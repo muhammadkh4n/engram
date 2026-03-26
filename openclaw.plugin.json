@@ -1,0 +1,24 @@
+{
+  "id": "openclaw-memory",
+  "name": "OpenClaw Memory",
+  "description": "Three-tier agentic RAG memory with automatic ingestion and retrieval",
+  "version": "0.1.0",
+  "kind": "context-engine",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "supabaseUrl": { "type": "string" },
+      "supabaseKey": { "type": "string" },
+      "openaiApiKey": { "type": "string" },
+      "embeddingModel": { "type": "string", "default": "text-embedding-3-small" },
+      "embeddingDimensions": { "type": "number", "default": 768 },
+      "retrievalBudgetTokens": { "type": "number", "default": 2000 },
+      "minRelevanceScore": { "type": "number", "default": 0.3 }
+    }
+  },
+  "uiHints": {
+    "supabaseKey": { "label": "Supabase Service Role Key", "sensitive": true },
+    "openaiApiKey": { "label": "OpenAI API Key", "sensitive": true }
+  }
+}

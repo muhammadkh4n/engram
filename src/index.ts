@@ -25,7 +25,7 @@ export { EpisodeStore } from './tiers/episodes.js';
 export { DigestStore } from './tiers/digests.js';
 export { KnowledgeStore } from './tiers/knowledge.js';
 
-export { RetrievalGate } from './retrieval/gate.js';
+export { RetrievalGate, shouldRetrieve } from './retrieval/gate.js';
 export { TierRouter } from './retrieval/tier-router.js';
 
 export { WriteBuffer } from './ingestion/write-buffer.js';
