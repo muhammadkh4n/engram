@@ -10,6 +10,9 @@ export interface MemoryConfig {
   circuitBreakerCooldown?: number;
   retrievalMinScore?: number;
   retrievalMaxResults?: number;
+  retrievalTimeoutMs?: number;
+  storageTimeoutMs?: number;
+  embeddingTimeoutMs?: number;
 }
 
 export interface Episode {
@@ -84,4 +87,20 @@ export type CircuitState = 'closed' | 'open' | 'half-open';
 export interface CircuitBreakerOptions {
   threshold: number;
   cooldownMs: number;
+}
+
+/** Working Memory types (Tier 0) */
+
+export interface WorkingMemoryItem {
+  key: string;
+  value: string;
+  category: 'topic' | 'entity' | 'decision' | 'preference' | 'context';
+  importance: number;
+  timestamp: string;
+}
+
+export interface WorkingMemorySnapshot {
+  session_id: string;
+  items: WorkingMemoryItem[];
+  created_at: string;
 }
