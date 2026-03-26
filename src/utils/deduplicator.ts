@@ -1,5 +1,3 @@
-import type { Knowledge } from '../types.js';
-import type { EmbeddingService } from './embeddings.js';
 
 export interface DeduplicationResult {
   isDuplicate: boolean;

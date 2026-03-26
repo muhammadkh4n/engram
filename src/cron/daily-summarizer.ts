@@ -2,7 +2,6 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import type { Episode, Digest } from '../types.js';
 import { Summarizer } from '../tiers/summarizer.js';
 import { DigestStore } from '../tiers/digests.js';
-import type { EmbeddingService } from '../utils/embeddings.js';
 
 export interface DailySummarizerOptions {
   supabase: SupabaseClient;

@@ -1,6 +1,5 @@
 import type { Episode } from '../types.js';
 import { EpisodeStore } from '../tiers/episodes.js';
-import { CircuitBreaker } from '../utils/circuit-breaker.js';
 
 /**
  * Fire-and-forget ingestion layer.
@@ -9,16 +8,14 @@ import { CircuitBreaker } from '../utils/circuit-breaker.js';
  */
 export class AsyncIngest {
   private episodeStore: EpisodeStore;
-  private _breaker: CircuitBreaker;
   private onError?: (err: unknown) => void;
 
   constructor(
     episodeStore: EpisodeStore,
-    breaker?: CircuitBreaker,
+    _breaker?: unknown,
     onError?: (err: unknown) => void
   ) {
     this.episodeStore = episodeStore;
-    this._breaker = breaker ?? new CircuitBreaker({ threshold: 5, cooldownMs: 30000 });
     this.onError = onError;
   }
 

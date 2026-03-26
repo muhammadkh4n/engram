@@ -1,5 +1,4 @@
 import type { Digest, Knowledge } from '../types.js';
-import type { EmbeddingService } from '../utils/embeddings.js';
 
 export interface ExtractionResult {
   topic: string;

@@ -17,7 +17,6 @@ export class BatchEmbedder {
     reject: (err: unknown) => void;
   }> = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private disposed = false;
 
   constructor(
     embeddings: EmbeddingService,
@@ -77,7 +76,6 @@ export class BatchEmbedder {
 
   /** Force flush and dispose */
   async dispose(): Promise<void> {
-    this.disposed = true;
     this.flushNow();
   }
 
