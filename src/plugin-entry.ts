@@ -87,7 +87,11 @@ function formatMemories(
 /*  Plugin entry                                                      */
 /* ------------------------------------------------------------------ */
 
-export default definePluginEntry((api: any) => {
+export default definePluginEntry({
+  id: 'openclaw-memory',
+  name: 'OpenClaw Memory',
+  description: 'Three-tier agentic RAG memory with automatic ingestion and retrieval',
+  register(api: any) {
   let supabase: SupabaseClient;
   let embeddings: EmbeddingService;
   let episodeStore: EpisodeStore;
@@ -373,4 +377,5 @@ export default definePluginEntry((api: any) => {
       };
     },
   });
+  },
 });
