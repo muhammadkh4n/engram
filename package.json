@@ -1,0 +1,36 @@
+{
+  "name": "openclaw-memory",
+  "version": "0.1.0",
+  "description": "OpenClaw Context Engine plugin — three-tier memory (Episodes, Digests, Knowledge) with automatic ingestion and semantic retrieval via pgvector",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsup src/index.ts --format esm --dts --watch"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "context-engine",
+    "pgvector",
+    "supabase"
+  ],
+  "author": "Muhammad Khan",
+  "license": "MIT",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "openai": "^4.55.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "pg": "^8.20.0",
+    "tsup": "^8.2.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
