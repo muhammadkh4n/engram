@@ -6,9 +6,15 @@
 export const TIMEOUTS = {
   /** Retrieval path — must be fast */
   RETRIEVAL: 200,
-  /** Storage path — more lenient */
-  STORAGE: 5000,
-  /** OpenAI embedding calls */
+  /** Storage path — generous, background work */
+  STORAGE: 30_000,
+  /** Embedding for retrieval path — fast, skip if slow */
+  EMBEDDING_RETRIEVAL: 200,
+  /** Embedding for storage path — generous, don't lose data */
+  EMBEDDING_STORAGE: 30_000,
+  /** Supabase insert timeout for storage path */
+  SUPABASE_INSERT: 10_000,
+  /** @deprecated Use EMBEDDING_RETRIEVAL or EMBEDDING_STORAGE */
   EMBEDDING: 500,
 } as const;
 

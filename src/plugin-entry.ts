@@ -5,7 +5,7 @@
  * lifecycle hooks (ingest, ingestBatch, assemble, compact, dispose)
  * and exposes agent tools for deep search, stats, and forget.
  */
-// @ts-ignore — provided by OpenClaw runtime
+// @ts-ignore — provided by OpenClaw runtime at install time
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry';
 import { Type } from '@sinclair/typebox';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -16,6 +16,7 @@ import { RetrievalGate } from './retrieval/gate.js';
 import { TierRouter } from './retrieval/tier-router.js';
 import { OpenAIEmbeddingService } from './utils/embeddings.js';
 import { CircuitBreaker } from './utils/circuit-breaker.js';
+import { TIMEOUTS } from './utils/timeout.js';
 import type { EmbeddingService } from './utils/embeddings.js';
 import type { Episode, SearchResult, TierName } from './types.js';
 
@@ -91,10 +92,12 @@ export default definePluginEntry({
   id: 'openclaw-memory',
   name: 'OpenClaw Memory',
   description: 'Three-tier agentic RAG memory with automatic ingestion and retrieval',
-  register(api: any) {
+  register(api) {
   let supabase: SupabaseClient;
-  let embeddings: EmbeddingService;
+  let retrievalEmbeddings: EmbeddingService;
+  let storageEmbeddings: EmbeddingService;
   let episodeStore: EpisodeStore;
+  let storageEpisodeStore: EpisodeStore;
   let digestStore: DigestStore;
   let knowledgeStore: KnowledgeStore;
   let gate: RetrievalGate;
@@ -104,18 +107,45 @@ export default definePluginEntry({
     if (supabase) return; // already initialised
 
     const cfg = resolveConfig(api.pluginConfig ?? {});
-    const breaker = new CircuitBreaker({ threshold: 5, cooldownMs: 30_000 });
+
+    // Separate circuit breakers: retrieval can be strict, storage is lenient
+    const retrievalBreaker = new CircuitBreaker({ threshold: 5, cooldownMs: 30_000 });
+    const storageBreaker = new CircuitBreaker({ threshold: 10, cooldownMs: 60_000 });
 
     supabase = createClient(cfg.supabaseUrl, cfg.supabaseKey);
-    embeddings = new OpenAIEmbeddingService({
+
+    // Retrieval embeddings: fast timeout — skip if slow
+    retrievalEmbeddings = new OpenAIEmbeddingService({
       apiKey: cfg.openaiApiKey,
       model: cfg.embeddingModel ?? 'text-embedding-3-small',
       dimensions: cfg.embeddingDimensions ?? 768,
-      breaker,
+      breaker: retrievalBreaker,
+      timeoutMs: TIMEOUTS.EMBEDDING_RETRIEVAL,
     });
-    episodeStore = new EpisodeStore(supabase, embeddings, breaker);
-    digestStore = new DigestStore(supabase, embeddings, breaker);
-    knowledgeStore = new KnowledgeStore(supabase, embeddings, breaker);
+
+    // Storage embeddings: generous timeout — don't lose data
+    storageEmbeddings = new OpenAIEmbeddingService({
+      apiKey: cfg.openaiApiKey,
+      model: cfg.embeddingModel ?? 'text-embedding-3-small',
+      dimensions: cfg.embeddingDimensions ?? 768,
+      breaker: storageBreaker,
+      timeoutMs: TIMEOUTS.EMBEDDING_STORAGE,
+    });
+
+    // Retrieval episode store (used in search/assemble)
+    episodeStore = new EpisodeStore(supabase, retrievalEmbeddings, retrievalBreaker, {
+      retrievalTimeoutMs: TIMEOUTS.RETRIEVAL,
+      storageTimeoutMs: TIMEOUTS.STORAGE,
+    });
+
+    // Storage episode store (used in ingestBatch background work)
+    storageEpisodeStore = new EpisodeStore(supabase, storageEmbeddings, storageBreaker, {
+      retrievalTimeoutMs: TIMEOUTS.RETRIEVAL,
+      storageTimeoutMs: TIMEOUTS.STORAGE,
+    });
+
+    digestStore = new DigestStore(supabase, retrievalEmbeddings, retrievalBreaker);
+    knowledgeStore = new KnowledgeStore(supabase, retrievalEmbeddings, retrievalBreaker);
     gate = new RetrievalGate({
       minScore: cfg.minRelevanceScore ?? 0.3,
       maxResults: 10,
@@ -135,26 +165,36 @@ export default definePluginEntry({
 
     async ingestBatch({ sessionId, messages }: { sessionId: string; messages: Array<{ role: string; content: string }> }) {
       init();
-      let count = 0;
 
-      // Store user and assistant messages as episodes
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i];
-        if (msg.role === 'user' || msg.role === 'assistant') {
-          try {
-            await episodeStore.insert({
-              session_id: sessionId,
-              role: msg.role as 'user' | 'assistant',
-              content: msg.content,
-            });
-            count++;
-          } catch (err) {
-            console.error(`[openclaw-memory] ingestBatch episode insert failed:`, err);
-          }
-        }
+      // Fire-and-forget: queue the actual work in the background
+      // Return immediately so we never block the response path
+      const storableMessages = messages.filter(
+        (msg) => msg.role === 'user' || msg.role === 'assistant'
+      );
+
+      if (storableMessages.length > 0) {
+        setTimeout(() => {
+          (async () => {
+            for (const msg of storableMessages) {
+              try {
+                await storageEpisodeStore.insert({
+                  session_id: sessionId,
+                  role: msg.role as 'user' | 'assistant',
+                  content: msg.content,
+                });
+              } catch (err) {
+                console.error(`[openclaw-memory] background ingest failed for ${msg.role}:`, err);
+                // Never propagate — this is background work
+              }
+            }
+          })().catch((err) => {
+            console.error(`[openclaw-memory] background ingest batch error:`, err);
+          });
+        }, 0);
       }
 
-      return { ingestedCount: count };
+      // Return immediately — don't wait for embedding/insert
+      return { ingestedCount: storableMessages.length };
     },
 
     async assemble({ messages, tokenBudget, prompt }: {
@@ -225,8 +265,9 @@ export default definePluginEntry({
     },
 
     async dispose() {
-      // disposed
       // Supabase client doesn't need explicit disposal
+      // Reset references so init() would re-create on next use
+      supabase = undefined as unknown as SupabaseClient;
     },
   }));
 

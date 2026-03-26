@@ -5,7 +5,11 @@ describe('Timeout utilities', () => {
   describe('TIMEOUTS', () => {
     it('should have correct default values', () => {
       expect(TIMEOUTS.RETRIEVAL).toBe(200);
-      expect(TIMEOUTS.STORAGE).toBe(5000);
+      expect(TIMEOUTS.STORAGE).toBe(30_000);
+      expect(TIMEOUTS.EMBEDDING_RETRIEVAL).toBe(200);
+      expect(TIMEOUTS.EMBEDDING_STORAGE).toBe(30_000);
+      expect(TIMEOUTS.SUPABASE_INSERT).toBe(10_000);
+      // Deprecated but still present for backwards compat
       expect(TIMEOUTS.EMBEDDING).toBe(500);
     });
   });
