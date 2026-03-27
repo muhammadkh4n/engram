@@ -88,7 +88,7 @@ function scoreIntent(type: IntentType, message: string): number {
 export class HeuristicIntentAnalyzer {
   analyze(
     message: string,
-    context?: AnalysisContext,
+    _context?: AnalysisContext,
   ): IntentResult {
     const trimmed = message.trim()
 

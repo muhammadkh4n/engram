@@ -1,0 +1,331 @@
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import type { MemoryType, TypedMemory, SensorySnapshot } from '@engram/core'
+import type { StorageAdapter } from '@engram/core'
+import { SupabaseEpisodeStorage } from './episodes.js'
+import { SupabaseDigestStorage } from './digests.js'
+import { SupabaseSemanticStorage } from './semantic.js'
+import { SupabaseProceduralStorage } from './procedural.js'
+import { SupabaseAssociationStorage } from './associations.js'
+
+export interface SupabaseAdapterOptions {
+  url: string
+  key: string
+  embeddingDimensions?: number
+}
+
+export class SupabaseStorageAdapter implements StorageAdapter {
+  private client: SupabaseClient
+  private _episodes: SupabaseEpisodeStorage | null = null
+  private _digests: SupabaseDigestStorage | null = null
+  private _semantic: SupabaseSemanticStorage | null = null
+  private _procedural: SupabaseProceduralStorage | null = null
+  private _associations: SupabaseAssociationStorage | null = null
+
+  constructor(opts: SupabaseAdapterOptions) {
+    this.client = createClient(opts.url, opts.key)
+  }
+
+  async initialize(): Promise<void> {
+    // Verify connection with a lightweight query
+    const { error } = await this.client
+      .from('memories')
+      .select('id')
+      .limit(1)
+    if (error) throw new Error(`Supabase connection failed: ${error.message}`)
+
+    this._episodes = new SupabaseEpisodeStorage(this.client)
+    this._digests = new SupabaseDigestStorage(this.client)
+    this._semantic = new SupabaseSemanticStorage(this.client)
+    this._procedural = new SupabaseProceduralStorage(this.client)
+    this._associations = new SupabaseAssociationStorage(this.client)
+  }
+
+  async dispose(): Promise<void> {
+    // Supabase client has no explicit close method — no-op
+    this._episodes = null
+    this._digests = null
+    this._semantic = null
+    this._procedural = null
+    this._associations = null
+  }
+
+  get episodes(): SupabaseEpisodeStorage {
+    if (!this._episodes) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+    return this._episodes
+  }
+
+  get digests(): SupabaseDigestStorage {
+    if (!this._digests) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+    return this._digests
+  }
+
+  get semantic(): SupabaseSemanticStorage {
+    if (!this._semantic) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+    return this._semantic
+  }
+
+  get procedural(): SupabaseProceduralStorage {
+    if (!this._procedural) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+    return this._procedural
+  }
+
+  get associations(): SupabaseAssociationStorage {
+    if (!this._associations) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+    return this._associations
+  }
+
+  async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
+    this.assertInitialized()
+
+    switch (type) {
+      case 'episode': {
+        const episodes = await this._episodes!.getByIds([id])
+        if (episodes.length === 0) return null
+        return { type: 'episode', data: episodes[0] }
+      }
+      case 'digest': {
+        const { data, error } = await this.client
+          .from('memory_digests')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle()
+        if (error) throw new Error(`getById digest failed: ${error.message}`)
+        if (!data) return null
+        const digests = await this._digests!.getBySession(
+          (data as { session_id: string }).session_id
+        )
+        const found = digests.find((d) => d.id === id)
+        return found ? { type: 'digest', data: found } : null
+      }
+      case 'semantic': {
+        const { data, error } = await this.client
+          .from('memory_semantic')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle()
+        if (error) throw new Error(`getById semantic failed: ${error.message}`)
+        if (!data) return null
+        return { type: 'semantic', data: rowToSemantic(data as SemanticRow) }
+      }
+      case 'procedural': {
+        const { data, error } = await this.client
+          .from('memory_procedural')
+          .select('*')
+          .eq('id', id)
+          .maybeSingle()
+        if (error) throw new Error(`getById procedural failed: ${error.message}`)
+        if (!data) return null
+        return { type: 'procedural', data: rowToProcedural(data as ProceduralRow) }
+      }
+    }
+  }
+
+  async getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> {
+    if (ids.length === 0) return []
+    this.assertInitialized()
+
+    const byType = new Map<MemoryType, string[]>()
+    for (const { id, type } of ids) {
+      const list = byType.get(type) ?? []
+      list.push(id)
+      byType.set(type, list)
+    }
+
+    const results: TypedMemory[] = []
+
+    const episodeIds = byType.get('episode')
+    if (episodeIds && episodeIds.length > 0) {
+      const episodes = await this._episodes!.getByIds(episodeIds)
+      for (const ep of episodes) results.push({ type: 'episode', data: ep })
+    }
+
+    const digestIds = byType.get('digest')
+    if (digestIds && digestIds.length > 0) {
+      const { data, error } = await this.client
+        .from('memory_digests')
+        .select('*')
+        .in('id', digestIds)
+      if (error) throw new Error(`getByIds digest failed: ${error.message}`)
+      for (const row of (data ?? []) as DigestRow[]) {
+        results.push({ type: 'digest', data: rowToDigest(row) })
+      }
+    }
+
+    const semanticIds = byType.get('semantic')
+    if (semanticIds && semanticIds.length > 0) {
+      const { data, error } = await this.client
+        .from('memory_semantic')
+        .select('*')
+        .in('id', semanticIds)
+      if (error) throw new Error(`getByIds semantic failed: ${error.message}`)
+      for (const row of (data ?? []) as SemanticRow[]) {
+        results.push({ type: 'semantic', data: rowToSemantic(row) })
+      }
+    }
+
+    const proceduralIds = byType.get('procedural')
+    if (proceduralIds && proceduralIds.length > 0) {
+      const { data, error } = await this.client
+        .from('memory_procedural')
+        .select('*')
+        .in('id', proceduralIds)
+      if (error) throw new Error(`getByIds procedural failed: ${error.message}`)
+      for (const row of (data ?? []) as ProceduralRow[]) {
+        results.push({ type: 'procedural', data: rowToProcedural(row) })
+      }
+    }
+
+    return results
+  }
+
+  async saveSensorySnapshot(sessionId: string, snapshot: SensorySnapshot): Promise<void> {
+    this.assertInitialized()
+    const { error } = await this.client
+      .from('sensory_snapshots')
+      .upsert(
+        { session_id: sessionId, snapshot: snapshot, saved_at: new Date().toISOString() },
+        { onConflict: 'session_id' }
+      )
+    if (error) throw new Error(`saveSensorySnapshot failed: ${error.message}`)
+  }
+
+  async loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null> {
+    this.assertInitialized()
+    const { data, error } = await this.client
+      .from('sensory_snapshots')
+      .select('snapshot')
+      .eq('session_id', sessionId)
+      .maybeSingle()
+    if (error) throw new Error(`loadSensorySnapshot failed: ${error.message}`)
+    if (!data) return null
+    return (data as { snapshot: SensorySnapshot }).snapshot
+  }
+
+  private assertInitialized(): void {
+    if (!this._episodes) {
+      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inline row mappers for getById/getByIds (avoids cross-importing sub-stores)
+// ---------------------------------------------------------------------------
+
+interface DigestRow {
+  id: string
+  session_id: string
+  summary: string
+  key_topics: string[]
+  source_episode_ids: string[]
+  source_digest_ids: string[]
+  level: number
+  embedding: number[] | null
+  metadata: Record<string, unknown>
+  created_at: string
+}
+
+interface SemanticRow {
+  id: string
+  topic: string
+  content: string
+  confidence: number
+  source_digest_ids: string[]
+  source_episode_ids: string[]
+  access_count: number
+  last_accessed: string | null
+  decay_rate: number
+  supersedes: string | null
+  superseded_by: string | null
+  embedding: number[] | null
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+interface ProceduralRow {
+  id: string
+  category: 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention'
+  trigger_text: string
+  procedure: string
+  confidence: number
+  observation_count: number
+  last_observed: string
+  first_observed: string
+  access_count: number
+  last_accessed: string | null
+  decay_rate: number
+  source_episode_ids: string[]
+  embedding: number[] | null
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+import type { Digest, SemanticMemory, ProceduralMemory } from '@engram/core'
+
+function rowToDigest(row: DigestRow): Digest {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    summary: row.summary,
+    keyTopics: row.key_topics ?? [],
+    sourceEpisodeIds: row.source_episode_ids ?? [],
+    sourceDigestIds: row.source_digest_ids ?? [],
+    level: row.level,
+    embedding: row.embedding ?? null,
+    metadata: row.metadata ?? {},
+    createdAt: new Date(row.created_at),
+  }
+}
+
+function rowToSemantic(row: SemanticRow): SemanticMemory {
+  return {
+    id: row.id,
+    topic: row.topic,
+    content: row.content,
+    confidence: row.confidence,
+    sourceDigestIds: row.source_digest_ids ?? [],
+    sourceEpisodeIds: row.source_episode_ids ?? [],
+    accessCount: row.access_count,
+    lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
+    decayRate: row.decay_rate,
+    supersedes: row.supersedes ?? null,
+    supersededBy: row.superseded_by ?? null,
+    embedding: row.embedding ?? null,
+    metadata: row.metadata ?? {},
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  }
+}
+
+function rowToProcedural(row: ProceduralRow): ProceduralMemory {
+  return {
+    id: row.id,
+    category: row.category,
+    trigger: row.trigger_text,
+    procedure: row.procedure,
+    confidence: row.confidence,
+    observationCount: row.observation_count,
+    lastObserved: new Date(row.last_observed),
+    firstObserved: new Date(row.first_observed),
+    accessCount: row.access_count,
+    lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
+    decayRate: row.decay_rate,
+    sourceEpisodeIds: row.source_episode_ids ?? [],
+    embedding: row.embedding ?? null,
+    metadata: row.metadata ?? {},
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+  }
+}
