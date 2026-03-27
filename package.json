@@ -1,44 +1,20 @@
 {
-  "name": "openclaw-memory",
-  "version": "0.1.0",
-  "description": "OpenClaw Context Engine plugin \u2014 three-tier memory (Episodes, Digests, Knowledge) with automatic ingestion and semantic retrieval via pgvector",
-  "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "name": "engram",
+  "private": true,
+  "description": "Brain-inspired cognitive memory engine for AI agents",
+  "workspaces": ["packages/*"],
   "scripts": {
-    "build": "tsup src/index.ts src/plugin-entry.ts --format esm --no-dts --external openclaw --external @sinclair/typebox",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "dev": "tsup src/index.ts --format esm --dts --watch",
-    "prebuild": "echo Building...",
-    "prepublishOnly": "npm run build"
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "clean": "turbo run clean"
   },
-  "keywords": [
-    "openclaw",
-    "memory",
-    "context-engine",
-    "pgvector",
-    "supabase"
-  ],
   "author": "Muhammad Khan",
   "license": "MIT",
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.48",
-    "@supabase/supabase-js": "^2.45.0",
-    "openai": "^4.55.0",
-    "uuid": "^10.0.0"
-  },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/uuid": "^10.0.0",
-    "pg": "^8.20.0",
-    "tsup": "^8.2.0",
+    "turbo": "^2.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
-  },
-  "openclaw": {
-    "extensions": [
-      "./dist/plugin-entry.js"
-    ]
   }
 }

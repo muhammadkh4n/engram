@@ -1,0 +1,242 @@
+import type Database from 'better-sqlite3'
+
+const SCHEMA_V1 = `
+-- Memory ID Pool (enables FK enforcement on polymorphic associations)
+CREATE TABLE IF NOT EXISTS memories (
+  id         TEXT    NOT NULL PRIMARY KEY,
+  type       TEXT    NOT NULL CHECK (type IN ('episode', 'digest', 'semantic', 'procedural')),
+  created_at REAL    NOT NULL DEFAULT (julianday('now'))
+);
+
+-- Episodic Memory
+CREATE TABLE IF NOT EXISTS episodes (
+  id               TEXT    NOT NULL PRIMARY KEY REFERENCES memories(id),
+  session_id       TEXT    NOT NULL,
+  role             TEXT    NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content          TEXT    NOT NULL,
+  salience         REAL    NOT NULL DEFAULT 0.3 CHECK (salience >= 0.0 AND salience <= 1.0),
+  access_count     INTEGER NOT NULL DEFAULT 0,
+  last_accessed    REAL,
+  consolidated_at  REAL,
+  embedding        BLOB,
+  entities_json    TEXT    NOT NULL DEFAULT '[]',
+  entities_fts     TEXT    GENERATED ALWAYS AS (
+                     replace(replace(replace(entities_json, '[', ''), ']', ''), '"', '')
+                   ) VIRTUAL,
+  metadata         TEXT    NOT NULL DEFAULT '{}',
+  created_at       REAL    NOT NULL DEFAULT (julianday('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_session_salience ON episodes(session_id, salience DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_unconsolidated ON episodes(session_id, consolidated_at, salience DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_last_accessed ON episodes(last_accessed);
+
+-- Digest Layer
+CREATE TABLE IF NOT EXISTS digests (
+  id                   TEXT    NOT NULL PRIMARY KEY REFERENCES memories(id),
+  session_id           TEXT    NOT NULL,
+  summary              TEXT    NOT NULL,
+  key_topics           TEXT    NOT NULL DEFAULT '[]',
+  source_episode_ids   TEXT    NOT NULL DEFAULT '[]',
+  source_digest_ids    TEXT    NOT NULL DEFAULT '[]',
+  level                INTEGER NOT NULL DEFAULT 0 CHECK (level >= 0 AND level <= 10),
+  embedding            BLOB,
+  metadata             TEXT    NOT NULL DEFAULT '{}',
+  created_at           REAL    NOT NULL DEFAULT (julianday('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_digests_session ON digests(session_id);
+CREATE INDEX IF NOT EXISTS idx_digests_created ON digests(created_at DESC);
+
+-- Semantic Memory
+CREATE TABLE IF NOT EXISTS semantic (
+  id                  TEXT    NOT NULL PRIMARY KEY REFERENCES memories(id),
+  topic               TEXT    NOT NULL,
+  content             TEXT    NOT NULL,
+  confidence          REAL    NOT NULL DEFAULT 0.5 CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  source_digest_ids   TEXT    NOT NULL DEFAULT '[]',
+  source_episode_ids  TEXT    NOT NULL DEFAULT '[]',
+  access_count        INTEGER NOT NULL DEFAULT 0,
+  last_accessed       REAL,
+  decay_rate          REAL    NOT NULL DEFAULT 0.02 CHECK (decay_rate > 0.0 AND decay_rate <= 1.0),
+  supersedes          TEXT    REFERENCES memories(id),
+  superseded_by       TEXT    REFERENCES memories(id),
+  embedding           BLOB,
+  metadata            TEXT    NOT NULL DEFAULT '{}',
+  created_at          REAL    NOT NULL DEFAULT (julianday('now')),
+  updated_at          REAL    NOT NULL DEFAULT (julianday('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_topic ON semantic(topic);
+CREATE INDEX IF NOT EXISTS idx_semantic_confidence ON semantic(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_semantic_last_accessed ON semantic(last_accessed);
+CREATE INDEX IF NOT EXISTS idx_semantic_created ON semantic(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_semantic_topic_confidence ON semantic(topic, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_semantic_supersedes ON semantic(supersedes) WHERE supersedes IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_semantic_superseded_by ON semantic(superseded_by) WHERE superseded_by IS NOT NULL;
+
+-- Procedural Memory
+CREATE TABLE IF NOT EXISTS procedural (
+  id                  TEXT    NOT NULL PRIMARY KEY REFERENCES memories(id),
+  category            TEXT    NOT NULL CHECK (category IN ('workflow', 'preference', 'habit', 'pattern', 'convention')),
+  trigger_text        TEXT    NOT NULL,
+  procedure           TEXT    NOT NULL,
+  confidence          REAL    NOT NULL DEFAULT 0.5 CHECK (confidence >= 0.0 AND confidence <= 1.0),
+  observation_count   INTEGER NOT NULL DEFAULT 1,
+  last_observed       REAL    NOT NULL DEFAULT (julianday('now')),
+  first_observed      REAL    NOT NULL DEFAULT (julianday('now')),
+  access_count        INTEGER NOT NULL DEFAULT 0,
+  last_accessed       REAL,
+  decay_rate          REAL    NOT NULL DEFAULT 0.01 CHECK (decay_rate > 0.0 AND decay_rate <= 1.0),
+  source_episode_ids  TEXT    NOT NULL DEFAULT '[]',
+  embedding           BLOB,
+  metadata            TEXT    NOT NULL DEFAULT '{}',
+  created_at          REAL    NOT NULL DEFAULT (julianday('now')),
+  updated_at          REAL    NOT NULL DEFAULT (julianday('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_procedural_category ON procedural(category);
+CREATE INDEX IF NOT EXISTS idx_procedural_confidence ON procedural(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_procedural_last_accessed ON procedural(last_accessed);
+CREATE INDEX IF NOT EXISTS idx_procedural_created ON procedural(created_at DESC);
+
+-- Associative Network
+CREATE TABLE IF NOT EXISTS associations (
+  id              TEXT    NOT NULL PRIMARY KEY,
+  source_id       TEXT    NOT NULL REFERENCES memories(id),
+  source_type     TEXT    NOT NULL CHECK (source_type IN ('episode', 'digest', 'semantic', 'procedural')),
+  target_id       TEXT    NOT NULL REFERENCES memories(id),
+  target_type     TEXT    NOT NULL CHECK (target_type IN ('episode', 'digest', 'semantic', 'procedural')),
+  edge_type       TEXT    NOT NULL CHECK (edge_type IN ('temporal', 'causal', 'topical', 'supports', 'contradicts', 'elaborates', 'derives_from', 'co_recalled')),
+  strength        REAL    NOT NULL DEFAULT 0.3 CHECK (strength >= 0.0 AND strength <= 1.0),
+  last_activated  REAL,
+  metadata        TEXT    NOT NULL DEFAULT '{}',
+  created_at      REAL    NOT NULL DEFAULT (julianday('now')),
+  CONSTRAINT uq_association_pair UNIQUE (source_id, target_id, edge_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_assoc_source_strength ON associations(source_id, strength DESC);
+CREATE INDEX IF NOT EXISTS idx_assoc_target_strength ON associations(target_id, strength DESC);
+CREATE INDEX IF NOT EXISTS idx_assoc_prune ON associations(strength, last_activated) WHERE strength < 0.1;
+
+-- Consolidation Run Tracking
+CREATE TABLE IF NOT EXISTS consolidation_runs (
+  id           TEXT    NOT NULL PRIMARY KEY,
+  cycle        TEXT    NOT NULL CHECK (cycle IN ('light', 'deep', 'dream', 'decay')),
+  started_at   REAL    NOT NULL DEFAULT (julianday('now')),
+  completed_at REAL,
+  status       TEXT    NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+  metadata     TEXT    NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_consolidation_runs_status ON consolidation_runs(status, started_at DESC);
+
+-- Sensory Buffer Persistence
+CREATE TABLE IF NOT EXISTS sensory_snapshots (
+  session_id   TEXT    NOT NULL PRIMARY KEY,
+  snapshot     TEXT    NOT NULL DEFAULT '{}',
+  saved_at     REAL    NOT NULL DEFAULT (julianday('now'))
+);
+`
+
+const FTS5_TABLES = `
+-- FTS5 virtual tables
+CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+  content, entities_fts,
+  content=episodes, content_rowid=rowid,
+  tokenize="porter unicode61 remove_diacritics 1",
+  prefix="2 3"
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS digests_fts USING fts5(
+  summary, key_topics,
+  content=digests, content_rowid=rowid,
+  tokenize="porter unicode61 remove_diacritics 1",
+  prefix="2 3"
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts USING fts5(
+  topic, content,
+  content=semantic, content_rowid=rowid,
+  tokenize="porter unicode61 remove_diacritics 1",
+  prefix="2 3"
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS procedural_fts USING fts5(
+  trigger_text, procedure, category,
+  content=procedural, content_rowid=rowid,
+  tokenize="porter unicode61 remove_diacritics 1",
+  prefix="2 3"
+);
+`
+
+const FTS5_TRIGGERS = `
+-- Episodes FTS sync
+CREATE TRIGGER IF NOT EXISTS episodes_fts_insert AFTER INSERT ON episodes BEGIN
+  INSERT INTO episodes_fts(rowid, content, entities_fts) VALUES (new.rowid, new.content, new.entities_fts);
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_fts_update AFTER UPDATE OF content, entities_json ON episodes BEGIN
+  INSERT INTO episodes_fts(episodes_fts, rowid, content, entities_fts) VALUES ('delete', old.rowid, old.content, old.entities_fts);
+  INSERT INTO episodes_fts(rowid, content, entities_fts) VALUES (new.rowid, new.content, new.entities_fts);
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_fts_delete AFTER DELETE ON episodes BEGIN
+  INSERT INTO episodes_fts(episodes_fts, rowid, content, entities_fts) VALUES ('delete', old.rowid, old.content, old.entities_fts);
+END;
+
+-- Digests FTS sync
+CREATE TRIGGER IF NOT EXISTS digests_fts_insert AFTER INSERT ON digests BEGIN
+  INSERT INTO digests_fts(rowid, summary, key_topics) VALUES (new.rowid, new.summary, new.key_topics);
+END;
+CREATE TRIGGER IF NOT EXISTS digests_fts_delete AFTER DELETE ON digests BEGIN
+  INSERT INTO digests_fts(digests_fts, rowid, summary, key_topics) VALUES ('delete', old.rowid, old.summary, old.key_topics);
+END;
+
+-- Semantic FTS sync
+CREATE TRIGGER IF NOT EXISTS semantic_fts_insert AFTER INSERT ON semantic BEGIN
+  INSERT INTO semantic_fts(rowid, topic, content) VALUES (new.rowid, new.topic, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS semantic_fts_update AFTER UPDATE OF topic, content ON semantic BEGIN
+  INSERT INTO semantic_fts(semantic_fts, rowid, topic, content) VALUES ('delete', old.rowid, old.topic, old.content);
+  INSERT INTO semantic_fts(rowid, topic, content) VALUES (new.rowid, new.topic, new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS semantic_fts_delete AFTER DELETE ON semantic BEGIN
+  INSERT INTO semantic_fts(semantic_fts, rowid, topic, content) VALUES ('delete', old.rowid, old.topic, old.content);
+END;
+
+-- Procedural FTS sync
+CREATE TRIGGER IF NOT EXISTS procedural_fts_insert AFTER INSERT ON procedural BEGIN
+  INSERT INTO procedural_fts(rowid, trigger_text, procedure, category) VALUES (new.rowid, new.trigger_text, new.procedure, new.category);
+END;
+CREATE TRIGGER IF NOT EXISTS procedural_fts_update AFTER UPDATE OF trigger_text, procedure, category ON procedural BEGIN
+  INSERT INTO procedural_fts(procedural_fts, rowid, trigger_text, procedure, category) VALUES ('delete', old.rowid, old.trigger_text, old.procedure, old.category);
+  INSERT INTO procedural_fts(rowid, trigger_text, procedure, category) VALUES (new.rowid, new.trigger_text, new.procedure, new.category);
+END;
+CREATE TRIGGER IF NOT EXISTS procedural_fts_delete AFTER DELETE ON procedural BEGIN
+  INSERT INTO procedural_fts(procedural_fts, rowid, trigger_text, procedure, category) VALUES ('delete', old.rowid, old.trigger_text, old.procedure, old.category);
+END;
+
+-- Auto-update updated_at triggers
+CREATE TRIGGER IF NOT EXISTS semantic_updated_at AFTER UPDATE ON semantic BEGIN
+  UPDATE semantic SET updated_at = julianday('now') WHERE id = new.id;
+END;
+CREATE TRIGGER IF NOT EXISTS procedural_updated_at AFTER UPDATE ON procedural BEGIN
+  UPDATE procedural SET updated_at = julianday('now') WHERE id = new.id;
+END;
+`
+
+export function getSchemaVersion(db: Database.Database): number {
+  return db.pragma('user_version', { simple: true }) as number
+}
+
+export function runMigrations(db: Database.Database): void {
+  const currentVersion = getSchemaVersion(db)
+
+  if (currentVersion >= 1) return // Already migrated
+
+  db.exec(SCHEMA_V1)
+  db.exec(FTS5_TABLES)
+  db.exec(FTS5_TRIGGERS)
+  db.pragma('user_version = 1')
+}
