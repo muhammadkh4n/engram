@@ -4,12 +4,12 @@
 
 /** Default timeouts (ms) */
 export const TIMEOUTS = {
-  /** Retrieval path — must be fast */
-  RETRIEVAL: 200,
+  /** Retrieval path — must be fast but realistic for VPS→OpenAI latency */
+  RETRIEVAL: 3_000,
   /** Storage path — generous, background work */
   STORAGE: 30_000,
-  /** Embedding for retrieval path — fast, skip if slow */
-  EMBEDDING_RETRIEVAL: 200,
+  /** Embedding for retrieval path — needs ~1-2s from VPS to OpenAI */
+  EMBEDDING_RETRIEVAL: 3_000,
   /** Embedding for storage path — generous, don't lose data */
   EMBEDDING_STORAGE: 30_000,
   /** Supabase insert timeout for storage path */
