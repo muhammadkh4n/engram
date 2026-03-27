@@ -1,6 +1,7 @@
 import type { RecallResult, IntentResult, RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
+import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
 import { stageRecall } from './recall.js'
 import { stageAssociate } from './association-walk.js'
@@ -52,8 +53,9 @@ export async function recall(
   // Stage 3: Topic priming — update sensory buffer for future queries
   const primed = stagePrime(memories, associations, sensory)
 
-  // Stage 4: Reconsolidation — fire-and-forget access tracking
-  stageReconsolidate(memories, associations, storage)
+  // Stage 4: Reconsolidation — fire-and-forget access tracking + co-recall edges
+  const manager = new AssociationManager(storage.associations)
+  stageReconsolidate(memories, associations, storage, manager)
 
   // Format results as markdown for system prompt injection
   const formatted = formatMemories(memories, associations)

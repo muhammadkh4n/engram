@@ -9,29 +9,32 @@ export class SqliteDigestStorage implements DigestStorage {
 
   async insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest> {
     const id = generateId()
-    this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'digest')
 
     const embeddingBlob = digest.embedding
       ? Buffer.from(new Float32Array(digest.embedding).buffer)
       : null
 
-    this.db
-      .prepare(
-        `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
-         source_digest_ids, level, embedding, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        digest.sessionId,
-        digest.summary,
-        JSON.stringify(digest.keyTopics),
-        JSON.stringify(digest.sourceEpisodeIds),
-        JSON.stringify(digest.sourceDigestIds),
-        digest.level,
-        embeddingBlob,
-        JSON.stringify(digest.metadata)
-      )
+    this.db.transaction(() => {
+      this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'digest')
+
+      this.db
+        .prepare(
+          `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
+           source_digest_ids, level, embedding, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          digest.sessionId,
+          digest.summary,
+          JSON.stringify(digest.keyTopics),
+          JSON.stringify(digest.sourceEpisodeIds),
+          JSON.stringify(digest.sourceDigestIds),
+          digest.level,
+          embeddingBlob,
+          JSON.stringify(digest.metadata)
+        )
+    })()
 
     return this.rowToDigest(
       this.db.prepare('SELECT * FROM digests WHERE id = ?').get(id) as DigestRow

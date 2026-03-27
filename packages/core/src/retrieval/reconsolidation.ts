@@ -1,10 +1,12 @@
 import type { RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
+import type { AssociationManager } from '../systems/association-manager.js'
 
 export function stageReconsolidate(
   recalled: RetrievedMemory[],
   associated: RetrievedMemory[],
-  storage: StorageAdapter
+  storage: StorageAdapter,
+  manager: AssociationManager
 ): void {
   // Record access for each retrieved memory
   const accessUpdates = [...recalled, ...associated].map(async (memory) => {
@@ -24,23 +26,12 @@ export function stageReconsolidate(
     }
   })
 
-  // Create co_recalled edges between top-5 recalled memories only (capped per audit A7)
-  const top5 = recalled.slice(0, 5)
-  const edgeUpdates: Promise<void>[] = []
-
-  for (let i = 0; i < top5.length; i++) {
-    for (let j = i + 1; j < top5.length; j++) {
-      edgeUpdates.push(
-        storage.associations.upsertCoRecalled(
-          top5[i].id,
-          top5[i].type,
-          top5[j].id,
-          top5[j].type
-        )
-      )
-    }
-  }
+  // Create co_recalled edges through AssociationManager so the 100-edge-per-memory
+  // cap is enforced (audit finding L5).
+  const coRecalledUpdate = manager.createCoRecalledEdges(
+    recalled.slice(0, 5).map((m) => ({ id: m.id, type: m.type }))
+  )
 
   // Fire and forget — don't await, swallow errors silently
-  Promise.allSettled([...accessUpdates, ...edgeUpdates]).catch(() => {})
+  Promise.allSettled([...accessUpdates, coRecalledUpdate]).catch(() => {})
 }

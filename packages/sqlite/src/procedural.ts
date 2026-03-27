@@ -11,34 +11,37 @@ export class SqliteProceduralStorage implements ProceduralStorage {
     memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>
   ): Promise<ProceduralMemory> {
     const id = generateId()
-    this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'procedural')
 
     const embeddingBlob = memory.embedding
       ? Buffer.from(new Float32Array(memory.embedding).buffer)
       : null
 
-    this.db
-      .prepare(
-        `INSERT INTO procedural (
-           id, category, trigger_text, procedure, confidence,
-           observation_count, last_observed, first_observed,
-           decay_rate, source_episode_ids, embedding, metadata
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        memory.category,
-        memory.trigger,
-        memory.procedure,
-        memory.confidence,
-        memory.observationCount,
-        julianFromDate(memory.lastObserved),
-        julianFromDate(memory.firstObserved),
-        memory.decayRate,
-        JSON.stringify(memory.sourceEpisodeIds),
-        embeddingBlob,
-        JSON.stringify(memory.metadata)
-      )
+    this.db.transaction(() => {
+      this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'procedural')
+
+      this.db
+        .prepare(
+          `INSERT INTO procedural (
+             id, category, trigger_text, procedure, confidence,
+             observation_count, last_observed, first_observed,
+             decay_rate, source_episode_ids, embedding, metadata
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          memory.category,
+          memory.trigger,
+          memory.procedure,
+          memory.confidence,
+          memory.observationCount,
+          julianFromDate(memory.lastObserved),
+          julianFromDate(memory.firstObserved),
+          memory.decayRate,
+          JSON.stringify(memory.sourceEpisodeIds),
+          embeddingBlob,
+          JSON.stringify(memory.metadata)
+        )
+    })()
 
     return this.rowToProcedural(
       this.db.prepare('SELECT * FROM procedural WHERE id = ?').get(id) as ProceduralRow

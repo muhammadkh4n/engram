@@ -11,31 +11,34 @@ export class SqliteSemanticStorage implements SemanticStorage {
     memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>
   ): Promise<SemanticMemory> {
     const id = generateId()
-    this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'semantic')
 
     const embeddingBlob = memory.embedding
       ? Buffer.from(new Float32Array(memory.embedding).buffer)
       : null
 
-    this.db
-      .prepare(
-        `INSERT INTO semantic (id, topic, content, confidence, source_digest_ids, source_episode_ids,
-         decay_rate, supersedes, superseded_by, embedding, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        memory.topic,
-        memory.content,
-        memory.confidence,
-        JSON.stringify(memory.sourceDigestIds),
-        JSON.stringify(memory.sourceEpisodeIds),
-        memory.decayRate,
-        memory.supersedes,
-        memory.supersededBy,
-        embeddingBlob,
-        JSON.stringify(memory.metadata)
-      )
+    this.db.transaction(() => {
+      this.db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'semantic')
+
+      this.db
+        .prepare(
+          `INSERT INTO semantic (id, topic, content, confidence, source_digest_ids, source_episode_ids,
+           decay_rate, supersedes, superseded_by, embedding, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          memory.topic,
+          memory.content,
+          memory.confidence,
+          JSON.stringify(memory.sourceDigestIds),
+          JSON.stringify(memory.sourceEpisodeIds),
+          memory.decayRate,
+          memory.supersedes,
+          memory.supersededBy,
+          embeddingBlob,
+          JSON.stringify(memory.metadata)
+        )
+    })()
 
     return this.rowToSemantic(
       this.db.prepare('SELECT * FROM semantic WHERE id = ?').get(id) as SemanticRow
@@ -83,7 +86,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
         `UPDATE semantic
          SET access_count = access_count + 1,
              last_accessed = julianday('now'),
-             confidence = MIN(1.0, confidence + ?)
+             confidence = MAX(0.05, MIN(1.0, confidence + ?))
          WHERE id = ?`
       )
       .run(confidenceBoost, id)

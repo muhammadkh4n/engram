@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { ProceduralStorage } from '@engram/core'
+import { sanitizeIlike } from './search.js'
 
 export class SupabaseProceduralStorage implements ProceduralStorage {
   constructor(private readonly client: SupabaseClient) {}
@@ -68,7 +69,7 @@ export class SupabaseProceduralStorage implements ProceduralStorage {
     const { data, error } = await this.client
       .from('memory_procedural')
       .select('*')
-      .or(`trigger_text.ilike.%${query}%,procedure.ilike.%${query}%`)
+      .or(`trigger_text.ilike.%${sanitizeIlike(query)}%,procedure.ilike.%${sanitizeIlike(query)}%`)
       .limit(limit)
 
     if (error) throw new Error(`Procedural search (text) failed: ${error.message}`)
@@ -90,7 +91,7 @@ export class SupabaseProceduralStorage implements ProceduralStorage {
     const { data, error } = await this.client
       .from('memory_procedural')
       .select('*')
-      .ilike('trigger_text', `%${activity}%`)
+      .ilike('trigger_text', `%${sanitizeIlike(activity)}%`)
       .limit(limit)
 
     if (error) throw new Error(`Procedural searchByTrigger failed: ${error.message}`)

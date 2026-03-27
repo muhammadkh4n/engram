@@ -193,11 +193,11 @@ describe('HeuristicIntentAnalyzer — strategy mapping', () => {
     expect(result.strategy.associationHops).toBe(2)
   })
 
-  it('INFORMATIONAL has shouldRecall=false', () => {
+  it('INFORMATIONAL has shouldRecall=true', () => {
     const result = analyzer.analyze(
       'The application uses a three-tier architecture with separate layers',
     )
-    expect(result.strategy.shouldRecall).toBe(false)
+    expect(result.strategy.shouldRecall).toBe(true)
   })
 
   it('EMOTIONAL has includeAssociations=true and 2 hops', () => {

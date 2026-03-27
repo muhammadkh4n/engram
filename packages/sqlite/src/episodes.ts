@@ -12,36 +12,38 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
   ): Promise<Episode> {
     const id = generateId()
 
-    // Insert into memories table first (FK requirement)
-    this.db
-      .prepare('INSERT INTO memories (id, type) VALUES (?, ?)')
-      .run(id, 'episode')
-
     const entitiesJson = JSON.stringify(episode.entities)
     const metadataJson = JSON.stringify(episode.metadata)
     const embeddingBlob = episode.embedding
       ? Buffer.from(new Float32Array(episode.embedding).buffer)
       : null
 
-    this.db
-      .prepare(
-        `INSERT INTO episodes (id, session_id, role, content, salience, access_count,
-         last_accessed, consolidated_at, embedding, entities_json, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        episode.sessionId,
-        episode.role,
-        episode.content,
-        episode.salience,
-        episode.accessCount,
-        episode.lastAccessed ? episode.lastAccessed.getTime() / 86400000 + 2440587.5 : null,
-        episode.consolidatedAt ? episode.consolidatedAt.getTime() / 86400000 + 2440587.5 : null,
-        embeddingBlob,
-        entitiesJson,
-        metadataJson
-      )
+    this.db.transaction(() => {
+      // Insert into memories table first (FK requirement)
+      this.db
+        .prepare('INSERT INTO memories (id, type) VALUES (?, ?)')
+        .run(id, 'episode')
+
+      this.db
+        .prepare(
+          `INSERT INTO episodes (id, session_id, role, content, salience, access_count,
+           last_accessed, consolidated_at, embedding, entities_json, metadata)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          id,
+          episode.sessionId,
+          episode.role,
+          episode.content,
+          episode.salience,
+          episode.accessCount,
+          episode.lastAccessed ? episode.lastAccessed.getTime() / 86400000 + 2440587.5 : null,
+          episode.consolidatedAt ? episode.consolidatedAt.getTime() / 86400000 + 2440587.5 : null,
+          embeddingBlob,
+          entitiesJson,
+          metadataJson
+        )
+    })()
 
     return this.rowToEpisode(
       this.db.prepare('SELECT * FROM episodes WHERE id = ?').get(id) as EpisodeRow

@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Digest, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { DigestStorage } from '@engram/core'
+import { sanitizeIlike } from './search.js'
 
 export class SupabaseDigestStorage implements DigestStorage {
   constructor(private readonly client: SupabaseClient) {}
@@ -63,7 +64,7 @@ export class SupabaseDigestStorage implements DigestStorage {
     const { data, error } = await this.client
       .from('memory_digests')
       .select('*')
-      .ilike('summary', `%${query}%`)
+      .ilike('summary', `%${sanitizeIlike(query)}%`)
       .limit(limit)
 
     if (error) throw new Error(`Digest search (text) failed: ${error.message}`)

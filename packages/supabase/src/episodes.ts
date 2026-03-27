@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { EpisodeStorage } from '@engram/core'
+import { sanitizeIlike } from './search.js'
 
 export class SupabaseEpisodeStorage implements EpisodeStorage {
   constructor(private readonly client: SupabaseClient) {}
@@ -66,7 +67,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
     let queryBuilder = this.client
       .from('memory_episodes')
       .select('*')
-      .ilike('content', `%${query}%`)
+      .ilike('content', `%${sanitizeIlike(query)}%`)
       .limit(limit)
 
     if (opts?.sessionId) {

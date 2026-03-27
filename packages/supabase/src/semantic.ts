@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { SemanticStorage } from '@engram/core'
+import { sanitizeIlike } from './search.js'
 
 export class SupabaseSemanticStorage implements SemanticStorage {
   constructor(private readonly client: SupabaseClient) {}
@@ -67,7 +68,7 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     const { data, error } = await this.client
       .from('memory_semantic')
       .select('*')
-      .or(`topic.ilike.%${query}%,content.ilike.%${query}%`)
+      .or(`topic.ilike.%${sanitizeIlike(query)}%,content.ilike.%${sanitizeIlike(query)}%`)
       .is('superseded_by', null)
       .limit(limit)
 

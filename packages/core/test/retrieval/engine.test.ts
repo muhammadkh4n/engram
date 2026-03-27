@@ -114,8 +114,10 @@ describe('recall engine — stage 2 (stageAssociate)', () => {
 
     const result = await recall('What is TypeScript strict mode?', storage, sensory, intent)
 
-    // QUESTION strategy has includeAssociations=true, associationHops=1
-    expect(storage.associations.walk).toHaveBeenCalledOnce()
+    // QUESTION strategy has includeAssociations=true, associationHops=1.
+    // walk is called at least once for the association stage; additional calls
+    // may come from AssociationManager.createCoRecalledEdges edge-count checks.
+    expect(storage.associations.walk).toHaveBeenCalled()
 
     // The walk results should appear in associations
     expect(result.associations.length).toBeGreaterThan(0)

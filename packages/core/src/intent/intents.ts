@@ -207,11 +207,14 @@ export const STRATEGY_TABLE: Record<IntentType, RetrievalStrategy> = {
   },
 
   INFORMATIONAL: {
-    shouldRecall: false,
-    tiers: [],
+    shouldRecall: true,
+    tiers: [
+      { tier: 'semantic', weight: 1.0, recencyBias: 0.3 },
+      { tier: 'episode', weight: 0.8, recencyBias: 0.5 },
+    ],
     queryTransform: null,
-    maxResults: 0,
-    minRelevance: 1.0,
+    maxResults: 3,
+    minRelevance: 0.5,
     includeAssociations: false,
     associationHops: 0,
     boostProcedural: false,
