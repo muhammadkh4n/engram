@@ -197,7 +197,12 @@ export default definePluginEntry({
         }
       },
 
-      async afterTurn(_params: {
+      async afterTurn({
+        sessionId,
+        messages,
+        prePromptMessageCount,
+        isHeartbeat,
+      }: {
         sessionId: string
         sessionFile: string
         messages: AgentMessage[]
@@ -205,7 +210,23 @@ export default definePluginEntry({
         isHeartbeat?: boolean
         tokenBudget?: number
       }) {
-        // Reserved for background consolidation triggers in future iterations
+        // The runtime calls afterTurn instead of ingest/ingestBatch when afterTurn
+        // exists on the engine. This is the canonical place to persist new messages.
+        if (isHeartbeat) return
+        const newMessages = messages.slice(prePromptMessageCount)
+        for (const msg of newMessages) {
+          const content = resolveContent(msg.content)
+          if (!content || content.length < 2) continue
+          try {
+            await memory.ingest({
+              sessionId,
+              role: msg.role as 'user' | 'assistant' | 'system',
+              content,
+            })
+          } catch (err) {
+            console.error('[engram] afterTurn ingest error:', err)
+          }
+        }
       },
 
       async dispose() {
