@@ -17,6 +17,7 @@ import { Type } from '@sinclair/typebox'
 import { Memory } from '@engram/core'
 import { SqliteStorageAdapter } from '@engram/sqlite'
 import type { StorageAdapter } from '@engram/core'
+import * as fs from 'node:fs'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -25,6 +26,7 @@ import type { StorageAdapter } from '@engram/core'
 const MAX_EPISODE_CHARS = 10_000
 const AUTO_CONSOLIDATE_THRESHOLD = 100 // trigger light sleep every N episodes
 const VERSION = '0.2.0'
+const SESSION_IMPORT_CAP = 500 // max messages to import from historical session file
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +35,9 @@ const VERSION = '0.2.0'
 interface ContentPart {
   type: string
   text?: string
+  name?: string        // tool name
+  input?: unknown      // tool args
+  content?: unknown    // tool result content
   [key: string]: unknown
 }
 
@@ -45,20 +50,44 @@ interface AgentMessage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Extract human-readable text from AgentMessage.content.
- *  Skips tool calls, tool results, and image parts — only takes text. */
-function extractText(content: string | ContentPart[]): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return String(content)
+/** Extract human-readable text AND preserve raw parts from AgentMessage.content.
+ *  - text parts: extracted as-is
+ *  - tool_use / toolCall: summarized as [Tool call: name]
+ *  - tool_result / toolResult: text content extracted
+ *  - image / thinking: skipped (not useful for text search)
+ *  rawParts is set when content is an array, for later reconstruction. */
+function extractContent(content: string | ContentPart[]): { text: string; rawParts?: ContentPart[] } {
+  if (typeof content === 'string') return { text: content }
+  if (!Array.isArray(content)) return { text: String(content) }
 
   const textParts: string[] = []
   for (const part of content) {
     if (part.type === 'text' && typeof part.text === 'string') {
       textParts.push(part.text)
+    } else if (part.type === 'tool_use' || part.type === 'toolCall') {
+      // Summarize tool call for searchability
+      const name = (part.name as string | undefined) ?? (part as Record<string, unknown>).toolName as string | undefined ?? 'unknown_tool'
+      textParts.push(`[Tool call: ${name}]`)
+    } else if (part.type === 'tool_result' || part.type === 'toolResult') {
+      // Extract text from tool result content
+      const resultContent = part.content
+      if (typeof resultContent === 'string') {
+        textParts.push(resultContent)
+      } else if (Array.isArray(resultContent)) {
+        for (const rc of resultContent) {
+          if (rc && typeof rc === 'object' && (rc as ContentPart).type === 'text' && typeof (rc as ContentPart).text === 'string') {
+            textParts.push((rc as ContentPart).text!)
+          }
+        }
+      }
     }
-    // Skip toolCall, toolResult, image, etc — not useful for memory
+    // Skip image, thinking, etc — not useful for text search
   }
-  return textParts.join('\n')
+
+  return {
+    text: textParts.join('\n'),
+    rawParts: content,
+  }
 }
 
 /** Truncate content to MAX_EPISODE_CHARS with a marker. */
@@ -71,7 +100,7 @@ function truncate(text: string): string {
 function extractQuery(messages: AgentMessage[], prompt?: string): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'user') {
-      const text = extractText(messages[i].content)
+      const { text } = extractContent(messages[i].content)
       if (text.length > 0) return text
     }
   }
@@ -84,6 +113,119 @@ function expandHome(p: string): string {
     return (process.env.HOME ?? '/root') + p.slice(1)
   }
   return p
+}
+
+// ---------------------------------------------------------------------------
+// Session serialization queue
+// Prevents concurrent afterTurn/compact calls on the same session from
+// interleaving and causing SQLite write conflicts.
+// ---------------------------------------------------------------------------
+
+const sessionQueues = new Map<string, Promise<void>>()
+
+function withSessionQueue<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = sessionQueues.get(sessionId) ?? Promise.resolve()
+  // Run fn regardless of whether the previous operation succeeded or failed.
+  const next = prev.then(fn, fn)
+  // Update the chain, swallowing the result so the chain stays void-typed.
+  sessionQueues.set(sessionId, next.then(() => {}, () => {}))
+  return next
+}
+
+// ---------------------------------------------------------------------------
+// Session file import
+// Reads a JSONL (or JSON array) session file and ingests historical messages
+// into Engram so the agent doesn't start with amnesia.
+// ---------------------------------------------------------------------------
+
+async function importSessionFile(
+  memory: Memory,
+  sessionId: string,
+  sessionFile: string
+): Promise<void> {
+  const resolvedPath = expandHome(sessionFile)
+
+  // Skip if file doesn't exist
+  if (!fs.existsSync(resolvedPath)) return
+
+  // Skip if already imported — check by marker file
+  const markerPath = resolvedPath + '.engram-imported'
+  if (fs.existsSync(markerPath)) return
+
+  // Also skip if episodes already exist for this session (e.g. previous run
+  // without a marker file, or DB was pre-populated).
+  // We do a lightweight check by attempting to read the raw file first —
+  // after reading we'll do the episode check only if the file has content.
+
+  let rawContent: string
+  try {
+    rawContent = fs.readFileSync(resolvedPath, 'utf-8')
+  } catch {
+    return // can't read file — non-fatal
+  }
+
+  if (!rawContent.trim()) return
+
+  // Parse messages — support both JSONL and JSON array formats
+  const messages: AgentMessage[] = []
+  const trimmed = rawContent.trim()
+
+  if (trimmed.startsWith('[')) {
+    // JSON array format
+    try {
+      const parsed = JSON.parse(trimmed) as unknown[]
+      for (const item of parsed) {
+        if (item && typeof item === 'object') {
+          const msg = item as Record<string, unknown>
+          if (typeof msg.role === 'string' && (typeof msg.content === 'string' || Array.isArray(msg.content))) {
+            messages.push({ role: msg.role, content: msg.content as string | ContentPart[] })
+          }
+        }
+      }
+    } catch {
+      return // malformed JSON — non-fatal
+    }
+  } else {
+    // JSONL format — one JSON object per line
+    for (const line of trimmed.split('\n')) {
+      const l = line.trim()
+      if (!l) continue
+      try {
+        const parsed = JSON.parse(l) as unknown
+        if (parsed && typeof parsed === 'object') {
+          const msg = parsed as Record<string, unknown>
+          if (typeof msg.role === 'string' && (typeof msg.content === 'string' || Array.isArray(msg.content))) {
+            messages.push({ role: msg.role, content: msg.content as string | ContentPart[] })
+          }
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  }
+
+  if (messages.length === 0) return
+
+  // Cap to last SESSION_IMPORT_CAP messages to avoid importing massive histories
+  const toImport = messages.slice(-SESSION_IMPORT_CAP)
+
+  // Ingest each message
+  for (const msg of toImport) {
+    const { text, rawParts } = extractContent(msg.content)
+    const content = truncate(text)
+    if (content.length < 2) continue
+    const validRoles = new Set(['user', 'assistant', 'system'])
+    const role = validRoles.has(msg.role) ? (msg.role as 'user' | 'assistant' | 'system') : 'user'
+    const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
+    await memory.ingest({ sessionId, role, content, metadata })
+  }
+
+  // Write marker file so we don't re-import on the next bootstrap
+  try {
+    fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8')
+  } catch {
+    // non-fatal — we'll just re-import next time (idempotent enough)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +258,10 @@ export default definePluginEntry({
     const memory = new Memory({ storage })
 
     let initialized = false
+    // dbReady tracks whether DB initialized successfully.
+    // ownsCompaction is set to dbReady so OpenClaw's built-in compaction takes
+    // over when our DB fails to initialize.
+    let dbReady = false
     let episodesSinceConsolidation = 0
 
     // -----------------------------------------------------------------------
@@ -123,13 +269,30 @@ export default definePluginEntry({
     // -----------------------------------------------------------------------
 
     api.registerContextEngine('engram', () => ({
-      info: { id: 'engram', name: 'Engram', version: VERSION, ownsCompaction: true },
+      get info() {
+        return { id: 'engram', name: 'Engram', version: VERSION, ownsCompaction: dbReady }
+      },
 
-      async bootstrap() {
+      async bootstrap({ sessionId, sessionFile }: { sessionId: string; sessionKey?: string; sessionFile: string }) {
         if (!initialized) {
-          await memory.initialize()
-          initialized = true
+          try {
+            await memory.initialize()
+            initialized = true
+            dbReady = true
+          } catch (err) {
+            console.error('[engram] bootstrap DB init failed:', err)
+            return { bootstrapped: false, reason: 'DB init failed: ' + String(err) }
+          }
         }
+
+        // Import historical messages from session file (if exists and not already imported)
+        try {
+          await importSessionFile(memory, sessionId, sessionFile)
+        } catch (err) {
+          console.error('[engram] session file import error:', err)
+          // Non-fatal — we can still function without history
+        }
+
         return { bootstrapped: true }
       },
 
@@ -140,11 +303,14 @@ export default definePluginEntry({
       async ingest({ sessionId, message, isHeartbeat }: {
         sessionId: string; message: AgentMessage; isHeartbeat?: boolean
       }) {
+        if (!dbReady) return { ingested: false }
         if (isHeartbeat) return { ingested: false }
-        const content = truncate(extractText(message.content))
+        const { text, rawParts } = extractContent(message.content)
+        const content = truncate(text)
         if (content.length < 2) return { ingested: false }
         try {
-          await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content })
+          const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
+          await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content, metadata })
           episodesSinceConsolidation++
           return { ingested: true }
         } catch (err) {
@@ -156,13 +322,16 @@ export default definePluginEntry({
       async ingestBatch({ sessionId, messages, isHeartbeat }: {
         sessionId: string; messages: AgentMessage[]; isHeartbeat?: boolean
       }) {
+        if (!dbReady) return { ingestedCount: 0 }
         if (isHeartbeat) return { ingestedCount: 0 }
         let count = 0
         for (const msg of messages) {
-          const content = truncate(extractText(msg.content))
+          const { text, rawParts } = extractContent(msg.content)
+          const content = truncate(text)
           if (content.length < 2) continue
           try {
-            await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content })
+            const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
+            await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content, metadata })
             count++
           } catch (err) {
             console.error('[engram] ingestBatch error:', err)
@@ -175,6 +344,9 @@ export default definePluginEntry({
       async assemble({ messages, tokenBudget, prompt }: {
         sessionId: string; messages: AgentMessage[]; tokenBudget?: number; prompt?: string; model?: string
       }) {
+        // Pass-through when DB not ready — no memory injection
+        if (!dbReady) return { messages, estimatedTokens: 0 }
+
         const query = extractQuery(messages, prompt)
         if (!query) return { messages, estimatedTokens: 0 }
         try {
@@ -191,14 +363,21 @@ export default definePluginEntry({
       },
 
       async compact() {
-        try {
-          await memory.consolidate('light')
-          episodesSinceConsolidation = 0
-          return { ok: true, compacted: true }
-        } catch (err) {
-          console.error('[engram] compact error:', err)
-          return { ok: false, compacted: false, reason: String(err) }
+        if (!dbReady) {
+          return { ok: false, compacted: false, reason: 'Engram DB not initialized' }
         }
+        // Wrap in session queue using a fixed key for compaction — compaction
+        // is global (not per-session) so we serialize under a sentinel key.
+        return withSessionQueue('__compact__', async () => {
+          try {
+            await memory.consolidate('light')
+            episodesSinceConsolidation = 0
+            return { ok: true, compacted: true }
+          } catch (err) {
+            console.error('[engram] compact error:', err)
+            return { ok: false, compacted: false, reason: String(err) }
+          }
+        })
       },
 
       /**
@@ -211,39 +390,46 @@ export default definePluginEntry({
         sessionId: string; sessionFile: string; messages: AgentMessage[]
         prePromptMessageCount: number; isHeartbeat?: boolean; tokenBudget?: number
       }) {
+        if (!dbReady) return
         if (isHeartbeat) return
 
-        // Ingest only the new messages from this turn
-        const newMessages = messages.slice(prePromptMessageCount)
-        for (const msg of newMessages) {
-          const content = truncate(extractText(msg.content))
-          if (content.length < 2) continue
-          try {
-            await memory.ingest({
-              sessionId,
-              role: msg.role as 'user' | 'assistant' | 'system',
-              content,
-            })
-            episodesSinceConsolidation++
-          } catch (err) {
-            console.error('[engram] afterTurn ingest error:', err)
+        return withSessionQueue(sessionId, async () => {
+          // Ingest only the new messages from this turn
+          const newMessages = messages.slice(prePromptMessageCount)
+          for (const msg of newMessages) {
+            const { text, rawParts } = extractContent(msg.content)
+            const content = truncate(text)
+            if (content.length < 2) continue
+            try {
+              const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
+              await memory.ingest({
+                sessionId,
+                role: msg.role as 'user' | 'assistant' | 'system',
+                content,
+                metadata,
+              })
+              episodesSinceConsolidation++
+            } catch (err) {
+              console.error('[engram] afterTurn ingest error:', err)
+            }
           }
-        }
 
-        // Auto-consolidation: trigger light sleep when enough episodes accumulate
-        if (episodesSinceConsolidation >= AUTO_CONSOLIDATE_THRESHOLD) {
-          try {
-            await memory.consolidate('light')
-            episodesSinceConsolidation = 0
-          } catch (err) {
-            console.error('[engram] auto-consolidation error:', err)
+          // Auto-consolidation: trigger light sleep when enough episodes accumulate
+          if (episodesSinceConsolidation >= AUTO_CONSOLIDATE_THRESHOLD) {
+            try {
+              await memory.consolidate('light')
+              episodesSinceConsolidation = 0
+            } catch (err) {
+              console.error('[engram] auto-consolidation error:', err)
+            }
           }
-        }
+        })
       },
 
       async dispose() {
         await memory.dispose()
         initialized = false
+        dbReady = false
       },
     }))
 

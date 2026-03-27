@@ -230,13 +230,32 @@ export function getSchemaVersion(db: Database.Database): number {
   return db.pragma('user_version', { simple: true }) as number
 }
 
+/**
+ * Whether FTS5 is available in the current SQLite build.
+ * Set after the first runMigrations() call.
+ * When false, episode/digest/semantic/procedural search falls back to LIKE queries.
+ */
+export let hasFts5 = true
+
 export function runMigrations(db: Database.Database): void {
   const currentVersion = getSchemaVersion(db)
 
   if (currentVersion >= 1) return // Already migrated
 
   db.exec(SCHEMA_V1)
-  db.exec(FTS5_TABLES)
-  db.exec(FTS5_TRIGGERS)
+
+  try {
+    db.exec(FTS5_TABLES)
+    db.exec(FTS5_TRIGGERS)
+    hasFts5 = true
+  } catch (err) {
+    hasFts5 = false
+    console.warn(
+      '[engram] FTS5 not available in this SQLite build — full-text search disabled, falling back to LIKE queries.',
+      err instanceof Error ? err.message : String(err)
+    )
+    // Non-fatal: the core tables still work; FTS-based search simply won't function.
+  }
+
   db.pragma('user_version = 1')
 }
