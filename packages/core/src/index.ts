@@ -45,3 +45,6 @@ export {
 export { withRetry } from './resilience/retry.js'
 export type { RetryOptions } from './resilience/retry.js'
 export { recall } from './retrieval/engine.js'
+export { Memory } from './memory.js'
+export type { MemoryOptions, SessionHandle } from './memory.js'
+export { createMemory } from './create-memory.js'
