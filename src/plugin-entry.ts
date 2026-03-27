@@ -92,6 +92,7 @@ export default definePluginEntry({
   id: 'openclaw-memory',
   name: 'OpenClaw Memory',
   description: 'Three-tier agentic RAG memory with automatic ingestion and retrieval',
+  kind: 'context-engine',
   register(api) {
   let supabase: SupabaseClient;
   let retrievalEmbeddings: EmbeddingService;
@@ -156,6 +157,11 @@ export default definePluginEntry({
   /* ---------- Context Engine registration ---------- */
 
   api.registerContextEngine('openclaw-memory', () => ({
+    info: {
+      id: 'openclaw-memory',
+      name: 'OpenClaw Memory',
+      ownsCompaction: false,
+    },
 
     async ingest({ isHeartbeat }: { sessionId: string; message: unknown; isHeartbeat?: boolean }) {
       if (isHeartbeat) return { ingested: false };
@@ -177,10 +183,20 @@ export default definePluginEntry({
           (async () => {
             for (const msg of storableMessages) {
               try {
+                // OpenClaw passes structured content (arrays of blocks), not plain strings
+                const textContent = typeof msg.content === 'string'
+                  ? msg.content
+                  : Array.isArray(msg.content)
+                    ? (msg.content as Array<{ type: string; text?: string }>)
+                        .filter((b) => b.type === 'text')
+                        .map((b) => b.text)
+                        .join('\n')
+                    : JSON.stringify(msg.content);
+                if (!textContent || textContent.length < 2) continue;
                 await storageEpisodeStore.insert({
                   session_id: sessionId,
                   role: msg.role as 'user' | 'assistant',
-                  content: msg.content,
+                  content: textContent,
                 });
               } catch (err) {
                 console.error(`[openclaw-memory] background ingest failed for ${msg.role}:`, err);

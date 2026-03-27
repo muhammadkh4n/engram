@@ -54,6 +54,7 @@ var plugin_entry_default = definePluginEntry({
   id: "openclaw-memory",
   name: "OpenClaw Memory",
   description: "Three-tier agentic RAG memory with automatic ingestion and retrieval",
+  kind: "context-engine",
   register(api) {
     let supabase;
     let retrievalEmbeddings;
@@ -101,6 +102,11 @@ var plugin_entry_default = definePluginEntry({
       router = new TierRouter();
     }
     api.registerContextEngine("openclaw-memory", () => ({
+      info: {
+        id: "openclaw-memory",
+        name: "OpenClaw Memory",
+        ownsCompaction: false
+      },
       async ingest({ isHeartbeat }) {
         if (isHeartbeat) return { ingested: false };
         return { ingested: true };
@@ -115,10 +121,12 @@ var plugin_entry_default = definePluginEntry({
             (async () => {
               for (const msg of storableMessages) {
                 try {
+                  const textContent = typeof msg.content === "string" ? msg.content : Array.isArray(msg.content) ? msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n") : JSON.stringify(msg.content);
+                  if (!textContent || textContent.length < 2) continue;
                   await storageEpisodeStore.insert({
                     session_id: sessionId,
                     role: msg.role,
-                    content: msg.content
+                    content: textContent
                   });
                 } catch (err) {
                   console.error(`[openclaw-memory] background ingest failed for ${msg.role}:`, err);
