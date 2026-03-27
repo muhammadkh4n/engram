@@ -2,13 +2,33 @@
  * Sanitize a query string for FTS5 MATCH.
  * FTS5 has special operators (AND, OR, NOT, NEAR, column:) that must be escaped.
  * We wrap each token in double quotes to treat them as literals.
+ * Tokens are joined with OR so partial matches rank by BM25 relevance
+ * instead of requiring ALL tokens to be present (implicit AND).
  */
 export function sanitizeFtsQuery(query: string): string {
   if (!query.trim()) return '""'
 
-  // Split on whitespace, wrap each token in quotes to escape FTS5 operators
-  const tokens = query.trim().split(/\s+/).filter(Boolean)
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' ')
+  // Split on whitespace, filter stopwords, wrap each token in quotes
+  const stopwords = new Set([
+    'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'for',
+    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'that',
+    'this', 'it', 'its', 'and', 'or', 'but', 'not', 'no', 'if', 'what',
+    'which', 'who', 'whom', 'how', 'when', 'where', 'why', 'so', 'than',
+  ])
+
+  const tokens = query
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => t.replace(/[?!.,;:]+$/, '').toLowerCase()) // strip trailing punctuation
+    .filter((t) => t.length > 1 && !stopwords.has(t))
+
+  if (tokens.length === 0) return '""'
+
+  // Join with OR — BM25 ranks results by how many tokens match
+  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ')
 }
 
 /** Convert Julian Day number to JS Date. */
