@@ -1,0 +1,46 @@
+{
+  "id": "engram",
+  "name": "Engram Cognitive Memory",
+  "description": "Brain-inspired cognitive memory engine with 5 memory systems, intent-driven recall, and consolidation cycles",
+  "version": "0.1.0",
+  "kind": "context-engine",
+  "entry": "dist/openclaw-plugin.js",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "storagePath": {
+        "type": "string",
+        "default": "~/.openclaw/engram.db",
+        "description": "Absolute or ~ path to the SQLite database file"
+      },
+      "supabaseUrl": {
+        "type": "string",
+        "description": "Supabase project URL (reserved for future cloud storage)"
+      },
+      "supabaseKey": {
+        "type": "string",
+        "description": "Supabase service role key"
+      },
+      "openaiApiKey": {
+        "type": "string",
+        "description": "OpenAI API key for embedding-based recall"
+      },
+      "embeddingDimensions": {
+        "type": "number",
+        "default": 1536,
+        "description": "Embedding vector dimensions (must match the model)"
+      }
+    }
+  },
+  "uiHints": {
+    "supabaseKey": {
+      "label": "Supabase Service Key",
+      "sensitive": true
+    },
+    "openaiApiKey": {
+      "label": "OpenAI API Key",
+      "sensitive": true
+    }
+  }
+}

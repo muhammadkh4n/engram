@@ -4,23 +4,37 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./plugin": {
+      "import": "./dist/openclaw-plugin.js"
+    }
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsup",
+    "build:plugin": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram/core": "*"
+    "@engram/core": "*",
+    "@sinclair/typebox": "^0.33.0"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.0"
   },
   "peerDependenciesMeta": {
-    "openclaw": { "optional": true }
+    "openclaw": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@engram/sqlite": "*",
+    "tsup": "^8.5.1",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }
