@@ -1,16 +1,17 @@
 /**
- * Real OpenClaw plugin entry point for Engram.
+ * Engram — OpenClaw ContextEngine plugin.
  *
- * This file is the production plugin entry — it uses definePluginEntry from
- * the OpenClaw plugin SDK and registers Engram as a ContextEngine with four
- * agent tools. It is built by tsup into dist/openclaw-plugin.js and loaded
- * by OpenClaw at runtime on the VPS.
+ * IMPORTANT for plugin developers:
+ * - OpenClaw calls afterTurn EXCLUSIVELY when it exists on the engine.
+ *   If afterTurn is present, ingest/ingestBatch are NEVER called.
+ *   afterTurn must handle all message persistence itself.
+ * - api.pluginConfig has the plugin-specific config (not api.config which is the full OpenClaw config).
+ * - AgentMessage.content can be string OR ContentPart[] — always extract text parts.
  *
- * Test files do NOT import this file. They import from plugin-entry.ts
- * (the framework-agnostic adapter) which has no openclaw dependency.
+ * Built by tsup → dist/openclaw-plugin.js. Loaded by OpenClaw at runtime.
  */
 
-// @ts-ignore — openclaw is only available on the VPS at runtime
+// @ts-ignore — openclaw only exists at runtime on the host
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
 import { Memory } from '@engram/core'
@@ -18,35 +19,71 @@ import { SqliteStorageAdapter } from '@engram/sqlite'
 import type { StorageAdapter } from '@engram/core'
 
 // ---------------------------------------------------------------------------
-// Type definitions (mirrors openclaw ContextEngine interface)
+// Constants
 // ---------------------------------------------------------------------------
+
+const MAX_EPISODE_CHARS = 10_000
+const AUTO_CONSOLIDATE_THRESHOLD = 100 // trigger light sleep every N episodes
+const VERSION = '0.2.0'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface ContentPart {
+  type: string
+  text?: string
+  [key: string]: unknown
+}
 
 interface AgentMessage {
   role: string
-  content: string | unknown[]
+  content: string | ContentPart[]
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function resolveContent(content: string | unknown[]): string {
+/** Extract human-readable text from AgentMessage.content.
+ *  Skips tool calls, tool results, and image parts — only takes text. */
+function extractText(content: string | ContentPart[]): string {
   if (typeof content === 'string') return content
-  return JSON.stringify(content)
+  if (!Array.isArray(content)) return String(content)
+
+  const textParts: string[] = []
+  for (const part of content) {
+    if (part.type === 'text' && typeof part.text === 'string') {
+      textParts.push(part.text)
+    }
+    // Skip toolCall, toolResult, image, etc — not useful for memory
+  }
+  return textParts.join('\n')
 }
 
-function extractQuery(
-  messages: AgentMessage[],
-  prompt?: string
-): string {
+/** Truncate content to MAX_EPISODE_CHARS with a marker. */
+function truncate(text: string): string {
+  if (text.length <= MAX_EPISODE_CHARS) return text
+  return text.slice(0, MAX_EPISODE_CHARS) + '\n[truncated — ' + (text.length - MAX_EPISODE_CHARS) + ' chars omitted]'
+}
+
+/** Extract last user message as query. */
+function extractQuery(messages: AgentMessage[], prompt?: string): string {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i]
-    if (msg.role === 'user') {
-      const text = resolveContent(msg.content)
+    if (messages[i].role === 'user') {
+      const text = extractText(messages[i].content)
       if (text.length > 0) return text
     }
   }
   return prompt ?? ''
+}
+
+/** Expand ~ to $HOME in a path. */
+function expandHome(p: string): string {
+  if (p.startsWith('~/')) {
+    return (process.env.HOME ?? '/root') + p.slice(1)
+  }
+  return p
 }
 
 // ---------------------------------------------------------------------------
@@ -60,10 +97,6 @@ export default definePluginEntry({
     'Brain-inspired cognitive memory engine with 5 memory systems, intent-driven recall, and consolidation cycles',
   kind: 'context-engine',
   configSchema: Type.Object({
-    supabaseUrl: Type.Optional(Type.String()),
-    supabaseKey: Type.Optional(Type.String()),
-    openaiApiKey: Type.Optional(Type.String()),
-    embeddingDimensions: Type.Optional(Type.Number({ default: 1536 })),
     storagePath: Type.Optional(Type.String({ default: '~/.openclaw/engram.db' })),
   }),
 
@@ -71,102 +104,79 @@ export default definePluginEntry({
     config?: Record<string, unknown>
     pluginConfig?: Record<string, unknown>
     registerContextEngine: (id: string, factory: () => unknown) => void
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    registerTool: (tool: any) => void
+    registerTool: (tool: unknown) => void
   }) {
-    // Resolve storage path from plugin-specific config
-    const cfg: Record<string, unknown> = api.pluginConfig ?? {}
-    const rawPath = (cfg.storagePath as string | undefined) ??
-      (process.env.HOME ?? '/root') + '/.openclaw/engram.db'
-
-    // Expand leading ~ to $HOME
-    const storagePath = rawPath.startsWith('~/')
-      ? (process.env.HOME ?? '/root') + rawPath.slice(1)
-      : rawPath
+    const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>
+    const storagePath = expandHome(
+      (cfg.storagePath as string | undefined) ??
+      '~/.openclaw/engram.db'
+    )
 
     const storage: StorageAdapter = new SqliteStorageAdapter(storagePath)
+    const memory = new Memory({ storage })
 
-    // Intelligence adapter placeholder — add @engram/openai when ready
-    const intelligence = undefined
-
-    const memory = new Memory({ storage, intelligence })
+    let initialized = false
+    let episodesSinceConsolidation = 0
 
     // -----------------------------------------------------------------------
-    // Context Engine registration
+    // Context Engine
     // -----------------------------------------------------------------------
 
     api.registerContextEngine('engram', () => ({
-      info: {
-        id: 'engram',
-        name: 'Engram',
-        version: '0.1.0',
-        ownsCompaction: true,
-      },
+      info: { id: 'engram', name: 'Engram', version: VERSION, ownsCompaction: true },
 
-      async bootstrap({ sessionId: _sessionId }: { sessionId: string }) {
-        await memory.initialize()
+      async bootstrap() {
+        if (!initialized) {
+          await memory.initialize()
+          initialized = true
+        }
         return { bootstrapped: true }
       },
 
-      async ingest({
-        sessionId,
-        message,
-        isHeartbeat,
-      }: {
-        sessionId: string
-        message: AgentMessage
-        isHeartbeat?: boolean
+      // ingest/ingestBatch are defined for completeness but OpenClaw will NOT
+      // call them when afterTurn exists. They serve as fallback for runtimes
+      // that don't use afterTurn.
+
+      async ingest({ sessionId, message, isHeartbeat }: {
+        sessionId: string; message: AgentMessage; isHeartbeat?: boolean
       }) {
         if (isHeartbeat) return { ingested: false }
-        const content = resolveContent(message.content)
-        if (!content || content.length < 2) return { ingested: false }
-        await memory.ingest({
-          sessionId,
-          role: message.role as 'user' | 'assistant' | 'system',
-          content,
-        })
-        return { ingested: true }
+        const content = truncate(extractText(message.content))
+        if (content.length < 2) return { ingested: false }
+        try {
+          await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content })
+          episodesSinceConsolidation++
+          return { ingested: true }
+        } catch (err) {
+          console.error('[engram] ingest error:', err)
+          return { ingested: false }
+        }
       },
 
-      async ingestBatch({
-        sessionId,
-        messages,
-        isHeartbeat,
-      }: {
-        sessionId: string
-        messages: AgentMessage[]
-        isHeartbeat?: boolean
+      async ingestBatch({ sessionId, messages, isHeartbeat }: {
+        sessionId: string; messages: AgentMessage[]; isHeartbeat?: boolean
       }) {
         if (isHeartbeat) return { ingestedCount: 0 }
         let count = 0
         for (const msg of messages) {
-          const content = resolveContent(msg.content)
-          if (!content || content.length < 2) continue
-          await memory.ingest({
-            sessionId,
-            role: msg.role as 'user' | 'assistant' | 'system',
-            content,
-          })
-          count++
+          const content = truncate(extractText(msg.content))
+          if (content.length < 2) continue
+          try {
+            await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content })
+            count++
+          } catch (err) {
+            console.error('[engram] ingestBatch error:', err)
+          }
         }
+        episodesSinceConsolidation += count
         return { ingestedCount: count }
       },
 
-      async assemble({
-        messages,
-        tokenBudget,
-        prompt,
-      }: {
-        sessionId: string
-        messages: AgentMessage[]
-        tokenBudget?: number
-        prompt?: string
-        model?: string
+      async assemble({ messages, tokenBudget, prompt }: {
+        sessionId: string; messages: AgentMessage[]; tokenBudget?: number; prompt?: string; model?: string
       }) {
         const query = extractQuery(messages, prompt)
-        if (!query) {
-          return { messages, estimatedTokens: 0 }
-        }
+        if (!query) return { messages, estimatedTokens: 0 }
         try {
           const result = await memory.recall(query, { tokenBudget })
           return {
@@ -180,16 +190,10 @@ export default definePluginEntry({
         }
       },
 
-      async compact({
-        sessionId: _sessionId,
-      }: {
-        sessionId: string
-        sessionFile: string
-        tokenBudget?: number
-        force?: boolean
-      }) {
+      async compact() {
         try {
           await memory.consolidate('light')
+          episodesSinceConsolidation = 0
           return { ok: true, compacted: true }
         } catch (err) {
           console.error('[engram] compact error:', err)
@@ -197,40 +201,49 @@ export default definePluginEntry({
         }
       },
 
-      async afterTurn({
-        sessionId,
-        messages,
-        prePromptMessageCount,
-        isHeartbeat,
-      }: {
-        sessionId: string
-        sessionFile: string
-        messages: AgentMessage[]
-        prePromptMessageCount: number
-        isHeartbeat?: boolean
-        tokenBudget?: number
+      /**
+       * CRITICAL: OpenClaw calls afterTurn EXCLUSIVELY when it exists.
+       * ingest/ingestBatch are skipped. We must persist messages here.
+       *
+       * messages = full session history. messages[prePromptMessageCount:] = new this turn.
+       */
+      async afterTurn({ sessionId, messages, prePromptMessageCount, isHeartbeat }: {
+        sessionId: string; sessionFile: string; messages: AgentMessage[]
+        prePromptMessageCount: number; isHeartbeat?: boolean; tokenBudget?: number
       }) {
-        // The runtime calls afterTurn instead of ingest/ingestBatch when afterTurn
-        // exists on the engine. This is the canonical place to persist new messages.
         if (isHeartbeat) return
+
+        // Ingest only the new messages from this turn
         const newMessages = messages.slice(prePromptMessageCount)
         for (const msg of newMessages) {
-          const content = resolveContent(msg.content)
-          if (!content || content.length < 2) continue
+          const content = truncate(extractText(msg.content))
+          if (content.length < 2) continue
           try {
             await memory.ingest({
               sessionId,
               role: msg.role as 'user' | 'assistant' | 'system',
               content,
             })
+            episodesSinceConsolidation++
           } catch (err) {
             console.error('[engram] afterTurn ingest error:', err)
+          }
+        }
+
+        // Auto-consolidation: trigger light sleep when enough episodes accumulate
+        if (episodesSinceConsolidation >= AUTO_CONSOLIDATE_THRESHOLD) {
+          try {
+            await memory.consolidate('light')
+            episodesSinceConsolidation = 0
+          } catch (err) {
+            console.error('[engram] auto-consolidation error:', err)
           }
         }
       },
 
       async dispose() {
         await memory.dispose()
+        initialized = false
       },
     }))
 
@@ -241,20 +254,14 @@ export default definePluginEntry({
     api.registerTool({
       name: 'engram_search',
       label: 'Search Memory',
-      description:
-        'Deep search across all memory systems (episodes, semantic, procedural)',
+      description: 'Deep search across all memory systems (episodes, semantic, procedural)',
       parameters: Type.Object({
         query: Type.String({ description: 'Search query' }),
       }),
-      async execute(_toolCallId: unknown, params: { query: string }) {
+      async execute(_id: unknown, params: { query: string }) {
         const result = await memory.recall(params.query)
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: result.formatted || 'No memories found.',
-            },
-          ],
+          content: [{ type: 'text' as const, text: result.formatted || 'No memories found.' }],
           details: { memoriesFound: result.memories.length },
         }
       },
@@ -263,18 +270,12 @@ export default definePluginEntry({
     api.registerTool({
       name: 'engram_stats',
       label: 'Memory Stats',
-      description:
-        'Get memory statistics: episode, digest, semantic, procedural counts',
+      description: 'Get memory statistics: episode, digest, semantic, procedural counts',
       parameters: Type.Object({}),
       async execute() {
         const stats = await memory.stats()
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(stats, null, 2),
-            },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(stats, null, 2) }],
           details: stats,
         }
       },
@@ -283,31 +284,15 @@ export default definePluginEntry({
     api.registerTool({
       name: 'engram_forget',
       label: 'Forget Memory',
-      description:
-        'Deprioritize memories matching a query (lossless — never deletes)',
+      description: 'Deprioritize memories matching a query (lossless — never deletes)',
       parameters: Type.Object({
         query: Type.String({ description: 'What to forget' }),
-        confirm: Type.Optional(
-          Type.Boolean({
-            default: false,
-            description: 'Set true to confirm forgetting',
-          })
-        ),
+        confirm: Type.Optional(Type.Boolean({ default: false, description: 'Set true to confirm' })),
       }),
-      async execute(
-        _toolCallId: unknown,
-        params: { query: string; confirm?: boolean }
-      ) {
-        const result = await memory.forget(params.query, {
-          confirm: params.confirm,
-        })
+      async execute(_id: unknown, params: { query: string; confirm?: boolean }) {
+        const result = await memory.forget(params.query, { confirm: params.confirm })
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
           details: result,
         }
       },
@@ -316,34 +301,17 @@ export default definePluginEntry({
     api.registerTool({
       name: 'engram_consolidate',
       label: 'Consolidate Memory',
-      description:
-        'Run memory consolidation: light (episodes→digests), deep (→knowledge), dream (→associations), decay (confidence reduction)',
+      description: 'Run memory consolidation: light (episodes→digests), deep (→knowledge), dream (→associations), decay',
       parameters: Type.Object({
-        cycle: Type.Optional(
-          Type.Union(
-            [
-              Type.Literal('light'),
-              Type.Literal('deep'),
-              Type.Literal('dream'),
-              Type.Literal('decay'),
-              Type.Literal('all'),
-            ],
-            { default: 'all' }
-          )
-        ),
+        cycle: Type.Optional(Type.Union([
+          Type.Literal('light'), Type.Literal('deep'), Type.Literal('dream'),
+          Type.Literal('decay'), Type.Literal('all'),
+        ], { default: 'all' })),
       }),
-      async execute(
-        _toolCallId: unknown,
-        params: { cycle?: 'light' | 'deep' | 'dream' | 'decay' | 'all' }
-      ) {
-        const result = await memory.consolidate(params.cycle ?? 'all')
+      async execute(_id: unknown, params: { cycle?: string }) {
+        const result = await memory.consolidate((params.cycle as 'light' | 'deep' | 'dream' | 'decay' | 'all') ?? 'all')
         return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
           details: result,
         }
       },
