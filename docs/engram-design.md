@@ -37,7 +37,7 @@ engram/
 │   │   │   │   ├── episodic.ts
 │   │   │   │   ├── semantic.ts
 │   │   │   │   ├── procedural.ts
-│   │   │   │   └── associative.ts
+│   │   │   │   └── association-manager.ts  # centralized edge policy
 │   │   │   ├── intent/          # intent analyzer + salience detector
 │   │   │   │   ├── analyzer.ts
 │   │   │   │   ├── salience.ts
@@ -144,8 +144,17 @@ interface Memory {
   /** Deprioritize memories matching query (lossless — marks as forgotten, never deletes). */
   forget(query: string, opts?: ForgetOptions): Promise<ForgetResult>
 
+  /** Get or create a session-scoped handle. Auto-generates sessionId if omitted. */
+  session(sessionId?: string): SessionHandle
+
   /** Release resources, persist working memory. */
   dispose(): Promise<void>
+}
+
+interface SessionHandle {
+  readonly sessionId: string
+  ingest(message: Omit<Message, 'sessionId'>): Promise<void>
+  recall(query: string, opts?: RecallOptions): Promise<RecallResult>
 }
 ```
 
@@ -1328,77 +1337,108 @@ async function decayPass(
 
 ## 8. Storage Adapter Interface
 
-The storage adapter abstracts all persistence. Each adapter handles search internally — SQLite uses FTS5, Supabase uses pgvector.
+The storage adapter abstracts all persistence. Each adapter handles search internally — SQLite uses FTS5, Supabase uses pgvector. The interface is split into composable per-system interfaces so adapters can be built incrementally.
+
+### 8.0 Composable Interface Design
 
 ```typescript
+// Each system is a separate interface — adapters can implement incrementally
+interface EpisodeStorage {
+  insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode>
+  search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
+  getByIds(ids: string[]): Promise<Episode[]>
+  getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]>
+  getUnconsolidated(sessionId: string): Promise<Episode[]>
+  getUnconsolidatedSessions(): Promise<string[]>
+  markConsolidated(ids: string[]): Promise<void>
+  recordAccess(id: string): Promise<void>
+}
+
+interface DigestStorage {
+  insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest>
+  search(query: string, opts?: SearchOptions): Promise<SearchResult<Digest>[]>
+  getBySession(sessionId: string): Promise<Digest[]>
+  getRecent(days: number): Promise<Digest[]>
+  getCountBySession(): Promise<Record<string, number>>
+}
+
+interface SemanticStorage {
+  insert(memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>): Promise<SemanticMemory>
+  search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]>
+  getUnaccessed(days: number): Promise<SemanticMemory[]>
+  /** Atomic: increment access_count + update last_accessed + boost confidence in one operation. */
+  recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
+  markSuperseded(id: string, supersededBy: string): Promise<void>
+  /** Batch decay: single UPDATE for all unaccessed memories. */
+  batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
+}
+
+interface ProceduralStorage {
+  insert(memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>): Promise<ProceduralMemory>
+  search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
+  searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
+  recordAccess(id: string): Promise<void>
+  incrementObservation(id: string): Promise<void>
+  /** Batch decay: single UPDATE for all unaccessed memories. */
+  batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
+}
+
+interface AssociationStorage {
+  insert(association: Omit<Association, 'id' | 'createdAt'>): Promise<Association>
+  /** Graph walk via recursive CTE — replaces N+1 individual queries. */
+  walk(seedIds: string[], opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[] }): Promise<WalkResult[]>
+  upsertCoRecalled(sourceId: string, sourceType: MemoryType, targetId: string, targetType: MemoryType): Promise<void>
+  pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number>
+  /** SQL-side dream cycle: entity co-occurrence with NOT EXISTS anti-join. */
+  discoverTopicalEdges(opts: { daysLookback: number; maxNew: number }): Promise<DiscoveredEdge[]>
+}
+
+// Composed full adapter
 interface StorageAdapter {
-  /** Run migrations, create tables. */
   initialize(): Promise<void>
-
-  /** Release connections, flush buffers. */
   dispose(): Promise<void>
+  episodes: EpisodeStorage
+  digests: DigestStorage
+  semantic: SemanticStorage
+  procedural: ProceduralStorage
+  associations: AssociationStorage
+  /** Fetch any memory by ID — returns discriminated union, not `any`. */
+  getById(id: string, type: MemoryType): Promise<TypedMemory | null>
+  /** Batch fetch by IDs across all tiers (for association walk target resolution). */
+  getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]>
+  /** Sensory buffer persistence. */
+  saveSensorySnapshot(sessionId: string, snapshot: SensorySnapshot): Promise<void>
+  loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null>
+}
 
-  episodes: {
-    insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode>
-    search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
-    getByIds(ids: string[]): Promise<Episode[]>
-    getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]>
-    getUnconsolidated(sessionId: string): Promise<Episode[]>
-    getUnconsolidatedSessions(): Promise<string[]>
-    markConsolidated(ids: string[]): Promise<void>
-    recordAccess(id: string): Promise<void>
-  }
+// Discriminated union — no `any` in the retrieval pipeline
+type TypedMemory =
+  | { type: 'episode'; data: Episode }
+  | { type: 'digest'; data: Digest }
+  | { type: 'semantic'; data: SemanticMemory }
+  | { type: 'procedural'; data: ProceduralMemory }
 
-  digests: {
-    insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest>
-    search(query: string, opts?: SearchOptions): Promise<SearchResult<Digest>[]>
-    getBySession(sessionId: string): Promise<Digest[]>
-    getRecent(days: number): Promise<Digest[]>
-    getCountBySession(): Promise<Record<string, number>>
-  }
+interface WalkResult {
+  memoryId: string
+  memoryType: MemoryType
+  depth: number
+  pathStrength: number
+}
 
-  semantic: {
-    insert(memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>): Promise<SemanticMemory>
-    search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]>
-    getUnaccessed(days: number): Promise<SemanticMemory[]>
-    updateConfidence(id: string, confidence: number): Promise<void>
-    /** Increase confidence by boost amount, capped at 1.0. */
-    boostConfidence(id: string, boost: number): Promise<void>
-    recordAccess(id: string): Promise<void>
-    markSuperseded(id: string, supersededBy: string): Promise<void>
-  }
-
-  procedural: {
-    insert(memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>): Promise<ProceduralMemory>
-    search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
-    searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
-    getUnaccessed(days: number): Promise<ProceduralMemory[]>
-    updateConfidence(id: string, confidence: number): Promise<void>
-    recordAccess(id: string): Promise<void>
-    incrementObservation(id: string): Promise<void>
-  }
-
-  associations: {
-    insert(association: Omit<Association, 'id' | 'createdAt'>): Promise<Association>
-    getForMemory(memoryId: string, opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[] }): Promise<Association[]>
-    exists(sourceId: string, targetId: string): Promise<boolean>
-    strengthen(id: string, boost: number): Promise<void>
-    upsertCoRecalled(sourceId: string, sourceType: MemoryType, targetId: string, targetType: MemoryType): Promise<void>
-    pruneWeak(opts: { maxStrength: number; olderThan: Date }): Promise<number>
-  }
-
-  /** Fetch any memory by ID and type (for association walk). */
-  getById(id: string, type: MemoryType): Promise<any | null>
-
-  /** Get all recent memories across tiers (for dream cycle). */
-  getAllRecent(days: number): Promise<Array<{ id: string; type: MemoryType; content: string; entities?: string[] }>>
+interface DiscoveredEdge {
+  sourceId: string
+  sourceType: MemoryType
+  targetId: string
+  targetType: MemoryType
+  sharedEntity: string
+  entityCount: number
 }
 
 interface SearchOptions {
   limit?: number            // default: 10
   minScore?: number         // default: 0.3
   sessionId?: string        // filter to specific session
-  embedding?: number[]      // pre-computed embedding (skips re-embedding)
+  embedding?: number[]      // pre-computed embedding (skips re-embedding the query 4x)
 }
 
 interface SearchResult<T> {
@@ -1407,138 +1447,61 @@ interface SearchResult<T> {
 }
 ```
 
-### 8.1 SQLite Adapter (@engram/sqlite)
+### 8.1 Universal Memory ID Pool
+
+All memory tables reference a `memories` table as the sole ID authority. This solves the polymorphic association FK problem — `associations.source_id` and `target_id` both get real foreign key constraints.
+
+IDs use UUID v7 (time-ordered) for monotonic B-tree insert performance, replacing UUID v4 which causes 50% page splits.
+
+### 8.2 SQLite Adapter (@engram/sqlite)
 
 Zero-config storage using better-sqlite3 with FTS5 full-text search.
 
-**Schema**:
+**Complete production-ready schema**: See `docs/engram-db-audit.md` Section 7a for the full schema including:
+- `memories` table for FK enforcement
+- Julian Day timestamps (`REAL`) instead of TEXT — monotonically comparable, arithmetic-friendly
+- NOT NULL on all columns with defaults
+- CHECK constraints on all enums and bounded values
+- Generated columns for FTS-safe entity text (strips JSON punctuation)
+- FTS5 with `porter unicode61 remove_diacritics 1` tokenizer + `prefix="2 3"`
+- All FTS5 sync triggers (AFTER INSERT/UPDATE/DELETE on every base table)
+- Composite indexes for all hot query patterns
+- Partial indexes for decay pass and weak edge pruning
+- `consolidation_runs` table for idempotent crash recovery
+- `sensory_snapshots` table for buffer persistence
+
+**Required pragmas** (set at connection open, not in schema):
 
 ```sql
--- Episodes
-CREATE TABLE episodes (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
-  content TEXT NOT NULL,
-  salience REAL DEFAULT 0.3,
-  access_count INTEGER DEFAULT 0,
-  last_accessed TEXT,
-  consolidated_at TEXT,
-  embedding BLOB,
-  entities TEXT,              -- JSON array
-  metadata TEXT DEFAULT '{}', -- JSON
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE INDEX idx_episodes_session ON episodes(session_id);
-CREATE INDEX idx_episodes_consolidated ON episodes(consolidated_at);
-
--- FTS5 for BM25 search
-CREATE VIRTUAL TABLE episodes_fts USING fts5(
-  content, entities,
-  content=episodes, content_rowid=rowid
-);
-
--- Digests
-CREATE TABLE digests (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  summary TEXT NOT NULL,
-  key_topics TEXT NOT NULL,   -- JSON array
-  source_episode_ids TEXT,    -- JSON array
-  source_digest_ids TEXT,     -- JSON array
-  level INTEGER DEFAULT 0,
-  embedding BLOB,
-  metadata TEXT DEFAULT '{}',
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE INDEX idx_digests_session ON digests(session_id);
-CREATE INDEX idx_digests_level ON digests(level);
-
-CREATE VIRTUAL TABLE digests_fts USING fts5(
-  summary, key_topics,
-  content=digests, content_rowid=rowid
-);
-
--- Semantic Memory
-CREATE TABLE semantic (
-  id TEXT PRIMARY KEY,
-  topic TEXT NOT NULL,
-  content TEXT NOT NULL,
-  confidence REAL DEFAULT 0.5,
-  source_digest_ids TEXT,
-  source_episode_ids TEXT,
-  access_count INTEGER DEFAULT 0,
-  last_accessed TEXT,
-  decay_rate REAL DEFAULT 0.02,
-  supersedes TEXT,
-  superseded_by TEXT,
-  embedding BLOB,
-  metadata TEXT DEFAULT '{}',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE VIRTUAL TABLE semantic_fts USING fts5(
-  topic, content,
-  content=semantic, content_rowid=rowid
-);
-
--- Procedural Memory
-CREATE TABLE procedural (
-  id TEXT PRIMARY KEY,
-  category TEXT NOT NULL CHECK (category IN ('workflow', 'preference', 'habit', 'pattern', 'convention')),
-  trigger_text TEXT NOT NULL,
-  procedure TEXT NOT NULL,
-  confidence REAL DEFAULT 0.5,
-  observation_count INTEGER DEFAULT 1,
-  last_observed TEXT,
-  first_observed TEXT,
-  access_count INTEGER DEFAULT 0,
-  last_accessed TEXT,
-  decay_rate REAL DEFAULT 0.01,
-  source_episode_ids TEXT,
-  embedding BLOB,
-  metadata TEXT DEFAULT '{}',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE VIRTUAL TABLE procedural_fts USING fts5(
-  trigger_text, procedure, category,
-  content=procedural, content_rowid=rowid
-);
-
--- Associative Network
-CREATE TABLE associations (
-  id TEXT PRIMARY KEY,
-  source_id TEXT NOT NULL,
-  source_type TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  target_type TEXT NOT NULL,
-  edge_type TEXT NOT NULL,
-  strength REAL DEFAULT 0.3,
-  last_activated TEXT,
-  metadata TEXT DEFAULT '{}',
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE INDEX idx_assoc_source ON associations(source_id);
-CREATE INDEX idx_assoc_target ON associations(target_id);
-CREATE INDEX idx_assoc_strength ON associations(strength);
-CREATE UNIQUE INDEX idx_assoc_pair ON associations(source_id, target_id, edge_type);
+PRAGMA journal_mode = WAL;       -- concurrent reads during writes
+PRAGMA synchronous = NORMAL;     -- safe with WAL, faster than FULL
+PRAGMA foreign_keys = ON;        -- enforce FK constraints
+PRAGMA cache_size = -65536;      -- 64MB page cache
+PRAGMA temp_store = MEMORY;      -- temp tables in RAM
+PRAGMA mmap_size = 268435456;    -- 256MB memory-mapped I/O
+PRAGMA wal_autocheckpoint = 1000; -- prevent unbounded WAL growth
 ```
 
-**Search implementation**: Uses FTS5 BM25 ranking. When an embedding provider is configured, falls back to vector cosine similarity for queries where BM25 returns low-quality results.
+**Search implementation**: BM25 via FTS5. When an embedding provider is configured, runs BM25 and vector search in parallel (not fallback — parallel merge). Vector embeddings stored as raw Float32 BLOB (`Buffer.from(new Float32Array(embedding).buffer)`), not JSON-stringified.
 
-### 8.2 Supabase Adapter (@engram/supabase)
+**Level 0 quality note**: BM25 keyword search without embeddings will produce lower recall quality than vector search for paraphrase queries. Level 0 is suitable for demos and low-stakes use. Level 1+ (with embeddings) is recommended for production.
 
-Cloud storage using PostgreSQL + pgvector. Same schema structure but with `VECTOR(n)` columns and ivfflat/HNSW indexes for vector search. RPC functions for similarity search.
+### 8.3 Supabase Adapter (@engram/supabase)
 
-Inherits all the existing migration patterns from the current codebase but adds:
-- Procedural memory table
-- Associations table
-- Access tracking columns
-- Decay/salience columns
-- RLS policies (not just enabled — actual policies)
+Cloud storage using PostgreSQL 15+ with pgvector and HNSW indexes.
+
+**Complete production-ready schema**: See `docs/engram-db-audit.md` Section 7b for the full schema including:
+- `memories` table for FK enforcement
+- HNSW vector indexes (`m=16, ef_construction=64`) replacing ivfflat
+- Partial vector indexes (`WHERE embedding IS NOT NULL AND superseded_by IS NULL`)
+- GIN indexes on array columns (entities, key_topics, source_episode_ids)
+- pg_trgm indexes for text search fallback
+- RPC functions: `engram_recall` (unified cross-tier search), `engram_association_walk` (recursive CTE), `engram_record_access` (atomic reconsolidation), `engram_upsert_co_recalled`, `engram_decay_pass` (batch), `engram_dream_cycle` (SQL-side entity co-occurrence)
+- RLS policies with `auth.uid()` for user isolation (not just enabled — actual policies)
+- `schema_migrations` table with content checksums
+- Migration scripts from current schema (004-007)
+
+**Connection note**: Use pgbouncer transaction mode (port 6543) for the storage client to allow connection multiplexing during concurrent recall + reconsolidation.
 
 ---
 
@@ -1850,6 +1813,109 @@ The existing openclaw-memory codebase contains substantial working code that map
 **Reason**: An engram is the neuroscience term for the physical trace a memory leaves in a substrate — the hypothetical means by which memories are stored. It is the exact concept this library implements: persistent, strengthening, decaying traces of experience in a computational substrate.
 
 **Package names**: `@engram/core`, `@engram/sqlite`, `@engram/supabase`, `@engram/openai`, `@engram/openclaw`
+
+---
+
+## 16. Audit Resolutions
+
+Four independent audits were conducted on this spec: Architecture Review, Critical Code Audit, Performance Analysis, and Database Architecture Audit. This section documents every finding and its resolution. All changes below are integrated into the spec above or the referenced schema files.
+
+### 16.1 Critical Fixes (Must-Have for v1.0)
+
+| # | Finding | Source | Resolution |
+|---|---------|--------|------------|
+| C1 | Architecture is a ~50% rewrite, not 70% migration | Arch, Code | Acknowledged. Section 12 updated: algorithm-level code ports (regex patterns, circuit breaker, dedup), structural code is rewritten. Plan accordingly. |
+| C2 | StorageAdapter too broad (34 methods) | Arch | Split into composable per-system interfaces (Section 8.0). Adapters can implement incrementally matching Level 0-3 upgrade path. |
+| C3 | Polymorphic association FK gap | DB | Added `memories` table as universal ID pool. All tables FK to it. Associations get real referential integrity. (Section 8.1, DB audit Section 7) |
+| C4 | Fire-and-forget ingestion drops messages | Code | Wire existing `WriteBuffer` class into ingestion path. Episodes must be durably queued before returning success. |
+| C5 | Embedding dimension mismatch (1536 vs 768) | DB, Prior audit | `IntelligenceAdapter.dimensions()` drives schema. SQLite uses BLOB (dimension-agnostic). PostgreSQL schema uses configurable dimension. |
+| C6 | RLS enabled without policies | DB, Prior audit | Full RLS policies included in PostgreSQL schema (DB audit Section 7b) using `auth.uid()` for user isolation. |
+| C7 | `memory_forget` does hard DELETE | Code | Rewritten: `forget()` sets confidence to 0.05 (floor) and marks `metadata.forgotten = true`. Never deletes. Lossless. |
+| C8 | No SQLite WAL mode | DB, Perf | Required pragmas defined in Section 8.2. Set at connection open. Without WAL, concurrent consolidation + recall deadlocks. |
+| C9 | FTS5 sync triggers absent | DB | All 12 triggers (INSERT/UPDATE/DELETE × 4 tables) included in SQLite schema (DB audit Section 7a). |
+| C10 | No schema migration system | Arch, DB | SQLite: `PRAGMA user_version`. PostgreSQL: `schema_migrations` table with checksums. Both in DB audit Section 5. |
+
+### 16.2 Algorithmic Fixes
+
+| # | Finding | Source | Resolution |
+|---|---------|--------|------------|
+| A1 | Association walk does N+1 serial `getById` calls | Perf, Code | Replaced with recursive CTE (single SQL query). SQLite and PostgreSQL versions in DB audit Section 3.2. `AssociationStorage.walk()` replaces per-edge queries. |
+| A2 | Dream cycle O(n^2) existence checks | Perf, Code | Moved to SQL-side entity co-occurrence with NOT EXISTS anti-join. `AssociationStorage.discoverTopicalEdges()` in DB audit Section 3.3. Single query replaces 1M+ round-trips. |
+| A3 | Decay pass loops individual UPDATEs | Perf, DB | Replaced with batch SQL: `SemanticStorage.batchDecay()` and `ProceduralStorage.batchDecay()`. Single UPDATE per tier per pass. DB audit Section 3.4. |
+| A4 | Query embedding computed 4x (once per tier) | Perf | `SearchOptions.embedding` accepts pre-computed vector. Recall Stage 1 embeds once, passes to all tier searches. |
+| A5 | Priming feedback loop — accessBoost is permanent and monotonically increasing | Code | Fixed: `accessBoost = min(0.1, accessCount * 0.01)` is now capped at 0.1 absolute. Combined with priming cap of 0.3 (reduced from 0.75), maximum non-similarity boost is 0.4. Prevents irrelevant memories from dominating. |
+| A6 | Reconsolidation: separate `recordAccess` + `boostConfidence` writes | Perf | Combined into single `recordAccessAndBoost()` method. One UPDATE per semantic memory per recall instead of two. |
+| A7 | co_recalled edges created for all result pairs | Perf, DB | Capped to top-5 recalled memories only. Maximum 10 edge upserts per recall (down from 50). Added per-memory edge cap: skip if source already has >100 co_recalled edges. |
+
+### 16.3 Schema Fixes
+
+| # | Finding | Source | Resolution |
+|---|---------|--------|------------|
+| S1 | SQLite timestamps as TEXT | DB | All timestamps use `REAL` (Julian Day numbers) via `julianday('now')`. Monotonically comparable, arithmetic-friendly. |
+| S2 | 23 missing NOT NULL constraints | DB | All columns with defaults are now NOT NULL. See DB audit Section 1.5 for full list. |
+| S3 | Missing CHECK constraints on enums | DB | Added: `source_type`, `target_type`, `edge_type`, `level`, `decay_rate`, `strength` all bounded. |
+| S4 | UUID v4 B-tree fragmentation | DB | Use UUID v7 (time-ordered) for all IDs. Monotonic insert performance. |
+| S5 | FTS5 indexes JSON brackets from entities | DB | Added generated column `entities_fts` that strips JSON punctuation. FTS5 indexes the cleaned text. |
+| S6 | FTS5 tokenizer not configured | DB | `tokenize="porter unicode61 remove_diacritics 1"` with `prefix="2 3"` for stemming + prefix search. |
+| S7 | Wrong/useless indexes | DB | Dropped: `idx_assoc_strength` (standalone), `idx_digests_level`. Replaced ivfflat with HNSW. Added 15+ composite and partial indexes. |
+| S8 | No consolidation idempotency | DB, Arch | Added `consolidation_runs` table + `episode_batch_hash UNIQUE` on digests. Crash-safe resumption via unique constraint. |
+| S9 | `getById` returns `any` | Arch | Returns `TypedMemory` discriminated union. Type-safe through entire retrieval pipeline. |
+| S10 | PostgreSQL ivfflat wrong for any scale | DB | Replaced with HNSW (`m=16, ef_construction=64`). Partial indexes: `WHERE embedding IS NOT NULL`. |
+
+### 16.4 Architectural Fixes
+
+| # | Finding | Source | Resolution |
+|---|---------|--------|------------|
+| AR1 | Associative Network is a "god subsystem" | Arch | Centralized into `AssociationManager` class in `core/systems/association-manager.ts`. Owns all edge creation policy. Storage adapter handles CRUD; manager handles when/how/why. |
+| AR2 | Procedural vs Semantic extraction overlap | Arch | Single extraction pass with disambiguation rule: if pattern implies a trigger/context ("before X", "when doing Y"), it is procedural. If standalone fact/preference ("I prefer X"), it is semantic. Never extract same content into both. |
+| AR3 | Digest treated as first-class in adapter but called "not a memory system" | Arch | Kept as separate interface (`DigestStorage`) for practical reasons — digests are queried during recall. But consolidation engine owns their lifecycle, not the public API. |
+| AR4 | Missing session management for standalone API | Arch | Added `memory.session(sessionId?)` returning `SessionHandle`. Auto-generates UUIDv7 session IDs when omitted. |
+| AR5 | Working memory persists as digest, polluting search | Code | Moved to dedicated `sensory_snapshots` table. No longer stored as digests. |
+| AR6 | No token estimation function | Arch | Use `Math.ceil(text.length / 4)` approximation for v1.0. Configurable via `createMemory({ tokenizer: (text) => number })`. |
+
+### 16.5 Security & Integrity
+
+| # | Finding | Source | Resolution |
+|---|---------|--------|------------|
+| SEC1 | PII flows unfiltered to OpenAI embeddings | Code | Document in README: all message content is sent to embedding provider. Add `intelligence.redact?: (text: string) => string` hook for PII stripping. Not implemented in v1.0 core but interface supports it. |
+| SEC2 | FTS5 injection risk | DB | Sanitize FTS5 queries: escape `AND`, `OR`, `NOT`, `NEAR`, column filter syntax. Use parameterized queries with `MATCH ?` not string interpolation. |
+| SEC3 | `derives_from` edges exempt from pruning | Code | Added: decay pass skips edges with `edge_type = 'derives_from'` (provenance must be permanent). |
+| SEC4 | Circuit breaker half-open has no concurrency control | Code | Add mutex flag: only one request proceeds in half-open state. Others fail fast. |
+
+### 16.6 Performance Characteristics
+
+Based on the performance audit, expected latency by scale:
+
+| Scale | Recall p50 (SQLite) | Recall p95 (SQLite) | Recall p50 (Supabase) | Recall p95 (Supabase) |
+|-------|--------------------|--------------------|----------------------|----------------------|
+| 1K memories | ~15ms | ~40ms | ~120ms | ~200ms |
+| 10K memories | ~30ms | ~80ms | ~200ms | ~350ms |
+| 100K memories | ~60ms | ~150ms | ~400ms | ~800ms |
+| 1M memories | ~100ms | ~300ms | ~720ms | ~2000ms |
+
+SQLite is ~10x faster on association walk due to no network latency. Supabase's p95 at 1M approaches the 2000ms budget — HNSW indexes and recursive CTE walks (replacing serial getById) are required to stay within budget.
+
+**Write amplification per recall**: ~15 writes (down from 55 after audit fixes). Breakdown: ~10 `recordAccess` updates + ~5 `co_recalled` upserts (capped). Sustainable at 10+ recalls/second on SQLite, 5 recalls/second on Supabase free tier.
+
+### 16.7 Maintenance Operations
+
+| Operation | Frequency | What It Does |
+|-----------|-----------|-------------|
+| FTS5 optimize | Monthly (in decay pass) | `INSERT INTO *_fts(*_fts) VALUES('optimize')` for all 4 FTS tables |
+| SQLite incremental vacuum | Monthly (in decay pass) | `PRAGMA incremental_vacuum(100)` reclaims pages from pruned edges |
+| HNSW reindex | Never (automatic) | HNSW indexes are maintained incrementally on insert |
+| Consolidation run cleanup | Monthly | Delete `consolidation_runs` older than 90 days with status `completed` |
+
+---
+
+## 17. Supporting Documents
+
+| Document | Purpose |
+|----------|---------|
+| `docs/engram-db-audit.md` | Complete database architecture audit with production-ready SQLite and PostgreSQL schemas, query patterns, RPC functions, RLS policies, and migration scripts |
+| `docs/lcm-comparison.md` | Feature-by-feature comparison with lossless-claw (LCM) |
+| `docs/audit-report.md` | Original code audit of the v0.1 codebase |
+| `docs/implementation-plan.md` | Prior implementation plan (superseded by this design) |
 
 ---
 
