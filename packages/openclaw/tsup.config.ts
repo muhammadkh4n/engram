@@ -15,11 +15,13 @@ export default defineConfig({
     'openclaw',
     '@sinclair/typebox',
     'better-sqlite3',
+    'openai',
   ],
   // Bundle Engram workspace packages + pure JS deps into the plugin
   noExternal: [
     '@engram/core',
     '@engram/sqlite',
+    '@engram/openai',
     'uuid',
   ],
   esbuildOptions(options) {
@@ -28,6 +30,7 @@ export default defineConfig({
     options.alias = {
       '@engram/core': path.resolve(__dirname, '../core/src/index.ts'),
       '@engram/sqlite': path.resolve(__dirname, '../sqlite/src/index.ts'),
+      '@engram/openai': path.resolve(__dirname, '../openai/src/index.ts'),
     }
   },
 })

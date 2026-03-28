@@ -16,7 +16,8 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
 import { Memory } from '@engram/core'
 import { SqliteStorageAdapter } from '@engram/sqlite'
-import type { StorageAdapter } from '@engram/core'
+import { openaiIntelligence } from '@engram/openai'
+import type { StorageAdapter, IntelligenceAdapter } from '@engram/core'
 import * as fs from 'node:fs'
 
 // ---------------------------------------------------------------------------
@@ -255,7 +256,26 @@ export default definePluginEntry({
     )
 
     const storage: StorageAdapter = new SqliteStorageAdapter(storagePath)
-    const memory = new Memory({ storage })
+
+    // Auto-detect OpenAI for vector embeddings (Level 0 → Level 1 upgrade)
+    const openaiKey = (cfg.openaiApiKey as string | undefined) ?? process.env.OPENAI_API_KEY
+    let intelligence: IntelligenceAdapter | undefined
+    if (openaiKey) {
+      try {
+        intelligence = openaiIntelligence({
+          apiKey: openaiKey,
+          embeddingModel: 'text-embedding-3-small',
+          embeddingDimensions: 1536,
+        })
+        console.log('[engram] OpenAI intelligence enabled (vector embeddings + LLM summarization)')
+      } catch (err) {
+        console.warn('[engram] OpenAI init failed, falling back to BM25:', err)
+      }
+    } else {
+      console.log('[engram] No OPENAI_API_KEY — using BM25 keyword search (Level 0)')
+    }
+
+    const memory = new Memory({ storage, intelligence })
 
     let initialized = false
     // dbReady tracks whether DB initialized successfully.
@@ -351,6 +371,10 @@ export default definePluginEntry({
         if (!query) return { messages, estimatedTokens: 0 }
         try {
           const result = await memory.recall(query, { tokenBudget })
+          console.log(`[engram] assemble: query="${query.slice(0, 80)}" intent=${result.intent.type} memories=${result.memories.length} assoc=${result.associations.length} tokens=${result.estimatedTokens}`)
+          if (result.memories.length > 0) {
+            console.log(`[engram] top hit: [${result.memories[0].type}] relevance=${result.memories[0].relevance.toFixed(3)} "${result.memories[0].content.slice(0, 80)}"`)
+          }
           return {
             messages,
             estimatedTokens: result.estimatedTokens,
