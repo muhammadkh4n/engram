@@ -305,6 +305,23 @@ export default definePluginEntry({
     let dbReady = false
     let episodesSinceConsolidation = 0
 
+    // Tools may be called before bootstrap() — ensure memory is initialized
+    async function ensureInitialized(): Promise<boolean> {
+      if (initialized && dbReady) return true
+      if (initialized && !dbReady) return false // init was attempted and failed
+      try {
+        await memory.initialize()
+        initialized = true
+        dbReady = true
+        return true
+      } catch (err) {
+        console.error('[engram] lazy init failed:', err)
+        initialized = true
+        dbReady = false
+        return false
+      }
+    }
+
     // -----------------------------------------------------------------------
     // Context Engine
     // -----------------------------------------------------------------------
@@ -344,7 +361,7 @@ export default definePluginEntry({
       async ingest({ sessionId, message, isHeartbeat }: {
         sessionId: string; message: AgentMessage; isHeartbeat?: boolean
       }) {
-        if (!dbReady) return { ingested: false }
+        if (!(await ensureInitialized())) return { ingested: false }
         if (isHeartbeat) return { ingested: false }
         const { text, rawParts } = extractContent(message.content)
         const content = truncate(text)
@@ -363,7 +380,7 @@ export default definePluginEntry({
       async ingestBatch({ sessionId, messages, isHeartbeat }: {
         sessionId: string; messages: AgentMessage[]; isHeartbeat?: boolean
       }) {
-        if (!dbReady) return { ingestedCount: 0 }
+        if (!(await ensureInitialized())) return { ingestedCount: 0 }
         if (isHeartbeat) return { ingestedCount: 0 }
         let count = 0
         for (const msg of messages) {
@@ -386,7 +403,7 @@ export default definePluginEntry({
         sessionId: string; messages: AgentMessage[]; tokenBudget?: number; prompt?: string; model?: string
       }) {
         // Pass-through when DB not ready — no memory injection
-        if (!dbReady) return { messages, estimatedTokens: 0 }
+        if (!(await ensureInitialized())) return { messages, estimatedTokens: 0 }
 
         const query = extractQuery(messages, prompt)
         if (!query) return { messages, estimatedTokens: 0 }
@@ -408,7 +425,7 @@ export default definePluginEntry({
       },
 
       async compact() {
-        if (!dbReady) {
+        if (!(await ensureInitialized())) {
           return { ok: false, compacted: false, reason: 'Engram DB not initialized' }
         }
         // Wrap in session queue using a fixed key for compaction — compaction
@@ -435,7 +452,7 @@ export default definePluginEntry({
         sessionId: string; sessionFile: string; messages: AgentMessage[]
         prePromptMessageCount: number; isHeartbeat?: boolean; tokenBudget?: number
       }) {
-        if (!dbReady) return
+        if (!(await ensureInitialized())) return
         if (isHeartbeat) return
 
         return withSessionQueue(sessionId, async () => {
@@ -490,6 +507,9 @@ export default definePluginEntry({
         query: Type.String({ description: 'Search query' }),
       }),
       async execute(_id: unknown, params: { query: string }) {
+        if (!(await ensureInitialized())) {
+          return { content: [{ type: 'text' as const, text: 'Engram memory not available (DB init failed)' }] }
+        }
         const result = await memory.recall(params.query)
         return {
           content: [{ type: 'text' as const, text: result.formatted || 'No memories found.' }],
@@ -504,6 +524,9 @@ export default definePluginEntry({
       description: 'Get memory statistics: episode, digest, semantic, procedural counts',
       parameters: Type.Object({}),
       async execute() {
+        if (!(await ensureInitialized())) {
+          return { content: [{ type: 'text' as const, text: 'Engram memory not available' }] }
+        }
         const stats = await memory.stats()
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(stats, null, 2) }],
@@ -521,6 +544,9 @@ export default definePluginEntry({
         confirm: Type.Optional(Type.Boolean({ default: false, description: 'Set true to confirm' })),
       }),
       async execute(_id: unknown, params: { query: string; confirm?: boolean }) {
+        if (!(await ensureInitialized())) {
+          return { content: [{ type: 'text' as const, text: 'Engram memory not available' }] }
+        }
         const result = await memory.forget(params.query, { confirm: params.confirm })
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
@@ -540,6 +566,9 @@ export default definePluginEntry({
         ], { default: 'all' })),
       }),
       async execute(_id: unknown, params: { cycle?: string }) {
+        if (!(await ensureInitialized())) {
+          return { content: [{ type: 'text' as const, text: 'Engram memory not available' }] }
+        }
         const result = await memory.consolidate((params.cycle as 'light' | 'deep' | 'dream' | 'decay' | 'all') ?? 'all')
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
