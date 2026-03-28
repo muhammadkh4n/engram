@@ -20,6 +20,7 @@ function makeSocialIntent(): IntentResult {
     strategy: STRATEGY_TABLE['SOCIAL'],
     extractedCues: [],
     salience: 0.1,
+    expandedQueries: ['hi'],
   }
 }
 
@@ -30,6 +31,7 @@ function makeQuestionIntent(): IntentResult {
     strategy: STRATEGY_TABLE['QUESTION'],
     extractedCues: ['typescript', 'strict', 'mode'],
     salience: 0.6,
+    expandedQueries: ['What is TypeScript strict mode?', 'TypeScript strict mode'],
   }
 }
 
@@ -57,10 +59,12 @@ describe('recall engine — stage 1 (stageRecall)', () => {
 
     const result = await recall('What is TypeScript strict mode?', storage, sensory, intent)
 
-    // QUESTION strategy has tiers: semantic, episode, digest
-    expect(storage.semantic.search).toHaveBeenCalledOnce()
-    expect(storage.episodes.search).toHaveBeenCalledOnce()
-    expect(storage.digests.search).toHaveBeenCalledOnce()
+    // QUESTION strategy has tiers: semantic, episode, digest.
+    // With multi-query expansion each tier is called once per expanded query variant,
+    // so we verify the tiers were called (at least once) but not procedural.
+    expect(storage.semantic.search).toHaveBeenCalled()
+    expect(storage.episodes.search).toHaveBeenCalled()
+    expect(storage.digests.search).toHaveBeenCalled()
     // procedural should NOT be called for QUESTION intent
     expect(storage.procedural.search).not.toHaveBeenCalled()
 

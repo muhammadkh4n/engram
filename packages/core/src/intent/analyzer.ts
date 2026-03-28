@@ -32,6 +32,65 @@ function extractCues(message: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Query expansion (keyword-based, no LLM dependency)
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate alternative query variants based on intent type.
+ * Always includes the original query as the first element.
+ * Strips question-word prefixes and extracts keyword-focused variants so that
+ * the question embedding space is bridged toward the answer/report embedding space.
+ */
+function expandQuery(query: string, intent: IntentType): string[] {
+  const queries = [query] // always include original
+
+  // Strip question-word prefixes to produce a content-focused variant
+  const contentQuery = query
+    .replace(/^(what|who|where|when|why|how|which|do you|did we|can you|tell me|show me)\s+(was|is|are|were|about|know|remember)\s*/i, '')
+    .replace(/\?$/, '')
+    .trim()
+  if (contentQuery.length > 5 && contentQuery !== query) {
+    queries.push(contentQuery)
+  }
+
+  // For RECALL_EXPLICIT: strip modal verbs and pronouns to get the bare topic
+  if (intent === 'RECALL_EXPLICIT') {
+    const bare = query
+      .replace(/\b(did|do)\b/gi, '')
+      .replace(/\b(we|I|you)\b/gi, '')
+      .replace(/\?$/, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+    if (bare.length > 5 && bare !== query && bare !== contentQuery) {
+      queries.push(bare)
+    }
+  }
+
+  // For QUESTION: add a keyword-only variant (nouns/entities, no stop words)
+  if (intent === 'QUESTION') {
+    const QUESTION_STOPS = new Set([
+      'what', 'when', 'where', 'which', 'about', 'know', 'remember', 'tell',
+      'show', 'does', 'last', 'recent', 'that', 'this', 'with', 'from', 'have',
+      'been', 'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
+      'was', 'how', 'who', 'why',
+    ])
+    const keywords = query
+      .replace(/\?$/, '')
+      .split(/\s+/)
+      .filter(w => w.length > 3)
+      .filter(w => !QUESTION_STOPS.has(w.toLowerCase()))
+    if (keywords.length > 0) {
+      const keywordQuery = keywords.join(' ')
+      if (keywordQuery !== query && keywordQuery !== contentQuery) {
+        queries.push(keywordQuery)
+      }
+    }
+  }
+
+  return queries
+}
+
+// ---------------------------------------------------------------------------
 // Salience scoring (lightweight, mirrors Section 5.2)
 // ---------------------------------------------------------------------------
 
@@ -170,6 +229,7 @@ export class HeuristicIntentAnalyzer {
       strategy,
       extractedCues: extractCues(message),
       salience: scoreSalience(message),
+      expandedQueries: expandQuery(message, type),
     }
   }
 }

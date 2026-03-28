@@ -44,8 +44,11 @@ export async function recall(
 ): Promise<RecallResult> {
   const strategy = intent.strategy
 
-  // Stage 1: Parallel search across tiers
-  const memories = await stageRecall(query, strategy, storage, sensory, opts?.embedding)
+  // Stage 1: Parallel search across tiers using all expanded query variants
+  const queries = intent.expandedQueries && intent.expandedQueries.length > 0
+    ? intent.expandedQueries
+    : [query]
+  const memories = await stageRecall(queries, strategy, storage, sensory, opts?.embedding)
 
   // Stage 2: Association walk from recalled memories
   const associations = await stageAssociate(memories, strategy, storage)

@@ -49,7 +49,7 @@ export class SupabaseSemanticStorage implements SemanticStorage {
         p_query_embedding: embedding,
         p_session_id: null,
         p_match_count: limit,
-        p_min_similarity: opts?.minScore ?? 0.3,
+        p_min_similarity: opts?.minScore ?? 0.15,
         p_include_episodes: false,
         p_include_digests: false,
         p_include_semantic: true,

@@ -143,6 +143,7 @@ export interface IntentResult {
   strategy: RetrievalStrategy
   extractedCues: string[]
   salience: number
+  expandedQueries: string[]
 }
 
 export interface RetrievalStrategy {

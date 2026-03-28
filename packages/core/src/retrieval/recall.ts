@@ -54,7 +54,7 @@ function getMetadata(item: AnyMemory): Record<string, unknown> {
 }
 
 export async function stageRecall(
-  query: string,
+  queries: string | string[],
   strategy: RetrievalStrategy,
   storage: StorageAdapter,
   sensory: SensoryBuffer,
@@ -62,61 +62,74 @@ export async function stageRecall(
 ): Promise<RetrievedMemory[]> {
   if (!strategy.shouldRecall) return []
 
-  const effectiveQuery = strategy.queryTransform ?? query
+  // Normalise to array — single-string callers remain backward-compatible
+  const queryList = Array.isArray(queries) ? queries : [queries]
 
-  // Build per-tier search promises
-  const tierSearches = strategy.tiers.map((tier) => ({
-    tier,
-    promise: getTierStorage(tier.tier, storage).search(effectiveQuery, {
-      limit: strategy.maxResults,
-      minScore: strategy.minRelevance,
-      embedding,
-    }),
-  }))
+  // Best score seen per memory ID across all query variants
+  const bestByIdAndTier = new Map<string, RetrievedMemory>()
 
-  // Execute all tier searches in parallel
-  const settled = await Promise.allSettled(tierSearches.map((t) => t.promise))
+  for (const rawQuery of queryList) {
+    const effectiveQuery = strategy.queryTransform ?? rawQuery
 
-  const scored: RetrievedMemory[] = []
+    // Build per-tier search promises for this query variant
+    const tierSearches = strategy.tiers.map((tier) => ({
+      tier,
+      promise: getTierStorage(tier.tier, storage).search(effectiveQuery, {
+        limit: strategy.maxResults,
+        minScore: strategy.minRelevance,
+        embedding,
+      }),
+    }))
 
-  for (let i = 0; i < settled.length; i++) {
-    const result = settled[i]
-    if (result.status !== 'fulfilled') continue
+    // Execute all tier searches in parallel
+    const settled = await Promise.allSettled(tierSearches.map((t) => t.promise))
 
-    const { tier } = tierSearches[i]
-    const items = result.value
+    for (let i = 0; i < settled.length; i++) {
+      const result = settled[i]
+      if (result.status !== 'fulfilled') continue
 
-    for (const { item, similarity } of items) {
-      const content = getContent(item)
-      const createdAt = getCreatedAt(item)
-      const accessCount = getAccessCount(item)
-      const metadata = getMetadata(item)
+      const { tier } = tierSearches[i]
+      const items = result.value
 
-      // Priming boost — already capped at 0.3 by SensoryBuffer
-      const primingBoost = sensory.getPrimingBoost(content)
+      for (const { item, similarity } of items) {
+        const content = getContent(item)
+        const createdAt = getCreatedAt(item)
+        const accessCount = getAccessCount(item)
+        const metadata = getMetadata(item)
 
-      // Recency score — 30-day exponential half-life
-      const ageHours = (Date.now() - createdAt.getTime()) / 3_600_000
-      const recencyScore = tier.recencyBias * Math.exp(-ageHours / 720)
+        // Priming boost — already capped at 0.3 by SensoryBuffer
+        const primingBoost = sensory.getPrimingBoost(content)
 
-      // Access frequency boost — capped at 0.1 per audit A5
-      const accessBoost = Math.min(0.1, accessCount * 0.01)
+        // Recency score — 30-day exponential half-life
+        const ageHours = (Date.now() - createdAt.getTime()) / 3_600_000
+        const recencyScore = tier.recencyBias * Math.exp(-ageHours / 720)
 
-      const finalScore = Math.min(
-        1.0,
-        similarity * tier.weight + primingBoost + recencyScore + accessBoost
-      )
+        // Access frequency boost — capped at 0.1 per audit A5
+        const accessBoost = Math.min(0.1, accessCount * 0.01)
 
-      scored.push({
-        id: item.id,
-        type: tier.tier,
-        content,
-        relevance: finalScore,
-        source: 'recall',
-        metadata,
-      })
+        const finalScore = Math.min(
+          1.0,
+          similarity * tier.weight + primingBoost + recencyScore + accessBoost
+        )
+
+        // Deduplicate by composite key: keep the highest-scoring result seen
+        // for this (id, tier) pair across all query variants
+        const dedupeKey = `${item.id}:${tier.tier}`
+        const existing = bestByIdAndTier.get(dedupeKey)
+        if (!existing || finalScore > existing.relevance) {
+          bestByIdAndTier.set(dedupeKey, {
+            id: item.id,
+            type: tier.tier,
+            content,
+            relevance: finalScore,
+            source: 'recall',
+            metadata,
+          })
+        }
+      }
     }
   }
 
+  const scored = Array.from(bestByIdAndTier.values())
   return scored.sort((a, b) => b.relevance - a.relevance).slice(0, strategy.maxResults)
 }

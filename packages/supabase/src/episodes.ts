@@ -70,7 +70,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
           query_embedding: embStr,
           filter_session_id: opts?.sessionId ?? null,
           match_count: limit,
-          min_similarity: opts?.minScore ?? 0.3,
+          min_similarity: opts?.minScore ?? 0.15,
         })
         if (error) throw new Error(`Episode search (legacy vector) failed: ${error.message}`)
         const rows = (data ?? []) as LegacyMatchRow[]
@@ -85,7 +85,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
         p_query_embedding: embedding,
         p_session_id: opts?.sessionId ?? null,
         p_match_count: limit,
-        p_min_similarity: opts?.minScore ?? 0.3,
+        p_min_similarity: opts?.minScore ?? 0.15,
         p_include_episodes: true,
         p_include_digests: false,
         p_include_semantic: false,

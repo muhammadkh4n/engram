@@ -224,6 +224,7 @@ describe('HeuristicIntentAnalyzer — result shape', () => {
     expect(result).toHaveProperty('strategy')
     expect(result).toHaveProperty('extractedCues')
     expect(result).toHaveProperty('salience')
+    expect(result).toHaveProperty('expandedQueries')
   })
 
   it('confidence is between 0 and 1', () => {
@@ -250,6 +251,35 @@ describe('HeuristicIntentAnalyzer — result shape', () => {
   it('extractedCues is an array', () => {
     const result = analyzer.analyze("Let's build a REST API")
     expect(Array.isArray(result.extractedCues)).toBe(true)
+  })
+
+  it('expandedQueries is an array', () => {
+    const result = analyzer.analyze("Let's build a REST API")
+    expect(Array.isArray(result.expandedQueries)).toBe(true)
+  })
+
+  it('expandedQueries always contains the original query as first element', () => {
+    const query = "What was the last opportunity scan?"
+    const result = analyzer.analyze(query)
+    expect(result.expandedQueries[0]).toBe(query)
+  })
+
+  it('QUESTION intent produces multiple expanded queries', () => {
+    const result = analyzer.analyze("What was the last opportunity scan?")
+    expect(result.expandedQueries.length).toBeGreaterThan(1)
+  })
+
+  it('RECALL_EXPLICIT intent produces expanded queries stripping modal verbs', () => {
+    const result = analyzer.analyze("What did we decide about the database schema?")
+    expect(result.type).toBe('RECALL_EXPLICIT')
+    expect(result.expandedQueries.length).toBeGreaterThan(1)
+  })
+
+  it('SOCIAL intent expanded queries contains only the original', () => {
+    const result = analyzer.analyze('hi')
+    expect(result.type).toBe('SOCIAL')
+    // SOCIAL bypasses expansion — still at least contains the original
+    expect(result.expandedQueries[0]).toBe('hi')
   })
 })
 

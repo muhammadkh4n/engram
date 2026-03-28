@@ -227,6 +227,7 @@ describe('SensoryBuffer', () => {
         },
         extractedCues: ['memory', 'systems'],
         salience: 0.7,
+        expandedQueries: ['memory systems'],
       }
       buf.setIntent(intent)
       expect(buf.getIntent()).toEqual(intent)
@@ -248,6 +249,7 @@ describe('SensoryBuffer', () => {
         },
         extractedCues: [],
         salience: 0.3,
+        expandedQueries: [],
       }
       const intent2 = { ...intent1, type: 'TASK_START' as const }
       buf.setIntent(intent1)
