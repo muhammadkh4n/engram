@@ -15,6 +15,7 @@ export interface SupabaseAdapterOptions {
 
 export class SupabaseStorageAdapter implements StorageAdapter {
   private client: SupabaseClient
+  private _isLegacy: boolean = false
   private _episodes: SupabaseEpisodeStorage | null = null
   private _digests: SupabaseDigestStorage | null = null
   private _semantic: SupabaseSemanticStorage | null = null
@@ -26,14 +27,30 @@ export class SupabaseStorageAdapter implements StorageAdapter {
   }
 
   async initialize(): Promise<void> {
-    // Verify connection with a lightweight query
-    const { error } = await this.client
+    // Detect schema version: new schema has the `memories` pool table,
+    // legacy schema only has `memory_episodes` / `memory_digests` / `memory_knowledge`.
+    const { error: memoriesError } = await this.client
       .from('memories')
       .select('id')
       .limit(1)
-    if (error) throw new Error(`Supabase connection failed: ${error.message}`)
 
-    this._episodes = new SupabaseEpisodeStorage(this.client)
+    if (memoriesError) {
+      // Legacy schema detected — verify at least memory_episodes exists.
+      const { error: legacyError } = await this.client
+        .from('memory_episodes')
+        .select('id')
+        .limit(1)
+      if (legacyError) {
+        throw new Error(`Supabase connection failed: ${legacyError.message}`)
+      }
+      // Legacy mode: memories table absent, use compatibility wrappers.
+      console.log('[engram] Supabase legacy schema detected — running in compatibility mode (no memories pool table)')
+      this._isLegacy = true
+    } else {
+      this._isLegacy = false
+    }
+
+    this._episodes = new SupabaseEpisodeStorage(this.client, this._isLegacy)
     this._digests = new SupabaseDigestStorage(this.client)
     this._semantic = new SupabaseSemanticStorage(this.client)
     this._procedural = new SupabaseProceduralStorage(this.client)

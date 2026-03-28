@@ -5,37 +5,56 @@ import type { EpisodeStorage } from '@engram/core'
 import { sanitizeIlike } from './search.js'
 
 export class SupabaseEpisodeStorage implements EpisodeStorage {
-  constructor(private readonly client: SupabaseClient) {}
+  /**
+   * @param legacyMode When true, skip the memories pool table insert and
+   *   omit columns that don't exist in the legacy schema (salience, entities,
+   *   access_count, etc.). Legacy mode is detected automatically by the adapter
+   *   and used until migrations 004-007 are applied.
+   */
+  constructor(
+    private readonly client: SupabaseClient,
+    private readonly legacyMode: boolean = false,
+  ) {}
 
   async insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode> {
     const id = generateId()
 
-    // Insert into memories table first (FK requirement)
-    const { error: memErr } = await this.client
-      .from('memories')
-      .insert({ id, type: 'episode' })
-    if (memErr) throw new Error(`Episode memory insert failed: ${memErr.message}`)
+    if (!this.legacyMode) {
+      // Insert into memories table first (FK requirement — full schema only)
+      const { error: memErr } = await this.client
+        .from('memories')
+        .insert({ id, type: 'episode' })
+      if (memErr) throw new Error(`Episode memory insert failed: ${memErr.message}`)
+    }
+
+    // Build the row — legacy schema only has: id, session_id, role, content,
+    // embedding, metadata, created_at. Full schema adds salience, access_count,
+    // last_accessed, consolidated_at, entities.
+    const row: Record<string, unknown> = {
+      id,
+      session_id: episode.sessionId,
+      role: episode.role,
+      content: episode.content,
+      embedding: episode.embedding ?? null,
+      metadata: episode.metadata,
+    }
+
+    if (!this.legacyMode) {
+      row.salience = episode.salience
+      row.access_count = episode.accessCount
+      row.last_accessed = episode.lastAccessed?.toISOString() ?? null
+      row.consolidated_at = episode.consolidatedAt?.toISOString() ?? null
+      row.entities = episode.entities
+    }
 
     const { data, error } = await this.client
       .from('memory_episodes')
-      .insert({
-        id,
-        session_id: episode.sessionId,
-        role: episode.role,
-        content: episode.content,
-        salience: episode.salience,
-        access_count: episode.accessCount,
-        last_accessed: episode.lastAccessed?.toISOString() ?? null,
-        consolidated_at: episode.consolidatedAt?.toISOString() ?? null,
-        embedding: episode.embedding ?? null,
-        entities: episode.entities,
-        metadata: episode.metadata,
-      })
+      .insert(row)
       .select()
       .single()
 
     if (error) throw new Error(`Episode insert failed: ${error.message}`)
-    return rowToEpisode(data as EpisodeRow)
+    return rowToEpisode(data as EpisodeRow, this.legacyMode)
   }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]> {
@@ -43,7 +62,25 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
     const embedding = opts?.embedding
 
     if (embedding) {
-      // Vector search via engram_recall RPC
+      if (this.legacyMode) {
+        // Legacy schema: use the old match_episodes RPC
+        // Format embedding as '[x,y,z]' string (legacy RPC accepts text)
+        const embStr = `[${embedding.join(',')}]`
+        const { data, error } = await this.client.rpc('match_episodes', {
+          query_embedding: embStr,
+          filter_session_id: opts?.sessionId ?? null,
+          match_count: limit,
+          min_similarity: opts?.minScore ?? 0.3,
+        })
+        if (error) throw new Error(`Episode search (legacy vector) failed: ${error.message}`)
+        const rows = (data ?? []) as LegacyMatchRow[]
+        return rows.map((r) => ({
+          item: legacyRowToEpisode(r),
+          similarity: r.similarity,
+        }))
+      }
+
+      // Full schema: use engram_recall RPC
       const { data, error } = await this.client.rpc('engram_recall', {
         p_query_embedding: embedding,
         p_session_id: opts?.sessionId ?? null,
@@ -63,7 +100,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
       }))
     }
 
-    // Text fallback via pg_trgm similarity
+    // Text fallback via ilike — works on both legacy and full schema
     let queryBuilder = this.client
       .from('memory_episodes')
       .select('*')
@@ -79,7 +116,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
 
     const rows = (data ?? []) as EpisodeRow[]
     return rows.map((r) => ({
-      item: rowToEpisode(r),
+      item: rowToEpisode(r, this.legacyMode),
       similarity: 0.5,
     }))
   }
@@ -91,7 +128,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
       .select('*')
       .in('id', ids)
     if (error) throw new Error(`Episode getByIds failed: ${error.message}`)
-    return ((data ?? []) as EpisodeRow[]).map(rowToEpisode)
+    return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, this.legacyMode))
   }
 
   async getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]> {
@@ -107,10 +144,15 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
 
     const { data, error } = await queryBuilder
     if (error) throw new Error(`Episode getBySession failed: ${error.message}`)
-    return ((data ?? []) as EpisodeRow[]).map(rowToEpisode)
+    return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, this.legacyMode))
   }
 
   async getUnconsolidated(sessionId: string): Promise<Episode[]> {
+    if (this.legacyMode) {
+      // Legacy schema lacks consolidated_at and salience — return all unprocessed
+      // episodes for the session (consolidation is a no-op in legacy mode)
+      return []
+    }
     const { data, error } = await this.client
       .from('memory_episodes')
       .select('*')
@@ -118,10 +160,11 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
       .is('consolidated_at', null)
       .order('salience', { ascending: false })
     if (error) throw new Error(`Episode getUnconsolidated failed: ${error.message}`)
-    return ((data ?? []) as EpisodeRow[]).map(rowToEpisode)
+    return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, false))
   }
 
   async getUnconsolidatedSessions(): Promise<string[]> {
+    if (this.legacyMode) return []
     const { data, error } = await this.client
       .from('memory_episodes')
       .select('session_id')
@@ -132,7 +175,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
   }
 
   async markConsolidated(ids: string[]): Promise<void> {
-    if (ids.length === 0) return
+    if (ids.length === 0 || this.legacyMode) return
     const { error } = await this.client
       .from('memory_episodes')
       .update({ consolidated_at: new Date().toISOString() })
@@ -141,6 +184,7 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
   }
 
   async recordAccess(id: string): Promise<void> {
+    if (this.legacyMode) return // no access tracking in legacy schema
     const { error } = await this.client.rpc('engram_record_access', {
       p_id: id,
       p_memory_type: 'episode',
@@ -179,18 +223,47 @@ interface RecallRow {
   entities: string[]
 }
 
-function rowToEpisode(row: EpisodeRow): Episode {
+// Legacy match_episodes RPC returns a subset of columns (no salience/entities/etc.)
+interface LegacyMatchRow {
+  id: string
+  session_id: string
+  role: string
+  content: string
+  embedding: number[] | null
+  metadata: Record<string, unknown>
+  created_at: string
+  similarity: number
+}
+
+function rowToEpisode(row: EpisodeRow, legacyMode = false): Episode {
   return {
     id: row.id,
     sessionId: row.session_id,
     role: row.role as Episode['role'],
     content: row.content,
-    salience: row.salience,
-    accessCount: row.access_count,
-    lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
-    consolidatedAt: row.consolidated_at ? new Date(row.consolidated_at) : null,
+    salience: legacyMode ? 0.3 : (row.salience ?? 0.3),
+    accessCount: legacyMode ? 0 : (row.access_count ?? 0),
+    lastAccessed: legacyMode ? null : (row.last_accessed ? new Date(row.last_accessed) : null),
+    consolidatedAt: legacyMode ? null : (row.consolidated_at ? new Date(row.consolidated_at) : null),
     embedding: row.embedding ?? null,
-    entities: row.entities ?? [],
+    entities: legacyMode ? [] : (row.entities ?? []),
+    metadata: row.metadata ?? {},
+    createdAt: new Date(row.created_at),
+  }
+}
+
+function legacyRowToEpisode(row: LegacyMatchRow): Episode {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    role: row.role as Episode['role'],
+    content: row.content,
+    salience: 0.3,
+    accessCount: 0,
+    lastAccessed: null,
+    consolidatedAt: null,
+    embedding: null,
+    entities: [],
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
   }

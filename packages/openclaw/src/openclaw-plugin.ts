@@ -16,6 +16,7 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
 import { Memory } from '@engram/core'
 import { SqliteStorageAdapter } from '@engram/sqlite'
+import { SupabaseStorageAdapter } from '@engram/supabase'
 import { openaiIntelligence } from '@engram/openai'
 import type { StorageAdapter, IntelligenceAdapter } from '@engram/core'
 import * as fs from 'node:fs'
@@ -241,6 +242,9 @@ export default definePluginEntry({
   kind: 'context-engine',
   configSchema: Type.Object({
     storagePath: Type.Optional(Type.String({ default: '~/.openclaw/engram.db' })),
+    supabaseUrl: Type.Optional(Type.String()),
+    supabaseKey: Type.Optional(Type.String()),
+    openaiApiKey: Type.Optional(Type.String()),
   }),
 
   register(api: {
@@ -250,14 +254,31 @@ export default definePluginEntry({
     registerTool: (tool: unknown) => void
   }) {
     const cfg = (api.pluginConfig ?? {}) as Record<string, unknown>
-    const storagePath = expandHome(
-      (cfg.storagePath as string | undefined) ??
-      '~/.openclaw/engram.db'
-    )
 
-    const storage: StorageAdapter = new SqliteStorageAdapter(storagePath)
+    // ---------------------------------------------------------------------------
+    // Storage backend auto-detection
+    // Prefer Supabase (pgvector) when credentials are present, fall back to SQLite.
+    // ---------------------------------------------------------------------------
+    let storage: StorageAdapter
 
-    // Auto-detect OpenAI for vector embeddings (Level 0 → Level 1 upgrade)
+    const supabaseUrl = (cfg.supabaseUrl as string | undefined) ?? process.env.SUPABASE_URL
+    const supabaseKey = (cfg.supabaseKey as string | undefined) ?? process.env.SUPABASE_SERVICE_KEY
+
+    if (supabaseUrl && supabaseKey) {
+      storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+      console.log('[engram] Using Supabase storage (pgvector + cosine similarity)')
+    } else {
+      const storagePath = expandHome(
+        (cfg.storagePath as string | undefined) ??
+        '~/.openclaw/engram.db'
+      )
+      storage = new SqliteStorageAdapter(storagePath)
+      console.log('[engram] Using SQLite storage (BM25 keyword search)')
+    }
+
+    // ---------------------------------------------------------------------------
+    // Intelligence adapter (OpenAI embeddings + LLM summarization)
+    // ---------------------------------------------------------------------------
     const openaiKey = (cfg.openaiApiKey as string | undefined) ?? process.env.OPENAI_API_KEY
     let intelligence: IntelligenceAdapter | undefined
     if (openaiKey) {
