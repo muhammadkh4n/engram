@@ -127,10 +127,24 @@ describe('SupabaseEpisodeStorage', () => {
     expect(mock.from).toHaveBeenNthCalledWith(2, 'memory_episodes')
   })
 
-  it('search with embedding calls engram_recall RPC with p_include_episodes=true', async () => {
+  it('search with text + embedding calls engram_hybrid_recall RPC with p_include_episodes=true', async () => {
     mock.rpc.mockResolvedValue({ data: [], error: null })
 
     await store.search('test query', { embedding: [0.1, 0.2, 0.3] })
+
+    expect(mock.rpc).toHaveBeenCalledWith('engram_hybrid_recall', expect.objectContaining({
+      p_query_text: 'test query',
+      p_include_episodes: true,
+      p_include_digests: false,
+      p_include_semantic: false,
+      p_include_procedural: false,
+    }))
+  })
+
+  it('search with embedding only (no query text) calls engram_recall RPC', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.search('', { embedding: [0.1, 0.2, 0.3] })
 
     expect(mock.rpc).toHaveBeenCalledWith('engram_recall', expect.objectContaining({
       p_include_episodes: true,
@@ -262,10 +276,24 @@ describe('SupabaseDigestStorage', () => {
     expect(mock.from).toHaveBeenNthCalledWith(2, 'memory_digests')
   })
 
-  it('search with embedding calls engram_recall with p_include_digests=true', async () => {
+  it('search with text + embedding calls engram_hybrid_recall with p_include_digests=true', async () => {
     mock.rpc.mockResolvedValue({ data: [], error: null })
 
     await store.search('summary query', { embedding: [0.1, 0.2] })
+
+    expect(mock.rpc).toHaveBeenCalledWith('engram_hybrid_recall', expect.objectContaining({
+      p_query_text: 'summary query',
+      p_include_episodes: false,
+      p_include_digests: true,
+      p_include_semantic: false,
+      p_include_procedural: false,
+    }))
+  })
+
+  it('search with embedding only (no query text) calls engram_recall with p_include_digests=true', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.search('', { embedding: [0.1, 0.2] })
 
     expect(mock.rpc).toHaveBeenCalledWith('engram_recall', expect.objectContaining({
       p_include_episodes: false,
@@ -339,10 +367,24 @@ describe('SupabaseSemanticStorage', () => {
     expect(mock.from).toHaveBeenNthCalledWith(2, 'memory_semantic')
   })
 
-  it('search with embedding calls engram_recall with p_include_semantic=true', async () => {
+  it('search with text + embedding calls engram_hybrid_recall with p_include_semantic=true', async () => {
     mock.rpc.mockResolvedValue({ data: [], error: null })
 
     await store.search('semantic query', { embedding: [0.5] })
+
+    expect(mock.rpc).toHaveBeenCalledWith('engram_hybrid_recall', expect.objectContaining({
+      p_query_text: 'semantic query',
+      p_include_episodes: false,
+      p_include_digests: false,
+      p_include_semantic: true,
+      p_include_procedural: false,
+    }))
+  })
+
+  it('search with embedding only (no query text) calls engram_recall with p_include_semantic=true', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.search('', { embedding: [0.5] })
 
     expect(mock.rpc).toHaveBeenCalledWith('engram_recall', expect.objectContaining({
       p_include_episodes: false,
@@ -450,10 +492,24 @@ describe('SupabaseProceduralStorage', () => {
     expect(mock.from).toHaveBeenNthCalledWith(2, 'memory_procedural')
   })
 
-  it('search with embedding calls engram_recall with p_include_procedural=true', async () => {
+  it('search with text + embedding calls engram_hybrid_recall with p_include_procedural=true', async () => {
     mock.rpc.mockResolvedValue({ data: [], error: null })
 
     await store.search('procedure query', { embedding: [0.3] })
+
+    expect(mock.rpc).toHaveBeenCalledWith('engram_hybrid_recall', expect.objectContaining({
+      p_query_text: 'procedure query',
+      p_include_episodes: false,
+      p_include_digests: false,
+      p_include_semantic: false,
+      p_include_procedural: true,
+    }))
+  })
+
+  it('search with embedding only (no query text) calls engram_recall with p_include_procedural=true', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.search('', { embedding: [0.3] })
 
     expect(mock.rpc).toHaveBeenCalledWith('engram_recall', expect.objectContaining({
       p_include_episodes: false,

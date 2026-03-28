@@ -20,6 +20,7 @@ import { SupabaseStorageAdapter } from '@engram/supabase'
 import { openaiIntelligence } from '@engram/openai'
 import type { StorageAdapter, IntelligenceAdapter } from '@engram/core'
 import * as fs from 'node:fs'
+import { shouldIngest } from './ingest-filter.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -366,6 +367,7 @@ export default definePluginEntry({
         const { text, rawParts } = extractContent(message.content)
         const content = truncate(text)
         if (content.length < 2) return { ingested: false }
+        if (!shouldIngest(content, message.role)) return { ingested: false }
         try {
           const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
           await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content, metadata })
@@ -387,6 +389,7 @@ export default definePluginEntry({
           const { text, rawParts } = extractContent(msg.content)
           const content = truncate(text)
           if (content.length < 2) continue
+          if (!shouldIngest(content, msg.role)) continue
           try {
             const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
             await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content, metadata })
@@ -462,6 +465,7 @@ export default definePluginEntry({
             const { text, rawParts } = extractContent(msg.content)
             const content = truncate(text)
             if (content.length < 2) continue
+            if (!shouldIngest(content, msg.role)) continue
             try {
               const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
               await memory.ingest({

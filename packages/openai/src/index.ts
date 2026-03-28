@@ -53,5 +53,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     extractKnowledge(content) {
       return summarizer.extractKnowledge(content)
     },
+    generateHypotheticalDoc(query) {
+      return summarizer.generateHypotheticalDoc(query)
+    },
   }
 }

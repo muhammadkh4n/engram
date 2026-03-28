@@ -1,6 +1,7 @@
 import type { RecallResult, IntentResult, RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
+import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
 import { stageRecall } from './recall.js'
@@ -40,7 +41,7 @@ export async function recall(
   storage: StorageAdapter,
   sensory: SensoryBuffer,
   intent: IntentResult,
-  opts?: { embedding?: number[]; tokenBudget?: number }
+  opts?: { embedding?: number[]; tokenBudget?: number; intelligence?: IntelligenceAdapter }
 ): Promise<RecallResult> {
   const strategy = intent.strategy
 
@@ -48,7 +49,40 @@ export async function recall(
   const queries = intent.expandedQueries && intent.expandedQueries.length > 0
     ? intent.expandedQueries
     : [query]
-  const memories = await stageRecall(queries, strategy, storage, sensory, opts?.embedding)
+  let memories = await stageRecall(queries, strategy, storage, sensory, opts?.embedding)
+
+  // HyDE fallback: when top result is weak, generate a hypothetical document that
+  // would answer the query, embed it, and run a second retrieval pass. Results from
+  // both passes are merged with deduplication — highest score per ID wins.
+  const topScore = memories[0]?.relevance ?? 0
+  const intelligence = opts?.intelligence
+  if (topScore < 0.25 && intelligence?.generateHypotheticalDoc && intelligence?.embed) {
+    try {
+      const hydeDoc = await intelligence.generateHypotheticalDoc(query)
+      const hydeEmbedding = await intelligence.embed(hydeDoc)
+      const hydeMemories = await stageRecall(
+        [hydeDoc, query],
+        strategy,
+        storage,
+        sensory,
+        hydeEmbedding
+      )
+      // Merge: keep unique IDs, prefer highest score
+      const merged = new Map<string, RetrievedMemory>()
+      for (const m of [...memories, ...hydeMemories]) {
+        const existing = merged.get(m.id)
+        if (!existing || m.relevance > existing.relevance) {
+          merged.set(m.id, m)
+        }
+      }
+      memories = Array.from(merged.values())
+        .sort((a, b) => b.relevance - a.relevance)
+        .slice(0, strategy.maxResults)
+    } catch (err) {
+      // HyDE failed — use direct results
+      console.error('[engram] HyDE fallback error:', err)
+    }
+  }
 
   // Stage 2: Association walk from recalled memories
   const associations = await stageAssociate(memories, strategy, storage)

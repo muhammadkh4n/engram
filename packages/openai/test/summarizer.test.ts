@@ -255,4 +255,70 @@ describe('OpenAISummarizer', () => {
       expect(result[0].topic).toBe('fenced')
     })
   })
+
+  describe('generateHypotheticalDoc()', () => {
+    it('returns the model response as the hypothetical document', async () => {
+      const hydeDoc = 'The user discussed their preference for TypeScript strict mode and decided to enable it in all projects.'
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(hydeDoc))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.generateHypotheticalDoc('What did we decide about TypeScript strict mode?')
+
+      expect(result).toBe(hydeDoc)
+    })
+
+    it('falls back to the original query when model returns null content', async () => {
+      mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: null } }] })
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const query = 'What is our deployment strategy?'
+      const result = await summarizer.generateHypotheticalDoc(query)
+
+      expect(result).toBe(query)
+    })
+
+    it('calls the model with the correct system prompt and user query', async () => {
+      const hydeDoc = 'The deployment uses Docker containers with Kubernetes orchestration.'
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(hydeDoc))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      await summarizer.generateHypotheticalDoc('How do we deploy our services?')
+
+      const call = mockChatCreate.mock.calls[0][0] as {
+        model: string
+        messages: { role: string; content: string }[]
+        max_tokens: number
+        temperature: number
+      }
+
+      expect(call.messages).toHaveLength(2)
+      expect(call.messages[0].role).toBe('system')
+      expect(call.messages[0].content).toContain('CONTENT of the memory')
+      expect(call.messages[1].role).toBe('user')
+      expect(call.messages[1].content).toBe('How do we deploy our services?')
+      expect(call.max_tokens).toBe(150)
+      expect(call.temperature).toBe(0.7)
+    })
+
+    it('uses the configured model', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('Some hypothetical doc content here.'))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key', model: 'gpt-4o' })
+      await summarizer.generateHypotheticalDoc('test query')
+
+      const call = mockChatCreate.mock.calls[0][0] as { model: string }
+      expect(call.model).toBe('gpt-4o')
+    })
+
+    it('returns a non-empty string for a normal query', async () => {
+      const content = 'We discussed using React with TypeScript and decided on strict mode configuration.'
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(content))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.generateHypotheticalDoc('What React decisions were made?')
+
+      expect(typeof result).toBe('string')
+      expect(result.length).toBeGreaterThan(0)
+    })
+  })
 })

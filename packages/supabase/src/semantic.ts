@@ -45,6 +45,27 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     const embedding = opts?.embedding
 
     if (embedding) {
+      // Prefer hybrid RRF search when query text is also available
+      if (query) {
+        const { data, error } = await this.client.rpc('engram_hybrid_recall', {
+          p_query_text: query,
+          p_query_embedding: JSON.stringify(embedding),
+          p_match_count: limit,
+          p_include_episodes: false,
+          p_include_digests: false,
+          p_include_semantic: true,
+          p_include_procedural: false,
+        })
+        if (error) throw new Error(`Semantic search (hybrid) failed: ${error.message}`)
+
+        const rows = (data ?? []) as RecallRow[]
+        return rows.map((r) => ({
+          item: recallRowToSemantic(r),
+          similarity: r.similarity,
+        }))
+      }
+
+      // Embedding only — fall back to pure vector search
       const { data, error } = await this.client.rpc('engram_recall', {
         p_query_embedding: embedding,
         p_session_id: null,

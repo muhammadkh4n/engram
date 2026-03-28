@@ -9,7 +9,8 @@ import {
   EPISODE_SEARCH_RESULTS,
   DIGEST_SEARCH_RESULTS,
 } from './mock-storage.js'
-import type { IntentResult } from '../../src/types.js'
+import type { IntentResult, RetrievedMemory } from '../../src/types.js'
+import type { IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 
 const analyzer = new HeuristicIntentAnalyzer()
 
@@ -304,5 +305,220 @@ describe('recall engine — RecallResult shape', () => {
     expect(Array.isArray(result.primed)).toBe(true)
     expect(typeof result.estimatedTokens).toBe('number')
     expect(typeof result.formatted).toBe('string')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HyDE two-phase recall
+// ---------------------------------------------------------------------------
+
+describe('recall engine — HyDE two-phase fallback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  // A strategy with zero recency bias so scores are determined purely by
+  // vector similarity. This prevents recency from inflating scores above 0.25
+  // in the "weak result" test scenarios.
+  const HYDE_TEST_STRATEGY = {
+    ...STRATEGY_TABLE['QUESTION'],
+    tiers: [
+      { tier: 'semantic' as const, weight: 1.0, recencyBias: 0 },
+      { tier: 'episode' as const, weight: 1.0, recencyBias: 0 },
+    ],
+    minRelevance: 0,
+  }
+
+  function makeWeakResultStorage() {
+    // Return very low similarity scores so the top result is below 0.25.
+    // With recencyBias=0 in HYDE_TEST_STRATEGY, finalScore = similarity * 1.0.
+    return createMockStorage({
+      semanticResults: [{ item: SEMANTIC_SEARCH_RESULTS[0].item, similarity: 0.1 }],
+      episodeResults: [{ item: EPISODE_SEARCH_RESULTS[0].item, similarity: 0.08 }],
+      digestResults: [],
+      proceduralResults: [],
+      walkResults: [],
+    })
+  }
+
+  function makeStrongResultStorage() {
+    // Return high similarity so top score > 0.25 — HyDE should NOT trigger
+    return createMockStorage({
+      semanticResults: [{ item: SEMANTIC_SEARCH_RESULTS[0].item, similarity: 0.9 }],
+      episodeResults: EPISODE_SEARCH_RESULTS,
+      digestResults: DIGEST_SEARCH_RESULTS,
+      proceduralResults: [],
+      walkResults: [],
+    })
+  }
+
+  function makeWeakIntent(): IntentResult {
+    return {
+      type: 'QUESTION',
+      confidence: 0.85,
+      strategy: HYDE_TEST_STRATEGY,
+      extractedCues: ['deployment', 'strategy'],
+      salience: 0.6,
+      expandedQueries: ['deployment strategy', 'how do we deploy'],
+    }
+  }
+
+  function makeStrongIntent(): IntentResult {
+    return {
+      type: 'QUESTION',
+      confidence: 0.85,
+      strategy: STRATEGY_TABLE['QUESTION'],
+      extractedCues: ['deployment', 'strategy'],
+      salience: 0.6,
+      expandedQueries: ['deployment strategy', 'how do we deploy'],
+    }
+  }
+
+  it('does not call generateHypotheticalDoc when top score is above 0.25', async () => {
+    const storage = makeStrongResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeStrongIntent()
+
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue('hypothetical doc')
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    expect(generateHypotheticalDoc).not.toHaveBeenCalled()
+    expect(embed).not.toHaveBeenCalledWith(expect.stringContaining('hypothetical'))
+  })
+
+  it('calls generateHypotheticalDoc when top score is below 0.25', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const hydeDoc = 'The team discussed deploying with Docker and Kubernetes in production.'
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue(hydeDoc)
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    expect(generateHypotheticalDoc).toHaveBeenCalledWith('deployment strategy')
+    expect(embed).toHaveBeenCalledWith(hydeDoc)
+  })
+
+  it('does not call HyDE when intelligence adapter is not provided', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    // No error should be thrown — no-op
+    const result = await recall('deployment strategy', storage, sensory, intent)
+
+    expect(result.memories).toBeDefined()
+    expect(Array.isArray(result.memories)).toBe(true)
+  })
+
+  it('does not call HyDE when intelligence lacks generateHypotheticalDoc', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const intelligence: IntelligenceAdapter = { embed } // no generateHypotheticalDoc
+
+    const result = await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    expect(embed).not.toHaveBeenCalled()
+    expect(result.memories).toBeDefined()
+  })
+
+  it('merges HyDE results with direct results, deduplicating by ID', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const hydeDoc = 'Deployment uses Docker containers managed by Kubernetes clusters.'
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue(hydeDoc)
+    // embed returns distinct vector for HyDE doc
+    const embed = vi.fn().mockResolvedValue([0.9, 0.8, 0.7])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    const result = await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    // All IDs should be unique in the merged result
+    const ids = result.memories.map((m: RetrievedMemory) => m.id)
+    const uniqueIds = new Set(ids)
+    expect(ids.length).toBe(uniqueIds.size)
+  })
+
+  it('keeps highest score per ID when same memory appears in both passes', async () => {
+    // First pass returns semantic mem at 0.1, HyDE pass returns it at 0.6
+    const semanticItem = SEMANTIC_SEARCH_RESULTS[0].item
+    const storage = createMockStorage({
+      semanticResults: [{ item: semanticItem, similarity: 0.1 }],
+      episodeResults: [],
+      digestResults: [],
+      proceduralResults: [],
+      walkResults: [],
+    })
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const hydeDoc = 'Detailed doc matching the semantic memory perfectly.'
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue(hydeDoc)
+    // HyDE pass returns same item at higher similarity
+    let callCount = 0
+    ;(storage.semantic.search as ReturnType<typeof vi.fn>).mockImplementation(
+      async (..._args: unknown[]) => {
+        callCount++
+        if (callCount <= 2) {
+          // First two calls (direct pass, 2 expanded queries) — low score
+          return [{ item: semanticItem, similarity: 0.1 }]
+        }
+        // Subsequent calls (HyDE pass) — high score for same item
+        return [{ item: semanticItem, similarity: 0.6 }]
+      }
+    )
+
+    const embed = vi.fn().mockResolvedValue([0.9, 0.8, 0.7])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    const result = await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    // The merged result should contain the semantic memory exactly once
+    const semMems = result.memories.filter((m: RetrievedMemory) => m.id === semanticItem.id)
+    expect(semMems.length).toBe(1)
+  })
+
+  it('falls back to direct results when HyDE throws an error', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const generateHypotheticalDoc = vi.fn().mockRejectedValue(new Error('OpenAI API error'))
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    // Should not throw — gracefully falls back to direct results
+    const result = await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    expect(result).toBeDefined()
+    expect(Array.isArray(result.memories)).toBe(true)
+  })
+
+  it('result is sorted by relevance descending after HyDE merge', async () => {
+    const storage = makeWeakResultStorage()
+    const sensory = new SensoryBuffer()
+    const intent = makeWeakIntent()
+
+    const hydeDoc = 'TypeScript deployment pipeline configured with Docker.'
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue(hydeDoc)
+    const embed = vi.fn().mockResolvedValue([0.5, 0.5, 0.5])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    const result = await recall('deployment strategy', storage, sensory, intent, { intelligence })
+
+    for (let i = 1; i < result.memories.length; i++) {
+      expect(result.memories[i - 1].relevance).toBeGreaterThanOrEqual(result.memories[i].relevance)
+    }
   })
 })

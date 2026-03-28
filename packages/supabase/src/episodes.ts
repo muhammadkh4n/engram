@@ -80,7 +80,28 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
         }))
       }
 
-      // Full schema: use engram_recall RPC
+      // Full schema: prefer hybrid RRF search when query text is also available
+      if (query) {
+        const { data, error } = await this.client.rpc('engram_hybrid_recall', {
+          p_query_text: query,
+          p_query_embedding: JSON.stringify(embedding),
+          p_match_count: limit,
+          p_session_id: opts?.sessionId ?? null,
+          p_include_episodes: true,
+          p_include_digests: false,
+          p_include_semantic: false,
+          p_include_procedural: false,
+        })
+        if (error) throw new Error(`Episode search (hybrid) failed: ${error.message}`)
+
+        const rows = (data ?? []) as RecallRow[]
+        return rows.map((r) => ({
+          item: recallRowToEpisode(r),
+          similarity: r.similarity,
+        }))
+      }
+
+      // Embedding only — fall back to pure vector search
       const { data, error } = await this.client.rpc('engram_recall', {
         p_query_embedding: embedding,
         p_session_id: opts?.sessionId ?? null,

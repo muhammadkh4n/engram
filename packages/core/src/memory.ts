@@ -174,6 +174,7 @@ export class Memory {
     const result = await engineRecall(query, this.storage, this.sensory, intent, {
       embedding,
       tokenBudget: opts?.tokenBudget,
+      intelligence: this.intelligence,
     })
 
     // Tick sensory buffer: decay priming weights each turn

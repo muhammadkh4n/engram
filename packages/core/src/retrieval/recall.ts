@@ -107,10 +107,19 @@ export async function stageRecall(
         // Access frequency boost — capped at 0.1 per audit A5
         const accessBoost = Math.min(0.1, accessCount * 0.01)
 
-        const finalScore = Math.min(
+        let finalScore = Math.min(
           1.0,
           similarity * tier.weight + primingBoost + recencyScore + accessBoost
         )
+
+        // Role-aware scoring adjustment: assistant messages contain answers,
+        // user messages often contain questions. Boost answers, penalise short questions.
+        if (metadata?.role === 'assistant' || (content.length > 200 && !content.endsWith('?'))) {
+          finalScore = Math.min(1.0, finalScore * 1.1) // 10% boost
+        }
+        if (metadata?.role === 'user' && content.length < 100 && content.includes('?')) {
+          finalScore *= 0.85 // 15% penalty
+        }
 
         // Deduplicate by composite key: keep the highest-scoring result seen
         // for this (id, tier) pair across all query variants

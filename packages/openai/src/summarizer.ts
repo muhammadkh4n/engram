@@ -77,6 +77,23 @@ export class OpenAISummarizer {
     return this.parseSummaryResult(raw, content)
   }
 
+  async generateHypotheticalDoc(query: string): Promise<string> {
+    const response = await this.client.chat.completions.create({
+      model: this.model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Given a query about past conversations or memories, write a short paragraph (2-3 sentences) that would be the CONTENT of the memory being searched for. Do not explain or answer the question — write what the stored memory would contain. Be specific and include likely keywords.',
+        },
+        { role: 'user', content: query },
+      ],
+      max_tokens: 150,
+      temperature: 0.7,
+    })
+    return response.choices[0].message.content ?? query
+  }
+
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
     const resp = await this.client.chat.completions.create({
       model: this.model,

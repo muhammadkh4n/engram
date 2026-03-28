@@ -25,4 +25,6 @@ export interface IntelligenceAdapter {
   dimensions?(): number
   summarize?(content: string, opts: SummarizeOptions): Promise<SummaryResult>
   extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
+  /** Generate a hypothetical document that would answer the query (HyDE) */
+  generateHypotheticalDoc?(query: string): Promise<string>
 }
