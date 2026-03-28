@@ -11,6 +11,7 @@ import { dreamCycle } from './consolidation/dream-cycle.js'
 import { decayPass } from './consolidation/decay-pass.js'
 import { scoreSalience } from './ingestion/salience.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
+import { extractSearchableContent } from './ingestion/content-cleaner.js'
 import { generateId } from './utils/id.js'
 
 // ---------------------------------------------------------------------------
@@ -92,16 +93,30 @@ export class Memory {
     const salience = scoreSalience({ role: message.role, content: message.content })
     const entities = extractEntities(message.content)
 
-    // Embed the content if an intelligence adapter with embed support is configured.
-    // Done synchronously (awaited) before insert — embedding quality is critical for
-    // recall. A failure is non-fatal: BM25 fallback still works without the vector.
+    // Compute clean, searchable text — strips tool calls, timestamps, system
+    // metadata, and user tool-invocation commands. This becomes the embedding
+    // input so that vector search ranks real content above metadata noise.
+    const searchableContent = extractSearchableContent(message.content, message.role)
+
+    // Embed the searchable content (not raw content) if an intelligence adapter
+    // with embed support is configured. Falls back to raw content when the cleaned
+    // text is too short (e.g. only an acknowledgment remains after stripping).
+    // Done synchronously (awaited) before insert — embedding quality is critical
+    // for recall. A failure is non-fatal: BM25 fallback still works without the vector.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
-        embedding = await this.intelligence.embed(message.content)
+        const textToEmbed = searchableContent.length > 20 ? searchableContent : message.content
+        embedding = await this.intelligence.embed(textToEmbed)
       } catch (err) {
         console.error('[engram] embedding failed, storing without vector:', err)
       }
+    }
+
+    const metadata: Record<string, unknown> = {
+      ...message.metadata,
+      searchableContent,
+      role: message.role,
     }
 
     const episode = await this.storage.episodes.insert({
@@ -114,7 +129,7 @@ export class Memory {
       consolidatedAt: null,
       embedding,
       entities,
-      metadata: message.metadata ?? {},
+      metadata,
     })
 
     // Create temporal edges linking this episode to recent session episodes.

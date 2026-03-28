@@ -171,7 +171,9 @@ describe('Memory — ingest() with intelligence adapter', () => {
 
     await memory.ingest({ role: 'user', content: 'TypeScript strict mode rocks' })
 
-    // embed() must have been called exactly once with the message content
+    // embed() must have been called exactly once.
+    // The content has no noise to strip, so searchableContent === content and
+    // embed() receives the original text.
     expect(embedFn).toHaveBeenCalledOnce()
     expect(embedFn).toHaveBeenCalledWith('TypeScript strict mode rocks')
 
@@ -186,6 +188,55 @@ describe('Memory — ingest() with intelligence adapter', () => {
     for (let i = 0; i < fakeVector.length; i++) {
       expect(ep.embedding![i]).toBeCloseTo(fakeVector[i], 5)
     }
+
+    await memory.dispose()
+  })
+
+  it('embeds searchableContent instead of raw content when content has noise', async () => {
+    const storage = makeStorage()
+
+    const embedFn = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const intelligence: IntelligenceAdapter = { embed: embedFn }
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    // Message with a timestamp prefix and a tool-call marker — both are noise.
+    // The cleaned text ("We use React for the frontend") is long enough (>20 chars)
+    // so embed() should receive the cleaned version.
+    const noisy = '[Sat 2026-03-28 10:00 UTC] [Tool call: engram_ingest] We use React for the frontend'
+    await memory.ingest({ role: 'user', content: noisy })
+
+    expect(embedFn).toHaveBeenCalledOnce()
+    // embed() must NOT have received the full noisy string
+    expect(embedFn).not.toHaveBeenCalledWith(noisy)
+    // embed() must have received a string that contains the substantive text
+    const embeddedText: string = embedFn.mock.calls[0][0]
+    expect(embeddedText).toContain('We use React for the frontend')
+    expect(embeddedText).not.toContain('[Tool call:')
+    expect(embeddedText).not.toMatch(/\[Sat 2026-03-28/)
+
+    await memory.dispose()
+  })
+
+  it('stores searchableContent in episode metadata at ingest time', async () => {
+    const storage = makeStorage()
+    const memory = makeMemory(storage) // no intelligence adapter needed
+    await memory.initialize()
+
+    const content = '[Mon 2026-03-01 09:00 UTC] Use engram_search to find GraphQL notes'
+    await memory.ingest({ role: 'user', content })
+
+    // Retrieve the stored episode and verify metadata.searchableContent exists
+    // and does not contain the timestamp or tool-invocation command.
+    const episodes = await storage.episodes.getBySession('default')
+    expect(episodes.length).toBeGreaterThan(0)
+
+    const ep = episodes[0]
+    expect(ep.metadata).toHaveProperty('searchableContent')
+    const sc = ep.metadata.searchableContent as string
+    expect(sc).not.toMatch(/\[Mon/)
+    expect(sc).not.toMatch(/engram_search/i)
+    expect(sc).toContain('GraphQL notes')
 
     await memory.dispose()
   })
