@@ -59,7 +59,7 @@ describe('Engram OpenClaw Plugin E2E — full conversation lifecycle', () => {
     expect(result.conversationLength).toBe(12) // 6 user + 6 assistant
     if (result.systemPromptAddition !== undefined) {
       expect(result.systemPromptAddition.length).toBeGreaterThan(0)
-      expect(result.systemPromptAddition).toContain('Recalled Context')
+      expect(result.systemPromptAddition).toContain('Engram')
     }
   })
 

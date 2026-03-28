@@ -15,21 +15,24 @@ function formatMemories(
 ): string {
   if (memories.length === 0 && associations.length === 0) return ''
 
-  const lines: string[] = ['## Recalled Context\n']
+  const lines: string[] = [
+    '## Engram — Recalled Conversation Memory',
+    '',
+    'IMPORTANT: The following are memories retrieved from past conversations. If the answer to the user\'s question is found below, USE IT directly. Do not say "I don\'t have this information" if it appears here.',
+    '',
+  ]
 
   if (memories.length > 0) {
-    lines.push('### Memories\n')
+    lines.push('### Recalled Memories\n')
     for (const m of memories) {
-      const score = m.relevance.toFixed(2)
-      lines.push(`- **[${m.type}]** (relevance: ${score}): ${m.content}`)
+      lines.push(`- [${m.type}] ${m.content}`)
     }
   }
 
   if (associations.length > 0) {
-    lines.push('\n### Associated Memories\n')
+    lines.push('\n### Related Memories\n')
     for (const a of associations) {
-      const score = a.relevance.toFixed(2)
-      lines.push(`- **[${a.type}]** (relevance: ${score}): ${a.content}`)
+      lines.push(`- [${a.type}] ${a.content}`)
     }
   }
 

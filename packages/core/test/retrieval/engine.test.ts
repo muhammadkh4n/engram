@@ -248,8 +248,8 @@ describe('recall engine — RecallResult shape', () => {
     const result = await recall('TypeScript strict mode', storage, sensory, intent)
 
     if (result.memories.length > 0 || result.associations.length > 0) {
-      expect(result.formatted).toContain('##')
-      expect(result.formatted).toContain('relevance')
+      expect(result.formatted).toContain('## Engram')
+      expect(result.formatted).toContain('Recalled Memories')
     }
   })
 
