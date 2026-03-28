@@ -98,9 +98,13 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
         if (error) throw new Error(`Episode search (hybrid) failed: ${error.message}`)
 
         const rows = (data ?? []) as RecallRow[]
+        // RRF scores are in ~0.001-0.033 range (1/(k+rank) * weight).
+        // Normalize to 0-1 by dividing by theoretical max (both searches rank #1).
+        // With k=60, max = 1/61 * 1.0 + 1/61 * 1.0 ≈ 0.0328
+        const RRF_MAX = 2.0 / 61.0
         return rows.map((r) => ({
           item: recallRowToEpisode(r),
-          similarity: r.similarity,
+          similarity: Math.min(1.0, (r.similarity || 0) / RRF_MAX),
         }))
       }
 

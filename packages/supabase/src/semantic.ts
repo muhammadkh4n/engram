@@ -59,9 +59,10 @@ export class SupabaseSemanticStorage implements SemanticStorage {
         if (error) throw new Error(`Semantic search (hybrid) failed: ${error.message}`)
 
         const rows = (data ?? []) as RecallRow[]
+        const RRF_MAX = 2.0 / 61.0
         return rows.map((r) => ({
           item: recallRowToSemantic(r),
-          similarity: r.similarity,
+          similarity: Math.min(1.0, (r.similarity || 0) / RRF_MAX),
         }))
       }
 

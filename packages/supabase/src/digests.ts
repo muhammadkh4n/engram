@@ -55,9 +55,10 @@ export class SupabaseDigestStorage implements DigestStorage {
         if (error) throw new Error(`Digest search (hybrid) failed: ${error.message}`)
 
         const rows = (data ?? []) as RecallRow[]
+        const RRF_MAX = 2.0 / 61.0
         return rows.map((r) => ({
           item: recallRowToDigest(r),
-          similarity: r.similarity,
+          similarity: Math.min(1.0, (r.similarity || 0) / RRF_MAX),
         }))
       }
 
