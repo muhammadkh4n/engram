@@ -3,6 +3,7 @@ import type { Digest, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { DigestStorage } from '@engram/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
+import { hybridSearch } from './vector-search.js'
 
 export class SqliteDigestStorage implements DigestStorage {
   constructor(private db: Database.Database) {}
@@ -44,7 +45,50 @@ export class SqliteDigestStorage implements DigestStorage {
   async search(query: string, opts?: SearchOptions): Promise<SearchResult<Digest>[]> {
     const ftsQuery = sanitizeFtsQuery(query)
     const limit = opts?.limit ?? 10
+    const embedding = opts?.embedding
 
+    // Hybrid path when a query embedding is available
+    if (embedding && embedding.length > 0) {
+      const db = this.db
+      const rowToD = (row: DigestRow & { bm25_score: number }) => this.rowToDigest(row)
+
+      return hybridSearch<Digest, DigestRow>(
+        {
+          db,
+          runBm25: () =>
+            db
+              .prepare(
+                `SELECT d.*, -digests_fts.rank AS bm25_score
+                 FROM digests_fts
+                 JOIN digests d ON digests_fts.rowid = d.rowid
+                 WHERE digests_fts MATCH ?
+                 ORDER BY rank LIMIT 50`
+              )
+              .all(ftsQuery) as Array<DigestRow & { bm25_score: number }>,
+          recentVectorSql: `
+            SELECT id, embedding FROM digests
+            WHERE embedding IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+          `,
+          recentVectorLimit: 200,
+          queryEmbedding: embedding,
+          limit,
+          getByIds: async (ids) => {
+            if (ids.length === 0) return []
+            const placeholders = ids.map(() => '?').join(',')
+            const rows = db
+              .prepare(`SELECT * FROM digests WHERE id IN (${placeholders})`)
+              .all(...ids) as DigestRow[]
+            return rows.map(r => this.rowToDigest(r))
+          },
+        },
+        rowToD,
+        (item, score) => ({ item, similarity: score })
+      )
+    }
+
+    // BM25-only path
     const rows = this.db
       .prepare(
         `SELECT d.*, -digests_fts.rank AS bm25_score

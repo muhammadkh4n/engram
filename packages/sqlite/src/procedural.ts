@@ -3,6 +3,7 @@ import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram/core
 import { generateId } from '@engram/core'
 import type { ProceduralStorage } from '@engram/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
+import { hybridSearch } from './vector-search.js'
 
 export class SqliteProceduralStorage implements ProceduralStorage {
   constructor(private db: Database.Database) {}
@@ -51,7 +52,50 @@ export class SqliteProceduralStorage implements ProceduralStorage {
   async search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]> {
     const ftsQuery = sanitizeFtsQuery(query)
     const limit = opts?.limit ?? 10
+    const embedding = opts?.embedding
 
+    // Hybrid path when a query embedding is available
+    if (embedding && embedding.length > 0) {
+      const db = this.db
+      const rowToP = (row: ProceduralRow & { bm25_score: number }) => this.rowToProcedural(row)
+
+      return hybridSearch<ProceduralMemory, ProceduralRow>(
+        {
+          db,
+          runBm25: () =>
+            db
+              .prepare(
+                `SELECT p.*, -procedural_fts.rank AS bm25_score
+                 FROM procedural_fts
+                 JOIN procedural p ON procedural_fts.rowid = p.rowid
+                 WHERE procedural_fts MATCH ?
+                 ORDER BY rank LIMIT 50`
+              )
+              .all(ftsQuery) as Array<ProceduralRow & { bm25_score: number }>,
+          recentVectorSql: `
+            SELECT id, embedding FROM procedural
+            WHERE embedding IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+          `,
+          recentVectorLimit: 200,
+          queryEmbedding: embedding,
+          limit,
+          getByIds: async (ids) => {
+            if (ids.length === 0) return []
+            const placeholders = ids.map(() => '?').join(',')
+            const rows = db
+              .prepare(`SELECT * FROM procedural WHERE id IN (${placeholders})`)
+              .all(...ids) as ProceduralRow[]
+            return rows.map(r => this.rowToProcedural(r))
+          },
+        },
+        rowToP,
+        (item, score) => ({ item, similarity: score })
+      )
+    }
+
+    // BM25-only path
     const rows = this.db
       .prepare(
         `SELECT p.*, -procedural_fts.rank AS bm25_score

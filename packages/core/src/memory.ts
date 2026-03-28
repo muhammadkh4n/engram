@@ -92,6 +92,18 @@ export class Memory {
     const salience = scoreSalience({ role: message.role, content: message.content })
     const entities = extractEntities(message.content)
 
+    // Embed the content if an intelligence adapter with embed support is configured.
+    // Done synchronously (awaited) before insert — embedding quality is critical for
+    // recall. A failure is non-fatal: BM25 fallback still works without the vector.
+    let embedding: number[] | null = null
+    if (this.intelligence?.embed) {
+      try {
+        embedding = await this.intelligence.embed(message.content)
+      } catch (err) {
+        console.error('[engram] embedding failed, storing without vector:', err)
+      }
+    }
+
     const episode = await this.storage.episodes.insert({
       sessionId,
       role: message.role,
@@ -100,7 +112,7 @@ export class Memory {
       accessCount: 0,
       lastAccessed: null,
       consolidatedAt: null,
-      embedding: null,
+      embedding,
       entities,
       metadata: message.metadata ?? {},
     })

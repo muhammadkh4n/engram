@@ -3,6 +3,7 @@ import type { Episode, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { EpisodeStorage } from '@engram/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
+import { hybridSearch } from './vector-search.js'
 
 export class SqliteEpisodeStorage implements EpisodeStorage {
   constructor(private db: Database.Database) {}
@@ -56,7 +57,49 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
   ): Promise<SearchResult<Episode>[]> {
     const ftsQuery = sanitizeFtsQuery(query)
     const limit = opts?.limit ?? 10
+    const embedding = opts?.embedding
 
+    // When a query embedding is provided, run hybrid BM25 + cosine search.
+    if (embedding && embedding.length > 0) {
+      const db = this.db
+      const sessionId = opts?.sessionId
+      const rowToEp = (row: EpisodeRow & { bm25_score: number }) => this.rowToEpisode(row)
+
+      return hybridSearch<Episode, EpisodeRow>(
+        {
+          db,
+          runBm25: () => {
+            let sql = `
+              SELECT e.*, -episodes_fts.rank AS bm25_score
+              FROM episodes_fts
+              JOIN episodes e ON episodes_fts.rowid = e.rowid
+              WHERE episodes_fts MATCH ?
+            `
+            const params: unknown[] = [ftsQuery]
+            if (sessionId) {
+              sql += ' AND e.session_id = ?'
+              params.push(sessionId)
+            }
+            sql += ' ORDER BY rank LIMIT 50'
+            return db.prepare(sql).all(...params) as Array<EpisodeRow & { bm25_score: number }>
+          },
+          recentVectorSql: `
+            SELECT id, embedding FROM episodes
+            WHERE embedding IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+          `,
+          recentVectorLimit: 200,
+          queryEmbedding: embedding,
+          limit,
+          getByIds: (ids) => this.getByIds(ids),
+        },
+        rowToEp,
+        (item, score) => ({ item, similarity: score })
+      )
+    }
+
+    // BM25-only path (no embedding provided)
     let sql = `
       SELECT e.*, -episodes_fts.rank AS bm25_score
       FROM episodes_fts

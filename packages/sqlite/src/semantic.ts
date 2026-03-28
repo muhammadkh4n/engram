@@ -3,6 +3,7 @@ import type { SemanticMemory, SearchOptions, SearchResult } from '@engram/core'
 import { generateId } from '@engram/core'
 import type { SemanticStorage } from '@engram/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
+import { hybridSearch } from './vector-search.js'
 
 export class SqliteSemanticStorage implements SemanticStorage {
   constructor(private db: Database.Database) {}
@@ -48,7 +49,52 @@ export class SqliteSemanticStorage implements SemanticStorage {
   async search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]> {
     const ftsQuery = sanitizeFtsQuery(query)
     const limit = opts?.limit ?? 10
+    const embedding = opts?.embedding
 
+    // Hybrid path when a query embedding is available
+    if (embedding && embedding.length > 0) {
+      const db = this.db
+      const rowToS = (row: SemanticRow & { bm25_score: number }) => this.rowToSemantic(row)
+
+      return hybridSearch<SemanticMemory, SemanticRow>(
+        {
+          db,
+          runBm25: () =>
+            db
+              .prepare(
+                `SELECT s.*, -semantic_fts.rank AS bm25_score
+                 FROM semantic_fts
+                 JOIN semantic s ON semantic_fts.rowid = s.rowid
+                 WHERE semantic_fts MATCH ?
+                   AND s.superseded_by IS NULL
+                 ORDER BY rank LIMIT 50`
+              )
+              .all(ftsQuery) as Array<SemanticRow & { bm25_score: number }>,
+          recentVectorSql: `
+            SELECT id, embedding FROM semantic
+            WHERE embedding IS NOT NULL
+              AND superseded_by IS NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+          `,
+          recentVectorLimit: 200,
+          queryEmbedding: embedding,
+          limit,
+          getByIds: async (ids) => {
+            if (ids.length === 0) return []
+            const placeholders = ids.map(() => '?').join(',')
+            const rows = db
+              .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})`)
+              .all(...ids) as SemanticRow[]
+            return rows.map(r => this.rowToSemantic(r))
+          },
+        },
+        rowToS,
+        (item, score) => ({ item, similarity: score })
+      )
+    }
+
+    // BM25-only path
     const rows = this.db
       .prepare(
         `SELECT s.*, -semantic_fts.rank AS bm25_score

@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { sqliteAdapter } from '@engram/sqlite'
 import { createMemory } from '../src/create-memory.js'
 import { Memory } from '../src/memory.js'
 import type { StorageAdapter } from '../src/adapters/storage.js'
+import type { IntelligenceAdapter } from '../src/adapters/intelligence.js'
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -149,6 +150,105 @@ describe('Memory — ingestBatch()', () => {
 
   it('empty batch completes without error', async () => {
     await expect(memory.ingestBatch([])).resolves.not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ingest() with intelligence adapter — embedding
+// ---------------------------------------------------------------------------
+
+describe('Memory — ingest() with intelligence adapter', () => {
+  it('stores embedding on episode when intelligence.embed is configured', async () => {
+    const storage = makeStorage()
+
+    // Build a minimal fake embedding vector
+    const fakeVector = [0.1, 0.2, 0.3, 0.4]
+    const embedFn = vi.fn().mockResolvedValue(fakeVector)
+
+    const intelligence: IntelligenceAdapter = { embed: embedFn }
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    await memory.ingest({ role: 'user', content: 'TypeScript strict mode rocks' })
+
+    // embed() must have been called exactly once with the message content
+    expect(embedFn).toHaveBeenCalledOnce()
+    expect(embedFn).toHaveBeenCalledWith('TypeScript strict mode rocks')
+
+    // The stored episode must carry the embedding.
+    // Float32Array round-trip through SQLite BLOB loses double precision,
+    // so compare element-wise with toBeCloseTo.
+    const episodes = await storage.episodes.search('TypeScript', { limit: 10 })
+    expect(episodes.length).toBeGreaterThan(0)
+    const ep = episodes[0].item
+    expect(ep.embedding).not.toBeNull()
+    expect(ep.embedding!.length).toBe(fakeVector.length)
+    for (let i = 0; i < fakeVector.length; i++) {
+      expect(ep.embedding![i]).toBeCloseTo(fakeVector[i], 5)
+    }
+
+    await memory.dispose()
+  })
+
+  it('stores null embedding when no intelligence adapter is configured', async () => {
+    const storage = makeStorage()
+    const memory = makeMemory(storage) // no intelligence adapter
+    await memory.initialize()
+
+    await memory.ingest({ role: 'user', content: 'TypeScript strict mode rocks' })
+
+    const episodes = await storage.episodes.search('TypeScript', { limit: 10 })
+    expect(episodes.length).toBeGreaterThan(0)
+    expect(episodes[0].item.embedding).toBeNull()
+
+    await memory.dispose()
+  })
+
+  it('stores episode without embedding when embed() throws (non-fatal)', async () => {
+    const storage = makeStorage()
+    const embedFn = vi.fn().mockRejectedValue(new Error('embedding service down'))
+    const intelligence: IntelligenceAdapter = { embed: embedFn }
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    // Should not throw even though embed() rejects
+    await expect(
+      memory.ingest({ role: 'user', content: 'hello world' })
+    ).resolves.not.toThrow()
+
+    // Episode is still stored — just without embedding
+    const episodes = await storage.episodes.search('hello', { limit: 10 })
+    expect(episodes.length).toBeGreaterThan(0)
+    expect(episodes[0].item.embedding).toBeNull()
+
+    await memory.dispose()
+  })
+
+  it('embeds all messages in ingestBatch', async () => {
+    const storage = makeStorage()
+    const embedFn = vi.fn().mockImplementation((text: string) =>
+      Promise.resolve([text.length * 0.01, 0.5, 0.3])
+    )
+    const intelligence: IntelligenceAdapter = { embed: embedFn }
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    await memory.ingestBatch([
+      { role: 'user', content: 'first message', sessionId: 'emb-batch' },
+      { role: 'assistant', content: 'second message', sessionId: 'emb-batch' },
+    ])
+
+    // embed() called once per message
+    expect(embedFn).toHaveBeenCalledTimes(2)
+
+    const episodes = await storage.episodes.getBySession('emb-batch')
+    expect(episodes).toHaveLength(2)
+    for (const ep of episodes) {
+      expect(ep.embedding).not.toBeNull()
+      expect(Array.isArray(ep.embedding)).toBe(true)
+    }
+
+    await memory.dispose()
   })
 })
 
