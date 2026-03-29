@@ -94,6 +94,35 @@ export class OpenAISummarizer {
     return response.choices[0].message.content ?? query
   }
 
+  async expandQuery(query: string): Promise<string[]> {
+    const response = await this.client.chat.completions.create({
+      model: this.model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Given a search query about past conversations or memories, generate 3-5 alternative keyword phrases that might appear in the stored content. Output ONLY a JSON array of strings. Do not explain. Focus on nouns, tools, technologies, and action words that the stored content would contain.',
+        },
+        { role: 'user', content: query },
+      ],
+      max_tokens: 100,
+      temperature: 0.5,
+    })
+
+    const raw = response.choices[0]?.message?.content ?? '[]'
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter((item): item is string => typeof item === 'string')
+          .slice(0, 5)
+      }
+    } catch {
+      // parse failed — return empty
+    }
+    return []
+  }
+
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
     const resp = await this.client.chat.completions.create({
       model: this.model,

@@ -56,5 +56,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     generateHypotheticalDoc(query) {
       return summarizer.generateHypotheticalDoc(query)
     },
+    expandQuery(query: string) {
+      return summarizer.expandQuery(query)
+    },
   }
 }
