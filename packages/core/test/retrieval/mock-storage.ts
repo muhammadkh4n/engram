@@ -144,6 +144,18 @@ export const WALK_RESULTS: WalkResult[] = [
   { memoryId: 'ep-assoc-1', memoryType: 'episode', depth: 1, pathStrength: 0.7 },
 ]
 
+export const VECTOR_SEARCH_RESULTS: SearchResult<TypedMemory>[] = [
+  { item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 },
+  { item: { type: 'episode', data: MOCK_EPISODE }, similarity: 0.75 },
+  { item: { type: 'episode', data: MOCK_EPISODE_2 }, similarity: 0.68 },
+  { item: { type: 'digest', data: MOCK_DIGEST }, similarity: 0.60 },
+]
+
+export const TEXT_BOOST_RESULTS: Array<{ id: string; type: MemoryType; boost: number }> = [
+  { id: 'sem-1', type: 'semantic', boost: 0.9 },
+  { id: 'ep-1', type: 'episode', boost: 0.7 },
+]
+
 // ---------------------------------------------------------------------------
 // Mock factory
 // ---------------------------------------------------------------------------
@@ -154,6 +166,8 @@ export interface MockStorageOptions {
   semanticResults?: SearchResult<SemanticMemory>[]
   proceduralResults?: SearchResult<ProceduralMemory>[]
   walkResults?: WalkResult[]
+  vectorSearchResults?: SearchResult<TypedMemory>[]
+  textBoostResults?: Array<{ id: string; type: MemoryType; boost: number }>
 }
 
 export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter {
@@ -162,6 +176,8 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
   const semanticResults = opts.semanticResults ?? SEMANTIC_SEARCH_RESULTS
   const proceduralResults = opts.proceduralResults ?? PROCEDURAL_SEARCH_RESULTS
   const walkResults = opts.walkResults ?? WALK_RESULTS
+  const vectorSearchResults = opts.vectorSearchResults ?? VECTOR_SEARCH_RESULTS
+  const textBoostResults = opts.textBoostResults ?? TEXT_BOOST_RESULTS
 
   // Build a lookup map for getById
   const memoryMap = new Map<string, TypedMemory>([
@@ -241,8 +257,8 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     ),
     saveSensorySnapshot: vi.fn().mockResolvedValue(undefined),
     loadSensorySnapshot: vi.fn().mockResolvedValue(null),
-    vectorSearch: vi.fn().mockResolvedValue([]),
-    textBoost: vi.fn().mockResolvedValue([]),
+    vectorSearch: vi.fn().mockResolvedValue(vectorSearchResults),
+    textBoost: vi.fn().mockResolvedValue(textBoostResults),
   }
 
   return adapter
