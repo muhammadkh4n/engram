@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
-import type { MemoryType, TypedMemory, SensorySnapshot } from '@engram/core'
+import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram/core'
 import type { StorageAdapter } from '@engram/core'
+import { cosineSimilarity, blobToVector } from './vector-search.js'
 import { runMigrations } from './migrations.js'
 import { SqliteEpisodeStorage } from './episodes.js'
 import { SqliteDigestStorage } from './digests.js'
@@ -170,6 +171,138 @@ export class SqliteStorageAdapter implements StorageAdapter {
       .get(sessionId) as { snapshot: string } | undefined
     if (!row) return null
     return JSON.parse(row.snapshot) as SensorySnapshot
+  }
+
+  // ---------------------------------------------------------------------------
+  // Vector-first retrieval
+  // ---------------------------------------------------------------------------
+
+  async vectorSearch(embedding: number[], opts?: {
+    limit?: number
+    sessionId?: string
+    tiers?: MemoryType[]
+  }): Promise<SearchResult<TypedMemory>[]> {
+    const db = this.assertDb()
+    const limit = opts?.limit ?? 15
+    const tiers = opts?.tiers ?? ['episode', 'digest', 'semantic', 'procedural']
+    const scanLimit = limit * 3
+    const results: Array<SearchResult<TypedMemory>> = []
+
+    if (tiers.includes('episode')) {
+      const sql = opts?.sessionId
+        ? 'SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ? ORDER BY created_at DESC LIMIT ?'
+        : 'SELECT * FROM episodes WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
+      const params = opts?.sessionId ? [opts.sessionId, scanLimit] : [scanLimit]
+      const rows = db.prepare(sql).all(...params) as EpisodeRow[]
+      for (const row of rows) {
+        if (!row.embedding) continue
+        const stored = blobToVector(row.embedding)
+        const sim = cosineSimilarity(embedding, stored)
+        if (sim > 0) {
+          const episodes = await this._episodes!.getByIds([row.id])
+          if (episodes.length > 0) {
+            results.push({ item: { type: 'episode', data: episodes[0] }, similarity: sim })
+          }
+        }
+      }
+    }
+
+    if (tiers.includes('digest')) {
+      const rows = db.prepare(
+        'SELECT * FROM digests WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
+      ).all(scanLimit) as DigestRow[]
+      for (const row of rows) {
+        if (!row.embedding) continue
+        const stored = blobToVector(row.embedding)
+        const sim = cosineSimilarity(embedding, stored)
+        if (sim > 0) {
+          results.push({ item: { type: 'digest', data: rowToDigest(row) }, similarity: sim })
+        }
+      }
+    }
+
+    if (tiers.includes('semantic')) {
+      const rows = db.prepare(
+        'SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL ORDER BY created_at DESC LIMIT ?'
+      ).all(scanLimit) as SemanticRow[]
+      for (const row of rows) {
+        if (!row.embedding) continue
+        const stored = blobToVector(row.embedding)
+        const sim = cosineSimilarity(embedding, stored)
+        if (sim > 0) {
+          results.push({ item: { type: 'semantic', data: rowToSemanticMemory(row) }, similarity: sim })
+        }
+      }
+    }
+
+    if (tiers.includes('procedural')) {
+      const rows = db.prepare(
+        'SELECT * FROM procedural WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
+      ).all(scanLimit) as ProceduralRow[]
+      for (const row of rows) {
+        if (!row.embedding) continue
+        const stored = blobToVector(row.embedding)
+        const sim = cosineSimilarity(embedding, stored)
+        if (sim > 0) {
+          results.push({ item: { type: 'procedural', data: rowToProceduralMemory(row) }, similarity: sim })
+        }
+      }
+    }
+
+    return results
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, limit)
+  }
+
+  async textBoost(terms: string[], opts?: {
+    limit?: number
+    sessionId?: string
+  }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
+    const db = this.assertDb()
+    if (terms.length === 0) return []
+    const limit = opts?.limit ?? 30
+
+    // FTS5 OR join
+    const ftsQuery = terms.join(' OR ')
+    const allResults: Array<{ id: string; type: MemoryType; rankScore: number }> = []
+
+    try {
+      const epRows = db.prepare(
+        'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?'
+      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      for (const r of epRows) allResults.push({ id: r.id, type: 'episode', rankScore: Math.abs(r.rank) })
+    } catch { /* FTS5 table may not exist */ }
+
+    try {
+      const dgRows = db.prepare(
+        'SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? ORDER BY rank LIMIT ?'
+      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      for (const r of dgRows) allResults.push({ id: r.id, type: 'digest', rankScore: Math.abs(r.rank) })
+    } catch { /* FTS5 table may not exist */ }
+
+    try {
+      const smRows = db.prepare(
+        'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? ORDER BY rank LIMIT ?'
+      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      for (const r of smRows) allResults.push({ id: r.id, type: 'semantic', rankScore: Math.abs(r.rank) })
+    } catch { /* FTS5 table may not exist */ }
+
+    try {
+      const prRows = db.prepare(
+        'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? ORDER BY rank LIMIT ?'
+      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      for (const r of prRows) allResults.push({ id: r.id, type: 'procedural', rankScore: Math.abs(r.rank) })
+    } catch { /* FTS5 table may not exist */ }
+
+    const maxRank = allResults.length > 0 ? Math.max(...allResults.map(r => r.rankScore)) : 1
+    return allResults
+      .sort((a, b) => b.rankScore - a.rankScore)
+      .slice(0, limit)
+      .map(r => ({
+        id: r.id,
+        type: r.type,
+        boost: maxRank > 0 ? r.rankScore / maxRank : 0,
+      }))
   }
 }
 
