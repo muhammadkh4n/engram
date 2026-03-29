@@ -27,4 +27,6 @@ export interface IntelligenceAdapter {
   extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
   /** Generate a hypothetical document that would answer the query (HyDE) */
   generateHypotheticalDoc?(query: string): Promise<string>
+  /** Generate 3-5 keyword variants to bridge vocabulary gap for BM25 boost */
+  expandQuery?(query: string): Promise<string[]>
 }
