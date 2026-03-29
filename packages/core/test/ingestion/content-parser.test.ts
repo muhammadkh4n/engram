@@ -323,4 +323,25 @@ describe('parseContent — edge cases', () => {
     expect(result.cleanText).not.toContain('session: abc')
     expect(result.cleanText).toContain('Real message here')
   })
+
+  it('Sender (untrusted) plain-text header line stripped from string', () => {
+    const msg = 'Sender (untrusted) · Muhammad Khan\nNode: RexBook (192.168.0.103) · app 2026.3.23 (2026032390) · mode remote\n\nI want to deploy a webhook server on the vps'
+    const result = parseContent(msg)
+    expect(result.cleanText).not.toContain('Sender (untrusted)')
+    expect(result.cleanText).not.toContain('Node: RexBook')
+    expect(result.cleanText).not.toContain('192.168.0.103')
+    expect(result.cleanText).toContain('I want to deploy a webhook server')
+  })
+
+  it('Node: device header stripped from ContentPart text', () => {
+    const content = [
+      {
+        type: 'text',
+        text: 'Node: RexBook (192.168.0.103) · app 2026.3.23 (2026032390) · mode remote\n\nWhat is the status?',
+      },
+    ]
+    const result = parseContent(content)
+    expect(result.cleanText).not.toContain('Node: RexBook')
+    expect(result.cleanText).toContain('What is the status?')
+  })
 })

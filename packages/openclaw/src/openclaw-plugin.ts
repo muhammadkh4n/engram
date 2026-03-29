@@ -54,22 +54,54 @@ interface AgentMessage {
 // ---------------------------------------------------------------------------
 
 /**
+ * Strip OpenClaw message headers that every external-channel message carries.
+ * These headers are metadata prepended by the runtime — they are NOT part of
+ * what the user said and they poison both ingest filtering and recall queries:
+ *   - BM25 uses AND between terms, so "Node: RexBook … webhook hub" requires
+ *     ALL terms to be present → 0 BM25 matches for any real content.
+ *   - Embedding is diluted by device names, IPs, build numbers.
+ *   - shouldIngest sees "Sender (untrusted)" at position 0 and drops the msg.
+ */
+function stripOpenClawHeaders(text: string): string {
+  return text
+    // "Sender (untrusted) · Name" or "Sender (untrusted metadata): ..."
+    .replace(/^Sender \(untrusted[^)]*\)[^\n]*\n/gm, '')
+    // "Node: DeviceName (IP) · app version (build) · mode remote"
+    .replace(/^Node:\s+\S+[^\n]*·\s*mode\s+\w+\s*\n/gm, '')
+    // "Conversation info (untrusted metadata):" + optional fenced block
+    .replace(/^Conversation info[^\n]*\n(?:```[\s\S]*?```\s*\n?)?/m, '')
+    // "OpenClaw runtime context (internal): ..." (single-line prefix)
+    .replace(/^OpenClaw runtime context \(internal\):[^\n]*\n/gm, '')
+    // Collapse leftover blank lines
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
  * Extract text from an AgentMessage for use as a recall query string.
- * This is ONLY used for extractQuery() — NOT for ingest, which now passes
- * raw content to Memory.ingest() and lets parseContent handle separation.
+ * Also used for the shouldIngest filter — stripping OpenClaw headers is
+ * critical so the filter sees the user's actual content, not metadata.
+ *
+ * NOT used for ingest content — Memory.ingest() receives raw content and
+ * lets parseContent handle the text/tool separation.
  */
 function extractTextForQuery(content: string | ContentPart[]): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return String(content)
-
-  const textParts: string[] = []
-  for (const part of content) {
-    if (part.type === 'text' && typeof part.text === 'string') {
-      textParts.push(part.text)
+  let raw: string
+  if (typeof content === 'string') {
+    raw = content
+  } else if (!Array.isArray(content)) {
+    raw = String(content)
+  } else {
+    const textParts: string[] = []
+    for (const part of content) {
+      if (part.type === 'text' && typeof part.text === 'string') {
+        textParts.push(part.text)
+      }
+      // Tool calls, tool results, images — not useful as recall query text.
     }
-    // Tool calls, tool results, images — not useful as recall query text.
+    raw = textParts.join('\n')
   }
-  return textParts.join('\n')
+  return stripOpenClawHeaders(raw)
 }
 
 /** Truncate content to MAX_EPISODE_CHARS with a marker. */

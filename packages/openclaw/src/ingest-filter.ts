@@ -18,8 +18,11 @@ export function shouldIngest(content: string, role: string): boolean {
   if (trimmed.length < 15) return false
 
   // --- System / metadata noise ---
-  if (trimmed.startsWith('Conversation info')) return false
-  if (trimmed.startsWith('Sender (untrusted')) return false
+  // These checks are defense-in-depth — extractTextForQuery already strips
+  // OpenClaw headers. The length guard prevents blocking substantive messages
+  // that happen to start with a metadata prefix.
+  if (trimmed.startsWith('Conversation info') && trimmed.length < 300) return false
+  if (trimmed.startsWith('Sender (untrusted') && trimmed.length < 100) return false
   if (/^System:\s*\[/.test(trimmed) && trimmed.length < 300) return false
 
   // --- Heartbeat / cron prompts ---

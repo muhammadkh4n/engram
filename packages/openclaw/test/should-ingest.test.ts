@@ -20,9 +20,24 @@ describe('shouldIngest() — length and metadata filters', () => {
     expect(shouldIngest('1234567890', 'user')).toBe(false)
   })
 
-  it('returns false for content starting with "Conversation info"', () => {
+  it('returns false for short content starting with "Conversation info"', () => {
     expect(shouldIngest('Conversation info: session started', 'system')).toBe(false)
     expect(shouldIngest('Conversation info metadata block here', 'user')).toBe(false)
+  })
+
+  it('returns true for long content starting with "Conversation info" (>= 300 chars)', () => {
+    const long = 'Conversation info: ' + 'x'.repeat(290)
+    expect(shouldIngest(long, 'user')).toBe(true)
+  })
+
+  it('returns false for short "Sender (untrusted)" metadata-only messages', () => {
+    expect(shouldIngest('Sender (untrusted) · MK', 'user')).toBe(false)
+    expect(shouldIngest('Sender (untrusted metadata): name MK', 'user')).toBe(false)
+  })
+
+  it('returns true for long "Sender (untrusted)" messages with real content (>= 200 chars)', () => {
+    const msg = 'Sender (untrusted) · Muhammad Khan\nNode: RexBook (192.168.0.103) · app 2026.3.23 · mode remote\n\nI want to deploy a webhook server on the vps for important events like mentions and emails'
+    expect(shouldIngest(msg, 'user')).toBe(true)
   })
 
   it('returns false for short System: prefixed content (< 300 chars)', () => {

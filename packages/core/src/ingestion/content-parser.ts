@@ -198,10 +198,16 @@ function stripMetadataNoise(text: string): string {
       )
       // Remove legacy [Tool call: name] markers (old plugin serialization artifact)
       .replace(/\[Tool call: [^\]]+\]\s*/g, '')
-      // Remove "Conversation info (untrusted metadata):" blocks (header line → closing ```)
+      // Remove "Conversation info (untrusted metadata):" blocks (fenced format)
       .replace(/^Conversation info \(untrusted metadata\):.*?\n```[\s\S]*?\n```\s*/m, '')
-      // Remove "Sender (untrusted metadata):" blocks (header line → closing ```)
+      // Remove "Conversation info" plain-text header lines
+      .replace(/^Conversation info[^\n]*\n(?:```[\s\S]*?```\s*\n?)?/m, '')
+      // Remove "Sender (untrusted metadata):" blocks (fenced format)
       .replace(/^Sender \(untrusted[^)]*\):.*?\n```[\s\S]*?\n```\s*/m, '')
+      // Remove "Sender (untrusted) · Name" plain-text header lines
+      .replace(/^Sender \(untrusted[^)]*\)[^\n]*\n/gm, '')
+      // Remove "Node: Device (IP) · app version · mode remote" header lines
+      .replace(/^Node:\s+\S+[^\n]*·\s*mode\s+\w+\s*\n/gm, '')
       // Remove System: [timestamp] lines
       .replace(/^System:\s*\[[^\]]*\]\s*/gm, '')
       // Collapse excess blank lines
