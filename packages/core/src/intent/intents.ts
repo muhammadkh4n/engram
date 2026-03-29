@@ -220,3 +220,54 @@ export const STRATEGY_TABLE: Record<IntentType, RetrievalStrategy> = {
     boostProcedural: false,
   },
 }
+
+// ---------------------------------------------------------------------------
+// Vector-First: 3-Mode Classification + Strategies
+// ---------------------------------------------------------------------------
+
+import type { RecallMode, RecallStrategy } from '../types.js'
+
+/** Classify a message into one of 3 recall modes. */
+export function classifyMode(message: string): RecallMode {
+  const trimmed = message.trim()
+
+  // skip: short acks, greetings, emoji-only
+  if (trimmed.length < 10) return 'skip'
+  if (/^(hi|hey|hello|thanks|thank you|ok|okay|sure|yes|no|yep|nope|lol|haha|hmm|ah|oh|done|got it)\s*[.!]?$/i.test(trimmed)) return 'skip'
+  if (/^[\p{Emoji}\s]+$/u.test(trimmed)) return 'skip'
+
+  // deep: question mark or recall keywords
+  if (/\?/.test(trimmed)) return 'deep'
+  if (/\b(remember|recall|what did|did we|last time|previously|have we|remind me)\b/i.test(trimmed)) return 'deep'
+
+  // everything else: light
+  return 'light'
+}
+
+/** Strategy table for the 3 recall modes. */
+export const RECALL_STRATEGIES: Record<RecallMode, RecallStrategy> = {
+  skip: {
+    mode: 'skip',
+    maxResults: 0,
+    associations: false,
+    associationHops: 0,
+    expand: false,
+    recencyBias: 0,
+  },
+  light: {
+    mode: 'light',
+    maxResults: 8,
+    associations: false,
+    associationHops: 0,
+    expand: false,
+    recencyBias: 0.4,
+  },
+  deep: {
+    mode: 'deep',
+    maxResults: 15,
+    associations: true,
+    associationHops: 2,
+    expand: true,
+    recencyBias: 0.2,
+  },
+}
