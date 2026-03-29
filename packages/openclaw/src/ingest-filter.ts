@@ -14,24 +14,36 @@
 export function shouldIngest(content: string, role: string): boolean {
   const trimmed = content.trim()
 
-  // Skip very short messages
-  if (trimmed.length < 10) return false
+  // --- Length gate ---
+  if (trimmed.length < 15) return false
 
-  // Skip system metadata
+  // --- System / metadata noise ---
   if (trimmed.startsWith('Conversation info')) return false
-  if (trimmed.startsWith('System:') && trimmed.length < 200) return false
+  if (trimmed.startsWith('Sender (untrusted')) return false
+  if (/^System:\s*\[/.test(trimmed) && trimmed.length < 300) return false
 
-  // Skip user messages that are just tool invocation commands
+  // --- Heartbeat / cron prompts ---
+  if (/HEARTBEAT_OK/i.test(trimmed)) return false
+  if (/Read HEARTBEAT\.md/i.test(trimmed)) return false
+  if (/^Read \w+\.md if it exists/i.test(trimmed)) return false
+
+  // --- User tool invocation commands ---
   if (role === 'user') {
-    if (/^(use|run|call|execute)\s+engram_/i.test(trimmed)) return false
+    if (/^(use|run|call|execute)\s+(the\s+)?engram_/i.test(trimmed)) return false
     if (/^(use|run)\s+the\s+engram/i.test(trimmed)) return false
   }
 
-  // Skip assistant messages that are ONLY tool calls with no useful text
+  // --- Assistant messages that are ONLY tool calls ---
   if (role === 'assistant') {
     const withoutToolCalls = trimmed.replace(/\[Tool call: [^\]]+\]\s*/g, '').trim()
-    if (withoutToolCalls.length < 20) return false
+    if (withoutToolCalls.length < 30) return false
   }
+
+  // --- WhatsApp/Telegram gateway noise ---
+  if (/^System: \[\d{4}-\d{2}-\d{2}.*gateway (dis)?connected/i.test(trimmed)) return false
+
+  // --- Pure acknowledgments ---
+  if (/^(ok|okay|sure|yes|no|yep|nope|thanks|thank you|got it|done|lol|haha|hmm|ah|oh)\s*[.!]?$/i.test(trimmed)) return false
 
   return true
 }

@@ -12,8 +12,12 @@ describe('shouldIngest() — length and metadata filters', () => {
     expect(shouldIngest('123456789', 'user')).toBe(false)
   })
 
-  it('returns true for content exactly 10 chars', () => {
-    expect(shouldIngest('1234567890', 'user')).toBe(true)
+  it('returns true for content exactly 15 chars', () => {
+    expect(shouldIngest('123456789012345', 'user')).toBe(true)
+  })
+
+  it('returns false for content under 15 chars', () => {
+    expect(shouldIngest('1234567890', 'user')).toBe(false)
   })
 
   it('returns false for content starting with "Conversation info"', () => {
@@ -21,13 +25,28 @@ describe('shouldIngest() — length and metadata filters', () => {
     expect(shouldIngest('Conversation info metadata block here', 'user')).toBe(false)
   })
 
-  it('returns false for short System: prefixed content (< 200 chars)', () => {
-    expect(shouldIngest('System: context loaded', 'system')).toBe(false)
+  it('returns false for short System: prefixed content (< 300 chars)', () => {
+    expect(shouldIngest('System: [2026-03-28] gateway connected', 'system')).toBe(false)
   })
 
-  it('returns true for long System: prefixed content (>= 200 chars)', () => {
-    const longSystem = 'System: ' + 'x'.repeat(200)
+  it('returns true for long System: prefixed content (>= 300 chars)', () => {
+    const longSystem = 'System: ' + 'x'.repeat(300)
     expect(shouldIngest(longSystem, 'system')).toBe(true)
+  })
+
+  it('returns false for heartbeat messages', () => {
+    expect(shouldIngest('HEARTBEAT_OK', 'assistant')).toBe(false)
+    expect(shouldIngest('Read HEARTBEAT.md if it exists', 'user')).toBe(false)
+  })
+
+  it('returns false for gateway connect/disconnect', () => {
+    expect(shouldIngest('System: [2026-03-28 21:30:28 UTC] WhatsApp gateway connected.', 'user')).toBe(false)
+  })
+
+  it('returns false for pure acknowledgments', () => {
+    expect(shouldIngest('ok', 'user')).toBe(false)
+    expect(shouldIngest('thanks', 'user')).toBe(false)
+    expect(shouldIngest('Got it', 'user')).toBe(false)
   })
 })
 
