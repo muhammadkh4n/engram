@@ -4,7 +4,8 @@ import type { IntelligenceAdapter } from './adapters/intelligence.js'
 import { SensoryBuffer } from './systems/sensory-buffer.js'
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
-import { recall as engineRecall } from './retrieval/engine.js'
+import { recall as engineRecall, type RecallResult as EngineRecallResult } from './retrieval/engine.js'
+import { classifyMode, RECALL_STRATEGIES } from './intent/intents.js'
 import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
 import { dreamCycle } from './consolidation/dream-cycle.js'
@@ -182,13 +183,15 @@ export class Memory {
   ): Promise<RecallResult> {
     this.assertInitialized()
 
-    // Analyze intent
+    // Classify intent using new 3-mode system
+    const mode = classifyMode(query)
+    const strategy = RECALL_STRATEGIES[mode]
+
+    // Still run old analyzer for backward compat (intent field in result)
     const intent = this.intentAnalyzer.analyze(query, {
       activeIntent: this.sensory.getIntent(),
       primedTopics: this.sensory.getPrimed().map(p => p.topic),
     })
-
-    // Set intent on sensory buffer
     this.sensory.setIntent(intent)
 
     // Embed query if intelligence adapter provides embeddings
@@ -197,9 +200,10 @@ export class Memory {
       embedding = await this.intelligence.embed(query)
     }
 
-    // Run the 4-stage retrieval pipeline
-    const result = await engineRecall(query, this.storage, this.sensory, intent, {
-      embedding,
+    // Run vector-first pipeline (text-only fallback when no embedding)
+    const result = await engineRecall(query, this.storage, this.sensory, {
+      strategy,
+      embedding: embedding ?? [],
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
     })
@@ -207,7 +211,14 @@ export class Memory {
     // Tick sensory buffer: decay priming weights each turn
     this.sensory.tick()
 
-    return result
+    return {
+      memories: result.memories,
+      associations: result.associations,
+      intent,
+      primed: result.primed,
+      estimatedTokens: result.estimatedTokens,
+      formatted: result.formatted,
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -358,9 +369,11 @@ export class Memory {
 
     const confirm = opts?.confirm ?? false
 
-    // Search matching memories across relevant tiers
-    const intent = this.intentAnalyzer.analyze(query)
-    const result = await engineRecall(query, this.storage, this.sensory, intent)
+    // Search matching memories across relevant tiers using deep strategy
+    const result = await engineRecall(query, this.storage, this.sensory, {
+      strategy: RECALL_STRATEGIES['deep'],
+      embedding: [],
+    })
 
     const allMemories = [...result.memories, ...result.associations]
 

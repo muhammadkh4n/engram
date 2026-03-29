@@ -122,14 +122,21 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   }
 
   // Step 1: Vector search — primary retriever
-  const vectorResults = await storage.vectorSearch(embedding, {
-    limit: strategy.maxResults * 2,
-    sessionId,
-  })
+  // Guard: storage adapters that haven't implemented vectorSearch yet (e.g.
+  // SQLite before Task 10) degrade gracefully to text-only fallback.
+  const hasVectorSearch = typeof storage.vectorSearch === 'function'
+  const hasTextBoost = typeof storage.textBoost === 'function'
+
+  const vectorResults = hasVectorSearch && embedding.length > 0
+    ? await storage.vectorSearch(embedding, {
+        limit: strategy.maxResults * 2,
+        sessionId,
+      })
+    : []
 
   // Step 2: BM25 boost — additive, OR semantics
   const terms = extractTerms(query, expandedTerms)
-  const boostResults = terms.length > 0
+  const boostResults = terms.length > 0 && hasTextBoost
     ? await storage.textBoost(terms, { limit: strategy.maxResults * 2, sessionId })
     : []
 
@@ -141,33 +148,97 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   // Step 3: Score + rank
   const scored: RetrievedMemory[] = []
 
-  for (const { item: typed, similarity } of vectorResults) {
-    const content = extractContent(typed)
-    const metadata = extractMetadata(typed)
-    const createdAt = extractCreatedAt(typed)
-    const accessCount = extractAccessCount(typed)
-    const role = extractRole(typed)
-    const primingBoost = sensory.getPrimingBoost(content)
-    const bm25RawBoost = boostMap.get(typed.data.id) ?? 0
+  if (vectorResults.length > 0) {
+    // Primary path: score vector results with optional BM25 boost
+    for (const { item: typed, similarity } of vectorResults) {
+      const content = extractContent(typed)
+      const metadata = extractMetadata(typed)
+      const createdAt = extractCreatedAt(typed)
+      const accessCount = extractAccessCount(typed)
+      const role = extractRole(typed)
+      const primingBoost = sensory.getPrimingBoost(content)
+      const bm25RawBoost = boostMap.get(typed.data.id) ?? 0
 
-    const finalScore = computeScore({
-      cosineSimilarity: similarity,
-      bm25Boost: bm25RawBoost,
-      recencyBias: strategy.recencyBias,
-      createdAt,
-      accessCount,
-      primingBoost,
-      role,
-    })
+      const finalScore = computeScore({
+        cosineSimilarity: similarity,
+        bm25Boost: bm25RawBoost,
+        recencyBias: strategy.recencyBias,
+        createdAt,
+        accessCount,
+        primingBoost,
+        role,
+      })
 
-    scored.push({
-      id: typed.data.id,
-      type: typed.type,
-      content,
-      relevance: finalScore,
-      source: 'recall',
-      metadata,
-    })
+      scored.push({
+        id: typed.data.id,
+        type: typed.type,
+        content,
+        relevance: finalScore,
+        source: 'recall',
+        metadata,
+      })
+    }
+  } else if (terms.length > 0) {
+    // Fallback: text-only search via per-tier .search() methods.
+    // Used when vectorSearch is not available (adapter not yet upgraded)
+    // or when no embedding was provided.
+    const limit = strategy.maxResults * 2
+    const searchQuery = terms.join(' ')
+
+    const [episodeHits, digestHits, semanticHits] = await Promise.all([
+      storage.episodes.search(searchQuery, { limit }),
+      storage.digests.search(searchQuery, { limit }),
+      storage.semantic.search(searchQuery, { limit }),
+    ])
+
+    const textHits: Array<{ typed: TypedMemory; similarity: number }> = []
+
+    for (const hit of episodeHits) {
+      textHits.push({
+        typed: { type: 'episode', data: hit.item },
+        similarity: hit.similarity ?? 0.5,
+      })
+    }
+    for (const hit of digestHits) {
+      textHits.push({
+        typed: { type: 'digest', data: hit.item },
+        similarity: hit.similarity ?? 0.4,
+      })
+    }
+    for (const hit of semanticHits) {
+      textHits.push({
+        typed: { type: 'semantic', data: hit.item },
+        similarity: hit.similarity ?? 0.5,
+      })
+    }
+
+    for (const { typed, similarity } of textHits) {
+      const content = extractContent(typed)
+      const metadata = extractMetadata(typed)
+      const createdAt = extractCreatedAt(typed)
+      const accessCount = extractAccessCount(typed)
+      const role = extractRole(typed)
+      const primingBoost = sensory.getPrimingBoost(content)
+
+      const finalScore = computeScore({
+        cosineSimilarity: similarity,
+        bm25Boost: 0,
+        recencyBias: strategy.recencyBias,
+        createdAt,
+        accessCount,
+        primingBoost,
+        role,
+      })
+
+      scored.push({
+        id: typed.data.id,
+        type: typed.type,
+        content,
+        relevance: finalScore,
+        source: 'recall',
+        metadata,
+      })
+    }
   }
 
   return scored
