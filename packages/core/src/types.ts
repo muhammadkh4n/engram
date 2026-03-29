@@ -25,6 +25,17 @@ export type IntentType =
   | 'SOCIAL'
   | 'INFORMATIONAL'
 
+export type RecallMode = 'skip' | 'light' | 'deep'
+
+export interface RecallStrategy {
+  mode: RecallMode
+  maxResults: number
+  associations: boolean
+  associationHops: number
+  expand: boolean
+  recencyBias: number
+}
+
 export interface Message {
   sessionId?: string
   role: 'user' | 'assistant' | 'system'
