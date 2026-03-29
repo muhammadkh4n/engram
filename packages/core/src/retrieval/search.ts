@@ -175,7 +175,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         content,
         relevance: finalScore,
         source: 'recall',
-        metadata,
+        metadata: { ...metadata, createdAt: createdAt.toISOString() },
       })
     }
   } else if (terms.length > 0) {
@@ -236,7 +236,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         content,
         relevance: finalScore,
         source: 'recall',
-        metadata,
+        metadata: { ...metadata, createdAt: createdAt.toISOString() },
       })
     }
   }

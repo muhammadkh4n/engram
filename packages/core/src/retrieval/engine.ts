@@ -34,6 +34,67 @@ export interface RecallOpts {
 // Formatting
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract attribution context (device, channel, timestamp) from memory metadata.
+ * Parses rawContent or rawParts first text part for OpenClaw headers.
+ */
+function extractAttribution(m: RetrievedMemory): string {
+  const meta = m.metadata
+  if (!meta) return ''
+
+  // Get raw text from rawContent (newer) or rawParts (older)
+  let rawText: string | undefined
+  const rawContent = meta.rawContent as unknown[] | undefined
+  const rawParts = meta.rawParts as unknown[] | undefined
+  if (Array.isArray(rawContent) && rawContent.length > 0) {
+    const first = rawContent[0] as Record<string, unknown>
+    rawText = typeof first?.text === 'string' ? first.text : undefined
+  } else if (Array.isArray(rawParts) && rawParts.length > 0) {
+    const first = rawParts[0] as Record<string, unknown>
+    rawText = typeof first?.text === 'string' ? first.text : undefined
+  }
+
+  if (!rawText) return ''
+
+  const parts: string[] = []
+
+  // Device: "Node: DeviceName (...)"
+  const deviceMatch = rawText.match(/Node:\s+(\w+)/)
+  if (deviceMatch) parts.push(deviceMatch[1])
+
+  // Channel: "WhatsApp gateway" or "Telegram gateway"
+  if (/whatsapp/i.test(rawText)) parts.push('WhatsApp')
+  else if (/telegram/i.test(rawText)) parts.push('Telegram')
+
+  return parts.length > 0 ? parts.join('/') : ''
+}
+
+function formatDate(m: RetrievedMemory): string {
+  const created = m.metadata?.createdAt as string | undefined
+  if (created) {
+    try {
+      const d = new Date(created)
+      if (!isNaN(d.getTime())) {
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      }
+    } catch { /* ignore */ }
+  }
+  return ''
+}
+
+function formatTag(m: RetrievedMemory): string {
+  const role = (m.metadata?.role as string) ?? ''
+  const attr = extractAttribution(m)
+  const date = formatDate(m)
+
+  const tagParts = [m.type]
+  if (role) tagParts.push(role)
+  if (attr) tagParts.push(attr)
+  if (date) tagParts.push(date)
+
+  return tagParts.join(' · ')
+}
+
 function formatMemories(
   memories: RetrievedMemory[],
   associations: RetrievedMemory[]
@@ -44,20 +105,21 @@ function formatMemories(
     '## Engram — Recalled Conversation Memory',
     '',
     'IMPORTANT: The following are memories retrieved from past conversations. If the answer to the user\'s question is found below, USE IT directly. Do not say "I don\'t have this information" if it appears here.',
+    'Context tags (type, role, device, date) are for your reference — do not include them in responses unless the user asks about when/where/who.',
     '',
   ]
 
   if (memories.length > 0) {
     lines.push('### Recalled Memories\n')
     for (const m of memories) {
-      lines.push(`- [${m.type}] ${m.content}`)
+      lines.push(`- [${formatTag(m)}] ${m.content}`)
     }
   }
 
   if (associations.length > 0) {
     lines.push('\n### Related Memories\n')
     for (const a of associations) {
-      lines.push(`- [${a.type}] ${a.content}`)
+      lines.push(`- [${formatTag(a)}] ${a.content}`)
     }
   }
 
