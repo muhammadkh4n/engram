@@ -77,6 +77,19 @@ export interface AssociationStorage {
 export interface StorageAdapter {
   initialize(): Promise<void>
   dispose(): Promise<void>
+
+  // --- Vector-first retrieval (new) ---
+  vectorSearch(embedding: number[], opts?: {
+    limit?: number
+    sessionId?: string
+    tiers?: MemoryType[]
+  }): Promise<SearchResult<TypedMemory>[]>
+
+  textBoost(terms: string[], opts?: {
+    limit?: number
+    sessionId?: string
+  }): Promise<Array<{ id: string; type: MemoryType; boost: number }>>
+
   episodes: EpisodeStorage
   digests: DigestStorage
   semantic: SemanticStorage

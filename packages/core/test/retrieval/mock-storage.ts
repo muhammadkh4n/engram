@@ -241,6 +241,8 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     ),
     saveSensorySnapshot: vi.fn().mockResolvedValue(undefined),
     loadSensorySnapshot: vi.fn().mockResolvedValue(null),
+    vectorSearch: vi.fn().mockResolvedValue([]),
+    textBoost: vi.fn().mockResolvedValue([]),
   }
 
   return adapter
