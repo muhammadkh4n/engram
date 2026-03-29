@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { MemoryType, TypedMemory, SensorySnapshot } from '@engram/core'
+import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram/core'
 import type { StorageAdapter } from '@engram/core'
 import { SupabaseEpisodeStorage } from './episodes.js'
 import { SupabaseDigestStorage } from './digests.js'
@@ -228,6 +228,59 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     return (data as { snapshot: SensorySnapshot }).snapshot
   }
 
+  async vectorSearch(embedding: number[], opts?: {
+    limit?: number
+    sessionId?: string
+    tiers?: MemoryType[]
+  }): Promise<SearchResult<TypedMemory>[]> {
+    this.assertInitialized()
+    const { data, error } = await this.client.rpc('engram_vector_search', {
+      p_query_embedding: JSON.stringify(embedding),
+      p_match_count: opts?.limit ?? 15,
+      p_session_id: opts?.sessionId ?? null,
+    })
+    if (error) throw new Error(`vectorSearch failed: ${error.message}`)
+
+    const rows = (data ?? []) as VectorSearchRow[]
+    const tierFilter = opts?.tiers ? new Set(opts.tiers) : null
+
+    return rows
+      .filter(r => !tierFilter || tierFilter.has(r.memory_type as MemoryType))
+      .map(r => ({
+        item: vectorRowToTypedMemory(r),
+        similarity: r.similarity,
+      }))
+  }
+
+  async textBoost(terms: string[], opts?: {
+    limit?: number
+    sessionId?: string
+  }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
+    this.assertInitialized()
+    if (terms.length === 0) return []
+
+    const sanitized = terms
+      .map(t => t.replace(/[^a-zA-Z0-9]/g, ''))
+      .filter(t => t.length > 0)
+    if (sanitized.length === 0) return []
+    const queryTerms = sanitized.join(' | ')
+
+    const { data, error } = await this.client.rpc('engram_text_boost', {
+      p_query_terms: queryTerms,
+      p_match_count: opts?.limit ?? 30,
+      p_session_id: opts?.sessionId ?? null,
+    })
+    if (error) throw new Error(`textBoost failed: ${error.message}`)
+
+    const rows = (data ?? []) as TextBoostRow[]
+    const maxRank = rows.length > 0 ? Math.max(...rows.map(r => r.rank_score)) : 1
+    return rows.map(r => ({
+      id: r.id,
+      type: r.memory_type as MemoryType,
+      boost: maxRank > 0 ? r.rank_score / maxRank : 0,
+    }))
+  }
+
   private assertInitialized(): void {
     if (!this._episodes) {
       throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
@@ -344,5 +397,128 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Types and helpers for vectorSearch / textBoost
+// ---------------------------------------------------------------------------
+
+interface VectorSearchRow {
+  id: string
+  memory_type: string
+  content: string
+  role: string | null
+  salience: number
+  access_count: number
+  created_at: string
+  similarity: number
+  entities: string[]
+  metadata: Record<string, unknown>
+}
+
+interface TextBoostRow {
+  id: string
+  memory_type: string
+  rank_score: number
+}
+
+function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
+  switch (row.memory_type) {
+    case 'episode':
+      return {
+        type: 'episode',
+        data: {
+          id: row.id,
+          sessionId: '',
+          role: (row.role ?? 'user') as 'user' | 'assistant' | 'system',
+          content: row.content,
+          salience: row.salience,
+          accessCount: row.access_count,
+          lastAccessed: null,
+          consolidatedAt: null,
+          embedding: null,
+          entities: row.entities ?? [],
+          metadata: row.metadata ?? {},
+          createdAt: new Date(row.created_at),
+        },
+      }
+    case 'digest':
+      return {
+        type: 'digest',
+        data: {
+          id: row.id,
+          sessionId: '',
+          summary: row.content,
+          keyTopics: row.entities ?? [],
+          sourceEpisodeIds: [],
+          sourceDigestIds: [],
+          level: 1,
+          embedding: null,
+          metadata: row.metadata ?? {},
+          createdAt: new Date(row.created_at),
+        },
+      }
+    case 'semantic':
+      return {
+        type: 'semantic',
+        data: {
+          id: row.id,
+          topic: '',
+          content: row.content,
+          confidence: row.salience,
+          sourceDigestIds: [],
+          sourceEpisodeIds: [],
+          accessCount: row.access_count,
+          lastAccessed: null,
+          decayRate: 0.01,
+          supersedes: null,
+          supersededBy: null,
+          embedding: null,
+          metadata: row.metadata ?? {},
+          createdAt: new Date(row.created_at),
+          updatedAt: new Date(row.created_at),
+        },
+      }
+    case 'procedural':
+      return {
+        type: 'procedural',
+        data: {
+          id: row.id,
+          category: 'convention' as const,
+          trigger: '',
+          procedure: row.content,
+          confidence: row.salience,
+          observationCount: 0,
+          lastObserved: new Date(row.created_at),
+          firstObserved: new Date(row.created_at),
+          accessCount: row.access_count,
+          lastAccessed: null,
+          decayRate: 0.01,
+          sourceEpisodeIds: [],
+          embedding: null,
+          metadata: row.metadata ?? {},
+          createdAt: new Date(row.created_at),
+          updatedAt: new Date(row.created_at),
+        },
+      }
+    default:
+      return {
+        type: 'episode',
+        data: {
+          id: row.id,
+          sessionId: '',
+          role: 'user',
+          content: row.content,
+          salience: row.salience,
+          accessCount: row.access_count,
+          lastAccessed: null,
+          consolidatedAt: null,
+          embedding: null,
+          entities: row.entities ?? [],
+          metadata: row.metadata ?? {},
+          createdAt: new Date(row.created_at),
+        },
+      }
   }
 }
