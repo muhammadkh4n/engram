@@ -218,25 +218,27 @@ describe('Memory — ingest() with intelligence adapter', () => {
     await memory.dispose()
   })
 
-  it('stores searchableContent in episode metadata at ingest time', async () => {
+  it('episodes.content is clean at ingest time (no timestamps, no tool markers)', async () => {
     const storage = makeStorage()
     const memory = makeMemory(storage) // no intelligence adapter needed
     await memory.initialize()
 
-    const content = '[Mon 2026-03-01 09:00 UTC] Use engram_search to find GraphQL notes'
+    // String content with timestamp and legacy tool-call marker
+    const content = '[Mon 2026-03-01 09:00 UTC] [Tool call: engram_search] find GraphQL notes'
     await memory.ingest({ role: 'user', content })
 
-    // Retrieve the stored episode and verify metadata.searchableContent exists
-    // and does not contain the timestamp or tool-invocation command.
+    // episodes.content must be clean — no timestamp, no tool marker
     const episodes = await storage.episodes.getBySession('default')
     expect(episodes.length).toBeGreaterThan(0)
 
     const ep = episodes[0]
-    expect(ep.metadata).toHaveProperty('searchableContent')
-    const sc = ep.metadata.searchableContent as string
-    expect(sc).not.toMatch(/\[Mon/)
-    expect(sc).not.toMatch(/engram_search/i)
-    expect(sc).toContain('GraphQL notes')
+    expect(ep.content).not.toMatch(/\[Mon/)
+    expect(ep.content).not.toContain('[Tool call:')
+    expect(ep.content).toContain('GraphQL notes')
+
+    // metadata.parts must carry the full-fidelity parsed parts
+    expect(ep.metadata).toHaveProperty('parts')
+    expect(Array.isArray(ep.metadata.parts)).toBe(true)
 
     await memory.dispose()
   })

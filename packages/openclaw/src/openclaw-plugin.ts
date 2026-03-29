@@ -53,44 +53,23 @@ interface AgentMessage {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Extract human-readable text AND preserve raw parts from AgentMessage.content.
- *  - text parts: extracted as-is
- *  - tool_use / toolCall: summarized as [Tool call: name]
- *  - tool_result / toolResult: text content extracted
- *  - image / thinking: skipped (not useful for text search)
- *  rawParts is set when content is an array, for later reconstruction. */
-function extractContent(content: string | ContentPart[]): { text: string; rawParts?: ContentPart[] } {
-  if (typeof content === 'string') return { text: content }
-  if (!Array.isArray(content)) return { text: String(content) }
+/**
+ * Extract text from an AgentMessage for use as a recall query string.
+ * This is ONLY used for extractQuery() — NOT for ingest, which now passes
+ * raw content to Memory.ingest() and lets parseContent handle separation.
+ */
+function extractTextForQuery(content: string | ContentPart[]): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return String(content)
 
   const textParts: string[] = []
   for (const part of content) {
     if (part.type === 'text' && typeof part.text === 'string') {
       textParts.push(part.text)
-    } else if (part.type === 'tool_use' || part.type === 'toolCall') {
-      // Summarize tool call for searchability
-      const name = (part.name as string | undefined) ?? (part as Record<string, unknown>).toolName as string | undefined ?? 'unknown_tool'
-      textParts.push(`[Tool call: ${name}]`)
-    } else if (part.type === 'tool_result' || part.type === 'toolResult') {
-      // Extract text from tool result content
-      const resultContent = part.content
-      if (typeof resultContent === 'string') {
-        textParts.push(resultContent)
-      } else if (Array.isArray(resultContent)) {
-        for (const rc of resultContent) {
-          if (rc && typeof rc === 'object' && (rc as ContentPart).type === 'text' && typeof (rc as ContentPart).text === 'string') {
-            textParts.push((rc as ContentPart).text!)
-          }
-        }
-      }
     }
-    // Skip image, thinking, etc — not useful for text search
+    // Tool calls, tool results, images — not useful as recall query text.
   }
-
-  return {
-    text: textParts.join('\n'),
-    rawParts: content,
-  }
+  return textParts.join('\n')
 }
 
 /** Truncate content to MAX_EPISODE_CHARS with a marker. */
@@ -103,7 +82,7 @@ function truncate(text: string): string {
 function extractQuery(messages: AgentMessage[], prompt?: string): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'user') {
-      const { text } = extractContent(messages[i].content)
+      const text = extractTextForQuery(messages[i].content)
       if (text.length > 0) return text
     }
   }
@@ -212,15 +191,16 @@ async function importSessionFile(
   // Cap to last SESSION_IMPORT_CAP messages to avoid importing massive histories
   const toImport = messages.slice(-SESSION_IMPORT_CAP)
 
-  // Ingest each message
+  // Ingest each message — pass raw content so Memory.ingest() → parseContent
+  // handles the text/tool separation. shouldIngest checks derived text length.
   for (const msg of toImport) {
-    const { text, rawParts } = extractContent(msg.content)
-    const content = truncate(text)
-    if (content.length < 2) continue
     const validRoles = new Set(['user', 'assistant', 'system'])
     const role = validRoles.has(msg.role) ? (msg.role as 'user' | 'assistant' | 'system') : 'user'
-    const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
-    await memory.ingest({ sessionId, role, content, metadata })
+    // For shouldIngest we need a text representation to check length/noise.
+    const textForFilter = extractTextForQuery(msg.content)
+    if (textForFilter.length < 2) continue
+    if (!shouldIngest(truncate(textForFilter), msg.role)) continue
+    await memory.ingest({ sessionId, role, content: msg.content })
   }
 
   // Write marker file so we don't re-import on the next bootstrap
@@ -364,13 +344,12 @@ export default definePluginEntry({
       }) {
         if (!(await ensureInitialized())) return { ingested: false }
         if (isHeartbeat) return { ingested: false }
-        const { text, rawParts } = extractContent(message.content)
-        const content = truncate(text)
-        if (content.length < 2) return { ingested: false }
-        if (!shouldIngest(content, message.role)) return { ingested: false }
+        // Use text representation only for the shouldIngest filter.
+        const textForFilter = truncate(extractTextForQuery(message.content))
+        if (textForFilter.length < 2) return { ingested: false }
+        if (!shouldIngest(textForFilter, message.role)) return { ingested: false }
         try {
-          const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
-          await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content, metadata })
+          await memory.ingest({ sessionId, role: message.role as 'user' | 'assistant' | 'system', content: message.content })
           episodesSinceConsolidation++
           return { ingested: true }
         } catch (err) {
@@ -386,13 +365,11 @@ export default definePluginEntry({
         if (isHeartbeat) return { ingestedCount: 0 }
         let count = 0
         for (const msg of messages) {
-          const { text, rawParts } = extractContent(msg.content)
-          const content = truncate(text)
-          if (content.length < 2) continue
-          if (!shouldIngest(content, msg.role)) continue
+          const textForFilter = truncate(extractTextForQuery(msg.content))
+          if (textForFilter.length < 2) continue
+          if (!shouldIngest(textForFilter, msg.role)) continue
           try {
-            const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
-            await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content, metadata })
+            await memory.ingest({ sessionId, role: msg.role as 'user' | 'assistant' | 'system', content: msg.content })
             count++
           } catch (err) {
             console.error('[engram] ingestBatch error:', err)
@@ -459,20 +436,20 @@ export default definePluginEntry({
         if (isHeartbeat) return
 
         return withSessionQueue(sessionId, async () => {
-          // Ingest only the new messages from this turn
+          // Ingest only the new messages from this turn.
+          // Pass raw content to memory.ingest() — parseContent handles the
+          // text/tool separation inside Memory. shouldIngest operates on
+          // extracted text for message-level noise filtering only.
           const newMessages = messages.slice(prePromptMessageCount)
           for (const msg of newMessages) {
-            const { text, rawParts } = extractContent(msg.content)
-            const content = truncate(text)
-            if (content.length < 2) continue
-            if (!shouldIngest(content, msg.role)) continue
+            const textForFilter = truncate(extractTextForQuery(msg.content))
+            if (textForFilter.length < 2) continue
+            if (!shouldIngest(textForFilter, msg.role)) continue
             try {
-              const metadata: Record<string, unknown> = rawParts ? { rawParts } : {}
               await memory.ingest({
                 sessionId,
                 role: msg.role as 'user' | 'assistant' | 'system',
-                content,
-                metadata,
+                content: msg.content,
               })
               episodesSinceConsolidation++
             } catch (err) {

@@ -237,25 +237,50 @@ export function getSchemaVersion(db: Database.Database): number {
  */
 export let hasFts5 = true
 
+const SCHEMA_V2 = `
+-- Episode Parts: full-fidelity storage for every ContentPart in a message.
+-- episodes.content holds clean searchable text only.
+-- episode_parts holds tool calls, tool results, reasoning, images — nothing
+-- in this table is indexed for search. That is the whole point.
+CREATE TABLE IF NOT EXISTS episode_parts (
+  id           TEXT    NOT NULL PRIMARY KEY,
+  episode_id   TEXT    NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+  ordinal      INTEGER NOT NULL,
+  part_type    TEXT    NOT NULL CHECK (part_type IN ('text', 'tool_call', 'tool_result', 'reasoning', 'image', 'other')),
+  text_content TEXT,
+  tool_name    TEXT,
+  tool_input   TEXT,
+  tool_output  TEXT,
+  raw          TEXT,
+  created_at   REAL    NOT NULL DEFAULT (julianday('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_episode_parts_episode ON episode_parts(episode_id);
+`
+
 export function runMigrations(db: Database.Database): void {
   const currentVersion = getSchemaVersion(db)
 
-  if (currentVersion >= 1) return // Already migrated
+  if (currentVersion < 1) {
+    db.exec(SCHEMA_V1)
 
-  db.exec(SCHEMA_V1)
+    try {
+      db.exec(FTS5_TABLES)
+      db.exec(FTS5_TRIGGERS)
+      hasFts5 = true
+    } catch (err) {
+      hasFts5 = false
+      console.warn(
+        '[engram] FTS5 not available in this SQLite build — full-text search disabled, falling back to LIKE queries.',
+        err instanceof Error ? err.message : String(err)
+      )
+      // Non-fatal: the core tables still work; FTS-based search simply won't function.
+    }
 
-  try {
-    db.exec(FTS5_TABLES)
-    db.exec(FTS5_TRIGGERS)
-    hasFts5 = true
-  } catch (err) {
-    hasFts5 = false
-    console.warn(
-      '[engram] FTS5 not available in this SQLite build — full-text search disabled, falling back to LIKE queries.',
-      err instanceof Error ? err.message : String(err)
-    )
-    // Non-fatal: the core tables still work; FTS-based search simply won't function.
+    db.pragma('user_version = 1')
   }
 
-  db.pragma('user_version = 1')
+  if (currentVersion < 2) {
+    db.exec(SCHEMA_V2)
+    db.pragma('user_version = 2')
+  }
 }

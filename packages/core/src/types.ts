@@ -28,8 +28,21 @@ export type IntentType =
 export interface Message {
   sessionId?: string
   role: 'user' | 'assistant' | 'system'
-  content: string
+  content: string | unknown[]
   metadata?: Record<string, unknown>
+}
+
+export interface EpisodePart {
+  id: string
+  episodeId: string
+  ordinal: number
+  partType: 'text' | 'tool_call' | 'tool_result' | 'reasoning' | 'image' | 'other'
+  textContent: string | null
+  toolName: string | null
+  toolInput: unknown | null
+  toolOutput: unknown | null
+  raw: unknown | null
+  createdAt: Date
 }
 
 export interface Episode {

@@ -42,15 +42,26 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 1', () => {
+  it('sets schema version to 2 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(1)
+    expect(getSchemaVersion(db)).toBe(2)
+  })
+
+  it('creates episode_parts table (dual-storage architecture)', () => {
+    runMigrations(db)
+
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .pluck()
+      .all() as string[]
+
+    expect(tables).toContain('episode_parts')
   })
 
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(1)
+    expect(getSchemaVersion(db)).toBe(2)
   })
 
   it('enforces foreign keys on memories table', () => {

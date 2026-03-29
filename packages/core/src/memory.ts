@@ -11,7 +11,7 @@ import { dreamCycle } from './consolidation/dream-cycle.js'
 import { decayPass } from './consolidation/decay-pass.js'
 import { scoreSalience } from './ingestion/salience.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
-import { extractSearchableContent } from './ingestion/content-cleaner.js'
+import { parseContent } from './ingestion/content-parser.js'
 import { generateId } from './utils/id.js'
 
 // ---------------------------------------------------------------------------
@@ -90,23 +90,30 @@ export class Memory {
     this.assertInitialized()
 
     const sessionId = message.sessionId ?? DEFAULT_SESSION_ID
-    const salience = scoreSalience({ role: message.role, content: message.content })
-    const entities = extractEntities(message.content)
 
-    // Compute clean, searchable text — strips tool calls, timestamps, system
-    // metadata, and user tool-invocation commands. This becomes the embedding
-    // input so that vector search ranks real content above metadata noise.
-    const searchableContent = extractSearchableContent(message.content, message.role)
+    // Parse content into clean searchable text + structured parts.
+    // episodes.content gets cleanText only — no tool calls, no timestamps, no metadata.
+    // Full fidelity is preserved in metadata.parts.
+    const parsed = parseContent(message.content)
+    const cleanText = parsed.cleanText
 
-    // Embed the searchable content (not raw content) if an intelligence adapter
-    // with embed support is configured. Falls back to raw content when the cleaned
-    // text is too short (e.g. only an acknowledgment remains after stripping).
-    // Done synchronously (awaited) before insert — embedding quality is critical
-    // for recall. A failure is non-fatal: BM25 fallback still works without the vector.
+    // Skip messages that have no meaningful text after parsing.
+    if (cleanText.length < 2) return
+
+    const salience = scoreSalience({ role: message.role, content: cleanText })
+    const entities = extractEntities(cleanText)
+
+    // Embed the clean text. When cleanText is too short to be meaningful (e.g.
+    // a single word after stripping), fall back to whatever string form of the
+    // original content we can extract, so the embedding call is not skipped for
+    // short-but-valid messages like "first message" or "got it".
+    // A failure is non-fatal: BM25 fallback still works without a vector.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
-        const textToEmbed = searchableContent.length > 20 ? searchableContent : message.content
+        const textToEmbed = cleanText.length > 20
+          ? cleanText
+          : (typeof message.content === 'string' ? message.content : cleanText)
         embedding = await this.intelligence.embed(textToEmbed)
       } catch (err) {
         console.error('[engram] embedding failed, storing without vector:', err)
@@ -115,14 +122,19 @@ export class Memory {
 
     const metadata: Record<string, unknown> = {
       ...message.metadata,
-      searchableContent,
       role: message.role,
+      parts: parsed.parts,
+    }
+
+    // Store raw content array in metadata for full fidelity when it was an array.
+    if (Array.isArray(message.content)) {
+      metadata.rawContent = message.content
     }
 
     const episode = await this.storage.episodes.insert({
       sessionId,
       role: message.role,
-      content: message.content,
+      content: cleanText,
       salience,
       accessCount: 0,
       lastAccessed: null,

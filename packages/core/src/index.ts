@@ -17,6 +17,8 @@ export { generateId } from './utils/id.js'
 export { estimateTokens } from './utils/tokens.js'
 export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
+export { parseContent } from './ingestion/content-parser.js'
+export type { ParsedContent, ParsedPart } from './ingestion/content-parser.js'
 export type {
   StorageAdapter,
   EpisodeStorage,
