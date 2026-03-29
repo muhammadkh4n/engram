@@ -1,13 +1,38 @@
-import type { RecallResult, IntentResult, RetrievedMemory } from '../types.js'
+import type { RecallStrategy, RetrievedMemory, RetrievalStrategy } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
-import { stageRecall } from './recall.js'
+import { unifiedSearch } from './search.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
 import { stageReconsolidate } from './reconsolidation.js'
+
+// ---------------------------------------------------------------------------
+// Public interfaces
+// ---------------------------------------------------------------------------
+
+export interface RecallResult {
+  memories: RetrievedMemory[]
+  associations: RetrievedMemory[]
+  strategy: RecallStrategy
+  primed: string[]
+  estimatedTokens: number
+  formatted: string
+}
+
+export interface RecallOpts {
+  strategy: RecallStrategy
+  embedding: number[]
+  intelligence?: IntelligenceAdapter
+  sessionId?: string
+  tokenBudget?: number
+}
+
+// ---------------------------------------------------------------------------
+// Formatting
+// ---------------------------------------------------------------------------
 
 function formatMemories(
   memories: RetrievedMemory[],
@@ -39,38 +64,86 @@ function formatMemories(
   return lines.join('\n')
 }
 
+// ---------------------------------------------------------------------------
+// Shim: map RecallStrategy -> RetrievalStrategy for stageAssociate
+// ---------------------------------------------------------------------------
+
+function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
+  return {
+    shouldRecall: true,
+    tiers: [],
+    queryTransform: null,
+    maxResults: strategy.maxResults,
+    minRelevance: 0,
+    includeAssociations: strategy.associations,
+    associationHops: strategy.associationHops,
+    boostProcedural: false,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 export async function recall(
   query: string,
   storage: StorageAdapter,
   sensory: SensoryBuffer,
-  intent: IntentResult,
-  opts?: { embedding?: number[]; tokenBudget?: number; intelligence?: IntelligenceAdapter }
+  opts: RecallOpts
 ): Promise<RecallResult> {
-  const strategy = intent.strategy
+  const { strategy, embedding, intelligence, sessionId } = opts
 
-  // Stage 1: Parallel search across tiers using all expanded query variants
-  const queries = intent.expandedQueries && intent.expandedQueries.length > 0
-    ? intent.expandedQueries
-    : [query]
-  let memories = await stageRecall(queries, strategy, storage, sensory, opts?.embedding)
+  // Skip mode — return immediately
+  if (strategy.mode === 'skip') {
+    return {
+      memories: [],
+      associations: [],
+      strategy,
+      primed: [],
+      estimatedTokens: 0,
+      formatted: '',
+    }
+  }
 
-  // HyDE fallback: when top result is weak, generate a hypothetical document that
-  // would answer the query, embed it, and run a second retrieval pass. Results from
-  // both passes are merged with deduplication — highest score per ID wins.
+  // Expand query terms when strategy says so and intelligence supports it
+  let expandedTerms: string[] | undefined
+  if (strategy.expand && intelligence?.expandQuery) {
+    try {
+      expandedTerms = await intelligence.expandQuery(query)
+    } catch {
+      // expansion failed — proceed without it
+    }
+  }
+
+  // Stage 1: Unified vector-first search
+  let memories = await unifiedSearch({
+    query,
+    embedding,
+    strategy,
+    storage,
+    sensory,
+    sessionId,
+    expandedTerms,
+  })
+
+  // HyDE fallback: when top result is weak, generate a hypothetical answer,
+  // embed it, and run a second search pass. Merge results (highest score wins).
   const topScore = memories[0]?.relevance ?? 0
-  const intelligence = opts?.intelligence
-  if (topScore < 0.25 && intelligence?.generateHypotheticalDoc && intelligence?.embed) {
+  if (topScore < 0.3 && intelligence?.generateHypotheticalDoc && intelligence?.embed) {
     try {
       const hydeDoc = await intelligence.generateHypotheticalDoc(query)
       const hydeEmbedding = await intelligence.embed(hydeDoc)
-      const hydeMemories = await stageRecall(
-        [hydeDoc, query],
+      const hydeMemories = await unifiedSearch({
+        query,
+        embedding: hydeEmbedding,
         strategy,
         storage,
         sensory,
-        hydeEmbedding
-      )
-      // Merge: keep unique IDs, prefer highest score
+        sessionId,
+        expandedTerms,
+      })
+
+      // Merge: unique IDs, prefer highest score
       const merged = new Map<string, RetrievedMemory>()
       for (const m of [...memories, ...hydeMemories]) {
         const existing = merged.get(m.id)
@@ -87,26 +160,28 @@ export async function recall(
     }
   }
 
-  // Stage 2: Association walk from recalled memories
-  const associations = await stageAssociate(memories, strategy, storage)
+  // Stage 2: Association walk (deep mode only)
+  let associations: RetrievedMemory[] = []
+  if (strategy.associations) {
+    const legacyStrategy = toRetrievalStrategy(strategy)
+    associations = await stageAssociate(memories, legacyStrategy, storage)
+  }
 
-  // Stage 3: Topic priming — update sensory buffer for future queries
+  // Stage 3: Topic priming
   const primed = stagePrime(memories, associations, sensory)
 
-  // Stage 4: Reconsolidation — fire-and-forget access tracking + co-recall edges
+  // Stage 4: Reconsolidation — fire-and-forget
   const manager = new AssociationManager(storage.associations)
   stageReconsolidate(memories, associations, storage, manager)
 
-  // Format results as markdown for system prompt injection
+  // Format results
   const formatted = formatMemories(memories, associations)
-
-  // Estimate token cost
   const estimatedTokens = estimateTokens(formatted)
 
   return {
     memories,
     associations,
-    intent,
+    strategy,
     primed,
     estimatedTokens,
     formatted,
