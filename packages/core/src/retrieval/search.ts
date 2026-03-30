@@ -77,6 +77,20 @@ interface ScoringInput {
   accessCount: number
   primingBoost: number
   role: string | undefined
+  content: string
+}
+
+/**
+ * Detect assistant messages that are self-referential recall failures —
+ * "I can't find X", "no record of X", "nothing stored about X".
+ * These have high similarity to the query because they parrot the search
+ * terms, but carry zero information. Heavy penalty pushes them below
+ * the actual content.
+ */
+const RECALL_FAILURE_PATTERNS = /\b(can'?t find|no record of|nothing stored|not finding|no luck|no mention|don'?t have.{0,20}(details|context|record)|genuinely (can'?t|don'?t)|searched.{0,30}(no|nothing|zero)|dug through everything)\b/i
+
+function isRecallFailureNoise(role: string | undefined, content: string): boolean {
+  return role === 'assistant' && RECALL_FAILURE_PATTERNS.test(content)
 }
 
 function computeScore(input: ScoringInput): number {
@@ -88,6 +102,7 @@ function computeScore(input: ScoringInput): number {
     accessCount,
     primingBoost,
     role,
+    content,
   } = input
 
   const baseScore = baseSim
@@ -97,7 +112,11 @@ function computeScore(input: ScoringInput): number {
   const accessBoost = Math.min(0.1, accessCount * 0.01)
   const roleBoost = role === 'assistant' ? 0.05 : 0
 
-  return baseScore + bm25Boost + recencyScore + accessBoost + primingBoost + roleBoost
+  // Recall failure noise: assistant parroting "I can't find [topic]" has
+  // high similarity to the topic but zero information. 60% penalty.
+  const noisePenalty = isRecallFailureNoise(role, content) ? 0.4 : 1.0
+
+  return (baseScore + bm25Boost + recencyScore + accessBoost + primingBoost + roleBoost) * noisePenalty
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +186,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         accessCount,
         primingBoost,
         role,
+        content,
       })
 
       scored.push({
@@ -228,6 +248,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         accessCount,
         primingBoost,
         role,
+        content,
       })
 
       scored.push({
