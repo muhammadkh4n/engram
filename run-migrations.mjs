@@ -5,19 +5,19 @@ import { readFileSync } from 'fs';
 const configs = [
   {
     label: 'Transaction pooler (port 6543)',
-    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:REDACTED_SUPABASE_SECRET@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres',
+    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:${DATABASE_PASSWORD}@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres',
   },
   {
     label: 'Session pooler (port 5432)',
-    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:REDACTED_SUPABASE_SECRET@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres',
+    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:${DATABASE_PASSWORD}@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres',
   },
   {
     label: 'Direct (port 5432)',
-    connectionString: 'postgresql://postgres:REDACTED_SUPABASE_SECRET@db.pmsmvpixvajpvrmeckgr.supabase.co:5432/postgres',
+    connectionString: 'postgresql://postgres:${DATABASE_PASSWORD}@db.pmsmvpixvajpvrmeckgr.supabase.co:5432/postgres',
   },
   {
     label: 'Region 1 pooler',
-    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:REDACTED_SUPABASE_SECRET@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres',
+    connectionString: 'postgresql://postgres.pmsmvpixvajpvrmeckgr:${DATABASE_PASSWORD}@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres',
   },
 ];
 
