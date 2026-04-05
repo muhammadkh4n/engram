@@ -1,5 +1,10 @@
 # Engram: Brain-Inspired Cognitive Memory for AI Agents
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/badge/npm-@engram-blue.svg)](https://www.npmjs.com/search?q=%40engram)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178c6.svg)](https://www.typescriptlang.org/)
+[![Tests](https://img.shields.io/badge/tests-Vitest-6e9f18.svg)](https://vitest.dev/)
+
 Brain-inspired cognitive memory engine for AI agents. While other context engines compress and retrieve, Engram consolidates, associates, primes, and strengthens — like biological memory.
 
 ## Why Engram
@@ -7,6 +12,44 @@ Brain-inspired cognitive memory engine for AI agents. While other context engine
 Existing context engines focus on **compression and retrieval** (the LCM approach). Engram models **five cognitive memory systems** with consolidation cycles, associative networks, intent-driven recall, and reconsolidation — mirroring how biological memory actually works.
 
 **Positioning**: LCM is the best compression engine. Engram is the best cognitive engine. Choose based on whether you want an agent that remembers or an agent that learns.
+
+## Architecture
+
+Engram implements a brain-inspired memory system with five interconnected memory systems:
+
+```
+INGEST → [Salience Detection, Entity Extraction, Temporal Linking]
+         ↓
+    ┌────────────────────────────────────────────────┐
+    │      ASSOCIATIVE NETWORK (Graph Edges)         │
+    │  temporal, causal, topical, supports,          │
+    │  contradicts, elaborates, derives_from, co_recalled
+    │                                                 │
+    │  ┌─────────────┐  ┌──────────┐  ┌────────────┐ │
+    │  │  EPISODIC   │  │ SEMANTIC │  │ PROCEDURAL │ │
+    │  │  (events)   │  │ (facts)  │  │ (how-to)   │ │
+    │  │             │  │          │  │            │ │
+    │  │ - lossless  │  │ - decays │  │ - learns   │ │
+    │  │ - temporal  │  │ - scored │  │ - counts   │ │
+    │  └─────────────┘  └──────────┘  └────────────┘ │
+    │         ↑              ↑              ↑          │
+    │         └──────────────┼──────────────┘          │
+    │                   SENSORY BUFFER                 │
+    │              (working memory ~100)               │
+    └────────────────────────────────────────────────┘
+         ↓
+RECALL → [BM25/Vector Search, Association Walk, Priming, Reconsolidation]
+         ↓
+    CONSOLIDATION → [Light Sleep, Deep Sleep, Dream, Decay]
+    (automatic or manual)
+```
+
+**Five Memory Systems**:
+- **Sensory Buffer** — Working memory. What's top-of-mind right now (~100 items, volatile)
+- **Episodic** — Raw conversation turns. Lossless ground truth. Never deleted.
+- **Semantic** — Extracted facts and concepts. Decays with confidence scores.
+- **Procedural** — Learned workflows, preferences, habits. Confidence + observation count.
+- **Associative Network** — 8 edge types linking memories to enable discovery and pattern completion
 
 ## Quick Start
 
@@ -31,32 +74,18 @@ await memory.dispose()
 
 That's it. SQLite + BM25, no setup. Upgrade to embeddings and cloud storage later.
 
+## Packages
+
+| Package | Purpose | Key Features |
+|---------|---------|--------------|
+| `@engram/core` | Memory engine | 5 memory systems, 4-stage recall, consolidation cycles, intent analysis, salience detection |
+| `@engram/sqlite` | Local storage | Zero-config SQLite + BM25 full-text search, zero dependencies |
+| `@engram/openai` | Intelligence | OpenAI embeddings, vector search, LLM-based summarization |
+| `@engram/supabase` | Cloud storage | PostgreSQL + pgvector, distributed agents, scalable |
+| `@engram/openclaw` | Framework integration | OpenClaw ContextEngine plugin, 4 memory tools, auto-consolidation |
+| `@engram/mcp` | Claude integration | MCP server for Claude Code, memory tools for AI assistants |
+
 ## Core Concepts
-
-### Five Memory Systems
-
-```
-┌──────────────────────────────────────────────────────┐
-│              ASSOCIATIVE NETWORK                    │
-│         (graph edges connecting everything)         │
-│                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌─────────────────┐   │
-│  │ EPISODIC │──│ SEMANTIC │──│   PROCEDURAL    │   │
-│  │ (events) │  │ (facts)  │  │   (how-to)      │   │
-│  └────┬─────┘  └────┬─────┘  └────────┬────────┘   │
-│       └─────────────┼──────────────────┘             │
-│                ┌────┴──────┐                        │
-│                │  SENSORY  │                        │
-│                │  BUFFER   │                        │
-│                └───────────┘                        │
-└──────────────────────────────────────────────────────┘
-```
-
-- **Sensory Buffer** — Working memory. What's top-of-mind right now (~100 items, volatile)
-- **Episodic** — Raw conversation turns. Lossless ground truth. Never deleted.
-- **Semantic** — Extracted facts and concepts. Decays with confidence scores.
-- **Procedural** — Learned workflows, preferences, habits. Confidence + observation count.
-- **Associative Network** — 8 edge types linking memories: temporal, causal, topical, supports, contradicts, elaborates, derives_from, co_recalled
 
 ### Four-Stage Retrieval
 
@@ -115,15 +144,6 @@ const memory = createMemory({
 })
 ```
 
-## Packages
-
-| Package | Scope | Purpose |
-|---------|-------|---------|
-| `@engram/core` | Memory engine | Type definitions, Memory class, 5 systems, recall pipeline, consolidation cycles |
-| `@engram/sqlite` | Storage (local) | Zero-config SQLite adapter with BM25 full-text search |
-| `@engram/openai` | Intelligence | OpenAI embeddings + summarization + future LLM intent analysis |
-| `@engram/supabase` | Storage (cloud) | PostgreSQL + pgvector via Supabase. For distributed agents. |
-| `@engram/openclaw` | Framework integration | OpenClaw ContextEngine plugin + 4 memory tools |
 
 ## API Reference
 
@@ -188,6 +208,58 @@ Get or create a session-scoped handle. Auto-generates sessionId if omitted.
 
 #### `dispose(): Promise<void>`
 Release resources, persist sensory buffer snapshot.
+
+## MCP Server Setup
+
+Engram includes an MCP (Model Context Protocol) server for Claude Code integration. Add to Claude's settings.json:
+
+```json
+{
+  "mcpServers": {
+    "engram-memory": {
+      "command": "node",
+      "args": ["/path/to/openclaw-memory/packages/mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+Then in Claude Code, use the memory tools:
+- `engram_search` — Deep memory search
+- `engram_stats` — Memory statistics
+- `engram_forget` — Lossless deprioritization
+- `engram_consolidate` — Manual consolidation
+
+Messages are automatically ingested and associated across sessions.
+
+## Storage Adapters
+
+Engram ships with multiple storage adapters. Choose based on your needs:
+
+### SQLite (Local, Zero-Config)
+```javascript
+import { sqliteAdapter } from '@engram/sqlite'
+
+const memory = createMemory({
+  storage: sqliteAdapter({ path: './engram.db' })
+})
+```
+
+Best for: Development, single-agent, no infrastructure.
+
+### Supabase (Cloud, Distributed)
+```javascript
+import { supabaseAdapter } from '@engram/supabase'
+
+const memory = createMemory({
+  storage: supabaseAdapter({
+    url: process.env.SUPABASE_URL,
+    key: process.env.SUPABASE_ANON_KEY
+  })
+})
+```
+
+Best for: Multi-agent systems, persistent storage, scaling.
 
 ## OpenClaw Plugin
 
@@ -300,11 +372,18 @@ This preserves the agent's history even as old memories fade from active retriev
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development setup and local testing
+- Monorepo structure and package organization
+- Code style and testing conventions
+- Adding new storage or intelligence adapters
+- Pull request process
 
 ## License
 
-MIT. See LICENSE file.
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE) file for details.
+
+Copyright 2026 Muhammad Khan.
 
 ## Brain-Science References
 
