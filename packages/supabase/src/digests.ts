@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { Digest, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { DigestStorage } from '@engram/core'
+import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class SupabaseDigestStorage implements DigestStorage {

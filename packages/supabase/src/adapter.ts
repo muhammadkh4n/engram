@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram/core'
-import type { StorageAdapter } from '@engram/core'
+import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
+import type { StorageAdapter } from '@engram-mem/core'
 import { SupabaseEpisodeStorage } from './episodes.js'
 import { SupabaseDigestStorage } from './digests.js'
 import { SupabaseSemanticStorage } from './semantic.js'
@@ -342,7 +342,7 @@ interface ProceduralRow {
   updated_at: string
 }
 
-import type { Digest, SemanticMemory, ProceduralMemory } from '@engram/core'
+import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
 
 function rowToDigest(row: DigestRow): Digest {
   return {

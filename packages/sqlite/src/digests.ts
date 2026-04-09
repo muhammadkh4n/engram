@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
-import type { Digest, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { DigestStorage } from '@engram/core'
+import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 import { hybridSearch } from './vector-search.js'
 

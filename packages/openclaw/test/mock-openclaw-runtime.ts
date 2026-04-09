@@ -12,7 +12,7 @@
  * 4. compact() — called when context overflows or manually
  * 5. dispose() — called on shutdown
  */
-import type { StorageAdapter, IntelligenceAdapter } from '@engram/core'
+import type { StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import { createEngramContextEngine } from '../src/plugin-entry.js'
 import { createEngramTools } from '../src/tools.js'
 

@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { ProceduralStorage } from '@engram/core'
+import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class SupabaseProceduralStorage implements ProceduralStorage {

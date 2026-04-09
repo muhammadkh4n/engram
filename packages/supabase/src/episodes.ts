@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { Episode, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { EpisodeStorage } from '@engram/core'
+import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { EpisodeStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class SupabaseEpisodeStorage implements EpisodeStorage {

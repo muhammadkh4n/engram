@@ -1,4 +1,4 @@
-import type { Memory } from '@engram/core'
+import type { Memory } from '@engram-mem/core'
 
 export function createEngramTools(memory: Memory) {
   return {

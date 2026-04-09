@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { SearchResult } from '@engram/core'
+import type { SearchResult } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Cosine similarity
@@ -45,19 +45,17 @@ export interface HybridRow {
 }
 
 /** Configuration for a hybrid search run. */
-export interface HybridSearchConfig<T> {
+export interface HybridSearchConfig<Item, Row extends HybridRow = HybridRow> {
   /** The SQLite database instance. */
   db: Database.Database
   /**
    * Run the BM25 FTS5 query and return raw rows + scores.
-   * Each item must include `id` (string) and `bm25_score` (number >= 0).
+   * Each row must include `id` (string) and `bm25_score` (number >= 0).
    */
-  runBm25: () => Array<T & { bm25_score: number }>
+  runBm25: () => Array<Row & { bm25_score: number }>
   /**
    * Fetch the most recent N rows that have an embedding stored, returning at
    * least `{ id, embedding }` columns.
-   * This is the second phase: "recent vector scan" to catch recent items
-   * BM25 might miss.
    */
   recentVectorSql: string
   recentVectorLimit?: number
@@ -65,17 +63,10 @@ export interface HybridSearchConfig<T> {
   queryEmbedding: number[]
   /** Maximum results to return (default 10). */
   limit?: number
-  /** Convert a raw BM25 row into the domain type. */
-  rowToItem: (row: T & { bm25_score: number }) => ReturnType<typeof rowToItem<T>>
-  /** Fetch full rows by IDs (for vector-only candidates not in BM25 results). */
-  getByIds: (ids: string[]) => Promise<Array<ReturnType<typeof rowToItem<T>>>>
+  /** Fetch full domain items by IDs (for vector-only candidates not in BM25 results). */
+  getByIds: (ids: string[]) => Promise<Item[]>
 }
 
-// TypeScript gymnastics to avoid "any" while keeping the generic factory clean.
-// We define `rowToItem` as a type-only helper — the actual conversion is passed
-// as a function parameter in `HybridSearchConfig`.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function rowToItem<T>(_row: T): unknown { return null as any }
 
 // ---------------------------------------------------------------------------
 // Core hybrid merge + re-rank
@@ -96,7 +87,7 @@ function rowToItem<T>(_row: T): unknown { return null as any }
  *  Return   — top `limit` results sorted by finalScore descending.
  */
 export async function hybridSearch<Item, Row extends HybridRow>(
-  config: HybridSearchConfig<Item>,
+  config: HybridSearchConfig<Item, Row>,
   bm25ToItem: (row: Row & { bm25_score: number }) => Item,
   itemToSearchResult: (item: Item, score: number) => SearchResult<Item>
 ): Promise<SearchResult<Item>[]> {
@@ -111,7 +102,7 @@ export async function hybridSearch<Item, Row extends HybridRow>(
   } = config
 
   // ── Phase 1: BM25 candidates ────────────────────────────────────────────
-  const bm25Rows = runBm25() as Array<Row & { bm25_score: number }>
+  const bm25Rows = runBm25()
 
   // Normalize BM25 scores to [0, 1]
   const maxBm25 = bm25Rows.length > 0

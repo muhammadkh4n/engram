@@ -4,9 +4,9 @@ import type {
   MemoryType,
   WalkResult,
   DiscoveredEdge,
-} from '@engram/core'
-import { generateId } from '@engram/core'
-import type { AssociationStorage } from '@engram/core'
+} from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { AssociationStorage } from '@engram-mem/core'
 import { julianToDate } from './search.js'
 
 export class SqliteAssociationStorage implements AssociationStorage {

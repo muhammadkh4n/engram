@@ -1,5 +1,5 @@
 import OpenAI from 'openai'
-import type { SummarizeOptions, SummaryResult, KnowledgeCandidate } from '@engram/core'
+import type { SummarizeOptions, SummaryResult, KnowledgeCandidate } from '@engram-mem/core'
 
 export interface OpenAISummarizerOptions {
   apiKey: string

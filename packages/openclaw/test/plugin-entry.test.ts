@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { sqliteAdapter } from '@engram/sqlite'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 import { createEngramContextEngine, extractQuery } from '../src/plugin-entry.js'
 
 // ---------------------------------------------------------------------------

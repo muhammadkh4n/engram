@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
-import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram/core'
-import type { StorageAdapter } from '@engram/core'
+import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
+import type { StorageAdapter } from '@engram-mem/core'
 import { cosineSimilarity, blobToVector } from './vector-search.js'
 import { runMigrations } from './migrations.js'
 import { SqliteEpisodeStorage } from './episodes.js'
@@ -378,7 +378,7 @@ interface ProceduralRow {
   updated_at: number
 }
 
-import type { Digest, SemanticMemory, ProceduralMemory } from '@engram/core'
+import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
 
 function rowToDigest(row: DigestRow): Digest {
   return {

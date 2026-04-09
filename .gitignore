@@ -6,3 +6,9 @@ dist/
 .env.*
 package-lock.json
 test-connection.mjs
+
+# Build artifacts (prevent leaking compiled files into src/)
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map

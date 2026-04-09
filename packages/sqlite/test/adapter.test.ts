@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { SqliteStorageAdapter } from '../src/adapter.js'
-import type { SensorySnapshot } from '@engram/core'
+import type { SensorySnapshot } from '@engram-mem/core'
 
 describe('SqliteStorageAdapter', () => {
   let adapter: SqliteStorageAdapter

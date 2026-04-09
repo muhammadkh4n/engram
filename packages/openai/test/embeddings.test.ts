@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { CircuitOpenError, TimeoutError } from '@engram/core'
+import { CircuitOpenError, TimeoutError } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.

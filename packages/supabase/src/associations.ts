@@ -5,9 +5,9 @@ import type {
   EdgeType,
   WalkResult,
   DiscoveredEdge,
-} from '@engram/core'
-import { generateId } from '@engram/core'
-import type { AssociationStorage } from '@engram/core'
+} from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { AssociationStorage } from '@engram-mem/core'
 
 export class SupabaseAssociationStorage implements AssociationStorage {
   constructor(private readonly client: SupabaseClient) {}

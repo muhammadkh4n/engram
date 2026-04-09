@@ -21,20 +21,20 @@ export default defineConfig({
   ],
   // Bundle Engram workspace packages + pure JS deps into the plugin
   noExternal: [
-    '@engram/core',
-    '@engram/sqlite',
-    '@engram/openai',
-    '@engram/supabase',
+    '@engram-mem/core',
+    '@engram-mem/sqlite',
+    '@engram-mem/openai',
+    '@engram-mem/supabase',
     'uuid',
   ],
   esbuildOptions(options) {
     options.platform = 'node'
     // Resolve workspace packages to their source
     options.alias = {
-      '@engram/core': path.resolve(__dirname, '../core/src/index.ts'),
-      '@engram/sqlite': path.resolve(__dirname, '../sqlite/src/index.ts'),
-      '@engram/openai': path.resolve(__dirname, '../openai/src/index.ts'),
-      '@engram/supabase': path.resolve(__dirname, '../supabase/src/index.ts'),
+      '@engram-mem/core': path.resolve(__dirname, '../core/src/index.ts'),
+      '@engram-mem/sqlite': path.resolve(__dirname, '../sqlite/src/index.ts'),
+      '@engram-mem/openai': path.resolve(__dirname, '../openai/src/index.ts'),
+      '@engram-mem/supabase': path.resolve(__dirname, '../supabase/src/index.ts'),
     }
   },
 })

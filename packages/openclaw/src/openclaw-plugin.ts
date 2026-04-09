@@ -14,11 +14,11 @@
 // @ts-ignore — openclaw only exists at runtime on the host
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
-import { Memory } from '@engram/core'
-import { SqliteStorageAdapter } from '@engram/sqlite'
-import { SupabaseStorageAdapter } from '@engram/supabase'
-import { openaiIntelligence } from '@engram/openai'
-import type { StorageAdapter, IntelligenceAdapter } from '@engram/core'
+import { Memory } from '@engram-mem/core'
+import { SqliteStorageAdapter } from '@engram-mem/sqlite'
+import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { openaiIntelligence } from '@engram-mem/openai'
+import type { StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import * as fs from 'node:fs'
 import { shouldIngest } from './ingest-filter.js'
 

@@ -2,7 +2,6 @@ import type {
   RecallStrategy,
   RetrievedMemory,
   TypedMemory,
-  MemoryType,
 } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'

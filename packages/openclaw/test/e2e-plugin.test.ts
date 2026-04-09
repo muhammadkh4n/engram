@@ -6,7 +6,7 @@
  * real OpenClaw runtime would.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { SqliteStorageAdapter } from '@engram/sqlite'
+import { SqliteStorageAdapter } from '@engram-mem/sqlite'
 import { MockOpenClawRuntime } from './mock-openclaw-runtime.js'
 
 // ---------------------------------------------------------------------------
@@ -368,7 +368,7 @@ describe('Engram OpenClaw Plugin E2E — tool integration', () => {
     // Get the memory instance to check for digests directly
     const engine = runtime.getEngine()
     const memory = engine.getMemory()
-    const storage = (memory as unknown as { storage: import('@engram/core').StorageAdapter }).storage
+    const storage = (memory as unknown as { storage: import('@engram-mem/core').StorageAdapter }).storage
     const sessionId = (runtime as unknown as { sessionId: string }).sessionId
     const digests = await storage.digests.getBySession(sessionId)
 

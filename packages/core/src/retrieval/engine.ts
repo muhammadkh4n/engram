@@ -87,7 +87,7 @@ function formatTag(m: RetrievedMemory): string {
   const attr = extractAttribution(m)
   const date = formatDate(m)
 
-  const tagParts = [m.type]
+  const tagParts: string[] = [m.type]
   if (role) tagParts.push(role)
   if (attr) tagParts.push(attr)
   if (date) tagParts.push(date)

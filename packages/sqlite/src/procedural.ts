@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
-import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { ProceduralStorage } from '@engram/core'
+import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 import { hybridSearch } from './vector-search.js'
 

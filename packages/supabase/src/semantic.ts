@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { SemanticMemory, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { SemanticStorage } from '@engram/core'
+import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class SupabaseSemanticStorage implements SemanticStorage {

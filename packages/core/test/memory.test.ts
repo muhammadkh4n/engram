@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { sqliteAdapter } from '@engram/sqlite'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 import { createMemory } from '../src/create-memory.js'
 import { Memory } from '../src/memory.js'
 import type { StorageAdapter } from '../src/adapters/storage.js'

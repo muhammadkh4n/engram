@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import { createTestDb } from './helpers.js'
 import { runMigrations } from '../src/migrations.js'
 import { SqliteEpisodeStorage } from '../src/episodes.js'
-import type { Episode } from '@engram/core'
+import type { Episode } from '@engram-mem/core'
 
 describe('SqliteEpisodeStorage', () => {
   let db: Database.Database

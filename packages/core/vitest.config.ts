@@ -4,7 +4,7 @@ import { resolve } from 'path'
 export default defineConfig({
   resolve: {
     alias: {
-      '@engram/sqlite': resolve(__dirname, '../sqlite/src/index.ts'),
+      '@engram-mem/sqlite': resolve(__dirname, '../sqlite/src/index.ts'),
     },
   },
   test: {

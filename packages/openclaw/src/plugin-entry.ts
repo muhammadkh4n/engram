@@ -1,6 +1,6 @@
-import type { StorageAdapter } from '@engram/core'
-import type { IntelligenceAdapter } from '@engram/core'
-import { Memory } from '@engram/core'
+import type { StorageAdapter } from '@engram-mem/core'
+import type { IntelligenceAdapter } from '@engram-mem/core'
+import { Memory } from '@engram-mem/core'
 
 export interface EngramPluginConfig {
   storage: StorageAdapter

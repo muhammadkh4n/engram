@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { sqliteAdapter } from '@engram/sqlite'
-import { Memory } from '@engram/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+import { Memory } from '@engram-mem/core'
 import { createEngramTools } from '../src/tools.js'
 
 // ---------------------------------------------------------------------------
@@ -258,7 +258,7 @@ describe('createEngramTools — engram_expand', () => {
     await memory.consolidate('light')
 
     // Retrieve the digest id from storage directly
-    const storage = (memory as unknown as { storage: import('@engram/core').StorageAdapter }).storage
+    const storage = (memory as unknown as { storage: import('@engram-mem/core').StorageAdapter }).storage
     const digests = await storage.digests.getBySession('tools-s1')
 
     if (digests.length === 0) {

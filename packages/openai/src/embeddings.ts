@@ -4,7 +4,7 @@ import {
   withRetry,
   withTimeoutSimple,
   TIMEOUTS,
-} from '@engram/core'
+} from '@engram-mem/core'
 
 export interface OpenAIEmbeddingServiceOptions {
   apiKey: string

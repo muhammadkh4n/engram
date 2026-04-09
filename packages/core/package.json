@@ -1,9 +1,11 @@
 {
-  "name": "@engram/core",
+  "name": "@engram-mem/core",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": ["dist/", "README.md"],
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -14,7 +16,6 @@
     "uuid": "^11.0.0"
   },
   "devDependencies": {
-    "@engram/sqlite": "*",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }

@@ -1,0 +1,31 @@
+{
+  "name": "@engram-mem/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server exposing Engram memory tools for Claude Code and other MCP clients",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "engram-mcp": "dist/index.js",
+    "engram-session-summary": "dist/session-summary.js",
+    "engram-pre-compact": "dist/pre-compact.js"
+  },
+  "files": ["dist/", "README.md"],
+  "publishConfig": { "access": "public" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@engram-mem/core": "*",
+    "@engram-mem/openai": "*",
+    "@engram-mem/supabase": "*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "openai": "^4.60.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

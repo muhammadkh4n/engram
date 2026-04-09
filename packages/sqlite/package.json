@@ -1,9 +1,11 @@
 {
-  "name": "@engram/sqlite",
+  "name": "@engram-mem/sqlite",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": ["dist/", "README.md"],
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -11,7 +13,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram/core": "*",
+    "@engram-mem/core": "*",
     "better-sqlite3": "^11.0.0",
     "uuid": "^11.0.0"
   },

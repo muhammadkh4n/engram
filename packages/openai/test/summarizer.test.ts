@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { SummarizeOptions } from '@engram/core'
+import type { SummarizeOptions } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.

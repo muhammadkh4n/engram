@@ -1,4 +1,4 @@
-import type { IntelligenceAdapter } from '@engram/core'
+import type { IntelligenceAdapter } from '@engram-mem/core'
 import { OpenAIEmbeddingService } from './embeddings.js'
 import { OpenAISummarizer } from './summarizer.js'
 
