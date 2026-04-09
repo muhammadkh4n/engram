@@ -4,7 +4,6 @@ dist/
 .turbo/
 *.env
 .env.*
-package-lock.json
 test-connection.mjs
 
 # Build artifacts (prevent leaking compiled files into src/)
