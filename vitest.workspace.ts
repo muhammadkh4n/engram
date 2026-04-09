@@ -6,5 +6,4 @@ export default defineWorkspace([
   'packages/openai',
   'packages/openclaw',
   'packages/supabase',
-  'packages/graph',
 ])
