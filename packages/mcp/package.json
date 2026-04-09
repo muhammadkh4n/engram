@@ -12,6 +12,7 @@
   },
   "files": ["dist/", "README.md"],
   "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "https://github.com/muhammadkh4n/engram.git" },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

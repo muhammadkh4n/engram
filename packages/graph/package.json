@@ -1,5 +1,5 @@
 {
-  "name": "@engram-mem/core",
+  "name": "@engram-mem/graph",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -10,11 +10,16 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:unit": "vitest run test/context-extractors.test.ts test/config.test.ts",
+    "test:integration": "vitest run test/neural-graph.test.ts test/spreading-activation.test.ts test/performance.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "uuid": "^11.0.0"
+    "neo4j-driver": "^5.27.0"
+  },
+  "peerDependencies": {
+    "@engram-mem/core": "*"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
