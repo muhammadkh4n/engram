@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "MCP server exposing Engram memory tools for Claude Code and other MCP clients",
   "main": "dist/index.js",

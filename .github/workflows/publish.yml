@@ -39,31 +39,27 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # Publish packages in dependency order
-      - run: npm publish --workspace=packages/core --provenance
+      # Publish packages in dependency order (|| true: skip already-published versions)
+      - run: npm publish --workspace=packages/core --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - run: npm publish --workspace=packages/openai --provenance
+      - run: npm publish --workspace=packages/openai --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - run: npm publish --workspace=packages/sqlite --provenance
+      - run: npm publish --workspace=packages/sqlite --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - run: npm publish --workspace=packages/supabase --provenance
+      - run: npm publish --workspace=packages/supabase --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - run: npm publish --workspace=packages/graph --provenance
+      - run: npm publish --workspace=packages/mcp --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - run: npm publish --workspace=packages/mcp --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/openclaw --provenance
+      - run: npm publish --workspace=packages/openclaw --provenance || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
