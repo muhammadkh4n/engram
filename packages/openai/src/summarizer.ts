@@ -5,6 +5,9 @@ import type {
   KnowledgeCandidate,
   ExtractedEntity,
   ExtractedEntityType,
+  SalienceClassification,
+  SalienceCategory,
+  SalienceOpts,
 } from '@engram-mem/core'
 
 export interface OpenAISummarizerOptions {
@@ -92,6 +95,77 @@ CONFIDENCE:
 - Below 0.5 : do not include
 
 Return an empty "entities" array only when there are truly no entities. Deduplicate case-insensitively; prefer the longest/most complete form.`
+
+const SALIENCE_SYSTEM_PROMPT = `You are a salience gate for a cognitive memory system. Your job is to decide whether a single conversation turn contains material worth storing in long-term memory. DEFAULT: REJECT. Only accept when the turn would meaningfully benefit a future session that did not see this conversation.
+
+ACCEPT categories (use exactly these strings):
+  fact              - a declared factual claim about the user, their environment, people, projects, or the world
+  preference        - user's stated preference or working style
+  decision          - a chosen course of action with rationale
+  lesson            - a failure explanation or thing-that-did-not-work learning
+  milestone         - completed work, merged PR, shipped feature, test suite turning green after failing
+  identity          - information about a named person or their role/relationship
+  context_switch    - switching to a different project, tool, or topic in a way future sessions should know
+  plan              - a stated intent to do something in the future
+  risk              - a stated concern, worry, or identified risk
+  external_fact     - information newly acquired from external source (docs, API, search result, meeting)
+  emotional_signal  - urgency, frustration, or strong sentiment that should inform future priority weighting
+
+REJECT (return store=false, category='none'):
+  - small talk, greetings, acknowledgments, filler
+  - tool call announcements, formatting, UI noise
+  - content trivially rederivable from git log or file contents
+  - duplicates of obviously recent memory
+  - ambiguous turns of unclear meaning
+
+RULES:
+1. Default REJECT. Only accept when confidence >= 0.7.
+2. The "distilled" field must be a 1-3 sentence self-contained version a future session could read without the original context. MINIMUM 15 characters.
+3. For user turns: distill, do not store verbatim.
+4. For assistant turns: distill decisions and lessons as "we decided X because Y" or "X failed because Y, fix is Z".
+5. NEVER store: passwords, API keys, OAuth tokens, credit card numbers, SSNs, or any string matching obvious secret patterns (sk-*, ghp_*, pk_live_*, bearer tokens, pem blocks). If the turn contains such content, return store=false with reason='contains_secret'.
+6. NEVER store turns under 20 characters unless they are an explicit preference or decision.
+
+Return JSON:
+{
+  "store": bool,
+  "category": "<one of: fact|preference|decision|lesson|milestone|identity|context_switch|plan|risk|external_fact|emotional_signal|none>",
+  "confidence": 0.0..1.0,
+  "distilled": "string (empty if store=false)",
+  "reason": "short explanation"
+}
+
+EXAMPLES:
+
+Input (user turn, project=engram): "ok"
+Output: {"store":false,"category":"none","confidence":0.95,"distilled":"","reason":"single acknowledgment"}
+
+Input (user turn, project=engram): "Actually I prefer bullet points for status summaries, stop using prose"
+Output: {"store":true,"category":"preference","confidence":0.9,"distilled":"MK prefers bullet-point format for status summaries rather than prose","reason":"direct preference correction"}
+
+Input (user turn, project=engram): "Sarah suggested tuning the decay parameter to 0.6"
+Output: {"store":true,"category":"fact","confidence":0.85,"distilled":"Sarah recommended decay parameter of 0.6 for spreading activation tuning","reason":"named-person declared fact"}
+
+Input (assistant turn, project=engram): "I'll read the file now"
+Output: {"store":false,"category":"none","confidence":0.95,"distilled":"","reason":"tool call announcement"}
+
+Input (assistant turn, project=engram): "Wave 2 is now e2e validated with 16/16 passing after fixing the TEMPORAL edge race condition"
+Output: {"store":true,"category":"milestone","confidence":0.9,"distilled":"Wave 2 e2e validation passes 16/16 after fixing TEMPORAL edge race (MERGE both endpoints of previousEpisodeId)","reason":"verified milestone with specific fix detail"}
+
+Input (user turn): "my openai key is sk-proj-abc123"
+Output: {"store":false,"category":"none","confidence":1.0,"distilled":"","reason":"contains_secret"}`
+
+function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
+  const parts: string[] = [
+    `Turn role: ${opts.turnRole}`,
+    `Current project: ${opts.project ?? 'global'}`,
+  ]
+  if (opts.priorTurn) {
+    parts.push(`Prior turn (context only): ${opts.priorTurn.slice(0, 500)}`)
+  }
+  parts.push('', 'Turn to classify:', content)
+  return parts.join('\n')
+}
 
 export class OpenAISummarizer {
   private readonly client: OpenAI
@@ -235,6 +309,101 @@ export class OpenAISummarizer {
         `[openai] extractEntities failed: ${err instanceof Error ? err.message : String(err)}\n`,
       )
       return []
+    }
+  }
+
+  /**
+   * Salience classification for the Layer 1 & 2 memory ingestion gate.
+   *
+   * Uses gpt-4o-mini with JSON response format. Default-rejects: returns
+   * store=false with low confidence when in doubt. On any API or parse
+   * failure, returns a rejection result rather than throwing so the
+   * caller's ingestion pipeline is not blocked.
+   */
+  async extractSalience(
+    content: string,
+    opts: SalienceOpts,
+  ): Promise<SalienceClassification> {
+    const trimmed = content.trim()
+
+    // Cheap short-circuit: turns under 15 chars are almost never worth storing
+    // (single-word ack, "ok", "yes", "got it"). Save an API call.
+    if (trimmed.length < 15) {
+      return {
+        store: false,
+        category: 'none',
+        confidence: 0.95,
+        distilled: '',
+        reason: 'too_short',
+      }
+    }
+
+    const userMessage = buildSalienceUserMessage(trimmed, opts)
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: SALIENCE_SYSTEM_PROMPT },
+          { role: 'user', content: userMessage },
+        ],
+        max_tokens: 400,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+      })
+
+      const raw = resp.choices[0]?.message?.content ?? '{}'
+      return this.parseSalience(raw)
+    } catch (err) {
+      process.stderr.write(
+        `[openai] extractSalience failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return {
+        store: false,
+        category: 'none',
+        confidence: 0,
+        distilled: '',
+        reason: 'classifier_error',
+      }
+    }
+  }
+
+  private parseSalience(raw: string): SalienceClassification {
+    const validCategories: Set<SalienceCategory> = new Set([
+      'fact', 'preference', 'decision', 'lesson', 'milestone',
+      'identity', 'context_switch', 'plan', 'risk', 'external_fact',
+      'emotional_signal', 'none',
+    ])
+
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed !== 'object' || parsed === null) {
+        return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
+      }
+      const obj = parsed as Record<string, unknown>
+
+      const store = obj['store'] === true
+      const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
+      const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
+        ? (rawCategory as SalienceCategory)
+        : 'none'
+      const confidence =
+        typeof obj['confidence'] === 'number'
+          ? Math.min(1, Math.max(0, obj['confidence']))
+          : 0
+      const distilled = typeof obj['distilled'] === 'string' ? obj['distilled'].trim() : ''
+      const reason = typeof obj['reason'] === 'string' ? obj['reason'] : ''
+
+      // Guardrail: if the classifier says store but gives no distilled text
+      // or the distilled text is shorter than the minimum useful length,
+      // reject it. Prevents empty writes.
+      if (store && distilled.length < 15) {
+        return { store: false, category, confidence, distilled: '', reason: 'empty_distilled' }
+      }
+
+      return { store, category, confidence, distilled, reason }
+    } catch {
+      return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
     }
   }
 

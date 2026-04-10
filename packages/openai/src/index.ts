@@ -56,6 +56,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     extractEntities(content) {
       return summarizer.extractEntities(content)
     },
+    extractSalience(content, opts) {
+      return summarizer.extractSalience(content, opts)
+    },
     generateHypotheticalDoc(query) {
       return summarizer.generateHypotheticalDoc(query)
     },

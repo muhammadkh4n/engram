@@ -34,6 +34,9 @@ export type {
   KnowledgeCandidate,
   ExtractedEntity,
   ExtractedEntityType,
+  SalienceCategory,
+  SalienceClassification,
+  SalienceOpts,
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
