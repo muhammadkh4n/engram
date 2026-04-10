@@ -23,6 +23,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@engram-mem/core": "*",
     "neo4j-driver": "^5.28.3"
   },
   "devDependencies": {

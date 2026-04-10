@@ -1,10 +1,11 @@
 import type { Message, Episode, ConsolidateResult, RecallResult, RetrievedMemory } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
-// Wave 2: Neo4j graph is an optional peer dependency. We import the type only
-// so @engram-mem/graph is never required at runtime unless the caller opts in
-// by passing a constructed NeuralGraph instance in MemoryOptions.
-import type { NeuralGraph } from '@engram-mem/graph'
+// Wave 2: The graph backend is accessed via a structural port, not a
+// concrete type. @engram-mem/graph's GraphPort structurally satisfies
+// this port. This lets core stay decoupled from any specific graph
+// implementation and breaks what would otherwise be a circular dependency.
+import type { GraphPort } from './adapters/graph.js'
 import { SensoryBuffer } from './systems/sensory-buffer.js'
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
@@ -35,7 +36,7 @@ export interface MemoryOptions {
    * Caller is responsible for constructing and initializing the graph
    * before passing it in.
    */
-  graph?: NeuralGraph
+  graph?: GraphPort
 }
 
 export interface SessionHandle {
@@ -62,7 +63,7 @@ export class Memory {
   // Wave 2: Optional Neo4j graph. null = unavailable or not configured.
   // All graph operations null-check this field. Ingestion and retrieval
   // fall back gracefully to SQL-only mode when graph is null.
-  private _graph: NeuralGraph | null = null
+  private _graph: GraphPort | null = null
 
   constructor(opts: MemoryOptions) {
     this.storage = opts.storage
@@ -203,20 +204,39 @@ export class Memory {
     // Dual edge systems: SQL temporal associations above are still created.
     // Neo4j edges are created IN ADDITION. SQL is the durable source of
     // truth. Neo4j is the acceleration layer. Both always get written.
+    //
+    // LLM entity extraction: when an intelligence adapter with
+    // extractEntities is available, run it in parallel with graph ingest
+    // to produce high-precision typed entities. Graph.ingestEpisode() will
+    // use these when present and fall back to the regex heuristic when
+    // the extraction is empty or fails.
     if (this._graph !== null) {
+      const graph = this._graph
       const previousEpisodeId = recentIds.length > 0
         ? recentIds[recentIds.length - 1]
         : undefined
 
-      this._graph.ingestEpisode({
-        id: episode.id,
-        sessionId,
-        role: message.role,
-        content: cleanText,
-        salience,
-        entities,
-        createdAt: episode.createdAt.toISOString(),
-        previousEpisodeId,
+      const extractEntitiesFn = this.intelligence?.extractEntities
+      const entityPromise = extractEntitiesFn
+        ? extractEntitiesFn.call(this.intelligence, cleanText).catch((err: unknown) => {
+            console.warn('[engram] extractEntities failed (falling back to regex):', err)
+            return [] as Awaited<ReturnType<NonNullable<IntelligenceAdapter['extractEntities']>>>
+          })
+        : Promise.resolve([])
+
+      entityPromise.then((llmEntities) => {
+        const input = {
+          id: episode.id,
+          sessionId,
+          role: message.role,
+          content: cleanText,
+          salience,
+          entities,
+          createdAt: episode.createdAt.toISOString(),
+          ...(previousEpisodeId ? { previousEpisodeId } : {}),
+          ...(llmEntities.length > 0 ? { llmEntities } : {}),
+        }
+        return graph.ingestEpisode(input)
       }).catch((err: unknown) => {
         console.warn('[engram] graph decomposition failed (non-fatal):', err)
       })

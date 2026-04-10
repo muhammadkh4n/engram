@@ -1,5 +1,11 @@
 import OpenAI from 'openai'
-import type { SummarizeOptions, SummaryResult, KnowledgeCandidate } from '@engram-mem/core'
+import type {
+  SummarizeOptions,
+  SummaryResult,
+  KnowledgeCandidate,
+  ExtractedEntity,
+  ExtractedEntityType,
+} from '@engram-mem/core'
 
 export interface OpenAISummarizerOptions {
   apiKey: string
@@ -32,6 +38,37 @@ Respond in JSON with exactly this shape (an array):
 ]
 
 Extract facts, preferences, decisions, and important patterns. Assign confidence (0-1) based on how clearly stated the knowledge is. Return an empty array if no knowledge can be extracted.`
+
+const ENTITY_SYSTEM_PROMPT = `You are a named-entity extractor for a cognitive memory graph. Given text from a conversation episode, identify REAL entities worth storing as graph nodes for retrieval.
+
+Return JSON with this exact shape:
+{
+  "entities": [
+    { "name": "string", "type": "person" | "org" | "tech" | "project" | "concept", "confidence": 0.0 }
+  ]
+}
+
+Rules:
+1. **person** — only actual named individuals (first name, last name, or full name). Do NOT include pronouns ("I", "you", "he"), generic references ("the team", "someone"), or roles ("the engineer").
+2. **org** — companies, teams, institutions (Anthropic, OpenAI, Google, "the Plane team").
+3. **tech** — specific technologies, libraries, tools, languages, databases (TypeScript, Neo4j, Supabase, Docker, PostgreSQL, React).
+4. **project** — named projects or products (Engram, Ouija, Claude Code, vps-agent).
+5. **concept** — named methodologies, techniques, or theories that function as retrievable anchors (Spreading Activation, HyDE, Complementary Learning Systems).
+
+DO NOT EXTRACT:
+- Pronouns, determiners, or UI labels ("Project Context", "Work Session", "Action Items")
+- Generic verbs or activities ("debugging", "deployment")
+- Adjectives or adverbs
+- Dates, times, or numeric values
+- Filenames, code identifiers, or variable names unless they're the actual project name
+
+Confidence scoring:
+- 0.9+ : explicit mention, full name, unambiguous
+- 0.7-0.9 : first name or single-word with clear context
+- 0.5-0.7 : inferred or abbreviated
+- Below 0.5 : do not include
+
+Return an empty "entities" array if no real entities are present. Deduplicate case-insensitively; prefer the longest/most complete form.`
 
 export class OpenAISummarizer {
   private readonly client: OpenAI
@@ -136,6 +173,87 @@ export class OpenAISummarizer {
 
     const raw = resp.choices[0]?.message?.content ?? '[]'
     return this.parseKnowledgeCandidates(raw)
+  }
+
+  /**
+   * Extract typed named entities from an episode's content.
+   *
+   * Uses gpt-4o-mini with JSON-response mode. Typical cost per call is
+   * ~500 input tokens + ~100 output tokens ≈ $0.00014 at current pricing.
+   *
+   * Returns an empty array on any parse or network error — the caller
+   * must treat extraction as best-effort and fall back to the heuristic
+   * regex extractor in @engram-mem/graph when this returns nothing.
+   */
+  async extractEntities(content: string): Promise<ExtractedEntity[]> {
+    // Skip extraction for very short content — nothing meaningful to extract
+    // and every call costs at least the minimum billing rate.
+    const trimmed = content.trim()
+    if (trimmed.length < 30) return []
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          { role: 'system', content: ENTITY_SYSTEM_PROMPT },
+          { role: 'user', content: trimmed.slice(0, 6000) },
+        ],
+        max_tokens: 500,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+      })
+
+      const raw = resp.choices[0]?.message?.content ?? '{"entities":[]}'
+      return this.parseExtractedEntities(raw)
+    } catch (err) {
+      // Non-fatal: caller uses regex fallback. Log to stderr so MCP
+      // stdio transport stays clean.
+      process.stderr.write(
+        `[openai] extractEntities failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return []
+    }
+  }
+
+  private parseExtractedEntities(raw: string): ExtractedEntity[] {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed !== 'object' || parsed === null) return []
+      const entities = (parsed as Record<string, unknown>)['entities']
+      if (!Array.isArray(entities)) return []
+
+      const validTypes: Set<ExtractedEntityType> = new Set([
+        'person', 'org', 'tech', 'project', 'concept',
+      ])
+
+      const seen = new Map<string, ExtractedEntity>()
+
+      for (const item of entities) {
+        if (typeof item !== 'object' || item === null) continue
+        const obj = item as Record<string, unknown>
+        const name = typeof obj['name'] === 'string' ? obj['name'].trim() : ''
+        const type = obj['type'] as string
+        const confidence =
+          typeof obj['confidence'] === 'number'
+            ? Math.min(1, Math.max(0, obj['confidence']))
+            : 0.5
+
+        if (name.length < 2) continue
+        if (!validTypes.has(type as ExtractedEntityType)) continue
+        if (confidence < 0.5) continue
+
+        // Deduplicate case-insensitively, keep highest confidence
+        const key = name.toLowerCase()
+        const existing = seen.get(key)
+        if (!existing || confidence > existing.confidence) {
+          seen.set(key, { name, type: type as ExtractedEntityType, confidence })
+        }
+      }
+
+      return Array.from(seen.values())
+    } catch {
+      return []
+    }
   }
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {

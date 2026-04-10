@@ -12,7 +12,7 @@
  * legacy SQL association walk.
  */
 
-import type { NeuralGraph, ActivatedNode } from '@engram-mem/graph'
+import type { GraphPort, GraphActivatedNode } from '../adapters/graph.js'
 import type { Episode, RetrievedMemory, RecallStrategy } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
@@ -105,7 +105,7 @@ function getActivationParams(strategy: RecallStrategy): ActivationParams {
  */
 async function getEntitySeeds(
   query: string,
-  graph: NeuralGraph,
+  graph: GraphPort,
 ): Promise<Map<string, number>> {
   const seeds = new Map<string, number>()
 
@@ -150,7 +150,7 @@ export interface ActivationResultSet {
 export async function stageActivate(
   recalled: RetrievedMemory[],
   query: string,
-  graph: NeuralGraph,
+  graph: GraphPort,
   strategy: RecallStrategy,
   storage: StorageAdapter,
 ): Promise<ActivationResultSet | null> {
@@ -178,7 +178,7 @@ export async function stageActivate(
   }
 
   // --- Run spreading activation via Cypher ---
-  let activatedNodes: ActivatedNode[]
+  let activatedNodes: GraphActivatedNode[]
   try {
     activatedNodes = await graph.spreadActivation({
       seedNodeIds: Array.from(seedActivations.keys()),

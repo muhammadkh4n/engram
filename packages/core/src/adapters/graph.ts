@@ -1,0 +1,89 @@
+/**
+ * GraphPort — the minimal interface core needs from a Wave 2 neural graph.
+ *
+ * This is a ports-and-adapters style contract. Core depends only on this
+ * interface, never on the concrete Neo4j implementation in @engram-mem/graph.
+ * NeuralGraph structurally satisfies this port; other graph backends can
+ * do the same without requiring changes to core.
+ *
+ * Defining this here also breaks what would otherwise be a circular
+ * dependency: core is the authoritative place for types that belong to
+ * cognitive memory, and graph implementations are downstream.
+ */
+
+// ---------------------------------------------------------------------------
+// Episode ingestion
+// ---------------------------------------------------------------------------
+
+/**
+ * Simplified episode shape for graph decomposition. When `llmEntities` is
+ * provided, graph implementations should prefer them over any internal
+ * regex-based extraction.
+ */
+export interface GraphEpisodeInput {
+  id: string
+  sessionId: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  salience: number
+  entities: string[]
+  createdAt: string | Date
+  previousEpisodeId?: string
+  llmEntities?: Array<{
+    name: string
+    type: 'person' | 'org' | 'tech' | 'project' | 'concept'
+    confidence: number
+  }>
+}
+
+// ---------------------------------------------------------------------------
+// Spreading activation
+// ---------------------------------------------------------------------------
+
+export interface GraphSpreadActivationOpts {
+  seedNodeIds: string[]
+  seedActivations?: Map<string, number>
+  maxHops?: number
+  decay?: number
+  threshold?: number
+  budget?: number
+  edgeFilter?: string[]
+}
+
+export interface GraphActivatedNode {
+  nodeId: string
+  nodeType: string
+  activation: number
+  depth: number
+  properties: Record<string, unknown>
+}
+
+// ---------------------------------------------------------------------------
+// Entity lookup
+// ---------------------------------------------------------------------------
+
+export interface GraphEntitySeedResult {
+  nodeId: string
+  nodeType: 'Person' | 'Entity' | 'Topic'
+  name: string
+}
+
+// ---------------------------------------------------------------------------
+// The port itself
+// ---------------------------------------------------------------------------
+
+/**
+ * A neural graph backend that core can optionally use for Wave 2+
+ * spreading activation, context assembly, and reconsolidation.
+ *
+ * All methods are optional at runtime in the sense that the entire port
+ * may be absent (no graph configured). Implementations should provide
+ * every method; core calls them only when the graph reference is non-null.
+ */
+export interface GraphPort {
+  isAvailable(): Promise<boolean>
+  ingestEpisode(input: GraphEpisodeInput): Promise<void>
+  lookupEntityNodes(names: string[]): Promise<GraphEntitySeedResult[]>
+  spreadActivation(opts: GraphSpreadActivationOpts): Promise<GraphActivatedNode[]>
+  strengthenTraversedEdges(pairs: Array<[string, string]>): Promise<void>
+}

@@ -15,16 +15,26 @@
  * duplicated.
  *
  * Usage:
- *   node dist/backfill-graph.js            # full backfill, all sessions
- *   node dist/backfill-graph.js --dry-run  # count only, no writes
- *   node dist/backfill-graph.js --limit N  # process at most N episodes
- *   node dist/backfill-graph.js --since ISO_DATE  # skip episodes older than this
+ *   node dist/backfill-graph.js                  # full backfill, all sessions
+ *   node dist/backfill-graph.js --dry-run        # count only, no writes
+ *   node dist/backfill-graph.js --limit N        # process at most N episodes
+ *   node dist/backfill-graph.js --since ISO_DATE # skip episodes older than this
+ *   node dist/backfill-graph.js --no-llm         # disable LLM extraction (regex only)
+ *   node dist/backfill-graph.js --concurrency N  # parallel LLM calls (default 4)
  *
- * Required env: SUPABASE_URL, SUPABASE_KEY, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+ * Required env: SUPABASE_URL, SUPABASE_KEY, NEO4J_URI, NEO4J_PASSWORD
+ * Optional env: NEO4J_USER (default: neo4j), OPENAI_API_KEY (enables LLM NER)
+ *
+ * When OPENAI_API_KEY is set, each episode is run through gpt-4o-mini for
+ * typed named-entity extraction (person/org/tech/project/concept) before
+ * being handed to the graph. Without it, the script falls back to the
+ * regex heuristic extractor in @engram-mem/graph.
  */
 
 import { createClient } from '@supabase/supabase-js'
 import { NeuralGraph } from '@engram-mem/graph'
+import { openaiIntelligence } from '@engram-mem/openai'
+import type { IntelligenceAdapter } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // CLI flags
@@ -35,16 +45,27 @@ interface Args {
   limit: number | null
   since: string | null
   batchSize: number
+  useLlm: boolean
+  concurrency: number
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { dryRun: false, limit: null, since: null, batchSize: 500 }
+  const args: Args = {
+    dryRun: false,
+    limit: null,
+    since: null,
+    batchSize: 500,
+    useLlm: true,
+    concurrency: 4,
+  }
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]
     if (flag === '--dry-run') args.dryRun = true
+    else if (flag === '--no-llm') args.useLlm = false
     else if (flag === '--limit') args.limit = Number.parseInt(argv[++i] ?? '0', 10)
     else if (flag === '--since') args.since = argv[++i] ?? null
     else if (flag === '--batch-size') args.batchSize = Number.parseInt(argv[++i] ?? '500', 10)
+    else if (flag === '--concurrency') args.concurrency = Number.parseInt(argv[++i] ?? '4', 10)
   }
   return args
 }
@@ -76,12 +97,21 @@ async function main(): Promise<void> {
   const neo4jUser = process.env['NEO4J_USER'] ?? 'neo4j'
   const neo4jPassword = requireEnv('NEO4J_PASSWORD')
 
-  log(`dry run:    ${args.dryRun}`)
-  log(`limit:      ${args.limit ?? '∞'}`)
-  log(`since:      ${args.since ?? '∞'}`)
-  log(`batch size: ${args.batchSize}`)
+  const openaiKey = process.env['OPENAI_API_KEY']
+  const llmEnabled = args.useLlm && !!openaiKey
+
+  log(`dry run:     ${args.dryRun}`)
+  log(`limit:       ${args.limit ?? '∞'}`)
+  log(`since:       ${args.since ?? '∞'}`)
+  log(`batch size:  ${args.batchSize}`)
+  log(`llm ner:     ${llmEnabled ? 'gpt-4o-mini' : 'off (regex fallback)'}`)
+  log(`concurrency: ${args.concurrency}`)
 
   const supabase = createClient(supabaseUrl, supabaseKey)
+
+  const intelligence: IntelligenceAdapter | null = llmEnabled
+    ? openaiIntelligence({ apiKey: openaiKey! })
+    : null
 
   const graph = new NeuralGraph({
     neo4jUri,
@@ -136,41 +166,68 @@ async function main(): Promise<void> {
 
     totalFetched += rows.length
 
-    for (const row of rows) {
-      // Skip empty or very short content
+    // Filter out empty/tiny rows upfront
+    const validRows = rows.filter((row) => {
       if (!row.content || row.content.trim().length < 2) {
         totalSkipped++
-        continue
+        return false
       }
+      return true
+    })
 
+    // Track TEMPORAL chain by walking validRows in order (already chronological)
+    // BEFORE any async work starts, so ordering is deterministic.
+    const rowsWithPrev = validRows.map((row) => {
       const previousEpisodeId = lastEpisodeBySession.get(row.session_id)
       lastEpisodeBySession.set(row.session_id, row.id)
+      return { row, previousEpisodeId }
+    })
 
-      if (args.dryRun) {
-        totalIngested++
-        continue
-      }
+    if (args.dryRun) {
+      totalIngested += rowsWithPrev.length
+      offset += rows.length
+    } else {
+      // Process in concurrency-limited chunks. LLM calls are the slow step;
+      // running several in parallel amortizes network latency significantly.
+      const chunkSize = args.concurrency
+      for (let i = 0; i < rowsWithPrev.length; i += chunkSize) {
+        const chunk = rowsWithPrev.slice(i, i + chunkSize)
+        await Promise.all(
+          chunk.map(async ({ row, previousEpisodeId }) => {
+            try {
+              // 1. Extract typed entities via LLM when available
+              const llmEntities = intelligence?.extractEntities
+                ? await intelligence.extractEntities(row.content).catch((err: unknown) => {
+                    log(
+                      `[warn] extractEntities ${row.id}: ${err instanceof Error ? err.message : String(err)}`,
+                    )
+                    return [] as Awaited<ReturnType<NonNullable<IntelligenceAdapter['extractEntities']>>>
+                  })
+                : undefined
 
-      try {
-        await graph.ingestEpisode({
-          id: row.id,
-          sessionId: row.session_id,
-          role: row.role,
-          content: row.content,
-          salience: row.salience ?? 0.5,
-          entities: row.entities ?? [],
-          createdAt: row.created_at,
-          ...(previousEpisodeId ? { previousEpisodeId } : {}),
-        })
-        totalIngested++
-      } catch (err) {
-        totalErrors++
-        const msg = err instanceof Error ? err.message : String(err)
-        log(`[ERROR] ingestEpisode ${row.id} failed: ${msg}`)
+              // 2. Ingest into Neo4j with typed entities when present
+              await graph.ingestEpisode({
+                id: row.id,
+                sessionId: row.session_id,
+                role: row.role,
+                content: row.content,
+                salience: row.salience ?? 0.5,
+                entities: row.entities ?? [],
+                createdAt: row.created_at,
+                ...(previousEpisodeId ? { previousEpisodeId } : {}),
+                ...(llmEntities && llmEntities.length > 0 ? { llmEntities } : {}),
+              })
+              totalIngested++
+            } catch (err) {
+              totalErrors++
+              const msg = err instanceof Error ? err.message : String(err)
+              log(`[ERROR] ingestEpisode ${row.id} failed: ${msg}`)
+            }
+          }),
+        )
       }
+      offset += rows.length
     }
-
-    offset += rows.length
 
     // Progress line every batch
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)

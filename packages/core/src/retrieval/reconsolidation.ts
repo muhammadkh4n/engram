@@ -1,4 +1,4 @@
-import type { NeuralGraph } from '@engram-mem/graph'
+import type { GraphPort } from '../adapters/graph.js'
 import type { RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { AssociationManager } from '../systems/association-manager.js'
@@ -18,7 +18,7 @@ export function stageReconsolidate(
   associated: RetrievedMemory[],
   storage: StorageAdapter,
   manager: AssociationManager,
-  graph: NeuralGraph | null = null,
+  graph: GraphPort | null = null,
 ): void {
   // Record access for each retrieved memory
   const accessUpdates = [...recalled, ...associated].map(async (memory) => {

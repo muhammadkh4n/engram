@@ -7,7 +7,7 @@
  * and builds the structured environmental context for the MCP response.
  */
 
-import type { ActivatedNode } from '@engram-mem/graph'
+import type { GraphActivatedNode } from '../adapters/graph.js'
 import type { RetrievedMemory } from '../types.js'
 import type { CompositeMemory } from './spreading-activation.js'
 
@@ -21,7 +21,7 @@ export function assembleContext(
   coreMemories: RetrievedMemory[],
   _associations: RetrievedMemory[],
   faintAssociations: RetrievedMemory[],
-  activatedNodes: ActivatedNode[],
+  activatedNodes: GraphActivatedNode[],
 ): CompositeMemory {
   const speakers: Array<{ name: string; role: string }> = []
   const emotionalContext: Array<{ label: string; intensity: number }> = []

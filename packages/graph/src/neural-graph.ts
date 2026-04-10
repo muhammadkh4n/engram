@@ -26,6 +26,12 @@ import { extractPersons, classifyEmotion } from './context-extractors.js'
  * Simplified episode shape used by consumers that don't want to build a
  * full EpisodeDecomposition. `ingestEpisode` extracts persons/emotion from
  * `content` internally and maps `entities` (string[]) to typed entity nodes.
+ *
+ * When `llmEntities` is provided (from an IntelligenceAdapter-backed
+ * entity extractor), the regex-based person/entity extraction is SKIPPED
+ * and the structured entities are used directly. This is the production
+ * path for high-precision NER. The regex path remains as a fallback when
+ * no intelligence adapter is available.
  */
 export interface SimpleEpisodeInput {
   id: string
@@ -36,6 +42,20 @@ export interface SimpleEpisodeInput {
   entities: string[]
   createdAt: string | Date
   previousEpisodeId?: string
+  /**
+   * Optional LLM-extracted typed entities. When present, takes precedence
+   * over regex-based extraction for persons and entities. Type values:
+   *   - 'person'  → added to persons[]
+   *   - 'tech'    → Entity with entityType='tech'
+   *   - 'project' → Entity with entityType='project'
+   *   - 'concept' → Entity with entityType='concept'
+   *   - 'org'     → Entity with entityType='concept' (Wave 1 has no 'org' type)
+   */
+  llmEntities?: Array<{
+    name: string
+    type: 'person' | 'org' | 'tech' | 'project' | 'concept'
+    confidence: number
+  }>
 }
 
 /** Result of looking up a query entity name in Neo4j */
@@ -938,8 +958,8 @@ export class NeuralGraph {
 
   /**
    * Simplified ingestion path for Wave 2. Takes a core-shaped episode,
-   * extracts persons/emotion internally, maps entities to typed entity
-   * nodes (default type 'tech'), and delegates to decomposeEpisode().
+   * extracts persons/emotion internally (or uses LLM-extracted entities
+   * when provided), and delegates to decomposeEpisode().
    *
    * Also creates the TEMPORAL edge from previousEpisodeId when provided.
    */
@@ -948,22 +968,46 @@ export class NeuralGraph {
       ? input.createdAt
       : new Date(input.createdAt)
 
-    const persons = extractPersons(input.content).map((p) => p.name)
     const emotionResult = classifyEmotion(input.content)
     const emotion = emotionResult.label !== 'neutral'
       ? { label: emotionResult.label, intensity: emotionResult.intensity }
       : null
 
-    // Build label from content (first 100 chars)
     const label = input.content.slice(0, 100)
 
-    // Map flat entity strings to typed entities. Without a classifier,
-    // default everything to 'tech' — this is a pragmatic choice; Wave 3
-    // can refine with a real entity type classifier.
-    const typedEntities = input.entities.map((name) => ({
-      name,
-      entityType: 'tech' as const,
-    }))
+    // Decide the entity source: LLM-extracted (precise) or regex fallback.
+    let persons: string[]
+    let typedEntities: Array<{
+      name: string
+      entityType: 'tech' | 'concept' | 'tool' | 'project'
+    }>
+
+    if (input.llmEntities && input.llmEntities.length > 0) {
+      // LLM path: use structured typed entities. Higher precision; no
+      // regex extraction runs.
+      persons = input.llmEntities
+        .filter((e) => e.type === 'person')
+        .map((e) => e.name)
+
+      typedEntities = input.llmEntities
+        .filter((e) => e.type !== 'person')
+        .map((e) => {
+          // Map LLM types to Wave 1's EntityNodeInput.entityType enum.
+          // 'org' collapses to 'concept' because Wave 1 has no 'org' type.
+          const entityType: 'tech' | 'concept' | 'tool' | 'project' =
+            e.type === 'tech' ? 'tech'
+            : e.type === 'project' ? 'project'
+            : 'concept'
+          return { name: e.name, entityType }
+        })
+    } else {
+      // Regex fallback path: the old heuristic extractors.
+      persons = extractPersons(input.content).map((p) => p.name)
+      typedEntities = input.entities.map((name) => ({
+        name,
+        entityType: 'tech' as const,
+      }))
+    }
 
     await this.decomposeEpisode({
       episodeId: input.id,

@@ -16,14 +16,7 @@
   "dependencies": {
     "uuid": "^11.0.0"
   },
-  "peerDependencies": {
-    "@engram-mem/graph": "*"
-  },
-  "peerDependenciesMeta": {
-    "@engram-mem/graph": { "optional": true }
-  },
   "devDependencies": {
-    "@engram-mem/graph": "*",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }

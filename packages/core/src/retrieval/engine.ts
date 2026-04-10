@@ -1,4 +1,4 @@
-import type { NeuralGraph } from '@engram-mem/graph'
+import type { GraphPort } from '../adapters/graph.js'
 import type { RecallStrategy, RetrievedMemory, RetrievalStrategy } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
@@ -35,7 +35,7 @@ export interface RecallOpts {
    * skipped and the legacy SQL association walk (stageAssociate) is used.
    * Defaults to null so existing callers need no changes.
    */
-  graph?: NeuralGraph | null
+  graph?: GraphPort | null
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ export async function recall(
 ): Promise<RecallResult> {
   const { strategy, embedding, intelligence, sessionId } = opts
   // Normalize: undefined and null both mean "no graph"
-  const graph: NeuralGraph | null = opts.graph ?? null
+  const graph: GraphPort | null = opts.graph ?? null
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {

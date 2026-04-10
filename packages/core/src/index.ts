@@ -32,7 +32,16 @@ export type {
   SummarizeOptions,
   SummaryResult,
   KnowledgeCandidate,
+  ExtractedEntity,
+  ExtractedEntityType,
 } from './adapters/intelligence.js'
+export type {
+  GraphPort,
+  GraphEpisodeInput,
+  GraphSpreadActivationOpts,
+  GraphActivatedNode,
+  GraphEntitySeedResult,
+} from './adapters/graph.js'
 export {
   CircuitBreaker,
   CircuitOpenError,
