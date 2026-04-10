@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
-    "openai": "^4.55.0"
+    "openai": "^6.34.0"
   },
   "devDependencies": {
     "typescript": "^5.5.0",

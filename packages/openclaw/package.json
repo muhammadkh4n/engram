@@ -28,7 +28,7 @@
     "@engram-mem/openai": "*",
     "@engram-mem/sqlite": "*",
     "@engram-mem/supabase": "*",
-    "@sinclair/typebox": "^0.33.0"
+    "@sinclair/typebox": "^0.34.49"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.0"
