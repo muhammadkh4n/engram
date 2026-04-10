@@ -52,6 +52,7 @@ import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
 import { resolveProject } from './project-detect.js'
 import { findDuplicate, boostDuplicate } from './dedup.js'
+import { logRejection } from './rejection-log.js'
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -324,6 +325,22 @@ async function main(): Promise<void> {
 
   // --- Gate ---
   if (!classification.store || classification.confidence < args.threshold) {
+    // Append to rolling rejection log for audit + prompt tuning.
+    // Skip logging for --raw mode because raw mode always stores, and
+    // for the too-short short-circuit (no useful signal there).
+    if (!args.raw && classification.reason !== 'too_short') {
+      logRejection({
+        timestamp: new Date().toISOString(),
+        cwd: process.cwd(),
+        project,
+        role: args.turn,
+        source: args.source,
+        category: classification.category,
+        confidence: classification.confidence,
+        reason: classification.reason,
+        contentPreview: content.slice(0, 300),
+      })
+    }
     log(
       args.verbose,
       `rejected: store=${classification.store} confidence=${classification.confidence.toFixed(2)} threshold=${args.threshold}`,
