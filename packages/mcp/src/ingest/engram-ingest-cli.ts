@@ -402,6 +402,10 @@ async function main(): Promise<void> {
         rawTurn: content.slice(0, 4000),
       },
     })
+    // Wait for fire-and-forget graph decomposition to finish before the
+    // process exits. Without this, the CLI can return immediately after
+    // the SQL insert and process.exit() kills the inflight Neo4j write.
+    await memory.flushPendingWrites()
     log(args.verbose, `stored as ${classification.category} in project=${project}`)
   } finally {
     await memory.dispose()

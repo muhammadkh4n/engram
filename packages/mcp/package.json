@@ -11,7 +11,8 @@
     "engram-pre-compact": "dist/pre-compact.js",
     "engram-backfill-graph": "dist/backfill-graph.js",
     "engram-test-wave2-e2e": "dist/test-wave2-e2e.js",
-    "engram-ingest": "dist/ingest/engram-ingest-cli.js"
+    "engram-ingest": "dist/ingest/engram-ingest-cli.js",
+    "engram-hook-user-prompt-submit": "dist/hooks/user-prompt-submit.js"
   },
   "files": ["dist/", "README.md"],
   "publishConfig": { "access": "public" },

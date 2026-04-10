@@ -64,6 +64,10 @@ export class Memory {
   // All graph operations null-check this field. Ingestion and retrieval
   // fall back gracefully to SQL-only mode when graph is null.
   private _graph: GraphPort | null = null
+  // Tracks fire-and-forget graph writes launched during ingest(). Callers
+  // that need deterministic persistence (CLI tools, tests) can call
+  // flushPendingWrites() to wait for all of them to settle.
+  private _pendingWrites: Array<Promise<unknown>> = []
 
   constructor(opts: MemoryOptions) {
     this.storage = opts.storage
@@ -224,7 +228,7 @@ export class Memory {
           })
         : Promise.resolve([])
 
-      entityPromise.then((llmEntities) => {
+      const graphPromise = entityPromise.then((llmEntities) => {
         const input = {
           id: episode.id,
           sessionId,
@@ -240,7 +244,28 @@ export class Memory {
       }).catch((err: unknown) => {
         console.warn('[engram] graph decomposition failed (non-fatal):', err)
       })
+
+      // Track the promise so callers can flush pending writes.
+      // The promise is appended here and removed after it settles, so
+      // _pendingWrites stays bounded during long-running processes.
+      this._pendingWrites.push(graphPromise)
+      graphPromise.finally(() => {
+        const idx = this._pendingWrites.indexOf(graphPromise)
+        if (idx >= 0) this._pendingWrites.splice(idx, 1)
+      })
     }
+  }
+
+  /**
+   * Wait for all fire-and-forget graph writes launched during ingest()
+   * to settle. Useful for CLI tools and tests that need deterministic
+   * persistence before exiting. Safe to call when no writes are pending.
+   */
+  async flushPendingWrites(): Promise<void> {
+    if (this._pendingWrites.length === 0) return
+    // Snapshot the array because entries will be removed as they settle
+    const snapshot = this._pendingWrites.slice()
+    await Promise.allSettled(snapshot)
   }
 
   /** Store multiple messages. Batch-optimized. */
