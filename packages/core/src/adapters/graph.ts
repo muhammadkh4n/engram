@@ -34,6 +34,13 @@ export interface GraphEpisodeInput {
     type: 'person' | 'org' | 'tech' | 'project' | 'concept'
     confidence: number
   }>
+  /**
+   * Optional project scope tag. When set, the graph should create a
+   * :Project node and a Memory-[:PROJECT]->Project edge so memories
+   * within the same project cluster together. Missing / empty means
+   * the memory is not scoped to a project.
+   */
+  project?: string
 }
 
 // ---------------------------------------------------------------------------

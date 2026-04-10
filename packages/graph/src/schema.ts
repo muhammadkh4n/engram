@@ -7,6 +7,7 @@ export const CONSTRAINTS: string[] = [
   'CREATE CONSTRAINT intent_id IF NOT EXISTS FOR (i:Intent) REQUIRE i.id IS UNIQUE',
   'CREATE CONSTRAINT session_id IF NOT EXISTS FOR (s:Session) REQUIRE s.sessionId IS UNIQUE',
   'CREATE CONSTRAINT time_context_id IF NOT EXISTS FOR (t:TimeContext) REQUIRE t.id IS UNIQUE',
+  'CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE',
 ]
 
 export const INDEXES: string[] = [
@@ -17,6 +18,7 @@ export const INDEXES: string[] = [
   'CREATE INDEX intent_type IF NOT EXISTS FOR (i:Intent) ON (i.intentType)',
   'CREATE INDEX time_context_composite IF NOT EXISTS FOR (t:TimeContext) ON (t.yearWeek, t.dayOfWeek, t.timeOfDay)',
   'CREATE INDEX person_name IF NOT EXISTS FOR (p:Person) ON (p.name)',
+  'CREATE INDEX project_name IF NOT EXISTS FOR (p:Project) ON (p.name)',
 ]
 
 export const ALL_SCHEMA_STATEMENTS: string[] = [...CONSTRAINTS, ...INDEXES]

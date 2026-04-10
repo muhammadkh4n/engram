@@ -36,6 +36,16 @@ export interface RecallOpts {
    * Defaults to null so existing callers need no changes.
    */
   graph?: GraphPort | null
+  /**
+   * Optional project scope. When set, vector-search results matching
+   * this project receive a relevance boost, and spreading activation
+   * uses the project node as an additional seed. This is a SOFT
+   * preference — memories from other projects are still returned with
+   * their original ranking. Set projectStrict=true for hard filtering.
+   */
+  project?: string
+  /** When true, drop candidates whose project does not match opts.project. */
+  projectStrict?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +197,33 @@ function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
   }
 }
 
+/**
+ * Apply project soft-preference to a ranked memory list.
+ * Same-project matches get a +0.10 relevance boost. When strict is on,
+ * explicit different-project matches are dropped (null project is kept
+ * because historical memories predate project tagging).
+ */
+function applyProjectPreference(
+  memories: RetrievedMemory[],
+  project: string,
+  strict: boolean,
+): RetrievedMemory[] {
+  return memories
+    .map((m) => {
+      const memProject = (m.metadata?.['project'] as string | undefined) ?? null
+      if (memProject === project) {
+        return { ...m, relevance: Math.min(1.0, m.relevance + 0.1) }
+      }
+      return m
+    })
+    .filter((m) => {
+      if (!strict) return true
+      const memProject = (m.metadata?.['project'] as string | undefined) ?? null
+      return memProject === project || memProject === null
+    })
+    .sort((a, b) => b.relevance - a.relevance)
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -200,6 +237,8 @@ export async function recall(
   const { strategy, embedding, intelligence, sessionId } = opts
   // Normalize: undefined and null both mean "no graph"
   const graph: GraphPort | null = opts.graph ?? null
+  const project = opts.project
+  const projectStrict = opts.projectStrict === true
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -233,6 +272,13 @@ export async function recall(
     sessionId,
     expandedTerms,
   })
+
+  // Project soft-preference: boost memories matching the current
+  // project so they rank higher than cross-project hits, without hard
+  // filtering. When projectStrict is set, drop explicit mismatches.
+  if (project) {
+    memories = applyProjectPreference(memories, project, projectStrict)
+  }
 
   // HyDE fallback: when top result is weak, generate a hypothetical answer,
   // embed it, and run a second search pass. Merge results (highest score wins).
@@ -280,7 +326,7 @@ export async function recall(
   let compositeContext: CompositeMemory | null = null
 
   if (strategy.associations && graph !== null) {
-    const activationResult = await stageActivate(memories, query, graph, strategy, storage)
+    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project)
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
       const legacyStrategy = toRetrievalStrategy(strategy)

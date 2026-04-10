@@ -56,6 +56,12 @@ export interface SimpleEpisodeInput {
     type: 'person' | 'org' | 'tech' | 'project' | 'concept'
     confidence: number
   }>
+  /**
+   * Optional project scope tag. Memories with the same project share a
+   * :Project node via the PROJECT edge. Used by Wave 2 retrieval to
+   * cluster same-project memories together via spreading activation.
+   */
+  project?: string
 }
 
 /** Result of looking up a query entity name in Neo4j */
@@ -1020,6 +1026,45 @@ export class NeuralGraph {
       emotion,
       intent: null,
     })
+
+    // PROJECT edge: tag this memory with its project scope.
+    // Uses MERGE on Project.id = 'project:<name>' so project nodes are
+    // singletons across the whole graph — all memories from the same
+    // project share the node, which means Wave 2 spreading activation
+    // from a Project seed naturally pulls in all project memories.
+    if (input.project && input.project !== 'global') {
+      const projectId = `project:${normalizeForId(input.project)}`
+      const now = new Date().toISOString()
+      const session = this.driver.session()
+      try {
+        await session.executeWrite(async (tx) => {
+          await tx.run(
+            `MERGE (p:Project {id: $projectId})
+             ON CREATE SET
+               p.name = $name,
+               p.createdAt = $now,
+               p.lastAccessed = $now,
+               p.activationCount = 0
+             ON MATCH SET
+               p.lastAccessed = $now
+             WITH p
+             MATCH (m:Memory {id: $memoryId})
+             MERGE (m)-[r:PROJECT]->(p)
+             ON CREATE SET
+               r.weight = 1.0,
+               r.createdAt = $now,
+               r.lastTraversed = $now,
+               r.traversalCount = 1
+             ON MATCH SET
+               r.lastTraversed = $now,
+               r.traversalCount = r.traversalCount + 1`,
+            { projectId, name: input.project, memoryId: input.id, now },
+          )
+        })
+      } finally {
+        await session.close()
+      }
+    }
 
     // TEMPORAL edge from previous episode in the same session.
     //

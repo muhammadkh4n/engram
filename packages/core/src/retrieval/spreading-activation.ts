@@ -153,6 +153,7 @@ export async function stageActivate(
   graph: GraphPort,
   strategy: RecallStrategy,
   storage: StorageAdapter,
+  project?: string,
 ): Promise<ActivationResultSet | null> {
   const params = getActivationParams(strategy)
 
@@ -169,6 +170,18 @@ export async function stageActivate(
   for (const [nodeId, activation] of entitySeeds) {
     if (!seedActivations.has(nodeId)) {
       seedActivations.set(nodeId, activation)
+    }
+  }
+
+  // --- Project seed (soft preference) ---
+  // When a project is provided, add its node as an additional seed with
+  // activation 0.6. Spreading activation from the project node naturally
+  // pulls in all memories sharing the PROJECT edge, boosting same-project
+  // associations without hard-filtering cross-project content.
+  if (project && project !== 'global') {
+    const projectNodeId = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/(^_|_$)/g, '')}`
+    if (!seedActivations.has(projectNodeId)) {
+      seedActivations.set(projectNodeId, 0.6)
     }
   }
 

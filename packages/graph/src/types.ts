@@ -13,6 +13,7 @@ export type NodeLabel =
   | 'Intent'
   | 'Session'
   | 'TimeContext'
+  | 'Project'
 
 // ============================================================================
 // Base Properties (shared by all nodes)
@@ -193,6 +194,7 @@ export type RelationType =
   | 'INTENTIONAL'
   | 'OCCURRED_IN'
   | 'OCCURRED_AT'
+  | 'PROJECT'
 
 export interface RelationshipProperties {
   weight: number

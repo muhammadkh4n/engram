@@ -37,6 +37,12 @@ export interface MemoryOptions {
    * before passing it in.
    */
   graph?: GraphPort
+  /**
+   * Optional default project scope. All ingestions and recalls will be
+   * tagged / boosted with this project unless overridden per-call via
+   * message.metadata.project or recall(..., { project }).
+   */
+  project?: string
 }
 
 export interface SessionHandle {
@@ -68,6 +74,7 @@ export class Memory {
   // that need deterministic persistence (CLI tools, tests) can call
   // flushPendingWrites() to wait for all of them to settle.
   private _pendingWrites: Array<Promise<unknown>> = []
+  private _defaultProject: string | undefined
 
   constructor(opts: MemoryOptions) {
     this.storage = opts.storage
@@ -75,6 +82,7 @@ export class Memory {
     this.sensory = new SensoryBuffer()
     this.intentAnalyzer = new HeuristicIntentAnalyzer()
     this._graph = opts.graph ?? null
+    this._defaultProject = opts.project
   }
 
   private get associations(): AssociationManager {
@@ -228,6 +236,13 @@ export class Memory {
           })
         : Promise.resolve([])
 
+      // Project tag comes from the message metadata (set by the caller,
+      // e.g. the engram-ingest CLI) or falls back to undefined.
+      const projectFromMeta =
+        message.metadata && typeof message.metadata['project'] === 'string'
+          ? (message.metadata['project'] as string)
+          : undefined
+
       const graphPromise = entityPromise.then((llmEntities) => {
         const input = {
           id: episode.id,
@@ -239,6 +254,7 @@ export class Memory {
           createdAt: episode.createdAt.toISOString(),
           ...(previousEpisodeId ? { previousEpisodeId } : {}),
           ...(llmEntities.length > 0 ? { llmEntities } : {}),
+          ...(projectFromMeta ? { project: projectFromMeta } : {}),
         }
         return graph.ingestEpisode(input)
       }).catch((err: unknown) => {
@@ -312,6 +328,7 @@ export class Memory {
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
       graph: this._graph,
+      ...(this._defaultProject ? { project: this._defaultProject } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn
