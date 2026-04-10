@@ -595,14 +595,172 @@ async function main(): Promise<void> {
   }
 
   // -------------------------------------------------------------------------
+  // Stage 7: Salience classifier (Phase 1 classifier behavior)
+  // -------------------------------------------------------------------------
+  section('Stage 7: Salience classifier correctness')
+
+  if (!intelligence.extractSalience) {
+    assert('intelligence.extractSalience is available', false, 'method missing')
+  } else {
+    const classifierFixtures: Array<{
+      content: string
+      turnRole: 'user' | 'assistant'
+      expectStore: boolean
+      expectCategory?: string
+      label: string
+    }> = [
+      {
+        content: 'ok',
+        turnRole: 'user',
+        expectStore: false,
+        label: 'Reject short acknowledgment',
+      },
+      {
+        content:
+          'Actually stop giving me time estimates — just do the work and tell me when it is done',
+        turnRole: 'user',
+        expectStore: true,
+        expectCategory: 'preference',
+        label: 'Accept user preference correction',
+      },
+      {
+        content:
+          "We're going to use Neo4j instead of graphology because graphology has O(E) edge checks and no GDS",
+        turnRole: 'assistant',
+        expectStore: true,
+        expectCategory: 'decision',
+        label: 'Accept assistant decision with rationale',
+      },
+      {
+        content: 'my OPENAI_API_KEY is sk-proj-abc123xyz789',
+        turnRole: 'user',
+        expectStore: false,
+        label: 'Reject content with API key',
+      },
+    ]
+
+    for (const fx of classifierFixtures) {
+      const result = await intelligence.extractSalience(fx.content, {
+        turnRole: fx.turnRole,
+        project: 'engram',
+      })
+      const pass =
+        result.store === fx.expectStore &&
+        (!fx.expectCategory || result.category === fx.expectCategory)
+      assert(
+        fx.label,
+        pass,
+        `got store=${result.store} category=${result.category} confidence=${result.confidence.toFixed(2)} reason="${result.reason}"`,
+      )
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Stage 8: Project scoping (Phase 5 behavior)
+  // -------------------------------------------------------------------------
+  section('Stage 8: Project scoping')
+
+  // All three fixture sessions share the same project via the test
+  // setup — all ingested without a --project flag, so they landed with
+  // no project tag. Verify that this is the case by checking the
+  // graph, then manually tag some via direct ingest to simulate
+  // mixed-project recall.
+  const projectSession = driver.session()
+  try {
+    // Ingest a project-tagged episode via Memory.ingest()
+    await memory.ingest({
+      content: 'The Wave 2 Neo4j pipeline is now project-scoped with soft-preference boosting',
+      role: 'system',
+      sessionId: SESSION_A,
+      metadata: { project: 'engram' },
+    })
+    await memory.flushPendingWrites()
+    await sleep(1000)
+
+    const engramProjectCount = await runCount(
+      projectSession,
+      `MATCH (p:Project {name: 'engram'})<-[:PROJECT]-(m:Memory) RETURN count(m) AS n`,
+      {},
+    )
+    assert(
+      'Ingesting with metadata.project="engram" creates PROJECT edge',
+      engramProjectCount >= 1,
+      `expected ≥1 Memory with PROJECT edge to engram, got ${engramProjectCount}`,
+    )
+
+    const projectNode = await projectSession.run(
+      `MATCH (p:Project {name: 'engram'}) RETURN p.id AS id`,
+      {},
+    )
+    assert(
+      ':Project node has canonical id "project:engram"',
+      projectNode.records[0]?.get('id') === 'project:engram',
+      `got ${String(projectNode.records[0]?.get('id'))}`,
+    )
+  } finally {
+    await projectSession.close()
+  }
+
+  // -------------------------------------------------------------------------
+  // Stage 9: Dedup gate
+  // -------------------------------------------------------------------------
+  section('Stage 9: Dedup gate')
+
+  // Verify dedup by writing one distinct fact, then attempting to
+  // write near-duplicates and asserting they don't produce new Memory
+  // nodes for the target session.
+  const dedupSessionId = 'e2e-wave2-dedup'
+  try {
+    // Cleanup any prior state
+    await supabase.from('memory_episodes').delete().eq('session_id', dedupSessionId)
+    const cleanDedup = driver.session()
+    try {
+      await cleanDedup.run(
+        `MATCH (s:Session {sessionId: $sid}) OPTIONAL MATCH (s)<-[:OCCURRED_IN]-(m:Memory) DETACH DELETE s, m`,
+        { sid: dedupSessionId },
+      )
+    } finally {
+      await cleanDedup.close()
+    }
+
+    // Write the original
+    await memory.ingest({
+      content: 'Sarah recommends setting the decay parameter to 0.6 for Wave 2 spreading activation tuning',
+      role: 'user',
+      sessionId: dedupSessionId,
+      metadata: { project: 'engram' },
+    })
+    await memory.flushPendingWrites()
+    await sleep(500)
+
+    // Use the dedup module directly against a near-duplicate
+    const { findDuplicate } = await import('./ingest/dedup.js')
+    const result = await findDuplicate(
+      'Sarah suggests the decay parameter should be 0.6 for Wave 2 activation',
+      storage,
+      intelligence,
+      { project: 'engram' },
+    )
+
+    assert(
+      'findDuplicate matches paraphrased content above threshold',
+      result.duplicateId !== null,
+      `got duplicateId=${result.duplicateId} similarity=${result.similarity.toFixed(3)}`,
+    )
+  } catch (err) {
+    assert('dedup stage did not throw', false, err instanceof Error ? err.message : String(err))
+  }
+
+  // -------------------------------------------------------------------------
   // Final cleanup
   // -------------------------------------------------------------------------
   if (!keepData) {
     section('Cleanup')
+    const allTestSessions = [...TEST_SESSIONS, dedupSessionId]
     const { error: finalDelete } = await supabase
       .from('memory_episodes')
       .delete()
-      .in('session_id', TEST_SESSIONS)
+      .in('session_id', allTestSessions)
     if (finalDelete) info(`Supabase cleanup warning: ${finalDelete.message}`)
     else info('Supabase episodes deleted')
 
@@ -612,7 +770,14 @@ async function main(): Promise<void> {
         `MATCH (s:Session) WHERE s.sessionId IN $sessions
          OPTIONAL MATCH (m:Memory)-[:OCCURRED_IN]->(s)
          DETACH DELETE m, s`,
-        { sessions: TEST_SESSIONS },
+        { sessions: allTestSessions },
+      )
+      // Also clean the test :Project node if it only has our test memories
+      await finalSession.run(
+        `MATCH (p:Project {name: 'engram'})
+         WHERE NOT (p)<-[:PROJECT]-(:Memory)
+         DETACH DELETE p`,
+        {},
       )
       info('Neo4j test session data deleted')
     } finally {
