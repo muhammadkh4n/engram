@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "MCP server exposing Engram memory tools for Claude Code and other MCP clients",
   "main": "dist/index.js",
@@ -17,9 +17,17 @@
     "engram-salience-stats": "dist/ingest/engram-salience-stats-cli.js",
     "engram-git-setup": "dist/git-setup-cli.js"
   },
-  "files": ["dist/", "README.md"],
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "https://github.com/muhammadkh4n/engram.git" },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muhammadkh4n/engram.git"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
