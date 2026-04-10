@@ -14,7 +14,8 @@
     "engram-ingest": "dist/ingest/engram-ingest-cli.js",
     "engram-hook-user-prompt-submit": "dist/hooks/user-prompt-submit.js",
     "engram-hook-stop": "dist/hooks/stop.js",
-    "engram-salience-stats": "dist/ingest/engram-salience-stats-cli.js"
+    "engram-salience-stats": "dist/ingest/engram-salience-stats-cli.js",
+    "engram-git-setup": "dist/git-setup-cli.js"
   },
   "files": ["dist/", "README.md"],
   "publishConfig": { "access": "public" },
