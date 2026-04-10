@@ -50,6 +50,8 @@ import type { SalienceClassification } from '@engram-mem/core'
 import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
+import { resolveProject } from './project-detect.js'
+import { findDuplicate, boostDuplicate } from './dedup.js'
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -283,6 +285,10 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
+  // --- Project resolution ---
+  const project = resolveProject(args.project, process.cwd())
+  log(args.verbose, `project: ${project} (flag=${args.project})`)
+
   // --- Classification ---
   let classification: SalienceClassification
   if (args.raw) {
@@ -307,7 +313,7 @@ async function main(): Promise<void> {
 
     classification = await intelligence.extractSalience(content, {
       turnRole: args.turn,
-      project: args.project === 'auto' || args.project === 'none' ? undefined : args.project,
+      project,
     })
   }
 
@@ -337,10 +343,46 @@ async function main(): Promise<void> {
 
   const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence = openaiIntelligence({ apiKey: openaiKey })
+
+  // --- Dedup gate ---
+  // Fires BEFORE the graph/memory stack is constructed so we avoid the
+  // cost of initializing Neo4j on the duplicate path.
+  if (!args.noDedup) {
+    await storage.initialize()
+    try {
+      const dup = await findDuplicate(classification.distilled, storage, intelligence, {
+        project,
+      })
+      if (args.verbose && dup.debug) {
+        const d = dup.debug
+        log(
+          args.verbose,
+          `dedup: candidates=${d.candidatesReturned} topSim=${d.topSimilarity.toFixed(3)} topProj=${d.topProject ?? 'null'} rejByThresh=${d.rejectedByThreshold} rejByWindow=${d.rejectedByWindow} rejByProj=${d.rejectedByProject}`,
+        )
+      }
+      if (dup.duplicateId) {
+        await boostDuplicate(storage, dup.duplicateId)
+        log(
+          args.verbose,
+          `deduped: existing=${dup.duplicateId.slice(0, 8)} similarity=${dup.similarity.toFixed(3)}`,
+        )
+        await storage.dispose()
+        return
+      }
+    } finally {
+      // Dispose the shallow storage before constructing the full Memory.
+      // This avoids double-dispose later.
+      await storage.dispose().catch(() => {})
+    }
+  }
+
+  // --- Full Memory construction + ingest ---
+  // Use a fresh storage instance because we disposed the dedup-check one.
+  const ingestStorage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const graph = await tryCreateGraph('[engram-ingest]')
 
   const memory = createMemory({
-    storage,
+    storage: ingestStorage,
     intelligence,
     ...(graph ? { graph } : {}),
   })
@@ -356,10 +398,11 @@ async function main(): Promise<void> {
         salienceConfidence: classification.confidence,
         salienceReason: classification.reason,
         source: args.source,
+        project,
         rawTurn: content.slice(0, 4000),
       },
     })
-    log(args.verbose, `stored as ${classification.category}`)
+    log(args.verbose, `stored as ${classification.category} in project=${project}`)
   } finally {
     await memory.dispose()
   }
