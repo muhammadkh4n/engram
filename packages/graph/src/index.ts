@@ -2,6 +2,14 @@
 export { NeuralGraph } from './neural-graph.js'
 export { SpreadingActivation } from './spreading-activation.js'
 
+// === Wave 2 Facade Types (from NeuralGraph) ===
+export type {
+  SimpleEpisodeInput,
+  EntitySeedResult,
+  SpreadActivationOpts,
+  ActivatedNode,
+} from './neural-graph.js'
+
 // === Configuration ===
 export { parseGraphConfig, validateGraphConfig } from './config.js'
 export type { GraphConfig } from './config.js'

@@ -1,3 +1,4 @@
+import type { NeuralGraph } from '@engram-mem/graph'
 import type { RecallStrategy, RetrievedMemory, RetrievalStrategy } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
@@ -8,6 +9,7 @@ import { unifiedSearch } from './search.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
 import { stageReconsolidate } from './reconsolidation.js'
+import { stageActivate, type CompositeMemory } from './spreading-activation.js'
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -28,6 +30,12 @@ export interface RecallOpts {
   intelligence?: IntelligenceAdapter
   sessionId?: string
   tokenBudget?: number
+  /**
+   * Optional Neo4j graph. When null or omitted, spreading activation is
+   * skipped and the legacy SQL association walk (stageAssociate) is used.
+   * Defaults to null so existing callers need no changes.
+   */
+  graph?: NeuralGraph | null
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +105,8 @@ function formatTag(m: RetrievedMemory): string {
 
 function formatMemories(
   memories: RetrievedMemory[],
-  associations: RetrievedMemory[]
+  associations: RetrievedMemory[],
+  context: CompositeMemory | null = null,
 ): string {
   if (memories.length === 0 && associations.length === 0) return ''
 
@@ -120,6 +129,41 @@ function formatMemories(
     lines.push('\n### Related Memories\n')
     for (const a of associations) {
       lines.push(`- [${formatTag(a)}] ${a.content}`)
+    }
+  }
+
+  // --- Wave 2: Graph context section ---
+  // Only present when Neo4j spreading activation ran. Backward compatible:
+  // when context is null, these sections are omitted entirely.
+  if (context !== null) {
+    const hasContextLines =
+      context.speakers.length > 0 ||
+      context.emotionalContext.length > 0 ||
+      context.relatedTopics.length > 0 ||
+      context.temporalContext.length > 0
+
+    if (hasContextLines) {
+      lines.push('\n### Context\n')
+      if (context.speakers.length > 0) {
+        lines.push(`- Speakers: ${context.speakers.map((s) => s.name).join(', ')}`)
+      }
+      if (context.emotionalContext.length > 0) {
+        lines.push(`- Tone: ${context.emotionalContext.map((e) => e.label).join(', ')}`)
+      }
+      if (context.relatedTopics.length > 0) {
+        lines.push(`- Related topics: ${context.relatedTopics.join(', ')}`)
+      }
+      if (context.temporalContext.length > 0) {
+        const tc = context.temporalContext[0]
+        if (tc) lines.push(`- Time: ${tc.timeOfDay}, ${tc.session}`)
+      }
+    }
+
+    if (context.faintAssociations.length > 0) {
+      lines.push('\n### Faint Associations\n')
+      for (const f of context.faintAssociations) {
+        lines.push(`- [${formatTag(f)}] ${f.content}`)
+      }
     }
   }
 
@@ -154,6 +198,8 @@ export async function recall(
   opts: RecallOpts
 ): Promise<RecallResult> {
   const { strategy, embedding, intelligence, sessionId } = opts
+  // Normalize: undefined and null both mean "no graph"
+  const graph: NeuralGraph | null = opts.graph ?? null
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -222,9 +268,29 @@ export async function recall(
     }
   }
 
-  // Stage 2: Association walk (deep mode only)
+  // Stage 2: Association expansion
+  // Wave 2: Try Neo4j spreading activation. Fall back to SQL walk if:
+  //   (a) graph is null (Neo4j unavailable or not configured), OR
+  //   (b) stageActivate returns null (mixed population — vector seeds
+  //       have no matching graph nodes, no entity hits either)
+  //
+  // Mixed population fallback: stageAssociate is NOT removed. It runs
+  // whenever the graph cannot help.
   let associations: RetrievedMemory[] = []
-  if (strategy.associations) {
+  let compositeContext: CompositeMemory | null = null
+
+  if (strategy.associations && graph !== null) {
+    const activationResult = await stageActivate(memories, query, graph, strategy, storage)
+    if (activationResult === null) {
+      // Graph has no nodes for any seed — fall back to SQL walk
+      const legacyStrategy = toRetrievalStrategy(strategy)
+      associations = await stageAssociate(memories, legacyStrategy, storage)
+    } else {
+      associations = activationResult.associations
+      compositeContext = activationResult.context
+    }
+  } else if (strategy.associations) {
+    // No graph — SQL association walk
     const legacyStrategy = toRetrievalStrategy(strategy)
     associations = await stageAssociate(memories, legacyStrategy, storage)
   }
@@ -233,11 +299,12 @@ export async function recall(
   const primed = stagePrime(memories, associations, sensory)
 
   // Stage 4: Reconsolidation — fire-and-forget
+  // Wave 2: also strengthens traversed Neo4j edges when graph is non-null.
   const manager = new AssociationManager(storage.associations)
-  stageReconsolidate(memories, associations, storage, manager)
+  stageReconsolidate(memories, associations, storage, manager, graph)
 
-  // Format results
-  const formatted = formatMemories(memories, associations)
+  // Format results (includes Context section when graph ran successfully)
+  const formatted = formatMemories(memories, associations, compositeContext)
   const estimatedTokens = estimateTokens(formatted)
 
   return {

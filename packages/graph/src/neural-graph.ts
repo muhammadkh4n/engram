@@ -12,7 +12,59 @@ import type {
   TimeContextNodeInput,
   EpisodeDecomposition,
   RelationType,
+  ActivationParams,
+  ActivationResult,
 } from './types.js'
+import { SpreadingActivation } from './spreading-activation.js'
+import { extractPersons, classifyEmotion } from './context-extractors.js'
+
+// ============================================================================
+// Wave 2 Facade Types
+// ============================================================================
+
+/**
+ * Simplified episode shape used by consumers that don't want to build a
+ * full EpisodeDecomposition. `ingestEpisode` extracts persons/emotion from
+ * `content` internally and maps `entities` (string[]) to typed entity nodes.
+ */
+export interface SimpleEpisodeInput {
+  id: string
+  sessionId: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  salience: number
+  entities: string[]
+  createdAt: string | Date
+  previousEpisodeId?: string
+}
+
+/** Result of looking up a query entity name in Neo4j */
+export interface EntitySeedResult {
+  nodeId: string
+  nodeType: 'Person' | 'Entity' | 'Topic'
+  name: string
+}
+
+/** Wave 2 spreadActivation options (wraps SpreadingActivation.activate) */
+export interface SpreadActivationOpts {
+  seedNodeIds: string[]
+  /** Optional per-seed initial activation (currently unused by the Cypher query) */
+  seedActivations?: Map<string, number>
+  maxHops?: number
+  decay?: number
+  threshold?: number
+  budget?: number
+  edgeFilter?: string[]
+}
+
+/** Wave 2 ActivatedNode — matches ActivationResult with stable field names */
+export interface ActivatedNode {
+  nodeId: string
+  nodeType: string
+  activation: number
+  depth: number
+  properties: Record<string, unknown>
+}
 
 // ============================================================================
 // Neo4j Integer Conversion
@@ -768,6 +820,190 @@ export class NeuralGraph {
       }
     } finally {
       await session.close()
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Wave 2 Facade: connectivity, entity lookup, spreading activation,
+  // simplified ingestion, edge strengthening. These wrap lower-level methods
+  // with the shape Wave 2's retrieval pipeline expects.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Availability check — alias for ping(). Returns true iff Neo4j is reachable
+   * and responsive. Does NOT throw.
+   */
+  async isAvailable(): Promise<boolean> {
+    return this.ping()
+  }
+
+  /**
+   * Look up Person, Entity, and Topic nodes by name. Case-insensitive match
+   * on Entity and Topic; exact match on Person.name.
+   *
+   * Used by Wave 2's entity-based seed injection: extract names from the
+   * query, pass them here, feed the resulting node IDs into spreading
+   * activation as independent graph seeds.
+   */
+  async lookupEntityNodes(names: string[]): Promise<EntitySeedResult[]> {
+    if (names.length === 0) return []
+
+    const session = this.driver.session()
+    try {
+      const result = await session.executeRead(async (tx) => {
+        return tx.run(
+          `UNWIND $names AS name
+           MATCH (n)
+           WHERE (n:Person AND n.name = name)
+              OR (n:Entity AND toLower(n.name) = toLower(name))
+              OR (n:Topic AND toLower(n.name) = toLower(name))
+           RETURN DISTINCT n.id AS nodeId,
+                  labels(n)[0] AS nodeType,
+                  n.name AS name`,
+          { names },
+        )
+      })
+
+      return result.records.map((record) => ({
+        nodeId: record.get('nodeId') as string,
+        nodeType: record.get('nodeType') as 'Person' | 'Entity' | 'Topic',
+        name: record.get('name') as string,
+      }))
+    } catch (err) {
+      // Non-fatal: caller treats an empty result the same as "no entities"
+      return []
+    } finally {
+      await session.close()
+    }
+  }
+
+  /**
+   * Wave 2 spreading activation facade. Wraps the standalone
+   * SpreadingActivation class with the option shape Wave 2 uses.
+   *
+   * Note: seedActivations is accepted for forward compatibility but the
+   * underlying Cypher query uses uniform activation (1.0) per seed.
+   * Per-seed initial weights are a Wave 3 enhancement.
+   */
+  async spreadActivation(opts: SpreadActivationOpts): Promise<ActivatedNode[]> {
+    const sa = new SpreadingActivation(this.driver)
+    const params: ActivationParams = {
+      maxHops: opts.maxHops ?? 2,
+      decayPerHop: opts.decay ?? 0.6,
+      minActivation: opts.threshold ?? 0.05,
+      maxNodes: opts.budget ?? 100,
+      edgeTypeFilter: (opts.edgeFilter ?? []) as ActivationParams['edgeTypeFilter'],
+    }
+    const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params)
+    return results.map((r) => ({
+      nodeId: r.nodeId,
+      nodeType: r.nodeType as string,
+      activation: r.activation,
+      depth: r.hops,
+      properties: r.properties,
+    }))
+  }
+
+  /**
+   * Strengthen a set of directed edge pairs (sourceId, targetId).
+   * For each pair, increments weight by 0.02 (capped at 1.0), bumps
+   * traversalCount, and updates lastTraversed.
+   *
+   * This is the reconsolidation analog: edges we actually traversed
+   * during recall get slightly stronger, making future retrieval faster.
+   */
+  async strengthenTraversedEdges(pairs: Array<[string, string]>): Promise<void> {
+    if (pairs.length === 0) return
+    const now = new Date().toISOString()
+    const session = this.driver.session()
+    try {
+      await session.executeWrite(async (tx) => {
+        await tx.run(
+          `UNWIND $pairs AS pair
+           MATCH (a)-[r]->(b)
+           WHERE a.id = pair[0] AND b.id = pair[1]
+           SET r.weight = CASE
+                 WHEN r.weight + 0.02 > 1.0 THEN 1.0
+                 ELSE r.weight + 0.02
+               END,
+               r.lastTraversed = $now,
+               r.traversalCount = coalesce(r.traversalCount, 0) + 1`,
+          { pairs, now },
+        )
+      })
+    } finally {
+      await session.close()
+    }
+  }
+
+  /**
+   * Simplified ingestion path for Wave 2. Takes a core-shaped episode,
+   * extracts persons/emotion internally, maps entities to typed entity
+   * nodes (default type 'tech'), and delegates to decomposeEpisode().
+   *
+   * Also creates the TEMPORAL edge from previousEpisodeId when provided.
+   */
+  async ingestEpisode(input: SimpleEpisodeInput): Promise<void> {
+    const timestamp = input.createdAt instanceof Date
+      ? input.createdAt
+      : new Date(input.createdAt)
+
+    const persons = extractPersons(input.content).map((p) => p.name)
+    const emotionResult = classifyEmotion(input.content)
+    const emotion = emotionResult.label !== 'neutral'
+      ? { label: emotionResult.label, intensity: emotionResult.intensity }
+      : null
+
+    // Build label from content (first 100 chars)
+    const label = input.content.slice(0, 100)
+
+    // Map flat entity strings to typed entities. Without a classifier,
+    // default everything to 'tech' — this is a pragmatic choice; Wave 3
+    // can refine with a real entity type classifier.
+    const typedEntities = input.entities.map((name) => ({
+      name,
+      entityType: 'tech' as const,
+    }))
+
+    await this.decomposeEpisode({
+      episodeId: input.id,
+      memoryType: 'episode',
+      label,
+      sessionId: input.sessionId,
+      timestamp,
+      persons,
+      entities: typedEntities,
+      emotion,
+      intent: null,
+    })
+
+    // TEMPORAL edge from previous episode in the same session
+    if (input.previousEpisodeId) {
+      const session = this.driver.session()
+      try {
+        await session.executeWrite(async (tx) => {
+          await tx.run(
+            `MATCH (prev:Memory {id: $prevId})
+             MATCH (curr:Memory {id: $currId})
+             MERGE (prev)-[r:TEMPORAL]->(curr)
+             ON CREATE SET
+               r.weight = 0.8,
+               r.createdAt = $now,
+               r.lastTraversed = $now,
+               r.traversalCount = 1
+             ON MATCH SET
+               r.lastTraversed = $now,
+               r.traversalCount = r.traversalCount + 1`,
+            {
+              prevId: input.previousEpisodeId,
+              currId: input.id,
+              now: new Date().toISOString(),
+            },
+          )
+        })
+      } finally {
+        await session.close()
+      }
     }
   }
 }

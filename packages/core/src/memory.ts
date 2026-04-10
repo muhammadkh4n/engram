@@ -1,6 +1,10 @@
 import type { Message, Episode, ConsolidateResult, RecallResult, RetrievedMemory } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
+// Wave 2: Neo4j graph is an optional peer dependency. We import the type only
+// so @engram-mem/graph is never required at runtime unless the caller opts in
+// by passing a constructed NeuralGraph instance in MemoryOptions.
+import type { NeuralGraph } from '@engram-mem/graph'
 import { SensoryBuffer } from './systems/sensory-buffer.js'
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
@@ -24,6 +28,14 @@ export interface MemoryOptions {
   intelligence?: IntelligenceAdapter
   consolidation?: { schedule: 'auto' | 'manual' }
   tokenizer?: (text: string) => number
+  /**
+   * Optional Neo4j graph. When provided, enables graph decomposition on
+   * ingest and spreading activation on recall. When omitted, the system
+   * operates in SQL-only mode with the legacy association walk.
+   * Caller is responsible for constructing and initializing the graph
+   * before passing it in.
+   */
+  graph?: NeuralGraph
 }
 
 export interface SessionHandle {
@@ -47,12 +59,17 @@ export class Memory {
   private initialized = false
   // AssociationManager is lazily created after storage is initialized.
   private _associations: AssociationManager | null = null
+  // Wave 2: Optional Neo4j graph. null = unavailable or not configured.
+  // All graph operations null-check this field. Ingestion and retrieval
+  // fall back gracefully to SQL-only mode when graph is null.
+  private _graph: NeuralGraph | null = null
 
   constructor(opts: MemoryOptions) {
     this.storage = opts.storage
     this.intelligence = opts.intelligence
     this.sensory = new SensoryBuffer()
     this.intentAnalyzer = new HeuristicIntentAnalyzer()
+    this._graph = opts.graph ?? null
   }
 
   private get associations(): AssociationManager {
@@ -70,6 +87,22 @@ export class Memory {
   async initialize(): Promise<void> {
     await this.storage.initialize()
     this.initialized = true
+
+    // Verify graph connectivity. If Neo4j is down, degrade gracefully to
+    // SQL-only mode. Ingestion and retrieval still work — they just use the
+    // legacy association walk instead of spreading activation.
+    if (this._graph !== null) {
+      try {
+        const available = await this._graph.isAvailable()
+        if (!available) {
+          console.warn('[engram] Neo4j unavailable — running in SQL-only mode')
+          this._graph = null
+        }
+      } catch (err) {
+        console.warn('[engram] Neo4j connectivity check failed, degrading to SQL-only:', err)
+        this._graph = null
+      }
+    }
   }
 
   /** Release resources, persist sensory buffer. */
@@ -161,6 +194,33 @@ export class Memory {
         // non-fatal: temporal edges are enrichment only
       })
     }
+
+    // --- Wave 2: Graph decomposition (Neo4j, fire-and-forget) ---
+    // Runs AFTER SQL episode insert succeeds. Non-blocking: does NOT await.
+    // If Neo4j is down or ingestEpisode throws, the warning is logged but
+    // ingest() completes normally with the SQL record intact.
+    //
+    // Dual edge systems: SQL temporal associations above are still created.
+    // Neo4j edges are created IN ADDITION. SQL is the durable source of
+    // truth. Neo4j is the acceleration layer. Both always get written.
+    if (this._graph !== null) {
+      const previousEpisodeId = recentIds.length > 0
+        ? recentIds[recentIds.length - 1]
+        : undefined
+
+      this._graph.ingestEpisode({
+        id: episode.id,
+        sessionId,
+        role: message.role,
+        content: cleanText,
+        salience,
+        entities,
+        createdAt: episode.createdAt.toISOString(),
+        previousEpisodeId,
+      }).catch((err: unknown) => {
+        console.warn('[engram] graph decomposition failed (non-fatal):', err)
+      })
+    }
   }
 
   /** Store multiple messages. Batch-optimized. */
@@ -206,6 +266,7 @@ export class Memory {
       embedding: embedding ?? [],
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
+      graph: this._graph,
     })
 
     // Tick sensory buffer: decay priming weights each turn
@@ -373,6 +434,7 @@ export class Memory {
     const result = await engineRecall(query, this.storage, this.sensory, {
       strategy: RECALL_STRATEGIES['deep'],
       embedding: [],
+      graph: this._graph,
     })
 
     const allMemories = [...result.memories, ...result.associations]
