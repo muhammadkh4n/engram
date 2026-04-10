@@ -128,7 +128,17 @@ engram_preexec() {
 
   [ "\$ENGRAM_SALIENCE_DISABLED" = "1" ] && return
   _engram_should_capture "\$cmd" || return
-  [ ! -f "${ingestCli}" ] && return
+
+  # Resolve engram-ingest via PATH first, fall back to workspace dist.
+  local ingest_bin
+  ingest_bin=\$(command -v engram-ingest 2>/dev/null)
+  if [ -z "\$ingest_bin" ]; then
+    if [ -f "${ingestCli}" ]; then
+      ingest_bin="node ${ingestCli}"
+    else
+      return
+    fi
+  fi
 
   # Detect project from cwd (walk up to first .git ancestor)
   local proj="shell"
@@ -158,7 +168,7 @@ engram_preexec() {
   # machine output than conversational turns. Dedup still runs so we
   # don't re-ingest the same command back-to-back.
   (
-    nohup node "${ingestCli}" \\
+    nohup \${=ingest_bin} \\
       --content "\$content" \\
       --turn system \\
       --source shell-preexec \\

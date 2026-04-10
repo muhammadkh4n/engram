@@ -53,9 +53,13 @@ const LOG_FILE = join(ENGRAM_DIR, 'git-hook.log')
 // ---------------------------------------------------------------------------
 
 /**
- * Build the post-commit script as a POSIX sh source string. The engram-ingest
- * path is baked in at install time so rerunning engram-git-setup picks up
- * new dist locations automatically.
+ * Build the post-commit script as a POSIX sh source string.
+ *
+ * The hook resolves engram-ingest via PATH lookup first (the expected
+ * install path after `npm install -g @engram-mem/mcp`), and falls back
+ * to the absolute dist path if PATH resolution fails. This lets the
+ * hook survive both published installs and in-workspace builds without
+ * a reinstall.
  */
 function buildPostCommitScript(ingestCli: string, envFile: string, logFile: string): string {
   return `#!/bin/sh
@@ -71,9 +75,12 @@ if [ "\$ENGRAM_SALIENCE_DISABLED" = "1" ]; then
   exit 0
 fi
 
-# Bail if the engram-ingest CLI is not built yet
-INGEST_CLI="${ingestCli}"
-if [ ! -f "\$INGEST_CLI" ]; then
+# Resolve the engram-ingest CLI. Prefer the PATH-installed bin (from
+# \`npm install -g @engram-mem/mcp\`), fall back to the in-workspace dist
+# path baked in at install time.
+INGEST_BIN="\$(command -v engram-ingest 2>/dev/null)"
+INGEST_FALLBACK="${ingestCli}"
+if [ -z "\$INGEST_BIN" ] && [ ! -f "\$INGEST_FALLBACK" ]; then
   exit 0
 fi
 
@@ -123,16 +130,29 @@ Hash: \$HASH"
 # The double subshell + nohup + & + redirect ensures the child is fully
 # detached from the current shell. \`git commit\` returns the instant this
 # block exits, and the classifier/ingest runs without blocking the user.
-(
-  nohup node "\$INGEST_CLI" \\
-    --content "\$CONTENT" \\
-    --turn system \\
-    --source git-commit \\
-    --project "\$REPO" \\
-    --session-id "git-\$REPO" \\
-    --verbose \\
-    >> "${logFile}" 2>&1 &
-) > /dev/null 2>&1
+if [ -n "\$INGEST_BIN" ]; then
+  (
+    nohup "\$INGEST_BIN" \\
+      --content "\$CONTENT" \\
+      --turn system \\
+      --source git-commit \\
+      --project "\$REPO" \\
+      --session-id "git-\$REPO" \\
+      --verbose \\
+      >> "${logFile}" 2>&1 &
+  ) > /dev/null 2>&1
+else
+  (
+    nohup node "\$INGEST_FALLBACK" \\
+      --content "\$CONTENT" \\
+      --turn system \\
+      --source git-commit \\
+      --project "\$REPO" \\
+      --session-id "git-\$REPO" \\
+      --verbose \\
+      >> "${logFile}" 2>&1 &
+  ) > /dev/null 2>&1
+fi
 
 # Chain to repo-local hook if the repo provides one at
 #   .git/hooks/post-commit-local
