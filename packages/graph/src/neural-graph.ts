@@ -1021,14 +1021,27 @@ export class NeuralGraph {
       intent: null,
     })
 
-    // TEMPORAL edge from previous episode in the same session
+    // TEMPORAL edge from previous episode in the same session.
+    //
+    // Race condition fix: Memory.ingest() calls ingestEpisode in a
+    // fire-and-forget manner, which means episode N+1's decomposition can
+    // start before episode N's Memory node finishes being written. The
+    // previous implementation used MATCH (prev:Memory {id: ...}) which
+    // silently produced no edge when prev didn't exist yet, dropping ~18%
+    // of TEMPORAL edges in practice.
+    //
+    // The fix uses MERGE for BOTH endpoints. If the previous Memory node
+    // doesn't exist yet, we create a stub with just the id; its properties
+    // will be filled in by ON MATCH when its own decomposeEpisode arrives.
+    // This is safe because decomposeEpisode also uses MERGE on Memory {id},
+    // so a stub will be populated rather than duplicated.
     if (input.previousEpisodeId) {
       const session = this.driver.session()
       try {
         await session.executeWrite(async (tx) => {
           await tx.run(
-            `MATCH (prev:Memory {id: $prevId})
-             MATCH (curr:Memory {id: $currId})
+            `MERGE (prev:Memory {id: $prevId})
+             MERGE (curr:Memory {id: $currId})
              MERGE (prev)-[r:TEMPORAL]->(curr)
              ON CREATE SET
                r.weight = 0.8,

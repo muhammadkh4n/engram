@@ -48,27 +48,50 @@ Return JSON with this exact shape:
   ]
 }
 
-Rules:
-1. **person** — only actual named individuals (first name, last name, or full name). Do NOT include pronouns ("I", "you", "he"), generic references ("the team", "someone"), or roles ("the engineer").
-2. **org** — companies, teams, institutions (Anthropic, OpenAI, Google, "the Plane team").
-3. **tech** — specific technologies, libraries, tools, languages, databases (TypeScript, Neo4j, Supabase, Docker, PostgreSQL, React).
-4. **project** — named projects or products (Engram, Ouija, Claude Code, vps-agent).
-5. **concept** — named methodologies, techniques, or theories that function as retrievable anchors (Spreading Activation, HyDE, Complementary Learning Systems).
+ENTITY TYPES:
+
+1. **person** — Real named individuals. A capitalized first name acting as a sentence subject or being referenced by others is almost always a person. EXTRACT people AGGRESSIVELY: if the text contains "Sarah said...", "Brian had a concern...", "Muhammad wants...", "tell Ahmad that...", "Danyal pointed out...", ALL of these are clear person mentions and MUST be extracted. Do NOT skip people just because the surrounding text is technical. People mentioned inside code/technical discussions still count: "Brian had a concern about TEMPORAL edges" → Brian is a person.
+   - Do NOT include pronouns ("I", "you", "he", "she", "they"), role descriptions ("the engineer", "the team"), or hypothetical references.
+
+2. **org** — Companies, teams, institutions (Anthropic, OpenAI, Google, Vercel, "the Plane team", UC Berkeley).
+
+3. **tech** — Specific technologies, libraries, tools, languages, databases (TypeScript, Neo4j, Supabase, Docker, PostgreSQL, React, Cypher).
+
+4. **project** — Named projects or products (Engram, Ouija, Claude Code, vps-agent, RexBook).
+
+5. **concept** — Named methodologies, techniques, theories, or abstractions that function as retrievable anchors (Spreading Activation, HyDE, Complementary Learning Systems, CLS, reconsolidation).
 
 DO NOT EXTRACT:
 - Pronouns, determiners, or UI labels ("Project Context", "Work Session", "Action Items")
-- Generic verbs or activities ("debugging", "deployment")
-- Adjectives or adverbs
-- Dates, times, or numeric values
-- Filenames, code identifiers, or variable names unless they're the actual project name
+- Generic verbs, activities, or states ("debugging", "deployment", "working")
+- Adjectives, adverbs, or emotions
+- Dates, times, numeric values, or durations
+- Code identifiers or variable names (camelCase words like "previousEpisodeId", "sessionId") UNLESS they are the actual product name
+- Technical field names or parameter names
 
-Confidence scoring:
-- 0.9+ : explicit mention, full name, unambiguous
+EXAMPLES:
+
+Input: "Brian had a separate concern about TEMPORAL edges breaking across session boundaries."
+Output: {"entities":[{"name":"Brian","type":"person","confidence":0.9}]}
+(Brian is clearly a person subject. TEMPORAL is a code identifier, not an entity. sessionId is a variable name, not an entity.)
+
+Input: "Sarah suggested tuning the decay parameter to 0.6 for spreading activation."
+Output: {"entities":[{"name":"Sarah","type":"person","confidence":0.9},{"name":"Spreading Activation","type":"concept","confidence":0.85}]}
+
+Input: "The Vercel build keeps timing out, Danyal mentioned they hit similar issues with Next.js 14."
+Output: {"entities":[{"name":"Vercel","type":"org","confidence":0.9},{"name":"Danyal","type":"person","confidence":0.9},{"name":"Next.js","type":"tech","confidence":0.9}]}
+
+Input: "Right, the previousEpisodeId lookup is per-session so we are already covered."
+Output: {"entities":[]}
+(No real entities — previousEpisodeId is a variable name, not a product.)
+
+CONFIDENCE:
+- 0.9+ : explicit mention with clear role (subject of sentence, directly addressed)
 - 0.7-0.9 : first name or single-word with clear context
 - 0.5-0.7 : inferred or abbreviated
 - Below 0.5 : do not include
 
-Return an empty "entities" array if no real entities are present. Deduplicate case-insensitively; prefer the longest/most complete form.`
+Return an empty "entities" array only when there are truly no entities. Deduplicate case-insensitively; prefer the longest/most complete form.`
 
 export class OpenAISummarizer {
   private readonly client: OpenAI

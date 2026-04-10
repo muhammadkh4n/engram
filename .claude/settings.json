@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/muhammadkh4n/Projects/github/muhammadkh4n/openclaw-memory/.claude/hooks/init-transition.sh"
+            "command": "/Users/muhammadkh4n/Projects/github/muhammadkh4n/engram/.claude/hooks/init-transition.sh"
           }
         ]
       }
