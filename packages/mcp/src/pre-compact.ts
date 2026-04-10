@@ -12,6 +12,7 @@
 
 import { readFileSync } from 'node:fs'
 import { createMemory } from '@engram-mem/core'
+import { tryCreateGraph } from './graph-helper.js'
 import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
 import OpenAI from 'openai'
@@ -176,7 +177,12 @@ async function main(): Promise<void> {
   // Ingest the summary into Engram long-term memory
   const storage = new SupabaseStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
   const intelligence = openaiIntelligence({ apiKey: OPENAI_API_KEY! })
-  const memory = createMemory({ storage, intelligence })
+  const graph = await tryCreateGraph('[engram-compact]')
+  const memory = createMemory({
+    storage,
+    intelligence,
+    ...(graph ? { graph } : {}),
+  })
   await memory.initialize()
 
   await memory.ingest({

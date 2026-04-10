@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
+    "@engram-mem/graph": "*",
     "@engram-mem/openai": "*",
     "@engram-mem/supabase": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",

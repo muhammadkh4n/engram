@@ -11,6 +11,15 @@
  *   SUPABASE_URL       — Supabase project URL
  *   SUPABASE_KEY       — Supabase anon/service key
  *   OPENAI_API_KEY     — OpenAI API key for embeddings + summarization
+ *
+ * Optional Wave 2 (Neo4j neural graph) environment variables:
+ *   NEO4J_URI          — e.g. bolt://localhost:7687  (enables graph mode)
+ *   NEO4J_USER         — default: neo4j
+ *   NEO4J_PASSWORD     — default: engram-dev
+ *
+ * When NEO4J_URI is set and reachable, ingestion decomposes episodes into
+ * the neural graph and recall uses Cypher spreading activation. Otherwise
+ * the server runs in SQL-only mode identical to pre-Wave-2 behavior.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -23,6 +32,7 @@ import { createMemory } from '@engram-mem/core'
 import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
+import { tryCreateGraph } from './graph-helper.js'
 
 // ---------------------------------------------------------------------------
 // Config validation
@@ -51,8 +61,13 @@ async function getMemory(): Promise<Memory> {
 
   const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence = openaiIntelligence({ apiKey: openaiApiKey })
+  const graph = await tryCreateGraph('[engram-mcp]')
 
-  memory = createMemory({ storage, intelligence })
+  memory = createMemory({
+    storage,
+    intelligence,
+    ...(graph ? { graph } : {}),
+  })
   await memory.initialize()
 
   return memory
