@@ -4,23 +4,72 @@ import type { EmotionLabel } from './types.js'
 // ============================================================================
 // Person Extraction
 // ============================================================================
+//
+// Precision over recall: a person-extracted name becomes a :Person node,
+// which is a singleton across the whole graph and is used for entity-based
+// seed injection in Wave 2. False positives like "Project Context" or
+// "Work Session" becoming Person nodes directly poisons the retrieval
+// signal, so these patterns all require a strong contextual cue
+// (verb like "said/told/asked", directed-at markers like "@", or
+// co-occurrence with "with/from/by").
+//
+// The old pattern that matched any two consecutive capitalized words was
+// removed because it was catching titles, UI labels, heading text, and
+// compound technical nouns far more often than it was catching real names.
 
 const PERSON_PATTERNS: RegExp[] = [
-  /(?:(?:tell|ask|cc|ping)\s+|@)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
-  /(?:with|from|by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
-  /(?<=\s)([A-Z][a-z]+\s+[A-Z][a-z]+)(?=[\s,.])/g,
+  // Directed-at cues — high confidence ("tell Muhammad", "ask Sarah", "@alice")
+  /(?:(?:tell|told|ask|asked|ping|cc|dm|email|emailed)\s+|@)([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
+  // Conversational cues — medium confidence ("with Sarah", "from Muhammad")
+  /(?:with|from|by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)(?=\s+(?:said|says|thinks|mentioned|suggested|wants|wanted|is|was|will|can|and|or|,|\.))/g,
+  // Quotative verbs — high confidence ("Muhammad said", "Sarah thinks")
+  /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:said|says|told|mentioned|suggested|asked|thinks|wants|wrote|replied)/g,
 ]
 
+// Words that must NOT be treated as a first name even if capitalized.
+// Covers pronouns, determiners, conjunctions, time words, technical
+// products seen during the Wave 2 dogfood backfill that polluted the
+// graph, and common English headers/labels.
 const NAME_BLOCKLIST = new Set([
+  // Personal pronouns — these leak through quotative patterns ("She said")
+  'I', 'You', 'He', 'She', 'It', 'We', 'They', 'Me', 'Him', 'Her',
+  'Us', 'Them', 'My', 'Your', 'His', 'Its', 'Our', 'Their', 'Mine',
+  'Yours', 'Hers', 'Ours', 'Theirs', 'Myself', 'Yourself', 'Himself',
+  'Herself', 'Itself', 'Ourselves', 'Yourselves', 'Themselves',
+  // Indefinite pronouns / discourse particles
+  'Someone', 'Somebody', 'Anyone', 'Anybody', 'Everyone', 'Everybody',
+  'Noone', 'No-one', 'Nobody', 'One', 'Ones',
+  // Determiners / conjunctions / adverbs that get capitalized sentence-initially
   'The', 'This', 'That', 'These', 'Those', 'What', 'How', 'Why',
   'When', 'Where', 'Who', 'Which', 'There', 'Here', 'Some', 'Any',
   'Each', 'Every', 'Both', 'All', 'Most', 'Many', 'Much', 'More',
   'Other', 'Another', 'Such', 'Same', 'Good', 'Great', 'Best',
   'New', 'Old', 'First', 'Last', 'Next', 'Previous', 'Note',
-  'True', 'False', 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
-  'Friday', 'Saturday', 'Sunday', 'January', 'February', 'March',
-  'April', 'May', 'June', 'July', 'August', 'September', 'October',
-  'November', 'December', 'Light', 'Deep', 'Dream', 'Wave',
+  'True', 'False', 'Yes', 'No', 'Maybe', 'None', 'Nothing',
+  'And', 'But', 'Or', 'So', 'If', 'Then', 'Because', 'Although',
+  'While', 'As', 'Now', 'Just', 'Also', 'Still', 'Is', 'Was', 'Are',
+  'Were', 'Will', 'Would', 'Should', 'Could', 'May', 'Might', 'Must',
+  'Do', 'Does', 'Did', 'Have', 'Has', 'Had', 'Be', 'Been', 'Being',
+  // Time
+  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+  'January', 'February', 'March', 'April', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December',
+  'Today', 'Yesterday', 'Tomorrow', 'Morning', 'Afternoon', 'Evening', 'Night',
+  // Note: 'May' omitted because it's a real first name.
+  // Engram internals / Wave terms
+  'Light', 'Deep', 'Dream', 'Wave', 'Engram', 'Memory',
+  // Products, tools, companies, and common compound-noun heads that
+  // polluted the graph during Wave 2 dogfood backfill. NOT people.
+  'Claude', 'Google', 'Github', 'GitHub', 'Supabase', 'Neo4j', 'Docker',
+  'OpenAI', 'Anthropic', 'Slack', 'Telegram', 'WhatsApp', 'Fizzy', 'Plane',
+  'Ouija', 'OpenClaw', 'Snyk', 'Keystatic', 'Aithentic', 'Vercel', 'Linear',
+  'Notion', 'Figma', 'Stripe', 'Turbo', 'Turborepo', 'Vitest', 'TypeScript',
+  'JavaScript', 'Python', 'Rust', 'Node', 'React', 'Next', 'Nuxt',
+  'Project', 'Session', 'Work', 'Code', 'Agent', 'Server', 'Client',
+  'Task', 'Context', 'Action', 'System', 'Hot', 'Added', 'Status',
+  'Phase', 'Stage', 'Build', 'Deploy', 'Update', 'Summary', 'Error',
+  'Scout', 'Acceptance', 'Solutions', 'Solution', 'Items', 'Item',
+  'Ad', 'Not', 'About', 'After', 'Before', 'During', 'Through',
 ])
 
 export interface PersonExtraction {
@@ -31,17 +80,28 @@ export interface PersonExtraction {
 export function extractPersons(text: string): PersonExtraction[] {
   const found = new Map<string, number>()
 
-  for (const pattern of PERSON_PATTERNS) {
+  for (let idx = 0; idx < PERSON_PATTERNS.length; idx++) {
+    const pattern = PERSON_PATTERNS[idx]!
     pattern.lastIndex = 0
     let match: RegExpExecArray | null
     while ((match = pattern.exec(text)) !== null) {
-      const name = match[1].trim()
-      const firstName = name.split(/\s+/)[0]
-      if (!firstName || NAME_BLOCKLIST.has(firstName) || name.length <= 1) continue
+      const rawName = (match[1] ?? '').trim()
+      if (rawName.length <= 1) continue
 
-      const confidence = name.includes(' ') ? 0.8 : 0.6
-      const existing = found.get(name) ?? 0
-      found.set(name, Math.max(existing, confidence))
+      const parts = rawName.split(/\s+/)
+      const firstName = parts[0] ?? ''
+      const lastName = parts[1]
+
+      if (NAME_BLOCKLIST.has(firstName)) continue
+      if (lastName && NAME_BLOCKLIST.has(lastName)) continue
+
+      // Confidence: directed-at (idx 0) > quotative (idx 2) > conversational (idx 1)
+      const baseConfidence = idx === 0 ? 0.9 : idx === 2 ? 0.8 : 0.7
+      // Full names score slightly higher
+      const confidence = lastName ? Math.min(0.95, baseConfidence + 0.05) : baseConfidence
+
+      const existing = found.get(rawName) ?? 0
+      found.set(rawName, Math.max(existing, confidence))
     }
   }
 

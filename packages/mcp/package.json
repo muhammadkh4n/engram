@@ -8,7 +8,8 @@
   "bin": {
     "engram-mcp": "dist/index.js",
     "engram-session-summary": "dist/session-summary.js",
-    "engram-pre-compact": "dist/pre-compact.js"
+    "engram-pre-compact": "dist/pre-compact.js",
+    "engram-backfill-graph": "dist/backfill-graph.js"
   },
   "files": ["dist/", "README.md"],
   "publishConfig": { "access": "public" },
@@ -25,6 +26,7 @@
     "@engram-mem/openai": "*",
     "@engram-mem/supabase": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@supabase/supabase-js": "^2.45.0",
     "openai": "^4.60.0"
   },
   "devDependencies": {
