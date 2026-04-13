@@ -4,8 +4,17 @@ ALTER TABLE memory_associations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_procedural ENABLE ROW LEVEL SECURITY;
 
 -- Explicit service_role full access on all engram tables
--- (service_role bypasses RLS, but policies make the intent explicit
--- and block anon/authenticated from accessing memory data)
+-- DROP IF EXISTS to make migration idempotent
+DO $$ BEGIN
+  DROP POLICY IF EXISTS service_role_all ON memory_episodes;
+  DROP POLICY IF EXISTS service_role_all ON memory_digests;
+  DROP POLICY IF EXISTS service_role_all ON memory_semantic;
+  DROP POLICY IF EXISTS service_role_all ON memory_procedural;
+  DROP POLICY IF EXISTS service_role_all ON memory_write_buffer;
+  DROP POLICY IF EXISTS service_role_all ON memory_associations;
+  DROP POLICY IF EXISTS service_role_all ON episode_parts;
+END $$;
+
 CREATE POLICY service_role_all ON memory_episodes FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY service_role_all ON memory_digests FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY service_role_all ON memory_semantic FOR ALL TO service_role USING (true) WITH CHECK (true);
