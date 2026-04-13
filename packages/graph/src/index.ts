@@ -18,6 +18,9 @@ export type { GraphConfig } from './config.js'
 export { extractPersons, classifyEmotion, classifyContentIntent } from './context-extractors.js'
 export type { PersonExtraction, EmotionClassification } from './context-extractors.js'
 
+// === GDS Utilities ===
+export { runWithProjectionCleanup } from './gds-utils.js'
+
 // === Schema ===
 export { ALL_SCHEMA_STATEMENTS, CONSTRAINTS, INDEXES } from './schema.js'
 

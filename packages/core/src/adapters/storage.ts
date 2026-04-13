@@ -23,6 +23,8 @@ export interface EpisodeStorage {
   getUnconsolidatedSessions(): Promise<string[]>
   markConsolidated(ids: string[]): Promise<void>
   recordAccess(id: string): Promise<void>
+  /** Find earliest created_at across episodes referenced by the given digest IDs */
+  findEarliestInDigests?(digestIds: string[]): Promise<{ createdAt: Date } | null>
 }
 
 export interface DigestStorage {
@@ -42,6 +44,8 @@ export interface SemanticStorage {
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
   markSuperseded(id: string, supersededBy: string): Promise<void>
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
+  /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
+  batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
 }
 
 export interface ProceduralStorage {
@@ -53,6 +57,8 @@ export interface ProceduralStorage {
   recordAccess(id: string): Promise<void>
   incrementObservation(id: string): Promise<void>
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
+  /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
+  batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
 }
 
 export interface AssociationStorage {

@@ -1,5 +1,6 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
+import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 
 export interface DeepSleepOptions {
@@ -13,33 +14,26 @@ export interface DeepSleepOptions {
 interface KnowledgeCandidate {
   topic: string
   content: string
-  /** Full matched phrase used for supersession contradiction detection */
   fullMatch?: string
   confidence: number
   sourceDigestIds: string[]
   sourceEpisodeIds: string[]
-  /** Disambiguation: 'semantic' = standalone fact, 'procedural' = trigger/context */
   kind: 'semantic' | 'procedural'
-  /** For procedural candidates: parsed trigger context */
   trigger?: string
 }
 
 const SEMANTIC_PATTERNS: Array<{ pattern: RegExp; topic: string; confidence: number }> = [
-  // Preferences
   { pattern: /I prefer\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
   { pattern: /I like\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
   { pattern: /I want\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.85 },
   { pattern: /I don'?t like\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
   { pattern: /I hate\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
-  // Decisions
   { pattern: /let'?s go with\s+(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
   { pattern: /we decided\s+(?:to\s+)?(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
   { pattern: /the plan is to\s+(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
-  // Personal info
   { pattern: /my (?:name|email|timezone|location) is\s+(.+?)(?:\.|,|$)/gi, topic: 'personal_info', confidence: 0.9 },
 ]
 
-/** Patterns that imply trigger/context — AR2 disambiguation rule */
 const PROCEDURAL_TRIGGER_PATTERNS: Array<{ pattern: RegExp; category: 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention' }> = [
   { pattern: /\bmy workflow is\b(.+)/i, category: 'workflow' },
   { pattern: /\bi usually\b(.+)/i, category: 'habit' },
@@ -52,27 +46,15 @@ const PROCEDURAL_TRIGGER_PATTERNS: Array<{ pattern: RegExp; category: 'workflow'
   { pattern: /\bmake sure to\b(.+)/i, category: 'convention' },
 ]
 
-/**
- * Contradiction pairs for supersession detection.
- * Each pair is [newPhrasePattern, existingContentPattern].
- * If the NEW candidate phrase matches [0] AND the EXISTING memory content matches [1]
- * (on overlapping subjects), the existing memory is superseded.
- */
 const CONTRADICTION_PAIRS: Array<[RegExp, RegExp]> = [
-  // New says "I prefer X" → supersedes existing "I don't like X"
   [/I prefer\s+(.+)/i, /I don'?t like\s+(.+)/i],
-  // New says "I like X" → supersedes existing "I hate X" or "I don't like X"
   [/I like\s+(.+)/i, /I hate\s+(.+)/i],
   [/I like\s+(.+)/i, /I don'?t like\s+(.+)/i],
-  // New says "I always X" → supersedes existing "I never X"
   [/I always\s+(.+)/i, /I never\s+(.+)/i],
-  // New says "I don't like X" → supersedes existing "I prefer X" or "I like X"
   [/I don'?t like\s+(.+)/i, /I prefer\s+(.+)/i],
   [/I don'?t like\s+(.+)/i, /I like\s+(.+)/i],
-  // New says "I hate X" → supersedes existing "I like X" or "I prefer X"
   [/I hate\s+(.+)/i, /I like\s+(.+)/i],
   [/I hate\s+(.+)/i, /I prefer\s+(.+)/i],
-  // New says "I never X" → supersedes existing "I always X"
   [/I never\s+(.+)/i, /I always\s+(.+)/i],
 ]
 
@@ -88,21 +70,10 @@ function subjectsOverlap(a: string, b: string): boolean {
   return overlap / maxSize > 0.5
 }
 
-/**
- * Extract knowledge candidates from digest content using regex patterns.
- *
- * AR2 Disambiguation rule:
- *  - If pattern implies a trigger/context (workflow, habit, procedural action) → procedural
- *  - If pattern is a standalone fact/preference → semantic
- */
-function extractCandidatesFromText(
-  text: string,
-  digestId: string
-): KnowledgeCandidate[] {
+function extractCandidatesFromText(text: string, digestId: string): KnowledgeCandidate[] {
   const candidates: KnowledgeCandidate[] = []
   const seen = new Set<string>()
 
-  // Check procedural trigger patterns first (AR2: trigger/context → procedural)
   for (const { pattern, category } of PROCEDURAL_TRIGGER_PATTERNS) {
     pattern.lastIndex = 0
     const match = pattern.exec(text)
@@ -124,7 +95,6 @@ function extractCandidatesFromText(
     }
   }
 
-  // Then semantic patterns
   for (const { pattern, topic, confidence } of SEMANTIC_PATTERNS) {
     pattern.lastIndex = 0
     let match
@@ -134,8 +104,6 @@ function extractCandidatesFromText(
       const key = `semantic:${topic}:${content}`
       if (seen.has(key)) continue
       seen.add(key)
-      // Store the full matched phrase (e.g. "I don't like JavaScript") for
-      // supersession contradiction detection, alongside the extracted content
       candidates.push({
         topic,
         content,
@@ -151,16 +119,6 @@ function extractCandidatesFromText(
   return candidates
 }
 
-/**
- * Check if a new candidate phrase contradicts an existing memory's content.
- *
- * Uses the full matched phrase (e.g. "I don't like JavaScript") rather than
- * the extracted content alone ("JavaScript"), so that CONTRADICTION_PAIRS
- * patterns can reliably match.
- *
- * @param newPhrase - the full matched phrase from extraction (e.g. "I don't like X")
- * @param existingContent - the content field of the existing semantic memory
- */
 function detectSupersession(newPhrase: string, existingContent: string): boolean {
   for (const [patternA, patternB] of CONTRADICTION_PAIRS) {
     const newMatchA = newPhrase.match(patternA)
@@ -178,18 +136,18 @@ function detectSupersession(newPhrase: string, existingContent: string): boolean
  * Brain analogy: Slow-wave sleep. Transfers hippocampal memories to neocortex,
  * extracting facts, patterns, and procedural rules.
  *
- * - Gets recent digests (7 days)
- * - Extracts knowledge candidates using regex patterns
- * - For semantic: checks deduplication (similarity > 0.92 → boost existing)
- *                 checks supersession (contradiction → mark old superseded)
- *                 inserts new semantic memory if no duplicate
- * - For procedural: checks if similar trigger exists → incrementObservation
- *                   else insert new procedural memory
+ * Neo4j operations (when graph is available):
+ * - Creates Semantic/Procedural Memory nodes
+ * - DERIVES_FROM edges to source digests
+ * - Transitive context inheritance with MAX weight attenuation
+ * - CONTRADICTS relationships on supersession
+ * - Temporal validity (validFrom from earliest source episode)
  */
 export async function deepSleep(
   storage: StorageAdapter,
   intelligence: IntelligenceAdapter | undefined,
-  opts?: DeepSleepOptions
+  opts?: DeepSleepOptions,
+  graph?: GraphPort | null,
 ): Promise<ConsolidateResult> {
   const minDigests = opts?.minDigests ?? 3
 
@@ -199,10 +157,14 @@ export async function deepSleep(
     return { cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0 }
   }
 
+  const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
+
   let promoted = 0
   let procedural = 0
   let deduplicated = 0
   let superseded = 0
+  let graphNodesCreated = 0
+  let graphEdgesCreated = 0
 
   // Collect all candidates from all digests
   const allCandidates: KnowledgeCandidate[] = []
@@ -224,7 +186,7 @@ export async function deepSleep(
           })
         }
       } catch {
-        // ignore intelligence errors — heuristic results still used
+        // ignore intelligence errors
       }
     }
   }
@@ -232,20 +194,15 @@ export async function deepSleep(
   // Process semantic candidates
   const semanticCandidates = allCandidates.filter(c => c.kind === 'semantic')
   for (const candidate of semanticCandidates) {
-    // Check deduplication
     const existing = await storage.semantic.search(candidate.content, { limit: 5 })
     const duplicate = existing.find(e => e.similarity > 0.92)
 
     if (duplicate) {
-      // Boost existing knowledge's confidence instead of inserting duplicate
       await storage.semantic.recordAccessAndBoost(duplicate.item.id, 0.1)
       deduplicated++
       continue
     }
 
-    // Check supersession against existing memories on same topic.
-    // Use fullMatch (e.g. "I don't like X") for reliable pattern matching,
-    // falling back to extracted content if fullMatch is not available.
     let supersededId: string | null = null
     const phraseForSupersession = candidate.fullMatch ?? candidate.content
     for (const e of existing) {
@@ -255,7 +212,6 @@ export async function deepSleep(
       }
     }
 
-    // Insert new semantic memory
     const knowledge = await storage.semantic.insert({
       topic: candidate.topic,
       content: candidate.content,
@@ -269,13 +225,12 @@ export async function deepSleep(
       metadata: {},
     })
 
-    // Mark old knowledge as superseded
     if (supersededId) {
       await storage.semantic.markSuperseded(supersededId, knowledge.id)
       superseded++
     }
 
-    // Create derives_from associations from source digests
+    // SQL derives_from associations
     for (const digestId of candidate.sourceDigestIds) {
       await storage.associations.insert({
         sourceId: digestId,
@@ -289,6 +244,93 @@ export async function deepSleep(
       })
     }
 
+    // --- Neo4j: Semantic Memory node ---
+    if (graphAvailable && graph?.runCypherWrite) {
+      try {
+        const now = new Date().toISOString()
+
+        // AUDIT FIX: validFrom = earliest source episode, not consolidation time
+        let validFrom = now
+        if (storage.episodes.findEarliestInDigests) {
+          const earliest = await storage.episodes.findEarliestInDigests(candidate.sourceDigestIds)
+          if (earliest) validFrom = earliest.createdAt.toISOString()
+        }
+
+        // Step 1: Create Semantic Memory node
+        const nodeResult = await graph.runCypherWrite(`
+          MERGE (s:Memory {id: $semanticId})
+          SET s.memoryType = 'semantic',
+              s.label = $label,
+              s.topic = $topic,
+              s.createdAt = $now,
+              s.validFrom = $validFrom,
+              s.validUntil = null,
+              s.pageRank = 0.0,
+              s.betweenness = 0.0,
+              s.isBridge = false,
+              s.activationCount = 0
+        `, {
+          semanticId: knowledge.id,
+          label: `${candidate.topic}: ${candidate.content.slice(0, 60)}`,
+          topic: candidate.topic,
+          now,
+          validFrom,
+        })
+        graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+
+        // Step 2: DERIVES_FROM edges to source digests
+        const derivesResult = await graph.runCypherWrite(`
+          UNWIND $sourceDigestIds AS digestId
+          MATCH (dig:Memory {id: digestId})
+          MATCH (s:Memory {id: $semanticId})
+          MERGE (s)-[r:DERIVES_FROM]->(dig)
+          ON CREATE SET r.weight = 0.8,
+                        r.createdAt = $now,
+                        r.lastTraversed = null,
+                        r.traversalCount = 0
+        `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
+        graphEdgesCreated += derivesResult.summary.counters.relationshipsCreated()
+
+        // Step 3: Transitive context inheritance with MAX weight
+        const ctxResult = await graph.runCypherWrite(`
+          MATCH (dig:Memory)-[r:CONTEXTUAL]->(ctx)
+          WHERE dig.id IN $sourceDigestIds
+            AND (ctx:Person OR ctx:Entity OR ctx:Topic)
+          WITH ctx, max(r.weight) * 0.7 AS inheritedWeight
+          MATCH (s:Memory {id: $semanticId})
+          MERGE (s)-[rel:CONTEXTUAL]->(ctx)
+          ON CREATE SET rel.weight = inheritedWeight,
+                        rel.createdAt = $now,
+                        rel.lastTraversed = null,
+                        rel.traversalCount = 0
+          ON MATCH SET rel.weight = CASE
+                         WHEN rel.weight < inheritedWeight THEN inheritedWeight
+                         ELSE rel.weight
+                       END,
+                       rel.lastTraversed = $now
+        `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
+        graphEdgesCreated += ctxResult.summary.counters.relationshipsCreated()
+
+        // Step 4: Supersession → CONTRADICTS + validUntil
+        if (supersededId) {
+          await graph.runCypherWrite(`
+            MATCH (old:Memory {id: $oldId})
+            MATCH (new:Memory {id: $newId})
+            SET old.validUntil = $now
+            MERGE (new)-[r:CONTRADICTS]->(old)
+            ON CREATE SET r.weight = 1.0,
+                          r.createdAt = $now,
+                          r.lastTraversed = null,
+                          r.traversalCount = 0
+          `, { oldId: supersededId, newId: knowledge.id, now })
+          graphEdgesCreated++
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(`[deep-sleep] Neo4j graph update failed for ${knowledge.id}: ${msg}`)
+      }
+    }
+
     promoted++
   }
 
@@ -300,12 +342,11 @@ export async function deepSleep(
     const match = existing.find(e => e.similarity > 0.85)
 
     if (match) {
-      // Strengthen existing procedure via incrementObservation
       await storage.procedural.incrementObservation(match.item.id)
       continue
     }
 
-    await storage.procedural.insert({
+    const proceduralRecord = await storage.procedural.insert({
       category: (candidate.trigger as 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention') ?? 'preference',
       trigger: candidate.trigger ?? candidate.topic,
       procedure: candidate.content,
@@ -319,6 +360,35 @@ export async function deepSleep(
       metadata: {},
     })
 
+    // --- Neo4j: Procedural Memory node ---
+    if (graphAvailable && graph?.runCypherWrite) {
+      try {
+        const now = new Date().toISOString()
+        const nodeResult = await graph.runCypherWrite(`
+          MERGE (p:Memory {id: $proceduralId})
+          SET p.memoryType = 'procedural',
+              p.label = $label,
+              p.triggerPattern = $triggerPattern,
+              p.createdAt = $now,
+              p.validFrom = $now,
+              p.validUntil = null,
+              p.pageRank = 0.0,
+              p.betweenness = 0.0,
+              p.isBridge = false,
+              p.activationCount = 0
+        `, {
+          proceduralId: proceduralRecord.id,
+          label: `${candidate.trigger}: ${candidate.content.slice(0, 60)}`,
+          triggerPattern: candidate.trigger ?? candidate.topic,
+          now,
+        })
+        graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(`[deep-sleep] Neo4j graph update failed for procedural ${proceduralRecord.id}: ${msg}`)
+      }
+    }
+
     procedural++
   }
 
@@ -328,5 +398,7 @@ export async function deepSleep(
     procedural,
     deduplicated,
     superseded,
+    graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
+    graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
   }
 }

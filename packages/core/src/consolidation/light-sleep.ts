@@ -1,5 +1,6 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
+import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import { heuristicSummarize } from './heuristic-summarize.js'
 import { estimateTokens } from '../utils/tokens.js'
@@ -15,18 +16,26 @@ export interface LightSleepOptions {
  * Brain analogy: Hippocampal replay during NREM sleep. Recent experiences
  * are replayed and compressed into session-level digests.
  *
+ * SQL operations:
  * - Gets sessions with unconsolidated episodes
  * - Skips sessions with fewer than minEpisodes (default 5)
- * - Sorts episodes by salience DESC (high-salience episodes lead each batch)
+ * - Sorts episodes by salience DESC
  * - Batches into groups of batchSize (default 20)
- * - Summarizes using intelligence adapter if available, else heuristic fallback
+ * - Summarizes using intelligence adapter or heuristic fallback
  * - Inserts a Digest and marks the source episodes as consolidated
- * - Creates derives_from association edges for each episode -> digest link
+ * - Creates derives_from association edges
+ *
+ * Neo4j operations (when graph is available):
+ * - Creates a Digest Memory node
+ * - DERIVES_FROM edges from digest to each source episode
+ * - Merges context connections (Person/Entity/Topic) with frequency weight
+ * - Attaches dominant Emotion node
  */
 export async function lightSleep(
   storage: StorageAdapter,
   intelligence: IntelligenceAdapter | undefined,
-  opts?: LightSleepOptions
+  opts?: LightSleepOptions,
+  graph?: GraphPort | null,
 ): Promise<ConsolidateResult> {
   const batchSize = opts?.batchSize ?? 20
   const minEpisodes = opts?.minEpisodes ?? 5
@@ -34,6 +43,10 @@ export async function lightSleep(
 
   let digestsCreated = 0
   let episodesProcessed = 0
+  let graphNodesCreated = 0
+  let graphEdgesCreated = 0
+
+  const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
 
   const sessions = await storage.episodes.getUnconsolidatedSessions()
 
@@ -143,6 +156,96 @@ export async function lightSleep(
         })
       }
 
+      // --- Neo4j graph operations ---
+      if (graphAvailable && graph?.runCypherWrite) {
+        try {
+          const now = new Date().toISOString()
+          const sourceIds = batch.map(e => e.id)
+
+          // Step 1: Create Digest Memory node
+          const nodeResult = await graph.runCypherWrite(`
+            MERGE (d:Memory {id: $digestId})
+            SET d.memoryType = 'digest',
+                d.label = $label,
+                d.createdAt = $createdAt,
+                d.validFrom = $validFrom,
+                d.validUntil = null,
+                d.pageRank = 0.0,
+                d.betweenness = 0.0,
+                d.isBridge = false,
+                d.activationCount = 0
+          `, {
+            digestId: digest.id,
+            label: digest.summary.slice(0, 80),
+            createdAt: now,
+            validFrom: now,
+          })
+          graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+
+          // Step 2: DERIVES_FROM edges from digest to source episodes
+          const derivesResult = await graph.runCypherWrite(`
+            UNWIND $sourceEpisodeIds AS episodeId
+            MATCH (ep:Memory {id: episodeId})
+            MATCH (d:Memory {id: $digestId})
+            MERGE (d)-[r:DERIVES_FROM]->(ep)
+            ON CREATE SET r.weight = 0.8,
+                          r.createdAt = $now,
+                          r.lastTraversed = null,
+                          r.traversalCount = 0
+          `, { sourceEpisodeIds: sourceIds, digestId: digest.id, now })
+          graphEdgesCreated += derivesResult.summary.counters.relationshipsCreated()
+
+          // Step 3: Merge context connections from source episodes
+          const ctxResult = await graph.runCypherWrite(`
+            MATCH (ep:Memory)-[r:SPOKE|CONTEXTUAL|TOPICAL]->(ctx)
+            WHERE ep.id IN $sourceEpisodeIds
+              AND (ctx:Person OR ctx:Entity OR ctx:Topic)
+            WITH ctx, count(DISTINCT ep) AS frequency, $totalSources AS total
+            MATCH (d:Memory {id: $digestId})
+            MERGE (d)-[rel:CONTEXTUAL]->(ctx)
+            ON CREATE SET rel.weight = toFloat(frequency) / total,
+                          rel.createdAt = $now,
+                          rel.lastTraversed = null,
+                          rel.traversalCount = 0
+            ON MATCH SET rel.weight = toFloat(frequency) / total,
+                         rel.lastTraversed = $now
+          `, {
+            sourceEpisodeIds: sourceIds,
+            totalSources: batch.length,
+            digestId: digest.id,
+            now,
+          })
+          graphEdgesCreated += ctxResult.summary.counters.relationshipsCreated()
+
+          // Step 4: Dominant emotion for the digest
+          const emotionResult = await graph.runCypherWrite(`
+            MATCH (ep:Memory)-[:EMOTIONAL]->(em:Emotion)
+            WHERE ep.id IN $sourceEpisodeIds
+            WITH em.label AS emotionLabel, count(*) AS freq
+            ORDER BY freq DESC
+            LIMIT 1
+            WITH emotionLabel
+            WHERE emotionLabel IS NOT NULL
+            MATCH (d:Memory {id: $digestId})
+            MERGE (dominantEm:Emotion {id: 'emotion:digest:' + $digestId + ':' + emotionLabel})
+            ON CREATE SET dominantEm.label = emotionLabel,
+                          dominantEm.sessionId = $sessionId,
+                          dominantEm.createdAt = $now
+            MERGE (d)-[rel:EMOTIONAL]->(dominantEm)
+            ON CREATE SET rel.weight = 0.7,
+                          rel.createdAt = $now,
+                          rel.lastTraversed = null,
+                          rel.traversalCount = 0
+          `, { sourceEpisodeIds: sourceIds, digestId: digest.id, sessionId, now })
+          graphNodesCreated += emotionResult.summary.counters.nodesCreated()
+          graphEdgesCreated += emotionResult.summary.counters.relationshipsCreated()
+        } catch (err) {
+          // Neo4j failure is non-fatal — SQL results already committed
+          const msg = err instanceof Error ? err.message : String(err)
+          console.warn(`[light-sleep] Neo4j graph update failed for digest ${digest.id}: ${msg}`)
+        }
+      }
+
       digestsCreated++
       episodesProcessed += batch.length
     }
@@ -152,5 +255,7 @@ export async function lightSleep(
     cycle: 'light',
     digestsCreated,
     episodesProcessed,
+    graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
+    graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
   }
 }

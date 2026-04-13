@@ -219,6 +219,32 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
     })
     if (error) throw new Error(`Episode recordAccess failed: ${error.message}`)
   }
+
+  async findEarliestInDigests(digestIds: string[]): Promise<{ createdAt: Date } | null> {
+    if (digestIds.length === 0) return null
+    const { data: digests, error: dErr } = await this.client
+      .from('digests')
+      .select('source_episode_ids')
+      .in('id', digestIds)
+    if (dErr || !digests || digests.length === 0) return null
+
+    const episodeIds: string[] = []
+    for (const d of digests) {
+      const ids = d.source_episode_ids as string[]
+      if (Array.isArray(ids)) episodeIds.push(...ids)
+    }
+    if (episodeIds.length === 0) return null
+
+    const { data: episodes, error: eErr } = await this.client
+      .from('episodes')
+      .select('created_at')
+      .in('id', episodeIds)
+      .order('created_at', { ascending: true })
+      .limit(1)
+    if (eErr || !episodes || episodes.length === 0) return null
+
+    return { createdAt: new Date(episodes[0].created_at) }
+  }
 }
 
 // ---------------------------------------------------------------------------

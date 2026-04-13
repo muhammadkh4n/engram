@@ -40,6 +40,7 @@ export type {
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
+  GraphQueryResult,
   GraphEpisodeInput,
   GraphSpreadActivationOpts,
   GraphActivatedNode,

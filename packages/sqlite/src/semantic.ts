@@ -158,6 +158,27 @@ export class SqliteSemanticStorage implements SemanticStorage {
     return result.changes
   }
 
+  async batchDecayGradient(
+    updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>,
+  ): Promise<number> {
+    const stmt = this.db.prepare(`
+      UPDATE semantic
+      SET confidence = MAX(0.0, confidence - ?)
+      WHERE id = ?
+        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+        AND superseded_by IS NULL
+    `)
+    let total = 0
+    const txn = this.db.transaction(() => {
+      for (const u of updates) {
+        const result = stmt.run(u.effectiveDecayRate, u.id, u.daysThreshold)
+        total += result.changes
+      }
+    })
+    txn()
+    return total
+  }
+
   private rowToSemantic(row: SemanticRow): SemanticMemory {
     return {
       id: row.id,

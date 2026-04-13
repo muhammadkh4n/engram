@@ -255,6 +255,16 @@ export interface ConsolidateResult {
   semanticDecayed?: number
   proceduralDecayed?: number
   edgesPruned?: number
+  // Graph fields — present when Neo4j graph is active
+  graphNodesCreated?: number
+  graphEdgesCreated?: number
+  graphEdgesUpdated?: number
+  communitiesDetected?: number
+  bridgeNodesFound?: number
+  replayEdgesCreated?: number
+  causalEdgesCreated?: number
+  graphEdgesPruned?: number
+  isolatedNodesDeprioritized?: number
 }
 
 // === Config Types ===

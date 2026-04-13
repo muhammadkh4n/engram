@@ -87,10 +87,28 @@ export interface GraphEntitySeedResult {
  * may be absent (no graph configured). Implementations should provide
  * every method; core calls them only when the graph reference is non-null.
  */
+/** Minimal shape of a Neo4j QueryResult for consolidation operations. */
+export interface GraphQueryResult {
+  records: Array<{ get(key: string): unknown; toObject(): Record<string, unknown> }>
+  summary: {
+    counters: {
+      nodesCreated(): number
+      relationshipsCreated(): number
+      relationshipsDeleted(): number
+      propertiesSet(): number
+    }
+  }
+}
+
 export interface GraphPort {
   isAvailable(): Promise<boolean>
   ingestEpisode(input: GraphEpisodeInput): Promise<void>
   lookupEntityNodes(names: string[]): Promise<GraphEntitySeedResult[]>
   spreadActivation(opts: GraphSpreadActivationOpts): Promise<GraphActivatedNode[]>
   strengthenTraversedEdges(pairs: Array<[string, string]>): Promise<void>
+  // Wave 3: raw Cypher execution for consolidation operations
+  runCypher?(query: string, params?: Record<string, unknown>): Promise<GraphQueryResult>
+  runCypherWrite?(query: string, params?: Record<string, unknown>): Promise<GraphQueryResult>
+  // Wave 3: check if Neo4j GDS plugin is available
+  isGdsAvailable?(): Promise<boolean>
 }

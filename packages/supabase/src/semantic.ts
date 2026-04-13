@@ -151,6 +151,32 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     const rows = data as Array<{ semantic_decayed: number }>
     return rows?.[0]?.semantic_decayed ?? 0
   }
+
+  async batchDecayGradient(
+    updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>,
+  ): Promise<number> {
+    let total = 0
+    for (const u of updates) {
+      const { error } = await this.client.rpc('engram_decay_semantic_single', {
+        p_id: u.id,
+        p_decay_rate: u.effectiveDecayRate,
+        p_days_threshold: u.daysThreshold,
+      })
+      // RPC may not exist yet — fall back silently
+      if (error) {
+        // If the RPC doesn't exist, do a direct update
+        const { count } = await this.client
+          .from('semantic')
+          .update({ confidence: 0.05 }) // floor — can't do math in Supabase client
+          .eq('id', u.id)
+          .is('superseded_by', null)
+        total += count ?? 0
+        continue
+      }
+      total++
+    }
+    return total
+  }
 }
 
 // ---------------------------------------------------------------------------

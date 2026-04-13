@@ -374,23 +374,26 @@ export class Memory {
     this.assertInitialized()
 
     if (cycle === 'light') {
-      return lightSleep(this.storage, this.intelligence)
+      return lightSleep(this.storage, this.intelligence, undefined, this._graph)
     }
     if (cycle === 'deep') {
-      return deepSleep(this.storage, this.intelligence)
+      return deepSleep(this.storage, this.intelligence, undefined, this._graph)
     }
     if (cycle === 'dream') {
-      return dreamCycle(this.storage)
+      return dreamCycle(this.storage, undefined, this._graph)
     }
     if (cycle === 'decay') {
-      return decayPass(this.storage)
+      return decayPass(this.storage, undefined, this._graph)
     }
 
     // 'all': run light → deep → dream → decay in sequence, merge results
-    const lightResult = await lightSleep(this.storage, this.intelligence)
-    const deepResult = await deepSleep(this.storage, this.intelligence)
-    const dreamResult = await dreamCycle(this.storage)
-    const decayResult = await decayPass(this.storage)
+    const lightResult = await lightSleep(this.storage, this.intelligence, undefined, this._graph)
+    const deepResult = await deepSleep(this.storage, this.intelligence, undefined, this._graph)
+    const dreamResult = await dreamCycle(this.storage, undefined, this._graph)
+    const decayResult = await decayPass(this.storage, undefined, this._graph)
+
+    const graphNodesCreated = (lightResult.graphNodesCreated ?? 0) + (deepResult.graphNodesCreated ?? 0)
+    const graphEdgesCreated = (lightResult.graphEdgesCreated ?? 0) + (deepResult.graphEdgesCreated ?? 0)
 
     return {
       cycle: 'all',
@@ -404,6 +407,14 @@ export class Memory {
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,
       edgesPruned: decayResult.edgesPruned ?? 0,
+      graphNodesCreated: graphNodesCreated > 0 ? graphNodesCreated : undefined,
+      graphEdgesCreated: graphEdgesCreated > 0 ? graphEdgesCreated : undefined,
+      communitiesDetected: dreamResult.communitiesDetected,
+      bridgeNodesFound: dreamResult.bridgeNodesFound,
+      replayEdgesCreated: dreamResult.replayEdgesCreated,
+      causalEdgesCreated: dreamResult.causalEdgesCreated,
+      graphEdgesPruned: decayResult.graphEdgesPruned,
+      isolatedNodesDeprioritized: decayResult.isolatedNodesDeprioritized,
     }
   }
 

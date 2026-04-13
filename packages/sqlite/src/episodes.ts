@@ -188,6 +188,22 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       .run(id)
   }
 
+  async findEarliestInDigests(digestIds: string[]): Promise<{ createdAt: Date } | null> {
+    if (digestIds.length === 0) return null
+    const placeholders = digestIds.map(() => '?').join(',')
+    const row = this.db.prepare(`
+      SELECT e.created_at
+      FROM digests d
+      JOIN json_each(d.source_episode_ids) ep_id ON 1=1
+      JOIN episodes e ON e.id = ep_id.value
+      WHERE d.id IN (${placeholders})
+      ORDER BY e.created_at ASC
+      LIMIT 1
+    `).get(...digestIds) as { created_at: number } | undefined
+    if (!row) return null
+    return { createdAt: julianToDate(row.created_at) ?? new Date() }
+  }
+
   private rowToEpisode(row: EpisodeRow): Episode {
     return {
       id: row.id,

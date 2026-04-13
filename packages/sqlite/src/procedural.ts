@@ -178,6 +178,26 @@ export class SqliteProceduralStorage implements ProceduralStorage {
     return result.changes
   }
 
+  async batchDecayGradient(
+    updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>,
+  ): Promise<number> {
+    const stmt = this.db.prepare(`
+      UPDATE procedural
+      SET confidence = MAX(0.0, confidence - ?)
+      WHERE id = ?
+        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+    `)
+    let total = 0
+    const txn = this.db.transaction(() => {
+      for (const u of updates) {
+        const result = stmt.run(u.effectiveDecayRate, u.id, u.daysThreshold)
+        total += result.changes
+      }
+    })
+    txn()
+    return total
+  }
+
   private rowToProcedural(row: ProceduralRow): ProceduralMemory {
     return {
       id: row.id,

@@ -1,4 +1,4 @@
-import neo4j, { type Driver, type ManagedTransaction } from 'neo4j-driver'
+import neo4j, { type Driver, type ManagedTransaction, type QueryResult } from 'neo4j-driver'
 import { ALL_SCHEMA_STATEMENTS } from './schema.js'
 import type { GraphConfig } from './config.js'
 import type {
@@ -1106,6 +1106,45 @@ export class NeuralGraph {
       } finally {
         await session.close()
       }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Wave 3: Raw Cypher execution for consolidation operations
+  // --------------------------------------------------------------------------
+
+  /** Run a read-only Cypher query (auto-commit mode — required for GDS). */
+  async runCypher(query: string, params?: Record<string, unknown>): Promise<QueryResult> {
+    const session = this.driver.session()
+    try {
+      return await session.run(query, params)
+    } finally {
+      await session.close()
+    }
+  }
+
+  /** Run a write Cypher query (auto-commit mode). */
+  async runCypherWrite(query: string, params?: Record<string, unknown>): Promise<QueryResult> {
+    const session = this.driver.session()
+    try {
+      return await session.run(query, params)
+    } finally {
+      await session.close()
+    }
+  }
+
+  /** Check if the Neo4j GDS plugin is available. */
+  async isGdsAvailable(): Promise<boolean> {
+    try {
+      const session = this.driver.session()
+      try {
+        await session.run('RETURN gds.version() AS version')
+        return true
+      } finally {
+        await session.close()
+      }
+    } catch {
+      return false
     }
   }
 }
