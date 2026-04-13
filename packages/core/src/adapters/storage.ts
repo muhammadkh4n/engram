@@ -46,6 +46,17 @@ export interface SemanticStorage {
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
   /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
   batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
+  /**
+   * Search semantic memories valid at the given point in time.
+   * Half-open interval: [valid_from, valid_until). valid_until is EXCLUSIVE.
+   * NULL valid_from = always valid. NULL valid_until = still valid.
+   */
+  searchAtTime(query: string, asOf: Date, opts?: Omit<SearchOptions, 'beforeDate'>): Promise<SearchResult<SemanticMemory>[]>
+  /**
+   * Return all semantic memories for a topic, ordered by valid_from ASC.
+   * Includes superseded memories for full timeline reconstruction.
+   */
+  getTopicTimeline(topic: string, opts?: { fromDate?: Date; toDate?: Date }): Promise<SemanticMemory[]>
 }
 
 export interface ProceduralStorage {

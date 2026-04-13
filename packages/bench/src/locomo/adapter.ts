@@ -1,0 +1,240 @@
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+import type { Memory } from '@engram-mem/core'
+import type {
+  BenchmarkOpts, LoCoMoResult, LoCoMoConversationResult,
+  LoCoMoQAPrediction, LoCoMoEvalFormat, LoCoMoCategoryMetrics,
+} from '../types.js'
+import type { LoCoMoConversationFile } from './types.js'
+import { computeRetrievalF1 } from '../metrics/f1.js'
+import { createBenchMemory } from '../memory-factory.js'
+
+export class LoCoMoAdapter {
+  async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
+    const stat = await fs.stat(dataPath)
+
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(dataPath)
+      const jsonFiles = entries.filter(e => e.endsWith('.json')).sort()
+      const conversations: LoCoMoConversationFile[] = []
+      for (const filename of jsonFiles) {
+        const raw = await fs.readFile(path.join(dataPath, filename), 'utf8')
+        const parsed = JSON.parse(raw) as LoCoMoConversationFile | LoCoMoConversationFile[]
+        if (Array.isArray(parsed)) {
+          conversations.push(...parsed)
+        } else {
+          conversations.push(parsed)
+        }
+      }
+      return conversations
+    }
+
+    const raw = await fs.readFile(dataPath, 'utf8')
+    const parsed = JSON.parse(raw) as LoCoMoConversationFile | LoCoMoConversationFile[]
+    return Array.isArray(parsed) ? parsed : [parsed]
+  }
+
+  /**
+   * Ingest all turns from a conversation. Segments by date-group (audit fix).
+   * Stores locomoSegmentIndex and locomoTurnId in metadata for evidence matching.
+   */
+  async ingestConversation(
+    conv: LoCoMoConversationFile,
+    memory: Memory,
+  ): Promise<{ episodesIngested: number; sessionsCreated: string[] }> {
+    const convId = String(conv.id)
+    const dateToSegment = new Map<string, { sessionId: string; segmentIndex: number }>()
+    const sessionsCreated: string[] = []
+    let segmentCounter = 0
+    let episodesIngested = 0
+
+    for (const turn of conv.conversation) {
+      if (!turn.text || turn.text.trim().length === 0) continue
+
+      const dateKey = turn.date ?? 'undated'
+      if (!dateToSegment.has(dateKey)) {
+        segmentCounter++
+        const sessionId = `locomo:${convId}:${dateKey.replace(/\s+/g, '-')}`
+        dateToSegment.set(dateKey, { sessionId, segmentIndex: segmentCounter })
+        sessionsCreated.push(sessionId)
+      }
+
+      const { sessionId, segmentIndex } = dateToSegment.get(dateKey)!
+      const role: 'user' | 'assistant' = turn.speaker === 'B' ? 'assistant' : 'user'
+
+      await memory.ingest({
+        role,
+        content: turn.text.trim(),
+        sessionId,
+        metadata: {
+          locomoConvId: convId,
+          locomoTurnId: turn.dia_id,
+          locomoSegmentIndex: segmentIndex,
+          locomoSpeaker: turn.speaker,
+          locomoDate: turn.date ?? null,
+        },
+      })
+
+      episodesIngested++
+    }
+
+    return { episodesIngested, sessionsCreated }
+  }
+
+  async ingestDataset(
+    conversations: LoCoMoConversationFile[],
+    memory: Memory,
+    opts?: Pick<BenchmarkOpts, 'consolidate'>,
+  ): Promise<{ totalEpisodes: number; totalSessions: number }> {
+    let totalEpisodes = 0
+    let totalSessions = 0
+
+    for (const conv of conversations) {
+      const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory)
+      totalEpisodes += episodesIngested
+      totalSessions += sessionsCreated.length
+
+      if (opts?.consolidate !== false) {
+        await memory.consolidate('light')
+      }
+    }
+
+    if (opts?.consolidate !== false) {
+      await memory.consolidate('deep')
+      await memory.consolidate('dream')
+      await memory.consolidate('decay')
+    }
+
+    return { totalEpisodes, totalSessions }
+  }
+
+  /**
+   * Evaluate all QA pairs. Evidence matching uses segment+turn metadata.
+   */
+  async evaluateDataset(
+    conversations: LoCoMoConversationFile[],
+    memory: Memory,
+    opts?: Pick<BenchmarkOpts, 'topK'>,
+  ): Promise<LoCoMoConversationResult[]> {
+    const topK = opts?.topK ?? 10
+    const convResults: LoCoMoConversationResult[] = []
+
+    for (const conv of conversations) {
+      const convId = String(conv.id)
+      const qaPredictions: LoCoMoQAPrediction[] = []
+
+      for (const qa of conv.qa) {
+        const recallResult = await memory.recall(qa.question)
+        const topMemories = recallResult.memories.slice(0, topK)
+
+        const prediction = topMemories
+          .map(m => m.content)
+          .filter(c => c && c.trim().length > 0)
+          .join(' ')
+          .slice(0, 2000)
+
+        const retrievalF1 = computeRetrievalF1(prediction, qa.answer)
+
+        const recalledEvidenceIds = new Set<string>()
+        for (const mem of topMemories) {
+          const locomoConvId = mem.metadata?.locomoConvId as string | undefined
+          const locomoSegmentIndex = mem.metadata?.locomoSegmentIndex as number | undefined
+          const locomoTurnId = mem.metadata?.locomoTurnId as number | undefined
+          if (
+            locomoConvId === convId &&
+            locomoSegmentIndex !== undefined &&
+            locomoTurnId !== undefined
+          ) {
+            recalledEvidenceIds.add(`D${locomoSegmentIndex}:${locomoTurnId}`)
+          }
+        }
+
+        const recallAtK = qa.evidence_ids.some(eid => recalledEvidenceIds.has(eid))
+
+        qaPredictions.push({
+          qaId: qa.id,
+          question: qa.question,
+          goldAnswer: qa.answer,
+          prediction,
+          retrievalF1,
+          recallAtK,
+          category: qa.category as 1 | 2 | 3 | 4 | 5,
+        })
+      }
+
+      convResults.push({
+        conversationId: convId,
+        qaPredictions,
+        episodesIngested: conv.conversation.length,
+        sessionsCreated: 0,
+      })
+    }
+
+    return convResults
+  }
+
+  async run(dataPath: string, opts?: BenchmarkOpts): Promise<LoCoMoResult> {
+    const ingestStart = Date.now()
+    const memory = await createBenchMemory(opts)
+    const conversations = await this.loadDataset(dataPath)
+
+    await this.ingestDataset(conversations, memory, opts)
+    const ingestTimeMs = Date.now() - ingestStart
+
+    const evalStart = Date.now()
+    const convResults = await this.evaluateDataset(conversations, memory, opts)
+    const evalTimeMs = Date.now() - evalStart
+
+    const allPredictions = convResults.flatMap(c => c.qaPredictions)
+    const totalQueries = allPredictions.length
+
+    const averageRetrievalF1 =
+      allPredictions.length > 0
+        ? allPredictions.reduce((sum, p) => sum + p.retrievalF1, 0) / allPredictions.length
+        : 0
+
+    const overallRecallAtK =
+      allPredictions.length > 0
+        ? allPredictions.filter(p => p.recallAtK).length / allPredictions.length
+        : 0
+
+    const categoryMap = new Map<number, LoCoMoQAPrediction[]>()
+    for (const p of allPredictions) {
+      const bucket = categoryMap.get(p.category) ?? []
+      bucket.push(p)
+      categoryMap.set(p.category, bucket)
+    }
+
+    const byCategory: LoCoMoCategoryMetrics[] = []
+    for (const [cat, preds] of categoryMap) {
+      byCategory.push({
+        category: cat as 1 | 2 | 3 | 4 | 5,
+        totalQuestions: preds.length,
+        averageRetrievalF1: preds.reduce((s, p) => s + p.retrievalF1, 0) / preds.length,
+        recallAtK: preds.filter(p => p.recallAtK).length / preds.length,
+      })
+    }
+    byCategory.sort((a, b) => a.category - b.category)
+
+    const evalFormat: LoCoMoEvalFormat[] = convResults.map(cr => ({
+      sample_id: cr.conversationId,
+      qa: cr.qaPredictions.map(p => ({
+        prediction: p.prediction,
+        retrieval_f1: p.retrievalF1,
+      })),
+    }))
+
+    const totalTokensRecalled = allPredictions.reduce(
+      (sum, p) => sum + Math.ceil(p.prediction.length / 4),
+      0,
+    )
+
+    return {
+      benchmark: 'locomo',
+      conversations: convResults,
+      overall: { averageRetrievalF1, recallAtK: overallRecallAtK, byCategory },
+      metrics: { totalQueries, ingestTimeMs, evalTimeMs, totalTokensRecalled },
+      evalFormat,
+    }
+  }
+}

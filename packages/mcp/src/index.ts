@@ -153,6 +153,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['query'],
         },
       },
+      {
+        name: 'memory_timeline',
+        description:
+          'Show how a topic evolved over time. Returns a chronological list of semantic memories for a topic, including superseded (expired) beliefs. Useful for understanding how knowledge changed.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            topic: {
+              type: 'string',
+              description: 'Topic to trace (e.g. "preference", "TypeScript", "auth architecture").',
+            },
+            from_date: {
+              type: 'string',
+              description: 'Optional ISO date string to filter from (inclusive).',
+            },
+            to_date: {
+              type: 'string',
+              description: 'Optional ISO date string to filter to (inclusive).',
+            },
+          },
+          required: ['topic'],
+        },
+      },
     ],
   }
 })
@@ -278,6 +301,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       return {
         content: [{ type: 'text' as const, text }],
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // memory_timeline
+    // -------------------------------------------------------------------------
+    if (name === 'memory_timeline') {
+      const topic = args['topic']
+      if (typeof topic !== 'string' || topic.trim().length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: topic must be a non-empty string' }],
+          isError: true,
+        }
+      }
+
+      const fromDate = typeof args['from_date'] === 'string' ? new Date(args['from_date']) : undefined
+      const toDate = typeof args['to_date'] === 'string' ? new Date(args['to_date']) : undefined
+
+      const timeline = await mem.getTimeline(topic.trim(), { fromDate, toDate })
+
+      if (timeline.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No semantic memories found for topic "${topic}".` }],
+        }
+      }
+
+      const lines = [`## Timeline: "${topic}" (${timeline.length} entries)\n`]
+      for (const m of timeline) {
+        const status = m.supersededBy ? '~~superseded~~' : '**current**'
+        const from = m.createdAt.toISOString().slice(0, 10)
+        lines.push(`- [${from}] ${status} — ${m.content}`)
+        if (m.supersededBy) lines.push(`  _superseded by: ${m.supersededBy}_`)
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
       }
     }
 

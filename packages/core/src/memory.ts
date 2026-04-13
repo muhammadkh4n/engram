@@ -1,4 +1,4 @@
-import type { Message, Episode, ConsolidateResult, RecallResult, RetrievedMemory } from './types.js'
+import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RetrievedMemory } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -300,7 +300,7 @@ export class Memory {
   /** Intent-analyzed, association-walked, primed recall. */
   async recall(
     query: string,
-    opts?: { embedding?: number[]; tokenBudget?: number }
+    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date }
   ): Promise<RecallResult> {
     this.assertInitialized()
 
@@ -328,6 +328,7 @@ export class Memory {
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
       graph: this._graph,
+      asOf: opts?.asOf,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
     })
 
@@ -361,6 +362,19 @@ export class Memory {
     const episodes = await this.storage.episodes.getByIds(digest.sourceEpisodeIds)
 
     return { episodes }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Temporal Queries
+  // ---------------------------------------------------------------------------
+
+  /** Get the full timeline of a topic — all semantic memories including superseded ones. */
+  async getTimeline(
+    topic: string,
+    opts?: { fromDate?: Date; toDate?: Date },
+  ): Promise<SemanticMemory[]> {
+    this.assertInitialized()
+    return this.storage.semantic.getTopicTimeline(topic, opts)
   }
 
   // ---------------------------------------------------------------------------

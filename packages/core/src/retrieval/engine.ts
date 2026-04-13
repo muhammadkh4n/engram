@@ -46,6 +46,13 @@ export interface RecallOpts {
   project?: string
   /** When true, drop candidates whose project does not match opts.project. */
   projectStrict?: boolean
+  /**
+   * Return memories valid at this point in time. When set:
+   * - Semantic: uses searchAtTime instead of search
+   * - Episodes/digests: passes beforeDate to SearchOptions
+   * Half-open [valid_from, valid_until). valid_until is EXCLUSIVE.
+   */
+  asOf?: Date
 }
 
 // ---------------------------------------------------------------------------

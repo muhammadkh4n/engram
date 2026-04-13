@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
-import { sanitizeFtsQuery, julianToDate } from './search.js'
+import { sanitizeFtsQuery, julianToDate, dateToJulian } from './search.js'
 import { hybridSearch } from './vector-search.js'
 
 export class SqliteSemanticStorage implements SemanticStorage {
@@ -177,6 +177,49 @@ export class SqliteSemanticStorage implements SemanticStorage {
     })
     txn()
     return total
+  }
+
+  async searchAtTime(
+    query: string,
+    asOf: Date,
+    opts?: { limit?: number; embedding?: number[] },
+  ): Promise<SearchResult<SemanticMemory>[]> {
+    // Get all results then filter by temporal validity
+    const results = await this.search(query, { limit: (opts?.limit ?? 10) * 3, embedding: opts?.embedding })
+    const asOfJulian = dateToJulian(asOf)
+    return results.filter(r => {
+      const row = this.db.prepare(
+        'SELECT valid_from, valid_until FROM semantic WHERE id = ?'
+      ).get(r.item.id) as { valid_from: number | null; valid_until: number | null } | undefined
+      if (!row) return false
+      // NULL valid_from = always valid (epoch)
+      if (row.valid_from !== null && row.valid_from > asOfJulian) return false
+      // NULL valid_until = still valid. valid_until is EXCLUSIVE
+      if (row.valid_until !== null && row.valid_until <= asOfJulian) return false
+      return true
+    }).slice(0, opts?.limit ?? 10)
+  }
+
+  async getTopicTimeline(
+    topic: string,
+    opts?: { fromDate?: Date; toDate?: Date },
+  ): Promise<SemanticMemory[]> {
+    let sql = `SELECT * FROM semantic WHERE (topic = ? OR topic LIKE ? OR content LIKE ?)`
+    const params: unknown[] = [topic, `%${topic}%`, `%${topic}%`]
+
+    if (opts?.fromDate) {
+      sql += ' AND COALESCE(valid_from, created_at) >= ?'
+      params.push(dateToJulian(opts.fromDate))
+    }
+    if (opts?.toDate) {
+      sql += ' AND COALESCE(valid_from, created_at) <= ?'
+      params.push(dateToJulian(opts.toDate))
+    }
+
+    sql += ' ORDER BY COALESCE(valid_from, created_at) ASC'
+
+    const rows = this.db.prepare(sql).all(...params) as SemanticRow[]
+    return rows.map(r => this.rowToSemantic(r))
   }
 
   private rowToSemantic(row: SemanticRow): SemanticMemory {

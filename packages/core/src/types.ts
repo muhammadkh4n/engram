@@ -212,6 +212,8 @@ export interface SearchOptions {
   minScore?: number
   sessionId?: string
   embedding?: number[]
+  /** Only return memories created at or before this date. Applied inside search where createdAt is available. */
+  beforeDate?: Date
 }
 
 export interface SearchResult<T> {

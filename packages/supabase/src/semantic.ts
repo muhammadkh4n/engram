@@ -177,6 +177,47 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     }
     return total
   }
+
+  async searchAtTime(
+    query: string,
+    asOf: Date,
+    opts?: { limit?: number; embedding?: number[] },
+  ): Promise<SearchResult<SemanticMemory>[]> {
+    // Get broader results then filter by temporal validity
+    const results = await this.search(query, { limit: (opts?.limit ?? 10) * 3, embedding: opts?.embedding })
+    const asOfIso = asOf.toISOString()
+    return results.filter(r => {
+      const meta = r.item.metadata as Record<string, unknown>
+      // Use valid_from/valid_until from the item if available, else fall back
+      const validFrom = (meta?.valid_from as string | undefined) ?? r.item.createdAt.toISOString()
+      const validUntil = meta?.valid_until as string | undefined
+      if (validFrom > asOfIso) return false
+      if (validUntil && validUntil <= asOfIso) return false
+      return true
+    }).slice(0, opts?.limit ?? 10)
+  }
+
+  async getTopicTimeline(
+    topic: string,
+    opts?: { fromDate?: Date; toDate?: Date },
+  ): Promise<SemanticMemory[]> {
+    let query = this.client
+      .from('semantic')
+      .select('*')
+      .or(`topic.eq.${topic},topic.ilike.%${topic}%,content.ilike.%${topic}%`)
+      .order('created_at', { ascending: true })
+
+    if (opts?.fromDate) {
+      query = query.gte('created_at', opts.fromDate.toISOString())
+    }
+    if (opts?.toDate) {
+      query = query.lte('created_at', opts.toDate.toISOString())
+    }
+
+    const { data, error } = await query
+    if (error) throw new Error(`Semantic getTopicTimeline failed: ${error.message}`)
+    return (data ?? []).map(rowToSemantic)
+  }
 }
 
 // ---------------------------------------------------------------------------

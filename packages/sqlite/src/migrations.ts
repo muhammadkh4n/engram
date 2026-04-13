@@ -283,4 +283,34 @@ export function runMigrations(db: Database.Database): void {
     db.exec(SCHEMA_V2)
     db.pragma('user_version = 2')
   }
+
+  if (currentVersion < 3) {
+    // V3: Temporal validity columns on semantic table.
+    // Half-open interval [valid_from, valid_until):
+    //   valid_from  INCLUSIVE — memory becomes valid at this moment
+    //   valid_until EXCLUSIVE — memory ceases to be valid at this moment
+    // NULL valid_from  = always valid (epoch). NULL valid_until = still valid.
+    const columns = db.prepare('PRAGMA table_info(semantic)').all() as Array<{ name: string }>
+    const hasValidFrom = columns.some(c => c.name === 'valid_from')
+    if (!hasValidFrom) {
+      db.exec('ALTER TABLE semantic ADD COLUMN valid_from REAL')
+      db.exec('ALTER TABLE semantic ADD COLUMN valid_until REAL')
+    }
+    // Backfill valid_from from created_at (idempotent)
+    db.exec('UPDATE semantic SET valid_from = created_at WHERE valid_from IS NULL')
+    // Backfill valid_until from the superseding memory's created_at
+    db.exec(`
+      UPDATE semantic SET valid_until = (
+        SELECT s2.created_at FROM semantic s2
+        WHERE s2.id = semantic.superseded_by LIMIT 1
+      ) WHERE superseded_by IS NOT NULL AND valid_until IS NULL
+    `)
+    // Partial index for temporal queries
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_semantic_temporal
+      ON semantic(valid_from, valid_until)
+      WHERE valid_until IS NOT NULL
+    `)
+    db.pragma('user_version = 3')
+  }
 }
