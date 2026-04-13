@@ -86,10 +86,9 @@ export class SupabaseSemanticStorage implements SemanticStorage {
       }))
     }
 
-    // Text fallback — use short keywords to avoid PostgREST .or() parser issues
-    // with commas/special chars in content. Extract first 3 words as search terms.
-    const keywords = query.split(/\s+/).slice(0, 5).join(' ')
-    const safe = sanitizeIlike(keywords)
+    // Text fallback — strip all non-alphanumeric chars to avoid PostgREST .or()
+    // parser failures (commas, parens, periods are structural in PostgREST filters)
+    const safe = query.replace(/[^a-zA-Z0-9\s]/g, '').split(/\s+/).slice(0, 5).join(' ')
     const { data, error } = await this.client
       .from('memory_semantic')
       .select('*')
