@@ -86,11 +86,14 @@ export class SupabaseSemanticStorage implements SemanticStorage {
       }))
     }
 
-    // Text fallback
+    // Text fallback — use short keywords to avoid PostgREST .or() parser issues
+    // with commas/special chars in content. Extract first 3 words as search terms.
+    const keywords = query.split(/\s+/).slice(0, 5).join(' ')
+    const safe = sanitizeIlike(keywords)
     const { data, error } = await this.client
       .from('memory_semantic')
       .select('*')
-      .or(`topic.ilike.%${sanitizeIlike(query)}%,content.ilike.%${sanitizeIlike(query)}%`)
+      .or(`topic.ilike.%${safe}%,content.ilike.%${safe}%`)
       .is('superseded_by', null)
       .limit(limit)
 
@@ -204,7 +207,7 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     let query = this.client
       .from('semantic')
       .select('*')
-      .or(`topic.eq.${topic},topic.ilike.%${topic}%,content.ilike.%${topic}%`)
+      .or(`topic.eq.${sanitizeIlike(topic)},topic.ilike.%${sanitizeIlike(topic)}%`)
       .order('created_at', { ascending: true })
 
     if (opts?.fromDate) {

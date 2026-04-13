@@ -23,7 +23,7 @@ export class SupabaseDigestStorage implements DigestStorage {
         session_id: digest.sessionId,
         summary: digest.summary,
         key_topics: digest.keyTopics,
-        source_episode_ids: digest.sourceEpisodeIds,
+        episode_ids: digest.sourceEpisodeIds,
         source_digest_ids: digest.sourceDigestIds,
         level: digest.level,
         embedding: digest.embedding ?? null,
@@ -140,7 +140,7 @@ interface DigestRow {
   session_id: string
   summary: string
   key_topics: string[]
-  source_episode_ids: string[]
+  episode_ids: string[]
   source_digest_ids: string[]
   level: number
   embedding: number[] | null
@@ -165,7 +165,7 @@ function rowToDigest(row: DigestRow): Digest {
     sessionId: row.session_id,
     summary: row.summary,
     keyTopics: row.key_topics ?? [],
-    sourceEpisodeIds: row.source_episode_ids ?? [],
+    sourceEpisodeIds: row.episode_ids ?? [],
     sourceDigestIds: row.source_digest_ids ?? [],
     level: row.level,
     embedding: row.embedding ?? null,

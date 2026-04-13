@@ -105,7 +105,14 @@ export class SupabaseAssociationStorage implements AssociationStorage {
       p_days_lookback: opts.daysLookback,
       p_max_new_associations: opts.maxNew,
     })
-    if (error) throw new Error(`Association discoverTopicalEdges failed: ${error.message}`)
+    // RPC may not exist — dream cycle SQL is supplementary to Neo4j graph ops.
+    // Return empty when the function isn't deployed.
+    if (error) {
+      if (error.message.includes('schema cache') || error.message.includes('not found')) {
+        return []
+      }
+      throw new Error(`Association discoverTopicalEdges failed: ${error.message}`)
+    }
 
     const rows = (data ?? []) as DreamRow[]
     return rows.map((r) => ({
