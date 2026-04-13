@@ -2,6 +2,7 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
+import { extractCounters } from './graph-counters.js'
 import { heuristicSummarize } from './heuristic-summarize.js'
 import { estimateTokens } from '../utils/tokens.js'
 
@@ -180,7 +181,7 @@ export async function lightSleep(
             createdAt: now,
             validFrom: now,
           })
-          graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+          graphNodesCreated += extractCounters(nodeResult).nodesCreated
 
           // Step 2: DERIVES_FROM edges from digest to source episodes
           const derivesResult = await graph.runCypherWrite(`
@@ -193,7 +194,7 @@ export async function lightSleep(
                           r.lastTraversed = null,
                           r.traversalCount = 0
           `, { sourceEpisodeIds: sourceIds, digestId: digest.id, now })
-          graphEdgesCreated += derivesResult.summary.counters.relationshipsCreated()
+          graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
 
           // Step 3: Merge context connections from source episodes
           const ctxResult = await graph.runCypherWrite(`
@@ -215,7 +216,7 @@ export async function lightSleep(
             digestId: digest.id,
             now,
           })
-          graphEdgesCreated += ctxResult.summary.counters.relationshipsCreated()
+          graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
 
           // Step 4: Dominant emotion for the digest
           const emotionResult = await graph.runCypherWrite(`
@@ -237,8 +238,8 @@ export async function lightSleep(
                           rel.lastTraversed = null,
                           rel.traversalCount = 0
           `, { sourceEpisodeIds: sourceIds, digestId: digest.id, sessionId, now })
-          graphNodesCreated += emotionResult.summary.counters.nodesCreated()
-          graphEdgesCreated += emotionResult.summary.counters.relationshipsCreated()
+          graphNodesCreated += extractCounters(emotionResult).nodesCreated
+          graphEdgesCreated += extractCounters(emotionResult).relationshipsCreated
         } catch (err) {
           // Neo4j failure is non-fatal — SQL results already committed
           const msg = err instanceof Error ? err.message : String(err)

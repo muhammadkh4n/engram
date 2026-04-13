@@ -1,6 +1,7 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
+import { extractCounters } from './graph-counters.js'
 
 export interface DecayPassOptions {
   semanticDecayRate?: number
@@ -170,7 +171,7 @@ export async function decayPass(
           AND type(r) <> 'DERIVES_FROM'
         DELETE r
       `, { cutoffDate })
-      graphEdgesPruned = pruneResult.summary.counters.relationshipsDeleted()
+      graphEdgesPruned = extractCounters(pruneResult).relationshipsDeleted
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[decay-pass] Neo4j edge pruning failed: ${msg}`)

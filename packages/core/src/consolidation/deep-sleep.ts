@@ -2,6 +2,7 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
+import { extractCounters } from './graph-counters.js'
 
 export interface DeepSleepOptions {
   minDigests?: number
@@ -276,7 +277,7 @@ export async function deepSleep(
           now,
           validFrom,
         })
-        graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+        graphNodesCreated += extractCounters(nodeResult).nodesCreated
 
         // Step 2: DERIVES_FROM edges to source digests
         const derivesResult = await graph.runCypherWrite(`
@@ -289,7 +290,7 @@ export async function deepSleep(
                         r.lastTraversed = null,
                         r.traversalCount = 0
         `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
-        graphEdgesCreated += derivesResult.summary.counters.relationshipsCreated()
+        graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
 
         // Step 3: Transitive context inheritance with MAX weight
         const ctxResult = await graph.runCypherWrite(`
@@ -309,7 +310,7 @@ export async function deepSleep(
                        END,
                        rel.lastTraversed = $now
         `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
-        graphEdgesCreated += ctxResult.summary.counters.relationshipsCreated()
+        graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
 
         // Step 4: Supersession → CONTRADICTS + validUntil
         if (supersededId) {
@@ -382,7 +383,7 @@ export async function deepSleep(
           triggerPattern: candidate.trigger ?? candidate.topic,
           now,
         })
-        graphNodesCreated += nodeResult.summary.counters.nodesCreated()
+        graphNodesCreated += extractCounters(nodeResult).nodesCreated
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.warn(`[deep-sleep] Neo4j graph update failed for procedural ${proceduralRecord.id}: ${msg}`)
