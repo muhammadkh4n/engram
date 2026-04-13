@@ -107,8 +107,13 @@ export interface GraphPort {
   spreadActivation(opts: GraphSpreadActivationOpts): Promise<GraphActivatedNode[]>
   strengthenTraversedEdges(pairs: Array<[string, string]>): Promise<void>
   // Wave 3: raw Cypher execution for consolidation operations
-  runCypher?(query: string, params?: Record<string, unknown>): Promise<GraphQueryResult>
-  runCypherWrite?(query: string, params?: Record<string, unknown>): Promise<GraphQueryResult>
+  // Returns the driver-native result type — consolidation code accesses
+  // .records and .summary.counters via the GraphQueryResult shape, but
+  // the actual neo4j-driver QueryResult is a structural superset.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  runCypher?(query: string, params?: Record<string, unknown>): Promise<any>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  runCypherWrite?(query: string, params?: Record<string, unknown>): Promise<any>
   // Wave 3: check if Neo4j GDS plugin is available
   isGdsAvailable?(): Promise<boolean>
 }

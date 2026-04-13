@@ -98,7 +98,7 @@ export async function decayPass(
         RETURN m.id AS memoryId, m.memoryType AS memoryType, m.pageRank AS pageRank
       `)
 
-      for (const record of prScores.records) {
+      for (const record of prScores.records as Array<{ get(key: string): unknown }>) {
         const id = record.get('memoryId') as string
         const pr = record.get('pageRank')
         pageRankMap.set(id, typeof pr === 'number' ? pr : Number(pr ?? 0))
@@ -192,7 +192,7 @@ export async function decayPass(
       let isolatedCount = 0
       const now = new Date().toISOString()
 
-      for (const record of isolatedResult.records) {
+      for (const record of isolatedResult.records as Array<{ get(key: string): unknown }>) {
         const memoryId = record.get('memoryId') as string
         const memoryType = record.get('memoryType') as string
 

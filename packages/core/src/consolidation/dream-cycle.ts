@@ -173,7 +173,7 @@ export async function dreamCycle(
         RETURN m.id AS memoryId
       `, { replaySeeds })
 
-      const seeds = seedResult.records.map(r => ({ memoryId: r.get('memoryId') as string }))
+      const seeds = seedResult.records.map((r: { get(key: string): unknown }) => ({ memoryId: r.get('memoryId') as string }))
 
       // Run spreading activation from each seed
       const activationResults: Array<{ seedId: string; activatedMemoryIds: Set<string> }> = []
@@ -264,7 +264,7 @@ export async function dreamCycle(
       `, { minSessions: causalMinSessions })
 
       const now = new Date().toISOString()
-      for (const record of causalResult.records) {
+      for (const record of causalResult.records as Array<{ get(key: string): unknown }>) {
         const topicAId = record.get('topicAId') as string
         const topicBId = record.get('topicBId') as string
         const sessionCount = record.get('sessionCount')

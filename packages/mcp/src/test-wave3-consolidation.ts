@@ -40,7 +40,7 @@ async function main() {
   if (neo4jPass) {
     try {
       graph = new NeuralGraph({ neo4jUri, neo4jUser, neo4jPassword: neo4jPass, enabled: true })
-      await graph.connect()
+      await graph.initialize()
       const available = await graph.isAvailable()
       console.log(`[ok] Neo4j: ${available ? 'connected' : 'unavailable'}`)
 
@@ -163,7 +163,7 @@ async function main() {
   console.log('\n=== Done ===')
 
   if (graph) {
-    await graph.disconnect()
+    await graph.dispose()
   }
   await storage.dispose()
   process.exit(0)

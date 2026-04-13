@@ -1,12 +1,20 @@
 {
   "name": "@engram-mem/sqlite",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist/", "README.md"],
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "https://github.com/muhammadkh4n/engram.git" },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/muhammadkh4n/engram.git"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
