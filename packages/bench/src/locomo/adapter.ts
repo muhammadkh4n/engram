@@ -5,7 +5,7 @@ import type {
   BenchmarkOpts, LoCoMoResult, LoCoMoConversationResult,
   LoCoMoQAPrediction, LoCoMoEvalFormat, LoCoMoCategoryMetrics,
 } from '../types.js'
-import type { LoCoMoConversationFile } from './types.js'
+import type { LoCoMoConversationFile, LoCoMoTurn } from './types.js'
 import { computeRetrievalF1 } from '../metrics/f1.js'
 import { createBenchMemory } from '../memory-factory.js'
 
@@ -35,47 +35,96 @@ export class LoCoMoAdapter {
   }
 
   /**
-   * Ingest all turns from a conversation. Segments by date-group (audit fix).
-   * Stores locomoSegmentIndex and locomoTurnId in metadata for evidence matching.
+   * Extract session turns from the conversation object.
+   * Real LoCoMo format: conversation.session_1 = LoCoMoTurn[], conversation.session_1_date_time = string
+   */
+  private extractSessions(conv: LoCoMoConversationFile): Array<{
+    sessionKey: string
+    segmentIndex: number
+    dateTime: string | null
+    turns: LoCoMoTurn[]
+    speakerA: string
+    speakerB: string
+  }> {
+    const sessions: Array<{
+      sessionKey: string
+      segmentIndex: number
+      dateTime: string | null
+      turns: LoCoMoTurn[]
+      speakerA: string
+      speakerB: string
+    }> = []
+
+    const speakerA = conv.conversation.speaker_a as string
+    const speakerB = conv.conversation.speaker_b as string
+
+    // Find all session_N keys (sorted numerically)
+    const sessionKeys = Object.keys(conv.conversation)
+      .filter(k => /^session_\d+$/.test(k))
+      .sort((a, b) => {
+        const numA = parseInt(a.replace('session_', ''), 10)
+        const numB = parseInt(b.replace('session_', ''), 10)
+        return numA - numB
+      })
+
+    for (let i = 0; i < sessionKeys.length; i++) {
+      const key = sessionKeys[i]!
+      const turns = conv.conversation[key] as LoCoMoTurn[]
+      const dateTimeKey = `${key}_date_time`
+      const dateTime = (conv.conversation[dateTimeKey] as string) ?? null
+
+      sessions.push({
+        sessionKey: key,
+        segmentIndex: i + 1, // 1-based
+        dateTime,
+        turns: Array.isArray(turns) ? turns : [],
+        speakerA,
+        speakerB,
+      })
+    }
+
+    return sessions
+  }
+
+  /**
+   * Ingest all turns from a conversation into memory.
+   * Maps each session to an Engram sessionId. Stores dia_id in metadata
+   * for evidence matching.
    */
   async ingestConversation(
     conv: LoCoMoConversationFile,
     memory: Memory,
   ): Promise<{ episodesIngested: number; sessionsCreated: string[] }> {
-    const convId = String(conv.id)
-    const dateToSegment = new Map<string, { sessionId: string; segmentIndex: number }>()
+    const convId = conv.sample_id
+    const sessions = this.extractSessions(conv)
     const sessionsCreated: string[] = []
-    let segmentCounter = 0
     let episodesIngested = 0
 
-    for (const turn of conv.conversation) {
-      if (!turn.text || turn.text.trim().length === 0) continue
+    for (const session of sessions) {
+      const sessionId = `locomo:${convId}:session-${session.segmentIndex}`
+      sessionsCreated.push(sessionId)
 
-      const dateKey = turn.date ?? 'undated'
-      if (!dateToSegment.has(dateKey)) {
-        segmentCounter++
-        const sessionId = `locomo:${convId}:${dateKey.replace(/\s+/g, '-')}`
-        dateToSegment.set(dateKey, { sessionId, segmentIndex: segmentCounter })
-        sessionsCreated.push(sessionId)
+      for (const turn of session.turns) {
+        if (!turn.text || turn.text.trim().length === 0) continue
+
+        // Map speaker name to role
+        const role: 'user' | 'assistant' = turn.speaker === session.speakerB ? 'assistant' : 'user'
+
+        await memory.ingest({
+          role,
+          content: turn.text.trim(),
+          sessionId,
+          metadata: {
+            locomoConvId: convId,
+            locomoDiaId: turn.dia_id, // e.g. "D1:3" — the evidence ID directly
+            locomoSegmentIndex: session.segmentIndex,
+            locomoSpeaker: turn.speaker,
+            locomoDate: session.dateTime,
+          },
+        })
+
+        episodesIngested++
       }
-
-      const { sessionId, segmentIndex } = dateToSegment.get(dateKey)!
-      const role: 'user' | 'assistant' = turn.speaker === 'B' ? 'assistant' : 'user'
-
-      await memory.ingest({
-        role,
-        content: turn.text.trim(),
-        sessionId,
-        metadata: {
-          locomoConvId: convId,
-          locomoTurnId: turn.dia_id,
-          locomoSegmentIndex: segmentIndex,
-          locomoSpeaker: turn.speaker,
-          locomoDate: turn.date ?? null,
-        },
-      })
-
-      episodesIngested++
     }
 
     return { episodesIngested, sessionsCreated }
@@ -109,7 +158,8 @@ export class LoCoMoAdapter {
   }
 
   /**
-   * Evaluate all QA pairs. Evidence matching uses segment+turn metadata.
+   * Evaluate all QA pairs. Evidence matching uses dia_id from metadata.
+   * LoCoMo evidence format: "D1:3" — already stored as locomoDiaId.
    */
   async evaluateDataset(
     conversations: LoCoMoConversationFile[],
@@ -120,7 +170,7 @@ export class LoCoMoAdapter {
     const convResults: LoCoMoConversationResult[] = []
 
     for (const conv of conversations) {
-      const convId = String(conv.id)
+      const convId = conv.sample_id
       const qaPredictions: LoCoMoQAPrediction[] = []
 
       for (const qa of conv.qa) {
@@ -133,28 +183,25 @@ export class LoCoMoAdapter {
           .join(' ')
           .slice(0, 2000)
 
-        const retrievalF1 = computeRetrievalF1(prediction, qa.answer)
+        const goldAnswer = String(qa.answer)
+        const retrievalF1 = computeRetrievalF1(prediction, goldAnswer)
 
+        // Build set of recalled evidence IDs from metadata
         const recalledEvidenceIds = new Set<string>()
         for (const mem of topMemories) {
           const locomoConvId = mem.metadata?.locomoConvId as string | undefined
-          const locomoSegmentIndex = mem.metadata?.locomoSegmentIndex as number | undefined
-          const locomoTurnId = mem.metadata?.locomoTurnId as number | undefined
-          if (
-            locomoConvId === convId &&
-            locomoSegmentIndex !== undefined &&
-            locomoTurnId !== undefined
-          ) {
-            recalledEvidenceIds.add(`D${locomoSegmentIndex}:${locomoTurnId}`)
+          const diaId = mem.metadata?.locomoDiaId as string | undefined
+          if (locomoConvId === convId && diaId) {
+            recalledEvidenceIds.add(diaId)
           }
         }
 
-        const recallAtK = qa.evidence_ids.some(eid => recalledEvidenceIds.has(eid))
+        const recallAtK = qa.evidence.some(eid => recalledEvidenceIds.has(eid))
 
         qaPredictions.push({
-          qaId: qa.id,
+          qaId: `${convId}:${qa.question.slice(0, 30)}`,
           question: qa.question,
-          goldAnswer: qa.answer,
+          goldAnswer,
           prediction,
           retrievalF1,
           recallAtK,
@@ -165,7 +212,7 @@ export class LoCoMoAdapter {
       convResults.push({
         conversationId: convId,
         qaPredictions,
-        episodesIngested: conv.conversation.length,
+        episodesIngested: 0, // populated by caller
         sessionsCreated: 0,
       })
     }
@@ -178,8 +225,12 @@ export class LoCoMoAdapter {
     const memory = await createBenchMemory(opts)
     const conversations = await this.loadDataset(dataPath)
 
+    console.log(`LoCoMo: ${conversations.length} conversations loaded`)
+
     await this.ingestDataset(conversations, memory, opts)
     const ingestTimeMs = Date.now() - ingestStart
+
+    console.log(`LoCoMo: ingestion complete (${ingestTimeMs}ms)`)
 
     const evalStart = Date.now()
     const convResults = await this.evaluateDataset(conversations, memory, opts)
