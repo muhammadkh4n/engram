@@ -79,8 +79,25 @@ async function getMemory(): Promise<Memory> {
 // ---------------------------------------------------------------------------
 
 const server = new Server(
-  { name: 'engram-memory', version: '0.1.0' },
-  { capabilities: { tools: {} } }
+  { name: 'engram-memory', version: '0.2.0' },
+  {
+    capabilities: { tools: {} },
+    instructions: `You have access to Engram, a persistent memory system that remembers across conversations.
+
+IMPORTANT — When to use memory_recall:
+- Before answering questions about past work, decisions, preferences, or architecture
+- When the user references something from a previous session ("remember when...", "what did we decide about...", "last time we...")
+- When you're about to say "I don't have information about that" or "I can't recall" — CHECK MEMORY FIRST
+- When context from previous conversations would help answer the current question
+- When the user asks about their own preferences, tools, or workflow
+
+IMPORTANT — When NOT to search memory:
+- Routine file reads, test outputs, build commands
+- Questions about general programming knowledge (use your training data)
+- When the user explicitly says not to use memory
+
+If memory_recall returns relevant results, USE THEM directly in your response. Do not say "I don't have this information" if it appears in recalled memories.`,
+  },
 )
 
 // ---------------------------------------------------------------------------
@@ -93,7 +110,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'memory_recall',
         description:
-          'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). Use this before answering questions about past context, preferences, or decisions.',
+          'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first.',
         inputSchema: {
           type: 'object' as const,
           properties: {
