@@ -66,6 +66,7 @@ async function getMemory(): Promise<Memory> {
   memory = createMemory({
     storage,
     intelligence,
+    autoConsolidate: true,
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
