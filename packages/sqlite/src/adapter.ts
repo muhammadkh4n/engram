@@ -8,6 +8,7 @@ import { SqliteDigestStorage } from './digests.js'
 import { SqliteSemanticStorage } from './semantic.js'
 import { SqliteProceduralStorage } from './procedural.js'
 import { SqliteAssociationStorage } from './associations.js'
+import { SqliteConsolidationRunStorage } from './consolidation-runs.js'
 import { julianToDate } from './search.js'
 
 export class SqliteStorageAdapter implements StorageAdapter {
@@ -17,6 +18,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
   private _semantic: SqliteSemanticStorage | null = null
   private _procedural: SqliteProceduralStorage | null = null
   private _associations: SqliteAssociationStorage | null = null
+  private _consolidationRuns: SqliteConsolidationRunStorage | null = null
 
   constructor(private readonly path?: string) {}
 
@@ -39,6 +41,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     this._semantic = new SqliteSemanticStorage(this.db)
     this._procedural = new SqliteProceduralStorage(this.db)
     this._associations = new SqliteAssociationStorage(this.db)
+    this._consolidationRuns = new SqliteConsolidationRunStorage(this.db)
   }
 
   async dispose(): Promise<void> {
@@ -69,6 +72,11 @@ export class SqliteStorageAdapter implements StorageAdapter {
   get associations(): SqliteAssociationStorage {
     if (!this._associations) throw new Error('SqliteStorageAdapter not initialized. Call initialize() first.')
     return this._associations
+  }
+
+  get consolidationRuns(): SqliteConsolidationRunStorage {
+    if (!this._consolidationRuns) throw new Error('SqliteStorageAdapter not initialized. Call initialize() first.')
+    return this._consolidationRuns
   }
 
   private assertDb(): Database.Database {

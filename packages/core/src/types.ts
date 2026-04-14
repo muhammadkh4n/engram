@@ -269,6 +269,17 @@ export interface ConsolidateResult {
   isolatedNodesDeprioritized?: number
 }
 
+export interface ConsolidationRun {
+  id: string
+  cycle: 'light' | 'deep' | 'dream' | 'decay'
+  startedAt: Date
+  completedAt: Date | null
+  status: 'running' | 'completed' | 'failed'
+  result: ConsolidateResult | null
+  durationMs: number | null
+  error: string | null
+}
+
 // === Config Types ===
 
 export interface EngineConfig {

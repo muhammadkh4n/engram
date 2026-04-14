@@ -1,22 +1,15 @@
 /**
- * Auto-consolidation — runs due consolidation cycles on initialize().
+ * Auto-consolidation — runs due consolidation cycles automatically.
  *
- * Zero config: when enabled, checks data-volume thresholds at startup
- * and fires cycles that are due. No timers, no cron, no external deps.
+ * Phase 1: on initialize() — check thresholds, fire due cycles once.
+ * Phase 2: worker interval — 30s setInterval for always-on daemons.
  *
- * Thresholds:
- *   Light sleep: any session with 20+ unconsolidated episodes
- *   Deep sleep:  5+ digests created since last deep sleep (or ever)
- *   Dream cycle: 24h+ since last dream AND 50+ total episodes
- *   Decay pass:  7d+ since last decay
+ * Zero config when used as Phase 1. Phase 2 requires explicit
+ * startConsolidationWorker() call.
  *
  * All cycles run with heuristic-only intelligence by default (zero LLM
  * cost). LLM-powered summarization only activates if an intelligence
  * adapter is explicitly provided.
- *
- * Concurrency: a simple in-process mutex prevents parallel runs.
- * Multi-process safety relies on the idempotency of each cycle — running
- * the same cycle twice is wasteful but not harmful.
  */
 
 import type { StorageAdapter } from '../adapters/storage.js'
@@ -29,15 +22,10 @@ import { dreamCycle } from './dream-cycle.js'
 import { decayPass } from './decay-pass.js'
 
 export interface AutoConsolidationOpts {
-  /** Minimum unconsolidated episodes per session to trigger light sleep. Default: 20 */
   lightSleepThreshold?: number
-  /** Minimum digests to trigger deep sleep. Default: 5 */
   deepSleepThreshold?: number
-  /** Minimum hours since last dream cycle. Default: 24 */
   dreamCycleIntervalHours?: number
-  /** Minimum episode count to trigger dream cycle. Default: 50 */
   dreamCycleMinEpisodes?: number
-  /** Minimum days since last decay pass. Default: 7 */
   decayIntervalDays?: number
 }
 
@@ -49,13 +37,11 @@ const DEFAULTS: Required<AutoConsolidationOpts> = {
   decayIntervalDays: 7,
 }
 
-// In-process mutex — prevents concurrent consolidation runs
 let _running = false
 
 /**
- * Check thresholds and run due consolidation cycles.
- * Called from Memory.initialize() when autoConsolidate is enabled.
- * Runs in background (fire-and-forget) so initialize() returns quickly.
+ * Run due consolidation cycles once. Called from Memory.initialize().
+ * Logs results to consolidation_runs table when available.
  */
 export async function runAutoConsolidation(
   storage: StorageAdapter,
@@ -63,66 +49,36 @@ export async function runAutoConsolidation(
   graph: GraphPort | null,
   opts?: AutoConsolidationOpts,
 ): Promise<ConsolidateResult[]> {
-  if (_running) {
-    return []
-  }
+  if (_running) return []
   _running = true
 
   const config = { ...DEFAULTS, ...opts }
   const results: ConsolidateResult[] = []
+  const tracker = storage.consolidationRuns
 
   try {
-    // --- Light Sleep ---
-    const lightDue = await isLightSleepDue(storage, config.lightSleepThreshold)
-    if (lightDue) {
-      try {
-        const result = await lightSleep(storage, intelligence, undefined, graph)
-        results.push(result)
-        if ((result.digestsCreated ?? 0) > 0) {
-          console.info(`[engram] auto-consolidation: light sleep created ${result.digestsCreated} digests`)
-        }
-      } catch (err) {
-        console.warn('[engram] auto-consolidation: light sleep failed:', (err as Error).message)
-      }
+    // Light sleep
+    if (await isLightSleepDue(storage, config.lightSleepThreshold)) {
+      results.push(await runTracked('light', tracker, () =>
+        lightSleep(storage, intelligence, undefined, graph)))
     }
 
-    // --- Deep Sleep ---
-    const deepDue = await isDeepSleepDue(storage, config.deepSleepThreshold)
-    if (deepDue) {
-      try {
-        const result = await deepSleep(storage, intelligence, undefined, graph)
-        results.push(result)
-        if ((result.promoted ?? 0) > 0) {
-          console.info(`[engram] auto-consolidation: deep sleep promoted ${result.promoted} facts`)
-        }
-      } catch (err) {
-        console.warn('[engram] auto-consolidation: deep sleep failed:', (err as Error).message)
-      }
+    // Deep sleep
+    if (await isDeepSleepDue(storage, config.deepSleepThreshold)) {
+      results.push(await runTracked('deep', tracker, () =>
+        deepSleep(storage, intelligence, undefined, graph)))
     }
 
-    // --- Dream Cycle ---
-    const dreamDue = await isDreamCycleDue(storage, config.dreamCycleIntervalHours, config.dreamCycleMinEpisodes)
-    if (dreamDue) {
-      try {
-        const result = await dreamCycle(storage, undefined, graph)
-        results.push(result)
-      } catch (err) {
-        console.warn('[engram] auto-consolidation: dream cycle failed:', (err as Error).message)
-      }
+    // Dream cycle
+    if (await isDreamCycleDue(storage, tracker, config.dreamCycleIntervalHours, config.dreamCycleMinEpisodes)) {
+      results.push(await runTracked('dream', tracker, () =>
+        dreamCycle(storage, undefined, graph)))
     }
 
-    // --- Decay Pass ---
-    const decayDue = await isDecayDue(storage, config.decayIntervalDays)
-    if (decayDue) {
-      try {
-        const result = await decayPass(storage, undefined, graph)
-        results.push(result)
-        if ((result.semanticDecayed ?? 0) > 0) {
-          console.info(`[engram] auto-consolidation: decay pass decayed ${result.semanticDecayed} memories`)
-        }
-      } catch (err) {
-        console.warn('[engram] auto-consolidation: decay pass failed:', (err as Error).message)
-      }
+    // Decay pass
+    if (await isDecayDue(storage, tracker, config.decayIntervalDays)) {
+      results.push(await runTracked('decay', tracker, () =>
+        decayPass(storage, undefined, graph)))
     }
   } finally {
     _running = false
@@ -131,14 +87,84 @@ export async function runAutoConsolidation(
   return results
 }
 
+/**
+ * Start a background consolidation worker for always-on daemons.
+ * Checks thresholds every intervalMs (default 30s) and runs due cycles.
+ * Returns a stop function.
+ */
+export function startConsolidationWorker(
+  storage: StorageAdapter,
+  intelligence: IntelligenceAdapter | undefined,
+  graph: GraphPort | null,
+  opts?: AutoConsolidationOpts & { intervalMs?: number },
+): { stop: () => void } {
+  const intervalMs = opts?.intervalMs ?? 30_000
+  let stopped = false
+
+  const timer = setInterval(async () => {
+    if (stopped) return
+    try {
+      await runAutoConsolidation(storage, intelligence, graph, opts)
+    } catch (err) {
+      console.warn('[engram] consolidation worker error:', (err as Error).message)
+    }
+  }, intervalMs)
+
+  console.info(`[engram] consolidation worker started (interval: ${intervalMs}ms)`)
+
+  return {
+    stop() {
+      stopped = true
+      clearInterval(timer)
+      console.info('[engram] consolidation worker stopped')
+    },
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Threshold checks — each is a single cheap query
+// Tracked execution — logs to consolidation_runs when available
 // ---------------------------------------------------------------------------
 
-async function isLightSleepDue(
-  storage: StorageAdapter,
-  threshold: number,
-): Promise<boolean> {
+type CycleType = 'light' | 'deep' | 'dream' | 'decay'
+
+async function runTracked(
+  cycle: CycleType,
+  tracker: StorageAdapter['consolidationRuns'],
+  fn: () => Promise<ConsolidateResult>,
+): Promise<ConsolidateResult> {
+  const runId = tracker ? await tracker.recordStart(cycle).catch(() => null) : null
+  const start = Date.now()
+
+  try {
+    const result = await fn()
+    const durationMs = Date.now() - start
+
+    if (runId && tracker) {
+      await tracker.recordComplete(runId, result, durationMs).catch(() => {})
+    }
+
+    const hasWork = (result.digestsCreated ?? 0) + (result.promoted ?? 0) +
+      (result.associationsCreated ?? 0) + (result.semanticDecayed ?? 0) > 0
+    if (hasWork) {
+      console.info(`[engram] auto-consolidation: ${cycle} completed in ${durationMs}ms`, result)
+    }
+
+    return result
+  } catch (err) {
+    const durationMs = Date.now() - start
+    if (runId && tracker) {
+      await tracker.recordFailure(runId, (err as Error).message, durationMs).catch(() => {})
+    }
+    console.warn(`[engram] auto-consolidation: ${cycle} failed in ${durationMs}ms:`, (err as Error).message)
+    return { cycle }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Threshold checks
+// ---------------------------------------------------------------------------
+
+async function isLightSleepDue(storage: StorageAdapter, threshold: number): Promise<boolean> {
   try {
     const sessions = await storage.episodes.getUnconsolidatedSessions()
     for (const sessionId of sessions) {
@@ -146,57 +172,54 @@ async function isLightSleepDue(
       if (episodes.length >= threshold) return true
     }
     return false
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
-async function isDeepSleepDue(
-  storage: StorageAdapter,
-  threshold: number,
-): Promise<boolean> {
+async function isDeepSleepDue(storage: StorageAdapter, threshold: number): Promise<boolean> {
   try {
     const digests = await storage.digests.getRecent(7)
     return digests.length >= threshold
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
 async function isDreamCycleDue(
   storage: StorageAdapter,
+  tracker: StorageAdapter['consolidationRuns'],
   intervalHours: number,
   minEpisodes: number,
 ): Promise<boolean> {
   try {
-    // Check episode volume first (cheap)
+    // Check last run time if tracker available
+    if (tracker) {
+      const lastRun = await tracker.getLastRun('dream')
+      if (lastRun?.completedAt) {
+        const hoursSince = (Date.now() - lastRun.completedAt.getTime()) / (1000 * 60 * 60)
+        if (hoursSince < intervalHours) return false
+      }
+    }
+
+    // Check volume
     const sessions = await storage.episodes.getUnconsolidatedSessions()
     const digestCounts = await storage.digests.getCountBySession()
     const totalSessions = new Set([...sessions, ...Object.keys(digestCounts)]).size
-    // Rough episode estimate: sessions * ~10 episodes per session
-    if (totalSessions * 10 < minEpisodes) return false
-
-    // Check last dream cycle run time via consolidation_runs table
-    // If table doesn't exist or no rows, dream is due
-    // We can't query consolidation_runs through the StorageAdapter directly,
-    // but getRecent digests acts as a proxy — if digests exist, dream can run
-    const digests = await storage.digests.getRecent(Math.ceil(intervalHours / 24))
-    return digests.length > 0
-  } catch {
-    return false
-  }
+    return totalSessions * 10 >= minEpisodes
+  } catch { return false }
 }
 
 async function isDecayDue(
   storage: StorageAdapter,
+  tracker: StorageAdapter['consolidationRuns'],
   intervalDays: number,
 ): Promise<boolean> {
   try {
-    // Decay is due if there are semantic memories older than the interval
-    // that haven't been accessed recently
+    if (tracker) {
+      const lastRun = await tracker.getLastRun('decay')
+      if (lastRun?.completedAt) {
+        const daysSince = (Date.now() - lastRun.completedAt.getTime()) / (1000 * 60 * 60 * 24)
+        if (daysSince < intervalDays) return false
+      }
+    }
     const unaccessed = await storage.semantic.getUnaccessed(intervalDays)
     return unaccessed.length > 0
-  } catch {
-    return false
-  }
+  } catch { return false }
 }

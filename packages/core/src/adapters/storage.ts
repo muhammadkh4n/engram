@@ -12,6 +12,8 @@ import type {
   WalkResult,
   DiscoveredEdge,
   SensorySnapshot,
+  ConsolidationRun,
+  ConsolidateResult,
 } from '../types.js'
 
 export interface EpisodeStorage {
@@ -91,6 +93,19 @@ export interface AssociationStorage {
   }): Promise<DiscoveredEdge[]>
 }
 
+export interface ConsolidationRunStorage {
+  /** Record the start of a consolidation run. Returns the run ID. */
+  recordStart(cycle: 'light' | 'deep' | 'dream' | 'decay'): Promise<string>
+  /** Mark a run as completed with its result. */
+  recordComplete(runId: string, result: ConsolidateResult, durationMs: number): Promise<void>
+  /** Mark a run as failed. */
+  recordFailure(runId: string, error: string, durationMs: number): Promise<void>
+  /** Get the most recent completed run for a given cycle. */
+  getLastRun(cycle: 'light' | 'deep' | 'dream' | 'decay'): Promise<ConsolidationRun | null>
+  /** Get recent runs across all cycles. */
+  getRecent(limit?: number): Promise<ConsolidationRun[]>
+}
+
 export interface StorageAdapter {
   initialize(): Promise<void>
   dispose(): Promise<void>
@@ -116,4 +131,6 @@ export interface StorageAdapter {
   getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]>
   saveSensorySnapshot(sessionId: string, snapshot: SensorySnapshot): Promise<void>
   loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null>
+  /** Optional consolidation run tracking. When present, auto-consolidation logs results. */
+  consolidationRuns?: ConsolidationRunStorage
 }

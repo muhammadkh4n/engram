@@ -26,6 +26,7 @@ export type {
   SemanticStorage,
   ProceduralStorage,
   AssociationStorage,
+  ConsolidationRunStorage,
 } from './adapters/storage.js'
 export type {
   IntelligenceAdapter,
@@ -46,7 +47,7 @@ export type {
   GraphActivatedNode,
   GraphEntitySeedResult,
 } from './adapters/graph.js'
-export { runAutoConsolidation } from './consolidation/auto-consolidation.js'
+export { runAutoConsolidation, startConsolidationWorker } from './consolidation/auto-consolidation.js'
 export type { AutoConsolidationOpts } from './consolidation/auto-consolidation.js'
 export {
   CircuitBreaker,
