@@ -15,6 +15,8 @@ import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
 import { dreamCycle } from './consolidation/dream-cycle.js'
 import { decayPass } from './consolidation/decay-pass.js'
+import { runAutoConsolidation } from './consolidation/auto-consolidation.js'
+import type { AutoConsolidationOpts } from './consolidation/auto-consolidation.js'
 import { scoreSalience } from './ingestion/salience.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
@@ -43,6 +45,13 @@ export interface MemoryOptions {
    * message.metadata.project or recall(..., { project }).
    */
   project?: string
+  /**
+   * Enable auto-consolidation on initialize(). When true, checks
+   * data-volume thresholds at startup and runs due consolidation cycles
+   * in the background. Zero LLM cost by default (heuristic-only).
+   * Defaults to false for backward compatibility.
+   */
+  autoConsolidate?: boolean | AutoConsolidationOpts
 }
 
 export interface SessionHandle {
@@ -75,8 +84,10 @@ export class Memory {
   // flushPendingWrites() to wait for all of them to settle.
   private _pendingWrites: Array<Promise<unknown>> = []
   private _defaultProject: string | undefined
+  private opts: MemoryOptions
 
   constructor(opts: MemoryOptions) {
+    this.opts = opts
     this.storage = opts.storage
     this.intelligence = opts.intelligence
     this.sensory = new SensoryBuffer()
@@ -115,6 +126,25 @@ export class Memory {
         console.warn('[engram] Neo4j connectivity check failed, degrading to SQL-only:', err)
         this._graph = null
       }
+    }
+
+    // Auto-consolidation: fire-and-forget background run of due cycles.
+    // Runs after storage + graph are initialized so consolidation has
+    // full access to both layers. Non-blocking — initialize() returns
+    // immediately while consolidation runs in the background.
+    if (this.opts.autoConsolidate) {
+      const autoOpts = typeof this.opts.autoConsolidate === 'object'
+        ? this.opts.autoConsolidate
+        : undefined
+      const consolidationPromise = runAutoConsolidation(
+        this.storage,
+        this.intelligence,
+        this._graph,
+        autoOpts,
+      ).catch(err => {
+        console.warn('[engram] auto-consolidation failed:', (err as Error).message)
+      })
+      this._pendingWrites.push(consolidationPromise)
     }
   }
 

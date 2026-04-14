@@ -46,6 +46,8 @@ export type {
   GraphActivatedNode,
   GraphEntitySeedResult,
 } from './adapters/graph.js'
+export { runAutoConsolidation } from './consolidation/auto-consolidation.js'
+export type { AutoConsolidationOpts } from './consolidation/auto-consolidation.js'
 export {
   CircuitBreaker,
   CircuitOpenError,
