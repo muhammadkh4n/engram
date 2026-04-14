@@ -913,21 +913,79 @@ export class NeuralGraph {
    */
   async spreadActivation(opts: SpreadActivationOpts): Promise<ActivatedNode[]> {
     const sa = new SpreadingActivation(this.driver)
+    const threshold = opts.threshold ?? 0.05
     const params: ActivationParams = {
       maxHops: opts.maxHops ?? 2,
       decayPerHop: opts.decay ?? 0.6,
-      minActivation: opts.threshold ?? 0.05,
+      minActivation: threshold,
       maxNodes: opts.budget ?? 100,
       edgeTypeFilter: (opts.edgeFilter ?? []) as ActivationParams['edgeTypeFilter'],
     }
     const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params)
-    return results.map((r) => ({
+    const activated: ActivatedNode[] = results.map((r) => ({
       nodeId: r.nodeId,
       nodeType: r.nodeType as string,
       activation: r.activation,
       depth: r.hops,
       properties: r.properties,
     }))
+
+    // Wave 5: Community node post-processing.
+    // Build activation map from results, then find :Community nodes where 2+
+    // MEMBER_OF source Memory nodes were activated. Use average activation * 0.8.
+    const activatedMemoryIds = activated
+      .filter(n => n.nodeType === 'Memory' || n.nodeType === 'memory')
+      .map(n => n.nodeId)
+
+    if (activatedMemoryIds.length >= 2) {
+      try {
+        // Build a per-ID activation map for TypeScript-side average calculation
+        const activationMap = new Map<string, number>()
+        for (const n of activated) {
+          activationMap.set(n.nodeId, n.activation)
+        }
+
+        const communityResult = await this.runCypher(`
+          UNWIND $activatedIds AS activatedId
+          MATCH (m:Memory {id: activatedId})-[:MEMBER_OF]->(c:Community)
+          WITH c.id AS communityId, c.label AS label,
+               c.memberCount AS memberCount,
+               collect(activatedId) AS activatedMembers
+          WHERE size(activatedMembers) >= 2
+          RETURN communityId, label, memberCount, activatedMembers
+        `, { activatedIds: activatedMemoryIds })
+
+        for (const record of communityResult.records) {
+          const communityId = record.get('communityId') as string
+          const activatedMemberIds = record.get('activatedMembers') as string[]
+          // Average activation of contributing members * 0.8 decay factor
+          const avgActivation = activatedMemberIds.reduce((sum, id) => {
+            return sum + (activationMap.get(id) ?? 0)
+          }, 0) / activatedMemberIds.length
+
+          const communityActivation = avgActivation * 0.8
+          if (communityActivation >= threshold) {
+            const rawMemberCount = record.get('memberCount')
+            activated.push({
+              nodeId: communityId,
+              nodeType: 'Community',
+              activation: communityActivation,
+              depth: 0,
+              properties: {
+                label: record.get('label') as string,
+                memberCount: neo4j.isInt(rawMemberCount)
+                  ? (rawMemberCount as { toNumber(): number }).toNumber()
+                  : (rawMemberCount as number) ?? 0,
+              },
+            })
+          }
+        }
+      } catch {
+        // Community activation is best-effort; never block on it
+      }
+    }
+
+    return activated
   }
 
   /**
@@ -1146,5 +1204,321 @@ export class NeuralGraph {
     } catch {
       return false
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Wave 5: Community operations
+  // --------------------------------------------------------------------------
+
+  /**
+   * Query all communities from Neo4j, grouped by communityId.
+   * Returns communities with >= minSize Memory members.
+   */
+  async getCommunityMembers(opts?: {
+    minSize?: number
+    projectId?: string
+  }): Promise<Array<{
+    communityId: string
+    memberNodeIds: string[]
+    memberLabels: string[]
+  }>> {
+    const minSize = opts?.minSize ?? 5
+    const projectFilter = opts?.projectId
+      ? 'AND m.projectId = $projectId'
+      : ''
+
+    const result = await this.runCypher(`
+      MATCH (m:Memory)
+      WHERE m.communityId IS NOT NULL ${projectFilter}
+      WITH m.communityId AS cid, collect(m.id) AS memberIds, collect(m.label) AS labels
+      WHERE size(memberIds) >= $minSize
+      RETURN cid, memberIds, labels
+      ORDER BY size(memberIds) DESC
+    `, { minSize: neo4j.int(minSize), projectId: opts?.projectId ?? null })
+
+    return result.records.map(r => ({
+      communityId: r.get('cid').toString(),
+      memberNodeIds: r.get('memberIds') as string[],
+      memberLabels: r.get('labels') as string[],
+    }))
+  }
+
+  /**
+   * For a given community, get the context node frequencies (entities, topics, persons, emotions).
+   */
+  async getCommunityContext(communityId: string, projectId?: string): Promise<{
+    entityFrequency: Map<string, number>
+    topicFrequency: Map<string, number>
+    personFrequency: Map<string, number>
+    emotionFrequency: Map<string, number>
+  }> {
+    const projectFilter = projectId
+      ? 'AND m.projectId = $projectId'
+      : ''
+
+    const result = await this.runCypher(`
+      MATCH (m:Memory {communityId: $communityId})--(ctx)
+      WHERE (ctx:Entity OR ctx:Topic OR ctx:Person OR ctx:Emotion)
+        ${projectFilter}
+      WITH labels(ctx)[0] AS ctxType, ctx.label AS label, count(*) AS freq
+      RETURN ctxType, label, freq
+      ORDER BY freq DESC
+    `, { communityId, projectId: projectId ?? null })
+
+    const entityFrequency = new Map<string, number>()
+    const topicFrequency = new Map<string, number>()
+    const personFrequency = new Map<string, number>()
+    const emotionFrequency = new Map<string, number>()
+
+    for (const record of result.records) {
+      const ctxType = (record.get('ctxType') as string).toLowerCase()
+      const label = record.get('label') as string
+      const rawFreq = record.get('freq')
+      const freq = neo4j.isInt(rawFreq) ? (rawFreq as { toNumber(): number }).toNumber() : (rawFreq as number)
+
+      switch (ctxType) {
+        case 'entity': entityFrequency.set(label, freq); break
+        case 'topic': topicFrequency.set(label, freq); break
+        case 'person': personFrequency.set(label, freq); break
+        case 'emotion': emotionFrequency.set(label, freq); break
+      }
+    }
+
+    return { entityFrequency, topicFrequency, personFrequency, emotionFrequency }
+  }
+
+  /**
+   * Create or update a :Community node and connect member :Memory nodes via MEMBER_OF.
+   */
+  async upsertCommunityNode(props: {
+    id: string
+    communityId: string
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+    generatedAt: string
+    projectId: string | null
+    memberNodeIds: string[]
+  }): Promise<void> {
+    // Upsert the :Community node
+    await this.runCypherWrite(`
+      MERGE (c:Community {id: $id})
+      SET c.communityId = $communityId,
+          c.label = $label,
+          c.memberCount = $memberCount,
+          c.topEntities = $topEntities,
+          c.topTopics = $topTopics,
+          c.topPersons = $topPersons,
+          c.dominantEmotion = $dominantEmotion,
+          c.generatedAt = $generatedAt,
+          c.projectId = $projectId
+    `, {
+      id: props.id,
+      communityId: props.communityId,
+      label: props.label,
+      memberCount: neo4j.int(props.memberCount),
+      topEntities: props.topEntities,
+      topTopics: props.topTopics,
+      topPersons: props.topPersons,
+      dominantEmotion: props.dominantEmotion,
+      generatedAt: props.generatedAt,
+      projectId: props.projectId,
+    })
+
+    // Create MEMBER_OF relationships from member Memory nodes to Community
+    if (props.memberNodeIds.length > 0) {
+      await this.runCypherWrite(`
+        MATCH (c:Community {id: $communityId})
+        UNWIND $memberIds AS memberId
+        MATCH (m:Memory {id: memberId})
+        MERGE (m)-[r:MEMBER_OF]->(c)
+        ON CREATE SET r.weight = 1.0,
+                      r.traversalCount = 0,
+                      r.createdAt = $now,
+                      r.lastTraversed = null
+      `, {
+        communityId: props.id,
+        memberIds: props.memberNodeIds,
+        now: new Date().toISOString(),
+      })
+    }
+  }
+
+  /**
+   * Query community summaries from Neo4j for MCP tool responses.
+   */
+  async queryCommunities(opts?: {
+    projectId?: string
+    limit?: number
+  }): Promise<Array<{
+    communityId: string
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+    generatedAt: string
+    projectId: string | null
+  }>> {
+    const limit = opts?.limit ?? 20
+    const projectFilter = opts?.projectId
+      ? 'WHERE (c.projectId = $projectId OR c.projectId IS NULL)'
+      : ''
+
+    const result = await this.runCypher(`
+      MATCH (c:Community)
+      ${projectFilter}
+      RETURN c
+      ORDER BY c.memberCount DESC
+      LIMIT $limit
+    `, { projectId: opts?.projectId ?? null, limit: neo4j.int(limit) })
+
+    return result.records.map(r => {
+      const c = r.get('c').properties as Record<string, unknown>
+      const memberCount = c['memberCount']
+      return {
+        communityId: c['communityId'] as string,
+        label: c['label'] as string,
+        memberCount: neo4j.isInt(memberCount) ? (memberCount as { toNumber(): number }).toNumber() : (memberCount as number) ?? 0,
+        topEntities: (c['topEntities'] as string[]) ?? [],
+        topTopics: (c['topTopics'] as string[]) ?? [],
+        topPersons: (c['topPersons'] as string[]) ?? [],
+        dominantEmotion: c['dominantEmotion'] as string | null,
+        generatedAt: c['generatedAt'] as string,
+        projectId: c['projectId'] as string | null,
+      }
+    })
+  }
+
+  /**
+   * Find shared Person/Entity nodes bridging two projects.
+   * Returns labels and snippet counts only — no cross-project memory content.
+   */
+  async findProjectBridges(projectA: string, projectB: string): Promise<Array<{
+    nodeId: string
+    nodeType: 'person' | 'entity'
+    label: string
+    projectACount: number
+    projectBCount: number
+    projectALabels: string[]
+    projectBLabels: string[]
+  }>> {
+    const result = await this.runCypher(`
+      MATCH (shared)--(memA:Memory {projectId: $projectA})
+      WHERE shared:Person OR shared:Entity
+      WITH shared, collect(DISTINCT memA.label)[0..3] AS memALabels, count(DISTINCT memA) AS memACount
+      MATCH (shared)--(memB:Memory {projectId: $projectB})
+      WITH shared, memALabels, memACount,
+           collect(DISTINCT memB.label)[0..3] AS memBLabels, count(DISTINCT memB) AS memBCount
+      WHERE memACount > 0 AND memBCount > 0
+      RETURN shared.id AS nodeId,
+             CASE WHEN shared:Person THEN 'person' ELSE 'entity' END AS nodeType,
+             shared.label AS label,
+             memACount, memBCount, memALabels, memBLabels
+      ORDER BY memACount + memBCount DESC
+    `, { projectA, projectB })
+
+    return result.records.map(r => {
+      const memACount = r.get('memACount')
+      const memBCount = r.get('memBCount')
+      return {
+        nodeId: r.get('nodeId') as string,
+        nodeType: r.get('nodeType') as 'person' | 'entity',
+        label: r.get('label') as string,
+        projectACount: neo4j.isInt(memACount) ? (memACount as { toNumber(): number }).toNumber() : (memACount as number),
+        projectBCount: neo4j.isInt(memBCount) ? (memBCount as { toNumber(): number }).toNumber() : (memBCount as number),
+        projectALabels: r.get('memALabels') as string[],
+        projectBLabels: r.get('memBLabels') as string[],
+      }
+    })
+  }
+
+  // --------------------------------------------------------------------------
+  // Wave 5: Pattern completion — attribute-based node lookup
+  // --------------------------------------------------------------------------
+
+  /**
+   * Find graph nodes matching query attributes for pattern completion.
+   * Uses indexed Cypher lookups — NOT full graph scans.
+   */
+  async findMatchingContextNodes(input: {
+    entities: string[]
+    emotions: string[]
+    persons: string[]
+    topics: string[]
+  }): Promise<Array<{ attributeType: string; nodeIds: string[] }>> {
+    const seedsByAttribute: Array<{ attributeType: string; nodeIds: string[] }> = []
+
+    // Entity/Topic matching via Cypher — case-insensitive CONTAINS
+    if (input.entities.length > 0) {
+      const result = await this.runCypher(`
+        UNWIND $needles AS needle
+        MATCH (n)
+        WHERE (n:Entity OR n:Topic)
+          AND toLower(n.label) CONTAINS toLower(needle)
+        RETURN DISTINCT n.id AS nodeId
+      `, { needles: input.entities })
+
+      const nodeIds = result.records.map(r => r.get('nodeId') as string)
+      if (nodeIds.length > 0) {
+        seedsByAttribute.push({ attributeType: 'entity', nodeIds })
+      }
+    }
+
+    // Person matching via Cypher
+    if (input.persons.length > 0) {
+      const result = await this.runCypher(`
+        UNWIND $needles AS needle
+        MATCH (n:Person)
+        WHERE toLower(n.label) CONTAINS toLower(needle)
+        RETURN DISTINCT n.id AS nodeId
+      `, { needles: input.persons })
+
+      const nodeIds = result.records.map(r => r.get('nodeId') as string)
+      if (nodeIds.length > 0) {
+        seedsByAttribute.push({ attributeType: 'person', nodeIds })
+      }
+    }
+
+    // Emotion matching via Cypher
+    const emotionLabels = ['positive', 'negative', 'neutral', 'urgent']
+    const canonicalEmotions = input.emotions
+      .map(e => emotionLabels.find(el => e.toLowerCase().includes(el) || el.includes(e.toLowerCase())))
+      .filter((e): e is string => e !== undefined)
+
+    if (canonicalEmotions.length > 0) {
+      const result = await this.runCypher(`
+        UNWIND $emotions AS emotion
+        MATCH (n:Emotion)
+        WHERE toLower(n.label) = emotion
+        RETURN DISTINCT n.id AS nodeId
+      `, { emotions: canonicalEmotions })
+
+      const nodeIds = result.records.map(r => r.get('nodeId') as string)
+      if (nodeIds.length > 0) {
+        seedsByAttribute.push({ attributeType: 'emotion', nodeIds })
+      }
+    }
+
+    // Topic matching (separate from entity for priority handling)
+    if (input.topics.length > 0) {
+      const result = await this.runCypher(`
+        UNWIND $needles AS needle
+        MATCH (n:Topic)
+        WHERE toLower(n.label) CONTAINS toLower(needle)
+        RETURN DISTINCT n.id AS nodeId
+      `, { needles: input.topics })
+
+      const nodeIds = result.records.map(r => r.get('nodeId') as string)
+      if (nodeIds.length > 0) {
+        seedsByAttribute.push({ attributeType: 'topic', nodeIds })
+      }
+    }
+
+    return seedsByAttribute
   }
 }

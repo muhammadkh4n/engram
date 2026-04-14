@@ -26,6 +26,16 @@ import { generateId } from './utils/id.js'
 // Types
 // ---------------------------------------------------------------------------
 
+export interface BridgeResult {
+  nodeId: string
+  nodeType: 'person' | 'entity'
+  label: string
+  projectACount: number
+  projectBCount: number
+  projectALabels: string[]
+  projectBLabels: string[]
+}
+
 export interface MemoryOptions {
   storage: StorageAdapter
   intelligence?: IntelligenceAdapter
@@ -45,6 +55,12 @@ export interface MemoryOptions {
    * message.metadata.project or recall(..., { project }).
    */
   project?: string
+  /**
+   * Wave 5: Optional project namespace. All ingestions and recalls will be
+   * scoped to this project. Memories from other projects are invisible to
+   * this instance. NULL memories (pre-namespace) remain accessible to all.
+   */
+  projectId?: string
   /**
    * Enable auto-consolidation on initialize(). When true, checks
    * data-volume thresholds at startup and runs due consolidation cycles
@@ -84,6 +100,8 @@ export class Memory {
   // flushPendingWrites() to wait for all of them to settle.
   private _pendingWrites: Array<Promise<unknown>> = []
   private _defaultProject: string | undefined
+  // Wave 5: project namespace for multi-agent isolation
+  private _projectId: string | undefined
   private opts: MemoryOptions
 
   constructor(opts: MemoryOptions) {
@@ -94,6 +112,7 @@ export class Memory {
     this.intentAnalyzer = new HeuristicIntentAnalyzer()
     this._graph = opts.graph ?? null
     this._defaultProject = opts.project
+    this._projectId = opts.projectId
   }
 
   private get associations(): AssociationManager {
@@ -151,10 +170,14 @@ export class Memory {
   /** Release resources, persist sensory buffer. */
   async dispose(): Promise<void> {
     if (this.initialized) {
-      const snapshot = this.sensory.snapshot(DEFAULT_SESSION_ID)
-      await this.storage.saveSensorySnapshot(DEFAULT_SESSION_ID, snapshot)
-      await this.storage.dispose()
       this.initialized = false
+      try {
+        const snapshot = this.sensory.snapshot(DEFAULT_SESSION_ID)
+        await this.storage.saveSensorySnapshot(DEFAULT_SESSION_ID, snapshot)
+      } catch {
+        // Storage may already be closed when multiple Memory instances share the same adapter
+      }
+      await this.storage.dispose()
     }
   }
 
@@ -219,6 +242,7 @@ export class Memory {
       embedding,
       entities,
       metadata,
+      projectId: this._projectId ?? null,
     })
 
     // Create temporal edges linking this episode to recent session episodes.
@@ -360,6 +384,7 @@ export class Memory {
       graph: this._graph,
       asOf: opts?.asOf,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
+      ...(this._projectId ? { projectId: this._projectId } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn
@@ -395,6 +420,77 @@ export class Memory {
   }
 
   // ---------------------------------------------------------------------------
+  // Community Intelligence (Wave 5)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Return community summaries (knowledge domain clusters) from Neo4j or SQL cache.
+   * When a topic filter is provided, only communities whose label or top entities/topics
+   * contain the needle are returned.
+   */
+  async getCommunitySummaries(opts?: {
+    topic?: string
+    limit?: number
+    projectId?: string
+  }): Promise<Array<{
+    communityId: string
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+  }>> {
+    this.assertInitialized()
+
+    // Prefer Neo4j direct query when graph is available
+    if (this._graph && typeof this._graph.queryCommunities === 'function') {
+      const communities = await this._graph.queryCommunities!({
+        projectId: opts?.projectId,
+        limit: opts?.limit ?? 5,
+      })
+
+      if (!opts?.topic) return communities
+
+      const needle = opts.topic.toLowerCase()
+      return communities.filter(c =>
+        c.label.toLowerCase().includes(needle) ||
+        c.topTopics.some(t => t.toLowerCase().includes(needle)) ||
+        c.topEntities.some(e => e.toLowerCase().includes(needle))
+      )
+    }
+
+    // Fallback: SQL cache
+    if (this.storage.getCommunitySummaries) {
+      const all = await this.storage.getCommunitySummaries({
+        projectId: opts?.projectId,
+        limit: opts?.limit ?? 5,
+      })
+
+      if (!opts?.topic) return all
+
+      const needle = opts.topic.toLowerCase()
+      return all.filter(c =>
+        c.label.toLowerCase().includes(needle) ||
+        c.topTopics.some(t => t.toLowerCase().includes(needle)) ||
+        c.topEntities.some(e => e.toLowerCase().includes(needle))
+      )
+    }
+
+    return []
+  }
+
+  /**
+   * Find shared Person/Entity nodes that bridge two project namespaces.
+   * Only available when Neo4j graph is configured.
+   */
+  async findBridges(projectA: string, projectB: string): Promise<BridgeResult[]> {
+    this.assertInitialized()
+    if (!this._graph || typeof this._graph.findProjectBridges !== 'function') return []
+    return this._graph.findProjectBridges!(projectA, projectB)
+  }
+
+  // ---------------------------------------------------------------------------
   // Temporal Queries
   // ---------------------------------------------------------------------------
 
@@ -424,7 +520,7 @@ export class Memory {
       return deepSleep(this.storage, this.intelligence, undefined, this._graph)
     }
     if (cycle === 'dream') {
-      return dreamCycle(this.storage, undefined, this._graph)
+      return dreamCycle(this.storage, undefined, this._graph, this.intelligence)
     }
     if (cycle === 'decay') {
       return decayPass(this.storage, undefined, this._graph)
@@ -433,7 +529,7 @@ export class Memory {
     // 'all': run light → deep → dream → decay in sequence, merge results
     const lightResult = await lightSleep(this.storage, this.intelligence, undefined, this._graph)
     const deepResult = await deepSleep(this.storage, this.intelligence, undefined, this._graph)
-    const dreamResult = await dreamCycle(this.storage, undefined, this._graph)
+    const dreamResult = await dreamCycle(this.storage, undefined, this._graph, this.intelligence)
     const decayResult = await decayPass(this.storage, undefined, this._graph)
 
     const graphNodesCreated = (lightResult.graphNodesCreated ?? 0) + (deepResult.graphNodesCreated ?? 0)

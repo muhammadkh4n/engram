@@ -25,8 +25,8 @@ export class SqliteProceduralStorage implements ProceduralStorage {
           `INSERT INTO procedural (
              id, category, trigger_text, procedure, confidence,
              observation_count, last_observed, first_observed,
-             decay_rate, source_episode_ids, embedding, metadata
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             decay_rate, source_episode_ids, embedding, metadata, project_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -40,7 +40,8 @@ export class SqliteProceduralStorage implements ProceduralStorage {
           memory.decayRate,
           JSON.stringify(memory.sourceEpisodeIds),
           embeddingBlob,
-          JSON.stringify(memory.metadata)
+          JSON.stringify(memory.metadata),
+          (memory as { projectId?: string | null }).projectId ?? null
         )
     })()
 
@@ -220,6 +221,7 @@ export class SqliteProceduralStorage implements ProceduralStorage {
       metadata: JSON.parse(row.metadata),
       createdAt: julianToDate(row.created_at)!,
       updatedAt: julianToDate(row.updated_at)!,
+      projectId: row.project_id ?? null,
     }
   }
 }
@@ -246,4 +248,5 @@ interface ProceduralRow {
   metadata: string
   created_at: number
   updated_at: number
+  project_id: string | null
 }

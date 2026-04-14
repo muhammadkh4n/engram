@@ -28,8 +28,8 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       this.db
         .prepare(
           `INSERT INTO episodes (id, session_id, role, content, salience, access_count,
-           last_accessed, consolidated_at, embedding, entities_json, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           last_accessed, consolidated_at, embedding, entities_json, metadata, project_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -42,7 +42,8 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
           episode.consolidatedAt ? episode.consolidatedAt.getTime() / 86400000 + 2440587.5 : null,
           embeddingBlob,
           entitiesJson,
-          metadataJson
+          metadataJson,
+          (episode as { projectId?: string | null }).projectId ?? null
         )
     })()
 
@@ -220,6 +221,7 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       entities: JSON.parse(row.entities_json),
       metadata: JSON.parse(row.metadata),
       createdAt: julianToDate(row.created_at)!,
+      projectId: row.project_id ?? null,
     }
   }
 }
@@ -238,4 +240,5 @@ interface EpisodeRow {
   entities_fts: string
   metadata: string
   created_at: number
+  project_id: string | null
 }

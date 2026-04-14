@@ -69,6 +69,7 @@ export interface Episode {
   entities: string[]
   metadata: Record<string, unknown>
   createdAt: Date
+  projectId: string | null  // Wave 5
 }
 
 export interface Digest {
@@ -82,6 +83,7 @@ export interface Digest {
   embedding: number[] | null
   metadata: Record<string, unknown>
   createdAt: Date
+  projectId: string | null  // Wave 5
 }
 
 export interface SemanticMemory {
@@ -100,6 +102,7 @@ export interface SemanticMemory {
   metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
+  projectId: string | null  // Wave 5
 }
 
 export interface ProceduralMemory {
@@ -119,6 +122,7 @@ export interface ProceduralMemory {
   metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
+  projectId: string | null  // Wave 5
 }
 
 export interface Association {
@@ -214,6 +218,8 @@ export interface SearchOptions {
   embedding?: number[]
   /** Only return memories created at or before this date. Applied inside search where createdAt is available. */
   beforeDate?: Date
+  /** Wave 5: scope results to a specific project. NULL rows always returned (backward compat). */
+  projectId?: string
 }
 
 export interface SearchResult<T> {
@@ -267,6 +273,8 @@ export interface ConsolidateResult {
   causalEdgesCreated?: number
   graphEdgesPruned?: number
   isolatedNodesDeprioritized?: number
+  // Wave 5 additions:
+  communitySummariesGenerated?: number
 }
 
 export interface ConsolidationRun {

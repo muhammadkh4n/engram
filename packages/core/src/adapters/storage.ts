@@ -115,11 +115,13 @@ export interface StorageAdapter {
     limit?: number
     sessionId?: string
     tiers?: MemoryType[]
+    projectId?: string  // Wave 5
   }): Promise<SearchResult<TypedMemory>[]>
 
   textBoost(terms: string[], opts?: {
     limit?: number
     sessionId?: string
+    projectId?: string  // Wave 5
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>>
 
   episodes: EpisodeStorage
@@ -133,4 +135,31 @@ export interface StorageAdapter {
   loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null>
   /** Optional consolidation run tracking. When present, auto-consolidation logs results. */
   consolidationRuns?: ConsolidationRunStorage
+
+  // Wave 5: community summary SQL cache (optional — used by MCP for fast queries)
+  saveCommunityCache?(data: {
+    communityId: string
+    projectId: string | null
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+  }): Promise<void>
+
+  getCommunitySummaries?(opts?: {
+    projectId?: string
+    limit?: number
+  }): Promise<Array<{
+    communityId: string
+    projectId: string | null
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+    generatedAt: string
+  }>>
 }

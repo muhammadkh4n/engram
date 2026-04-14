@@ -356,6 +356,7 @@ function rowToDigest(row: DigestRow): Digest {
     embedding: row.embedding ?? null,
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }
 
@@ -376,6 +377,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    projectId: null,
   }
 }
 
@@ -397,6 +399,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    projectId: null,
   }
 }
 
@@ -441,6 +444,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           entities: row.entities ?? [],
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
+          projectId: null,
         },
       }
     case 'digest':
@@ -457,6 +461,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           embedding: null,
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
+          projectId: null,
         },
       }
     case 'semantic':
@@ -478,6 +483,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
           updatedAt: new Date(row.created_at),
+          projectId: null,
         },
       }
     case 'procedural':
@@ -500,6 +506,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
           updatedAt: new Date(row.created_at),
+          projectId: null,
         },
       }
     default:
@@ -518,6 +525,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           entities: row.entities ?? [],
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
+          projectId: null,
         },
       }
   }

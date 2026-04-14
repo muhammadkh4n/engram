@@ -177,6 +177,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['topic'],
         },
       },
+      {
+        name: 'memory_overview',
+        description:
+          'Returns a high-level summary of what Engram knows, organized by knowledge clusters. Use this to understand what topics, projects, or domains are heavily represented in memory. Optionally filter by topic to find related clusters.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            topic: {
+              type: 'string',
+              description: 'Optional topic filter. If provided, returns clusters whose summary or top entities match this topic.',
+            },
+            max_communities: {
+              type: 'number',
+              description: 'Maximum number of communities to return. Default 5.',
+            },
+            project_id: {
+              type: 'string',
+              description: 'Optional project namespace to scope the query.',
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'memory_bridges',
+        description:
+          'Find shared people or entities that bridge two different projects. Returns cross-project connections — useful for understanding what or who connects two workstreams. Returns labels and counts only, not full memory content from other projects.',
+        inputSchema: {
+          type: 'object' as const,
+          properties: {
+            project_a: { type: 'string', description: 'First project ID.' },
+            project_b: { type: 'string', description: 'Second project ID.' },
+          },
+          required: ['project_a', 'project_b'],
+        },
+      },
     ],
   }
 })
@@ -334,6 +370,75 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const from = m.createdAt.toISOString().slice(0, 10)
         lines.push(`- [${from}] ${status} — ${m.content}`)
         if (m.supersededBy) lines.push(`  _superseded by: ${m.supersededBy}_`)
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // memory_overview
+    // -------------------------------------------------------------------------
+    if (name === 'memory_overview') {
+      const topic = typeof args['topic'] === 'string' ? args['topic'].trim() : undefined
+      const maxCommunities = typeof args['max_communities'] === 'number'
+        ? Math.min(args['max_communities'], 20)
+        : 5
+      const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
+
+      const communities = await mem.getCommunitySummaries({ topic, limit: maxCommunities, projectId })
+
+      if (communities.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No knowledge clusters found. Run a dream cycle consolidation to generate community summaries.' }],
+        }
+      }
+
+      const lines = ['## Engram — Knowledge Domain Overview', '']
+      for (const c of communities) {
+        lines.push(`### ${c.label}`)
+        lines.push(`- Members: ${c.memberCount} memories`)
+        if (c.topTopics.length > 0) lines.push(`- Topics: ${c.topTopics.join(', ')}`)
+        if (c.topEntities.length > 0) lines.push(`- Entities: ${c.topEntities.join(', ')}`)
+        if (c.topPersons.length > 0) lines.push(`- People: ${c.topPersons.join(', ')}`)
+        if (c.dominantEmotion) lines.push(`- Dominant tone: ${c.dominantEmotion}`)
+        lines.push('')
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // memory_bridges
+    // -------------------------------------------------------------------------
+    if (name === 'memory_bridges') {
+      const projectA = args['project_a']
+      const projectB = args['project_b']
+
+      if (typeof projectA !== 'string' || typeof projectB !== 'string') {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: project_a and project_b are required.' }],
+          isError: true,
+        }
+      }
+
+      const bridges = await mem.findBridges(projectA, projectB)
+
+      if (bridges.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: `No shared entities or people found between ${projectA} and ${projectB}.` }],
+        }
+      }
+
+      const lines = [`## Cross-Project Bridges: ${projectA} ↔ ${projectB}`, '']
+      for (const b of bridges) {
+        lines.push(`### ${b.nodeType === 'person' ? 'Person' : 'Entity'}: ${b.label}`)
+        lines.push(`  - ${projectA}: ${b.projectACount} memories`)
+        lines.push(`  - ${projectB}: ${b.projectBCount} memories`)
+        lines.push('')
       }
 
       return {

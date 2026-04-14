@@ -116,4 +116,74 @@ export interface GraphPort {
   runCypherWrite?(query: string, params?: Record<string, unknown>): Promise<any>
   // Wave 3: check if Neo4j GDS plugin is available
   isGdsAvailable?(): Promise<boolean>
+
+  // Wave 5: community summary generation (optional — only NeuralGraph implements these)
+  getCommunityMembers?(opts?: {
+    minSize?: number
+    projectId?: string
+  }): Promise<Array<{
+    communityId: string
+    memberNodeIds: string[]
+    memberLabels: string[]
+  }>>
+
+  getCommunityContext?(communityId: string, projectId?: string): Promise<{
+    entityFrequency: Map<string, number>
+    topicFrequency: Map<string, number>
+    personFrequency: Map<string, number>
+    emotionFrequency: Map<string, number>
+  }>
+
+  upsertCommunityNode?(props: {
+    id: string
+    communityId: string
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+    generatedAt: string
+    projectId: string | null
+    memberNodeIds: string[]
+  }): Promise<void>
+
+  /** Wave 5: Query community summaries from Neo4j for MCP tool responses. */
+  queryCommunities?(opts?: {
+    projectId?: string
+    limit?: number
+  }): Promise<Array<{
+    communityId: string
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+  }>>
+
+  /**
+   * Wave 5: Pattern completion — find context nodes matching query attributes.
+   * Used as spreading activation seeds when vector search returns weak results.
+   */
+  findMatchingContextNodes?(input: {
+    entities: string[]
+    emotions: string[]
+    persons: string[]
+    topics: string[]
+  }): Promise<Array<{ attributeType: string; nodeIds: string[] }>>
+
+  /**
+   * Wave 5: Find shared Person/Entity nodes that bridge two project namespaces.
+   * Returns connection metadata — no cross-project memory content.
+   */
+  findProjectBridges?(projectA: string, projectB: string): Promise<Array<{
+    nodeId: string
+    nodeType: 'person' | 'entity'
+    label: string
+    projectACount: number
+    projectBCount: number
+    projectALabels: string[]
+    projectBLabels: string[]
+  }>>
 }

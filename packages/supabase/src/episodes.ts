@@ -303,6 +303,7 @@ function rowToEpisode(row: EpisodeRow, legacyMode = false): Episode {
     entities: legacyMode ? [] : (row.entities ?? []),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }
 
@@ -320,6 +321,7 @@ function legacyRowToEpisode(row: LegacyMatchRow): Episode {
     entities: [],
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }
 
@@ -337,5 +339,6 @@ function recallRowToEpisode(row: RecallRow): Episode {
     entities: row.entities ?? [],
     metadata: {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }

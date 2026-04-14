@@ -8,6 +8,8 @@ export const CONSTRAINTS: string[] = [
   'CREATE CONSTRAINT session_id IF NOT EXISTS FOR (s:Session) REQUIRE s.sessionId IS UNIQUE',
   'CREATE CONSTRAINT time_context_id IF NOT EXISTS FOR (t:TimeContext) REQUIRE t.id IS UNIQUE',
   'CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE',
+  // Wave 5: Community node (9th label)
+  'CREATE CONSTRAINT community_id IF NOT EXISTS FOR (c:Community) REQUIRE c.id IS UNIQUE',
 ]
 
 export const INDEXES: string[] = [

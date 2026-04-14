@@ -42,9 +42,9 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 2 after all migrations', () => {
+  it('sets schema version to 4 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(2)
+    expect(getSchemaVersion(db)).toBe(4)
   })
 
   it('creates episode_parts table (dual-storage architecture)', () => {
@@ -61,7 +61,7 @@ describe('SQLite migrations', () => {
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(2)
+    expect(getSchemaVersion(db)).toBe(4)
   })
 
   it('enforces foreign keys on memories table', () => {

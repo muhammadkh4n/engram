@@ -189,18 +189,25 @@ export class SqliteStorageAdapter implements StorageAdapter {
     limit?: number
     sessionId?: string
     tiers?: MemoryType[]
+    projectId?: string
   }): Promise<SearchResult<TypedMemory>[]> {
     const db = this.assertDb()
     const limit = opts?.limit ?? 15
     const tiers = opts?.tiers ?? ['episode', 'digest', 'semantic', 'procedural']
     const scanLimit = limit * 3
     const results: Array<SearchResult<TypedMemory>> = []
+    const projectFilter = opts?.projectId ? ` AND (project_id = '${opts.projectId.replace(/'/g, "''")}' OR project_id IS NULL)` : ''
 
     if (tiers.includes('episode')) {
-      const sql = opts?.sessionId
-        ? 'SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ? ORDER BY created_at DESC LIMIT ?'
-        : 'SELECT * FROM episodes WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
-      const params = opts?.sessionId ? [opts.sessionId, scanLimit] : [scanLimit]
+      let sql: string
+      let params: unknown[]
+      if (opts?.sessionId) {
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ?${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        params = [opts.sessionId, scanLimit]
+      } else {
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        params = [scanLimit]
+      }
       const rows = db.prepare(sql).all(...params) as EpisodeRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -217,7 +224,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('digest')) {
       const rows = db.prepare(
-        'SELECT * FROM digests WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
+        `SELECT * FROM digests WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
       ).all(scanLimit) as DigestRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -231,7 +238,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('semantic')) {
       const rows = db.prepare(
-        'SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL ORDER BY created_at DESC LIMIT ?'
+        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
       ).all(scanLimit) as SemanticRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -245,7 +252,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('procedural')) {
       const rows = db.prepare(
-        'SELECT * FROM procedural WHERE embedding IS NOT NULL ORDER BY created_at DESC LIMIT ?'
+        `SELECT * FROM procedural WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
       ).all(scanLimit) as ProceduralRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -265,6 +272,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
   async textBoost(terms: string[], opts?: {
     limit?: number
     sessionId?: string
+    projectId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     const db = this.assertDb()
     if (terms.length === 0) return []
@@ -273,32 +281,49 @@ export class SqliteStorageAdapter implements StorageAdapter {
     // FTS5 OR join
     const ftsQuery = terms.join(' OR ')
     const allResults: Array<{ id: string; type: MemoryType; rankScore: number }> = []
+    const projectId = opts?.projectId
 
     try {
-      const epRows = db.prepare(
-        'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?'
-      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      let sql = 'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?'
+      const params: unknown[] = [ftsQuery, limit]
+      if (projectId) {
+        sql = `SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL) ORDER BY rank LIMIT ?`
+        params.splice(1, 0, projectId)
+      }
+      const epRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
       for (const r of epRows) allResults.push({ id: r.id, type: 'episode', rankScore: Math.abs(r.rank) })
     } catch { /* FTS5 table may not exist */ }
 
     try {
-      const dgRows = db.prepare(
-        'SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? ORDER BY rank LIMIT ?'
-      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      let sql = 'SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? ORDER BY rank LIMIT ?'
+      const params: unknown[] = [ftsQuery, limit]
+      if (projectId) {
+        sql = `SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? AND (d.project_id = ? OR d.project_id IS NULL) ORDER BY rank LIMIT ?`
+        params.splice(1, 0, projectId)
+      }
+      const dgRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
       for (const r of dgRows) allResults.push({ id: r.id, type: 'digest', rankScore: Math.abs(r.rank) })
     } catch { /* FTS5 table may not exist */ }
 
     try {
-      const smRows = db.prepare(
-        'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? ORDER BY rank LIMIT ?'
-      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      let sql = 'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? ORDER BY rank LIMIT ?'
+      const params: unknown[] = [ftsQuery, limit]
+      if (projectId) {
+        sql = `SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND (s.project_id = ? OR s.project_id IS NULL) ORDER BY rank LIMIT ?`
+        params.splice(1, 0, projectId)
+      }
+      const smRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
       for (const r of smRows) allResults.push({ id: r.id, type: 'semantic', rankScore: Math.abs(r.rank) })
     } catch { /* FTS5 table may not exist */ }
 
     try {
-      const prRows = db.prepare(
-        'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? ORDER BY rank LIMIT ?'
-      ).all(ftsQuery, limit) as Array<{ id: string; rank: number }>
+      let sql = 'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? ORDER BY rank LIMIT ?'
+      const params: unknown[] = [ftsQuery, limit]
+      if (projectId) {
+        sql = `SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND (p.project_id = ? OR p.project_id IS NULL) ORDER BY rank LIMIT ?`
+        params.splice(1, 0, projectId)
+      }
+      const prRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
       for (const r of prRows) allResults.push({ id: r.id, type: 'procedural', rankScore: Math.abs(r.rank) })
     } catch { /* FTS5 table may not exist */ }
 
@@ -311,6 +336,84 @@ export class SqliteStorageAdapter implements StorageAdapter {
         type: r.type,
         boost: maxRank > 0 ? r.rankScore / maxRank : 0,
       }))
+  }
+
+  async saveCommunityCache(data: {
+    communityId: string
+    projectId: string | null
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+  }): Promise<void> {
+    const db = this.assertDb()
+    db.prepare(`
+      INSERT INTO community_summaries
+        (community_id, project_id, label, member_count, top_entities, top_topics,
+         top_persons, dominant_emotion, generated_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, julianday('now'), julianday('now'))
+      ON CONFLICT(community_id) DO UPDATE SET
+        label            = excluded.label,
+        member_count     = excluded.member_count,
+        top_entities     = excluded.top_entities,
+        top_topics       = excluded.top_topics,
+        top_persons      = excluded.top_persons,
+        dominant_emotion = excluded.dominant_emotion,
+        updated_at       = julianday('now')
+    `).run(
+      data.communityId,
+      data.projectId ?? null,
+      data.label,
+      data.memberCount,
+      JSON.stringify(data.topEntities),
+      JSON.stringify(data.topTopics),
+      JSON.stringify(data.topPersons),
+      data.dominantEmotion ?? null,
+    )
+  }
+
+  async getCommunitySummaries(opts?: {
+    projectId?: string
+    limit?: number
+  }): Promise<Array<{
+    communityId: string
+    projectId: string | null
+    label: string
+    memberCount: number
+    topEntities: string[]
+    topTopics: string[]
+    topPersons: string[]
+    dominantEmotion: string | null
+    generatedAt: string
+  }>> {
+    const db = this.assertDb()
+    const limit = opts?.limit ?? 20
+
+    let sql: string
+    let params: unknown[]
+
+    if (opts?.projectId !== undefined) {
+      sql = `SELECT * FROM community_summaries WHERE (project_id = ? OR project_id IS NULL) ORDER BY member_count DESC LIMIT ?`
+      params = [opts.projectId, limit]
+    } else {
+      sql = `SELECT * FROM community_summaries ORDER BY member_count DESC LIMIT ?`
+      params = [limit]
+    }
+
+    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>
+    return rows.map(r => ({
+      communityId: r['community_id'] as string,
+      projectId: r['project_id'] as string | null,
+      label: r['label'] as string,
+      memberCount: r['member_count'] as number,
+      topEntities: JSON.parse(r['top_entities'] as string) as string[],
+      topTopics: JSON.parse(r['top_topics'] as string) as string[],
+      topPersons: JSON.parse(r['top_persons'] as string) as string[],
+      dominantEmotion: r['dominant_emotion'] as string | null,
+      generatedAt: String(r['generated_at']),
+    }))
   }
 }
 
@@ -334,6 +437,7 @@ interface EpisodeRow {
   entities_fts: string
   metadata: string
   created_at: number
+  project_id: string | null
 }
 
 interface DigestRow {
@@ -347,6 +451,7 @@ interface DigestRow {
   embedding: Buffer | null
   metadata: string
   created_at: number
+  project_id: string | null
 }
 
 interface SemanticRow {
@@ -365,6 +470,7 @@ interface SemanticRow {
   metadata: string
   created_at: number
   updated_at: number
+  project_id: string | null
 }
 
 interface ProceduralRow {
@@ -384,6 +490,7 @@ interface ProceduralRow {
   metadata: string
   created_at: number
   updated_at: number
+  project_id: string | null
 }
 
 import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
@@ -402,6 +509,7 @@ function rowToDigest(row: DigestRow): Digest {
       : null,
     metadata: JSON.parse(row.metadata),
     createdAt: julianToDate(row.created_at)!,
+    projectId: row.project_id ?? null,
   }
 }
 
@@ -424,6 +532,7 @@ function rowToSemanticMemory(row: SemanticRow): SemanticMemory {
     metadata: JSON.parse(row.metadata),
     createdAt: julianToDate(row.created_at)!,
     updatedAt: julianToDate(row.updated_at)!,
+    projectId: row.project_id ?? null,
   }
 }
 
@@ -447,5 +556,6 @@ function rowToProceduralMemory(row: ProceduralRow): ProceduralMemory {
     metadata: JSON.parse(row.metadata),
     createdAt: julianToDate(row.created_at)!,
     updatedAt: julianToDate(row.updated_at)!,
+    projectId: row.project_id ?? null,
   }
 }

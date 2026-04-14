@@ -21,8 +21,8 @@ export class SqliteDigestStorage implements DigestStorage {
       this.db
         .prepare(
           `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
-           source_digest_ids, level, embedding, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           source_digest_ids, level, embedding, metadata, project_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -33,7 +33,8 @@ export class SqliteDigestStorage implements DigestStorage {
           JSON.stringify(digest.sourceDigestIds),
           digest.level,
           embeddingBlob,
-          JSON.stringify(digest.metadata)
+          JSON.stringify(digest.metadata),
+          (digest as { projectId?: string | null }).projectId ?? null
         )
     })()
 
@@ -151,6 +152,7 @@ export class SqliteDigestStorage implements DigestStorage {
         : null,
       metadata: JSON.parse(row.metadata),
       createdAt: julianToDate(row.created_at)!,
+      projectId: row.project_id ?? null,
     }
   }
 }
@@ -166,4 +168,5 @@ interface DigestRow {
   embedding: Buffer | null
   metadata: string
   created_at: number
+  project_id: string | null
 }

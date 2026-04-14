@@ -130,10 +130,12 @@ export interface UnifiedSearchOpts {
   sensory: SensoryBuffer
   sessionId?: string
   expandedTerms?: string[]
+  /** Wave 5: hard SQL-level project namespace filter */
+  projectId?: string
 }
 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
-  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms } = opts
+  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
@@ -149,13 +151,18 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     ? await storage.vectorSearch(embedding, {
         limit: strategy.maxResults * 2,
         sessionId,
+        ...(projectId !== undefined ? { projectId } : {}),
       })
     : []
 
   // Step 2: BM25 boost — additive, OR semantics
   const terms = extractTerms(query, expandedTerms)
   const boostResults = terms.length > 0 && hasTextBoost
-    ? await storage.textBoost(terms, { limit: strategy.maxResults * 2, sessionId })
+    ? await storage.textBoost(terms, {
+        limit: strategy.maxResults * 2,
+        sessionId,
+        ...(projectId !== undefined ? { projectId } : {}),
+      })
     : []
 
   const boostMap = new Map<string, number>()

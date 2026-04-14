@@ -224,6 +224,7 @@ export async function deepSleep(
       supersededBy: null,
       embedding: null,
       metadata: {},
+      projectId: null,
     })
 
     if (supersededId) {
@@ -359,6 +360,7 @@ export async function deepSleep(
       sourceEpisodeIds: candidate.sourceEpisodeIds,
       embedding: null,
       metadata: {},
+      projectId: null,
     })
 
     // --- Neo4j: Procedural Memory node ---

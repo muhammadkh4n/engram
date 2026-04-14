@@ -217,6 +217,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    projectId: null,
   }
 }
 
@@ -238,5 +239,6 @@ function recallRowToProcedural(row: RecallRow): ProceduralMemory {
     metadata: {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.created_at),
+    projectId: null,
   }
 }

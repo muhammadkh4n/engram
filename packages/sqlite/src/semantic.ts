@@ -23,8 +23,8 @@ export class SqliteSemanticStorage implements SemanticStorage {
       this.db
         .prepare(
           `INSERT INTO semantic (id, topic, content, confidence, source_digest_ids, source_episode_ids,
-           decay_rate, supersedes, superseded_by, embedding, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           decay_rate, supersedes, superseded_by, embedding, metadata, project_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           id,
@@ -37,7 +37,8 @@ export class SqliteSemanticStorage implements SemanticStorage {
           memory.supersedes,
           memory.supersededBy,
           embeddingBlob,
-          JSON.stringify(memory.metadata)
+          JSON.stringify(memory.metadata),
+          (memory as { projectId?: string | null }).projectId ?? null
         )
     })()
 
@@ -241,6 +242,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
       metadata: JSON.parse(row.metadata),
       createdAt: julianToDate(row.created_at)!,
       updatedAt: julianToDate(row.updated_at)!,
+      projectId: row.project_id ?? null,
     }
   }
 }
@@ -261,4 +263,5 @@ interface SemanticRow {
   metadata: string
   created_at: number
   updated_at: number
+  project_id: string | null
 }

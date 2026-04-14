@@ -1,5 +1,6 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { GraphPort } from '../adapters/graph.js'
+import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { ConsolidateResult } from '../types.js'
 
 export interface DreamCycleOptions {
@@ -7,6 +8,58 @@ export interface DreamCycleOptions {
   maxNewAssociations?: number
   replaySeeds?: number
   causalMinSessions?: number
+  /** Wave 5: Generate natural-language community summaries after Louvain. Default true. */
+  generateCommunitySummaries?: boolean
+  /** Wave 5: Minimum Memory node count for a community to receive a summary. Default 5. */
+  minCommunitySize?: number
+  /** Wave 5: Scope community summary generation to a specific project namespace. */
+  projectId?: string
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+function topNByFrequency(freq: Map<string, number>, n: number): string[] {
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([label]) => label)
+}
+
+function buildHeuristicSummary(
+  topTopics: string[],
+  topEntities: string[],
+  topPersons: string[],
+  memberCount: number
+): string {
+  const parts: string[] = []
+  if (topTopics.length > 0) parts.push(`discussions about ${topTopics.slice(0, 2).join(' and ')}`)
+  if (topEntities.length > 0) parts.push(`involving ${topEntities.slice(0, 2).join(' and ')}`)
+  if (topPersons.length > 0) parts.push(`with ${topPersons[0]}`)
+  return parts.length > 0
+    ? `A cluster of ${memberCount} memories covering ${parts.join(', ')}.`
+    : `A cluster of ${memberCount} related memories.`
+}
+
+interface CommunityCacheData {
+  communityId: string
+  projectId: string | null
+  label: string
+  memberCount: number
+  topEntities: string[]
+  topTopics: string[]
+  topPersons: string[]
+  dominantEmotion: string | null
+}
+
+async function writeCommunityCache(
+  storage: StorageAdapter,
+  data: CommunityCacheData
+): Promise<void> {
+  if (typeof (storage as { saveCommunityCache?: unknown }).saveCommunityCache === 'function') {
+    await (storage as { saveCommunityCache: (data: CommunityCacheData) => Promise<void> }).saveCommunityCache(data)
+  }
 }
 
 /**
@@ -30,6 +83,7 @@ export async function dreamCycle(
   storage: StorageAdapter,
   opts?: DreamCycleOptions,
   graph?: GraphPort | null,
+  intelligence?: IntelligenceAdapter,
 ): Promise<ConsolidateResult> {
   const daysLookback = opts?.daysLookback ?? 7
   const maxNewAssociations = opts?.maxNewAssociations ?? 100
@@ -41,6 +95,7 @@ export async function dreamCycle(
   let bridgeNodesFound: number | undefined
   let replayEdgesCreated = 0
   let causalEdgesCreated = 0
+  let communitySummariesGenerated = 0
 
   const graphAvailable = graph?.runCypher && graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
   const gdsAvailable = graphAvailable && graph?.isGdsAvailable ? await graph.isGdsAvailable().catch(() => false) : false
@@ -101,6 +156,105 @@ export async function dreamCycle(
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[dream-cycle] Louvain community detection failed: ${msg}`)
       try { await graph.runCypher!(`CALL gds.graph.drop('memory-graph', false)`) } catch { /* ok */ }
+    }
+
+    // -----------------------------------------------------------------------
+    // Operation 1b: Community Summary Generation (Wave 5)
+    // Runs after Louvain assigns communityId properties to Memory nodes.
+    // Requires getCommunityMembers, getCommunityContext, upsertCommunityNode
+    // on the graph port. Skipped gracefully when not implemented.
+    // -----------------------------------------------------------------------
+    const generateSummaries = opts?.generateCommunitySummaries ?? true
+    const minCommunitySize = opts?.minCommunitySize ?? 5
+
+    if (
+      generateSummaries &&
+      typeof graph?.getCommunityMembers === 'function' &&
+      typeof graph?.getCommunityContext === 'function' &&
+      typeof graph?.upsertCommunityNode === 'function'
+    ) {
+      try {
+        const communities = await graph.getCommunityMembers!({
+          minSize: minCommunitySize,
+          projectId: opts?.projectId,
+        })
+
+        for (const community of communities) {
+          const { communityId, memberNodeIds, memberLabels } = community
+
+          const context = await graph.getCommunityContext!(communityId, opts?.projectId)
+          const { entityFrequency, topicFrequency, personFrequency, emotionFrequency } = context
+
+          const topEntities = topNByFrequency(entityFrequency, 3)
+          const topTopics = topNByFrequency(topicFrequency, 3)
+          const topPersons = topNByFrequency(personFrequency, 3)
+          const dominantEmotion = topNByFrequency(emotionFrequency, 1)[0] ?? null
+
+          let summaryLabel: string
+
+          if (intelligence?.summarize) {
+            const contextParts: string[] = []
+            if (topTopics.length > 0) contextParts.push(`Topics: ${topTopics.join(', ')}`)
+            if (topEntities.length > 0) contextParts.push(`Technologies/Entities: ${topEntities.join(', ')}`)
+            if (topPersons.length > 0) contextParts.push(`People: ${topPersons.join(', ')}`)
+            if (dominantEmotion) contextParts.push(`Emotional tone: ${dominantEmotion}`)
+
+            const sampleLabels = memberLabels.slice(0, 10).join('\n- ')
+            const prompt = [
+              'Summarize the following cluster of related memories into a single 2-3 sentence description.',
+              'Describe what knowledge domain or recurring theme this cluster represents.',
+              'Be specific — name the subject matter, not just "a group of memories".',
+              '',
+              'Memory samples:',
+              `- ${sampleLabels}`,
+              '',
+              ...contextParts,
+            ].join('\n')
+
+            try {
+              const result = await intelligence.summarize(prompt, { mode: 'bullet_points', targetTokens: 150 })
+              summaryLabel = result.text.slice(0, 200)
+            } catch {
+              summaryLabel = buildHeuristicSummary(topTopics, topEntities, topPersons, memberNodeIds.length)
+            }
+          } else {
+            summaryLabel = buildHeuristicSummary(topTopics, topEntities, topPersons, memberNodeIds.length)
+          }
+
+          const projectPrefix = opts?.projectId ?? 'global'
+          const communityNodeId = `community:${projectPrefix}:${communityId}`
+
+          await graph.upsertCommunityNode!({
+            id: communityNodeId,
+            communityId,
+            label: summaryLabel,
+            memberCount: memberNodeIds.length,
+            topEntities,
+            topTopics,
+            topPersons,
+            dominantEmotion,
+            generatedAt: new Date().toISOString(),
+            projectId: opts?.projectId ?? null,
+            memberNodeIds,
+          })
+
+          await writeCommunityCache(storage, {
+            communityId: communityNodeId,
+            projectId: opts?.projectId ?? null,
+            label: summaryLabel,
+            memberCount: memberNodeIds.length,
+            topEntities,
+            topTopics,
+            topPersons,
+            dominantEmotion,
+          })
+
+          communitySummariesGenerated++
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.warn(`[dream-cycle] Community summary generation failed: ${msg}`)
+      }
     }
   } else if (graphAvailable) {
     console.warn('[dream-cycle] GDS plugin unavailable — Louvain and betweenness skipped')
@@ -332,5 +486,6 @@ export async function dreamCycle(
     bridgeNodesFound,
     replayEdgesCreated: graphAvailable ? replayEdgesCreated : undefined,
     causalEdgesCreated: graphAvailable ? causalEdgesCreated : undefined,
+    communitySummariesGenerated: communitySummariesGenerated > 0 ? communitySummariesGenerated : undefined,
   }
 }

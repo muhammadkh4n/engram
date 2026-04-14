@@ -171,6 +171,7 @@ function rowToDigest(row: DigestRow): Digest {
     embedding: row.embedding ?? null,
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }
 
@@ -186,5 +187,6 @@ function recallRowToDigest(row: RecallRow): Digest {
     embedding: null,
     metadata: {},
     createdAt: new Date(row.created_at),
+    projectId: null,
   }
 }

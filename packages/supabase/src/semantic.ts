@@ -272,6 +272,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    projectId: null,
   }
 }
 
@@ -292,5 +293,6 @@ function recallRowToSemantic(row: RecallRow): SemanticMemory {
     metadata: {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.created_at),
+    projectId: null,
   }
 }

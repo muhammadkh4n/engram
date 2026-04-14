@@ -138,6 +138,7 @@ export async function lightSleep(
           entities,
           decisions,
         },
+        projectId: null,
       })
 
       // Mark episodes as consolidated (lossless — they are never deleted)

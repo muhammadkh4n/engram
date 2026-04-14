@@ -313,4 +313,39 @@ export function runMigrations(db: Database.Database): void {
     `)
     db.pragma('user_version = 3')
   }
+
+  if (currentVersion < 4) {
+    // V4: Community summaries cache table + project_id columns on all memory tables.
+    // community_summaries: read cache for MCP tool queries.
+    // Source of truth is the :Community nodes in Neo4j.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS community_summaries (
+        community_id     TEXT    NOT NULL PRIMARY KEY,
+        project_id       TEXT,
+        label            TEXT    NOT NULL,
+        member_count     INTEGER NOT NULL DEFAULT 0,
+        top_entities     TEXT    NOT NULL DEFAULT '[]',
+        top_topics       TEXT    NOT NULL DEFAULT '[]',
+        top_persons      TEXT    NOT NULL DEFAULT '[]',
+        dominant_emotion TEXT,
+        generated_at     REAL    NOT NULL DEFAULT (julianday('now')),
+        updated_at       REAL    NOT NULL DEFAULT (julianday('now'))
+      )
+    `)
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_community_project ON community_summaries(project_id)`)
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_community_members ON community_summaries(member_count DESC)`)
+
+    // project_id columns on all memory tables.
+    // NULL = global (accessible from all projects, backward compatible).
+    const tables = ['episodes', 'digests', 'semantic', 'procedural'] as const
+    for (const table of tables) {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      if (!cols.some(c => c.name === 'project_id')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN project_id TEXT`)
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_project ON ${table}(project_id) WHERE project_id IS NOT NULL`)
+      }
+    }
+
+    db.pragma('user_version = 4')
+  }
 }

@@ -21,6 +21,11 @@ export type { PersonExtraction, EmotionClassification } from './context-extracto
 // === GDS Utilities ===
 export { runWithProjectionCleanup } from './gds-utils.js'
 
+// === Wave 5: Pattern completion ===
+export { runPatternCompletion } from './pattern-completion.js'
+export type { PatternCompletionInput, PatternCompletionResult } from './pattern-completion.js'
+export { extractEmotionKeywords } from './emotion-extractor.js'
+
 // === Schema ===
 export { ALL_SCHEMA_STATEMENTS, CONSTRAINTS, INDEXES } from './schema.js'
 
