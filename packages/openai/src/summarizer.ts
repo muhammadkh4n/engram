@@ -448,6 +448,113 @@ export class OpenAISummarizer {
     }
   }
 
+  /**
+   * Cross-encoder reranking via LLM pointwise scoring.
+   *
+   * Sends all candidates in a single prompt, asks for relevance scores.
+   * Uses gpt-4o-mini for cost efficiency (~$0.001 per rerank of 20 docs).
+   * Documents are truncated to 300 chars each to keep prompt compact.
+   */
+  async rerank(
+    query: string,
+    documents: ReadonlyArray<{ id: string; content: string }>,
+  ): Promise<Array<{ id: string; score: number }>> {
+    if (documents.length === 0) return []
+    if (documents.length === 1) return [{ id: documents[0]!.id, score: 1.0 }]
+
+    // Cap at 25 candidates — beyond that, diminishing returns
+    const candidates = documents.slice(0, 25)
+
+    const docList = candidates
+      .map((d, i) => `[${i}] ${d.content.slice(0, 300)}`)
+      .join('\n')
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model: this.model,
+        messages: [
+          {
+            role: 'system',
+            content: `You are a relevance scorer. Given a search query and numbered documents, score each document's relevance to the query on a scale of 0-10.
+
+Return JSON: {"scores": [{"index": 0, "score": 8}, ...]}
+
+Scoring guide:
+- 10: directly answers the query with specific details
+- 7-9: highly relevant, contains key information
+- 4-6: partially relevant, tangentially related
+- 1-3: weakly related, mostly noise
+- 0: completely irrelevant
+
+Be discriminating — most documents should score below 5. Only score 8+ when the document clearly and specifically addresses the query.`,
+          },
+          {
+            role: 'user',
+            content: `Query: "${query}"\n\nDocuments:\n${docList}`,
+          },
+        ],
+        max_tokens: 400,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+      })
+
+      const raw = resp.choices[0]?.message?.content ?? '{"scores":[]}'
+      return this.parseRerankScores(raw, candidates)
+    } catch (err) {
+      process.stderr.write(
+        `[openai] rerank failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      // Non-fatal: return original order with descending scores
+      return candidates.map((d, i) => ({
+        id: d.id,
+        score: 1.0 - i * (0.5 / candidates.length),
+      }))
+    }
+  }
+
+  private parseRerankScores(
+    raw: string,
+    candidates: ReadonlyArray<{ id: string; content: string }>,
+  ): Array<{ id: string; score: number }> {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed !== 'object' || parsed === null) throw new Error('not an object')
+
+      const scores = (parsed as Record<string, unknown>)['scores']
+      if (!Array.isArray(scores)) throw new Error('no scores array')
+
+      const result: Array<{ id: string; score: number }> = []
+      for (const entry of scores) {
+        if (typeof entry !== 'object' || entry === null) continue
+        const obj = entry as Record<string, unknown>
+        const index = typeof obj['index'] === 'number' ? obj['index'] : -1
+        const score = typeof obj['score'] === 'number' ? obj['score'] : 0
+
+        if (index < 0 || index >= candidates.length) continue
+        result.push({
+          id: candidates[index]!.id,
+          score: Math.min(1.0, Math.max(0, score / 10)), // normalize 0-10 → 0-1
+        })
+      }
+
+      // Fill in any candidates the LLM missed with score 0
+      const scored = new Set(result.map(r => r.id))
+      for (const c of candidates) {
+        if (!scored.has(c.id)) {
+          result.push({ id: c.id, score: 0 })
+        }
+      }
+
+      return result
+    } catch {
+      // Parse failed — return original order
+      return candidates.map((d, i) => ({
+        id: d.id,
+        score: 1.0 - i * (0.5 / candidates.length),
+      }))
+    }
+  }
+
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
       const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw]

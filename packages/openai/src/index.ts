@@ -65,5 +65,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     expandQuery(query: string) {
       return summarizer.expandQuery(query)
     },
+    rerank(query, documents) {
+      return summarizer.rerank(query, documents)
+    },
   }
 }

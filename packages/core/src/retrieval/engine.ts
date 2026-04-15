@@ -477,6 +477,31 @@ export async function recall(
     }
   }
 
+  // Stage 1b: Cross-encoder reranking
+  // When the intelligence adapter provides a reranker, re-score candidates
+  // for precise semantic ordering. This is the highest-leverage retrieval
+  // improvement: bi-encoder search finds candidates, reranking orders them.
+  if (intelligence?.rerank && memories.length > 1) {
+    try {
+      const docs = memories.map(m => ({ id: m.id, content: m.content }))
+      const reranked = await intelligence.rerank(query, docs)
+      const scoreMap = new Map(reranked.map(r => [r.id, r.score]))
+      memories = memories
+        .map(m => {
+          const rerankScore = scoreMap.get(m.id)
+          if (rerankScore === undefined) return m
+          // Blend: reranker dominates (70%) with original for tiebreaking (30%)
+          const blended = rerankScore * 0.7 + m.relevance * 0.3
+          return { ...m, relevance: blended }
+        })
+        .sort((a, b) => b.relevance - a.relevance)
+        .slice(0, strategy.maxResults)
+    } catch (err) {
+      // Non-fatal: use original ranking
+      console.error('[engram] reranking error:', err)
+    }
+  }
+
   // Stage 2: Association expansion
   // Wave 2: Try Neo4j spreading activation. Fall back to SQL walk if:
   //   (a) graph is null (Neo4j unavailable or not configured), OR

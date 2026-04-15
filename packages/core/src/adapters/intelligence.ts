@@ -118,4 +118,23 @@ export interface IntelligenceAdapter {
   generateHypotheticalDoc?(query: string): Promise<string>
   /** Generate 3-5 keyword variants to bridge vocabulary gap for BM25 boost */
   expandQuery?(query: string): Promise<string[]>
+  /**
+   * Cross-encoder reranking: given a query and candidate documents,
+   * return documents with relevance scores (0-1) based on deeper
+   * semantic analysis than bi-encoder similarity.
+   *
+   * This is the single highest-leverage retrieval improvement:
+   * bi-encoder (embedding) search finds candidates fast but ranks
+   * them approximately. Cross-encoder reranking re-scores each
+   * (query, document) pair jointly for precise ordering.
+   *
+   * Implementations may use:
+   * - LLM-based pointwise scoring (OpenAI, Anthropic)
+   * - Dedicated reranker APIs (Cohere, Jina, Voyage)
+   * - Local cross-encoder models (ms-marco-MiniLM via ONNX)
+   */
+  rerank?(
+    query: string,
+    documents: ReadonlyArray<{ id: string; content: string }>,
+  ): Promise<Array<{ id: string; score: number }>>
 }

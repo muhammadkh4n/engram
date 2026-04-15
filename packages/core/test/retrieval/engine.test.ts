@@ -6,6 +6,7 @@ import { RECALL_STRATEGIES } from '../../src/intent/intents.js'
 import {
   createMockStorage,
   MOCK_EPISODE,
+  MOCK_SEMANTIC,
   VECTOR_SEARCH_RESULTS,
 } from './mock-storage.js'
 import type { RecallStrategy, RetrievedMemory, TypedMemory, SearchResult } from '../../src/types.js'
@@ -213,6 +214,71 @@ describe('recall engine — HyDE fallback', () => {
 
     expect(result).toBeDefined()
     expect(Array.isArray(result.memories)).toBe(true)
+  })
+})
+
+describe('recall engine — cross-encoder reranking', () => {
+  it('reranks memories when intelligence.rerank is provided', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    // Reranker inverts the order: give highest score to last candidate
+    const rerank = vi.fn().mockImplementation(
+      async (_query: string, docs: ReadonlyArray<{ id: string; content: string }>) => {
+        return docs.map((d, i) => ({
+          id: d.id,
+          score: (docs.length - i) / docs.length, // last gets lowest, first gets highest... reversed
+        })).reverse()
+      }
+    )
+    const intelligence: IntelligenceAdapter = { rerank }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    const result = await recall('TypeScript strict mode', storage, sensory, opts)
+
+    expect(rerank).toHaveBeenCalledOnce()
+    expect(rerank.mock.calls[0][0]).toBe('TypeScript strict mode')
+    expect(rerank.mock.calls[0][1].length).toBeGreaterThan(1)
+    // Memories should still be sorted descending by blended score
+    for (let i = 1; i < result.memories.length; i++) {
+      expect(result.memories[i - 1].relevance).toBeGreaterThanOrEqual(
+        result.memories[i].relevance
+      )
+    }
+  })
+
+  it('does not rerank when only one memory', async () => {
+    const singleResult: SearchResult<TypedMemory>[] = [
+      { item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 },
+    ]
+    const storage = createMockStorage({ vectorSearchResults: singleResult })
+    const sensory = new SensoryBuffer()
+
+    const rerank = vi.fn()
+    const intelligence: IntelligenceAdapter = { rerank }
+    const opts = makeOpts({ strategy: RECALL_STRATEGIES.light, intelligence })
+
+    await recall('TypeScript', storage, sensory, opts)
+
+    expect(rerank).not.toHaveBeenCalled()
+  })
+
+  it('falls back to original ranking when rerank throws', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const rerank = vi.fn().mockRejectedValue(new Error('API error'))
+    const intelligence: IntelligenceAdapter = { rerank }
+    const opts = makeOpts({ strategy: RECALL_STRATEGIES.light, intelligence })
+
+    const result = await recall('TypeScript strict mode', storage, sensory, opts)
+
+    expect(rerank).toHaveBeenCalledOnce()
+    // Should still return results (original ranking)
+    expect(result.memories.length).toBeGreaterThan(0)
   })
 })
 
