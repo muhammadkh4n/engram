@@ -41,8 +41,8 @@
     "@engram-mem/openai": "*",
     "@engram-mem/supabase": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@supabase/supabase-js": "^2.45.0",
-    "openai": "^4.60.0"
+    "@supabase/supabase-js": "^2.103.0",
+    "openai": "^6.34.0"
   },
   "devDependencies": {
     "typescript": "^6.0.2"
