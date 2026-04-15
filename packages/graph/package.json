@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/graph",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Neo4j-backed neural graph for Engram — spreading activation, engram cells, context nodes",
   "type": "module",
   "main": "dist/index.js",
