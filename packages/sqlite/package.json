@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/sqlite",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "SQLite storage adapter for Engram — zero-config local memory with vector search and FTS5",
   "keywords": [
     "memory",

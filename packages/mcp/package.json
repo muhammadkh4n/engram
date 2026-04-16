@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/mcp",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "MCP server for Engram memory — recall, ingest, forget, timeline, overview tools for Claude Code and any MCP client",
   "keywords": [
     "memory",
