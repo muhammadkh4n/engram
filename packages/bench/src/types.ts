@@ -3,6 +3,7 @@ export interface BenchmarkOpts {
   consolidate?: boolean  // default true
   graph?: boolean        // default true
   topK?: number          // default 10
+  limit?: number         // max conversations to evaluate (default: all)
   openaiApiKey?: string
   outputPath?: string
 }

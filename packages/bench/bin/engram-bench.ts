@@ -51,6 +51,7 @@ function parseArgs(argv: string[]) {
     graph: args['graph'] !== false,
     compare: args['compare'] === true,
     topK: parseInt(args['top-k'] as string ?? '10', 10) || 10,
+    limit: parseInt(args['limit'] as string ?? '0', 10) || 0,
     verbose: args['verbose'] === true,
   }
 }
@@ -62,6 +63,7 @@ async function main() {
     consolidate: args.consolidate,
     graph: args.graph,
     topK: args.topK,
+    limit: args.limit > 0 ? args.limit : undefined,
   }
 
   await fs.mkdir(args.outputDir, { recursive: true })

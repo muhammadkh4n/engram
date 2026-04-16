@@ -220,21 +220,67 @@ export class LoCoMoAdapter {
     return convResults
   }
 
-  async run(dataPath: string, opts?: BenchmarkOpts): Promise<LoCoMoResult> {
-    const ingestStart = Date.now()
+  /**
+   * Evaluate a single conversation in isolation: fresh memory instance,
+   * ingest its turns, optionally consolidate, then evaluate its QA pairs.
+   * This prevents cross-conversation noise pollution.
+   */
+  async runConversation(
+    conv: LoCoMoConversationFile,
+    opts?: BenchmarkOpts,
+  ): Promise<{ result: LoCoMoConversationResult; ingestMs: number; evalMs: number }> {
     const memory = await createBenchMemory(opts)
-    const conversations = await this.loadDataset(dataPath)
 
-    console.log(`LoCoMo: ${conversations.length} conversations loaded`)
+    const ingestStart = Date.now()
+    const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory)
 
-    await this.ingestDataset(conversations, memory, opts)
-    const ingestTimeMs = Date.now() - ingestStart
-
-    console.log(`LoCoMo: ingestion complete (${ingestTimeMs}ms)`)
+    if (opts?.consolidate !== false) {
+      await memory.consolidate('light')
+      await memory.consolidate('deep')
+    }
+    const ingestMs = Date.now() - ingestStart
 
     const evalStart = Date.now()
-    const convResults = await this.evaluateDataset(conversations, memory, opts)
-    const evalTimeMs = Date.now() - evalStart
+    const [convResult] = await this.evaluateDataset([conv], memory, opts)
+    const evalMs = Date.now() - evalStart
+
+    // Fill in ingestion stats
+    convResult!.episodesIngested = episodesIngested
+    convResult!.sessionsCreated = sessionsCreated.length
+
+    await memory.dispose()
+    return { result: convResult!, ingestMs, evalMs }
+  }
+
+  async run(dataPath: string, opts?: BenchmarkOpts): Promise<LoCoMoResult> {
+    const allConversations = await this.loadDataset(dataPath)
+    const conversations = opts?.limit
+      ? allConversations.slice(0, opts.limit)
+      : allConversations
+
+    console.log(`LoCoMo: ${conversations.length} conversations loaded${opts?.limit ? ` (limited from ${allConversations.length})` : ''}`)
+
+    // Per-conversation isolation: each conversation gets its own memory
+    // instance so cross-conversation noise doesn't pollute retrieval.
+    const convResults: LoCoMoConversationResult[] = []
+    let totalIngestMs = 0
+    let totalEvalMs = 0
+
+    for (let i = 0; i < conversations.length; i++) {
+      const conv = conversations[i]!
+      console.log(`LoCoMo: [${i + 1}/${conversations.length}] ${conv.sample_id} — ingesting...`)
+
+      const { result, ingestMs, evalMs } = await this.runConversation(conv, opts)
+      convResults.push(result)
+      totalIngestMs += ingestMs
+      totalEvalMs += evalMs
+
+      const hits = result.qaPredictions.filter(p => p.recallAtK).length
+      console.log(`LoCoMo: [${i + 1}/${conversations.length}] ${conv.sample_id} — ${result.qaPredictions.length} QAs, ${hits} hits, ingest ${ingestMs}ms, eval ${evalMs}ms`)
+    }
+
+    const ingestTimeMs = totalIngestMs
+    const evalTimeMs = totalEvalMs
 
     const allPredictions = convResults.flatMap(c => c.qaPredictions)
     const totalQueries = allPredictions.length
