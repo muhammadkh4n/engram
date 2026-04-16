@@ -1,8 +1,17 @@
 {
   "name": "@engram-mem/openclaw",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "OpenClaw plugin for Engram — persistent cross-session memory for OpenClaw AI agents",
-  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "openclaw", "plugin"],
+  "keywords": [
+    "memory",
+    "ai",
+    "agents",
+    "cognitive",
+    "embeddings",
+    "recall",
+    "openclaw",
+    "plugin"
+  ],
   "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
