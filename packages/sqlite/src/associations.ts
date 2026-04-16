@@ -230,6 +230,11 @@ export class SqliteAssociationStorage implements AssociationStorage {
       createdAt: julianToDate(row.created_at)!,
     }
   }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM associations').get() as { n: number }
+    return row.n
+  }
 }
 
 interface AssociationRow {

@@ -224,6 +224,11 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       projectId: row.project_id ?? null,
     }
   }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM episodes').get() as { n: number }
+    return row.n
+  }
 }
 
 interface EpisodeRow {

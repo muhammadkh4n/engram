@@ -245,6 +245,11 @@ export class SqliteSemanticStorage implements SemanticStorage {
       projectId: row.project_id ?? null,
     }
   }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM semantic WHERE superseded_by IS NULL').get() as { n: number }
+    return row.n
+  }
 }
 
 interface SemanticRow {

@@ -224,6 +224,11 @@ export class SqliteProceduralStorage implements ProceduralStorage {
       projectId: row.project_id ?? null,
     }
   }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM procedural').get() as { n: number }
+    return row.n
+  }
 }
 
 /** Convert JS Date to Julian Day number. */

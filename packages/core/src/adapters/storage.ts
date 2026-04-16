@@ -27,6 +27,8 @@ export interface EpisodeStorage {
   recordAccess(id: string): Promise<void>
   /** Find earliest created_at across episodes referenced by the given digest IDs */
   findEarliestInDigests?(digestIds: string[]): Promise<{ createdAt: Date } | null>
+  /** Fast COUNT(*) for stats(). Falls back to N-scan when not implemented. */
+  count?(): Promise<number>
 }
 
 export interface DigestStorage {
@@ -35,6 +37,8 @@ export interface DigestStorage {
   getBySession(sessionId: string): Promise<Digest[]>
   getRecent(days: number): Promise<Digest[]>
   getCountBySession(): Promise<Record<string, number>>
+  /** Fast COUNT(*) for stats(). Falls back to getCountBySession sum when not implemented. */
+  count?(): Promise<number>
 }
 
 export interface SemanticStorage {
@@ -48,6 +52,8 @@ export interface SemanticStorage {
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
   /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
   batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
+  /** Fast COUNT(*) for stats(). Falls back to getUnaccessed(0) when not implemented. */
+  count?(): Promise<number>
   /**
    * Search semantic memories valid at the given point in time.
    * Half-open interval: [valid_from, valid_until). valid_until is EXCLUSIVE.
@@ -72,6 +78,8 @@ export interface ProceduralStorage {
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
   /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
   batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
+  /** Fast COUNT(*) for stats(). Returns 0 when not implemented. */
+  count?(): Promise<number>
 }
 
 export interface AssociationStorage {
@@ -91,6 +99,8 @@ export interface AssociationStorage {
     daysLookback: number
     maxNew: number
   }): Promise<DiscoveredEdge[]>
+  /** Fast COUNT(*) for stats(). Falls back to an unbounded walk when not implemented. */
+  count?(): Promise<number>
 }
 
 export interface ConsolidationRunStorage {

@@ -1,11 +1,45 @@
-# Engram: Brain-Inspired Cognitive Memory for AI Agents
+# Engram — A Brain for Your AI Agents
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![npm](https://img.shields.io/badge/npm-@engram--mem-blue.svg)](https://www.npmjs.com/search?q=%40engram-mem)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0+-3178c6.svg)](https://www.typescriptlang.org/)
 [![Tests](https://img.shields.io/badge/tests-Vitest-6e9f18.svg)](https://vitest.dev/)
 
-Brain-inspired cognitive memory engine for AI agents. While other context engines compress and retrieve, Engram consolidates, associates, primes, and strengthens — like biological memory.
+**Your agent has amnesia. We gave it a hippocampus.**
+
+Other memory systems remember what you told them. Engram learns what matters and forgets what doesn't — across sessions, projects, and agents. Five memory systems, graph-based spreading activation, and consolidation cycles that turn conversations into semantic knowledge.
+
+## Start in 30 seconds
+
+**For Claude Code users:**
+
+```bash
+npm install -g @engram-mem/mcp
+```
+
+Add to `~/.claude/settings.json` — see [MCP setup](packages/mcp/README.md).
+
+**For builders:**
+
+```bash
+npm install @engram-mem/core @engram-mem/sqlite
+```
+
+```javascript
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+
+const memory = createMemory({ storage: sqliteAdapter() })
+await memory.initialize()
+
+await memory.ingest({ role: 'user', content: 'I prefer TypeScript strict mode' })
+await memory.consolidate('light')
+
+const { memories } = await memory.recall('What TypeScript config do I use?')
+console.log(memories[0]?.content)
+```
+
+No API keys required. SQLite + BM25 out of the box. Upgrade to embeddings, cloud storage, or Neo4j graph when ready.
 
 ## What's New in v0.3.0
 
@@ -75,28 +109,15 @@ RECALL → [BM25/Vector Search, Association Walk, Priming, Reconsolidation]
 - **Procedural** — Learned workflows, preferences, habits. Confidence + observation count.
 - **Associative Network** — 8 edge types linking memories to enable discovery and pattern completion
 
-## Quick Start
+## Examples
 
-Zero-config, no API keys required:
+- [`examples/demo.mjs`](examples/demo.mjs) — standalone SQLite demo, no API keys
+- [`examples/claude-code-memory.mjs`](examples/claude-code-memory.mjs) — persistent memory across Claude Code sessions
 
-```javascript
-import { createMemory } from '@engram-mem/core'
-import { sqliteAdapter } from '@engram-mem/sqlite'
-
-const memory = createMemory({ storage: sqliteAdapter() })
-await memory.initialize()
-
-// Ingest
-await memory.ingest({ role: 'user', content: 'I prefer TypeScript' })
-
-// Recall
-const result = await memory.recall('What languages does the user like?')
-console.log(result.formatted)
-
-await memory.dispose()
+```bash
+npm install @engram-mem/core @engram-mem/sqlite
+node examples/demo.mjs
 ```
-
-That's it. SQLite + BM25, no setup. Upgrade to embeddings and cloud storage later.
 
 ## Packages
 

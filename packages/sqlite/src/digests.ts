@@ -155,6 +155,11 @@ export class SqliteDigestStorage implements DigestStorage {
       projectId: row.project_id ?? null,
     }
   }
+
+  async count(): Promise<number> {
+    const row = this.db.prepare('SELECT COUNT(*) as n FROM digests').get() as { n: number }
+    return row.n
+  }
 }
 
 interface DigestRow {

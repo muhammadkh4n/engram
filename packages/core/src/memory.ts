@@ -198,7 +198,10 @@ export class Memory {
     const cleanText = parsed.cleanText
 
     // Skip messages that have no meaningful text after parsing.
-    if (cleanText.length < 2) return
+    if (cleanText.length < 2) {
+      console.warn('[engram] ingest: message discarded — no usable text content after parsing. Check message.content shape.')
+      return
+    }
 
     const salience = scoreSalience({ role: message.role, content: cleanText })
     const entities = extractEntities(cleanText)
@@ -585,58 +588,50 @@ export class Memory {
   }> {
     this.assertInitialized()
 
-    // Collect all known session IDs from both unconsolidated episodes and
-    // digest session counts (covers sessions where all episodes are consolidated).
+    // Prefer fast count() when the adapter supports it (O(1) COUNT(*)).
+    // Falls back to the legacy N-scan approach for adapters without count().
+    const [episodes, digests, semantic, procedural, associations] = await Promise.all([
+      this.storage.episodes.count
+        ? this.storage.episodes.count()
+        : this.countEpisodesLegacy(),
+      this.storage.digests.count
+        ? this.storage.digests.count()
+        : this.storage.digests.getCountBySession().then(m => Object.values(m).reduce((s, v) => s + v, 0)),
+      this.storage.semantic.count
+        ? this.storage.semantic.count()
+        : this.storage.semantic.getUnaccessed(0).then(list => list.length),
+      this.storage.procedural.count
+        ? this.storage.procedural.count()
+        : Promise.resolve(0),
+      this.storage.associations.count
+        ? this.storage.associations.count()
+        : this.countAssociationsLegacy(),
+    ])
+
+    return { episodes, digests, semantic, procedural, associations }
+  }
+
+  /** Fallback for adapters without episodes.count() — O(N) but bounded by session count */
+  private async countEpisodesLegacy(): Promise<number> {
     const [unconsolidatedSessions, digestCountBySession] = await Promise.all([
       this.storage.episodes.getUnconsolidatedSessions(),
       this.storage.digests.getCountBySession(),
     ])
-
     const allSessionIds = new Set<string>([
       ...unconsolidatedSessions,
       ...Object.keys(digestCountBySession),
     ])
-
-    // Fetch all episodes (consolidated + unconsolidated) across all known sessions.
-    const allEpisodeIds: string[] = []
+    let count = 0
     for (const sessionId of allSessionIds) {
       const episodes = await this.storage.episodes.getBySession(sessionId)
-      for (const ep of episodes) allEpisodeIds.push(ep.id)
+      count += episodes.length
     }
+    return count
+  }
 
-    // Digest count: sum of all per-session counts.
-    const digestCount = Object.values(digestCountBySession).reduce(
-      (sum, v) => sum + v,
-      0
-    )
-
-    // Semantic count: getUnaccessed(0) returns items with (last_accessed IS NULL
-    // OR last_accessed < now), which captures all semantic memories with confidence > 0.05.
-    // Items accessed in this very millisecond could be missed, but this is acceptable.
-    const semanticAll = await this.storage.semantic.getUnaccessed(0)
-
-    // Procedural count: StorageAdapter has no direct count operation for procedural.
-    // We return 0 as a conservative lower bound; an accurate count would require
-    // a COUNT(*) query not exposed in the current interface.
-    const proceduralCount = 0
-
-    // Association count: walk 1 hop from all episode IDs.
-    let associationCount = 0
-    if (allEpisodeIds.length > 0) {
-      const walkResults = await this.storage.associations.walk(allEpisodeIds, {
-        maxHops: 1,
-        minStrength: 0,
-      })
-      associationCount = walkResults.length
-    }
-
-    return {
-      episodes: allEpisodeIds.length,
-      digests: digestCount,
-      semantic: semanticAll.length,
-      procedural: proceduralCount,
-      associations: associationCount,
-    }
+  /** Fallback for adapters without associations.count() — returns 0 rather than OOM */
+  private async countAssociationsLegacy(): Promise<number> {
+    return 0
   }
 
   // ---------------------------------------------------------------------------
