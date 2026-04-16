@@ -23,6 +23,7 @@ function parseArgs(argv: string[]) {
     const arg = argv[i]!
     if (arg === '--no-consolidate') { args['consolidate'] = false; continue }
     if (arg === '--no-graph') { args['graph'] = false; continue }
+    if (arg === '--no-rerank') { args['noRerank'] = true; continue }
     if (arg === '--consolidate') { args['consolidate'] = true; continue }
     if (arg === '--graph') { args['graph'] = true; continue }
     if (arg === '--compare') { args['compare'] = true; continue }
@@ -52,6 +53,7 @@ function parseArgs(argv: string[]) {
     compare: args['compare'] === true,
     topK: parseInt(args['top-k'] as string ?? '10', 10) || 10,
     limit: parseInt(args['limit'] as string ?? '0', 10) || 0,
+    noRerank: args['noRerank'] === true,
     verbose: args['verbose'] === true,
   }
 }
@@ -64,6 +66,7 @@ async function main() {
     graph: args.graph,
     topK: args.topK,
     limit: args.limit > 0 ? args.limit : undefined,
+    noRerank: args.noRerank === true,
   }
 
   await fs.mkdir(args.outputDir, { recursive: true })

@@ -4,6 +4,7 @@ export interface BenchmarkOpts {
   graph?: boolean        // default true
   topK?: number          // default 10
   limit?: number         // max conversations to evaluate (default: all)
+  noRerank?: boolean     // disable cross-encoder reranking for A/B comparison
   openaiApiKey?: string
   outputPath?: string
 }

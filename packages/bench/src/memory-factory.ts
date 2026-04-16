@@ -15,7 +15,12 @@ export async function createBenchMemory(opts?: BenchmarkOpts): Promise<Memory> {
   const storage = new SqliteStorageAdapter(':memory:')
 
   const apiKey = opts?.openaiApiKey ?? process.env['OPENAI_API_KEY']
-  const intelligence = apiKey ? openaiIntelligence({ apiKey }) : undefined
+  const fullIntelligence = apiKey ? openaiIntelligence({ apiKey }) : undefined
+
+  // Strip rerank when noRerank is set (for A/B comparison benchmarks)
+  const intelligence = fullIntelligence && opts?.noRerank
+    ? { ...fullIntelligence, rerank: undefined }
+    : fullIntelligence
 
   const memory = createMemory({
     storage,
