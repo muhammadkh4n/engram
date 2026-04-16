@@ -210,9 +210,11 @@ SUPABASE_KEY=...
 NEO4J_URI=bolt://localhost:7687
 ```
 
-## Benchmark Results (v0.3.0)
+## Benchmark Results (v0.3.0, preliminary)
 
-### LoCoMo Conv-26 (199 QAs)
+### LoCoMo Conv-26 — 1 of 10 conversations (199 QAs)
+
+> Full 10-conversation run is in progress. These numbers are preliminary from a single conversation.
 
 | Category | Recall @ K |
 |----------|-----------|

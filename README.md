@@ -18,7 +18,7 @@ Brain-inspired cognitive memory engine for AI agents. While other context engine
 | BM25 as independent candidates | Keyword matches enter the pipeline even with weak embeddings |
 | Contextual embedding | Preceding turns prepended at ingest for richer vectors |
 
-**LoCoMo Benchmark (conversational QA, 199 questions):**
+**LoCoMo Benchmark — preliminary results** (1 of 10 conversations, 199 questions, Conv-26):
 
 | Category | R@K |
 |----------|-----|
@@ -29,7 +29,7 @@ Brain-inspired cognitive memory engine for AI agents. While other context engine
 | Adversarial | 85.1% |
 | **Overall** | **66.8%** |
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history.
+> **Note:** These numbers are from a single LoCoMo conversation. Full 10-conversation evaluation is in progress — results will be updated here and in [CHANGELOG.md](CHANGELOG.md). Baseline before these changes: 19.6% R@K on the same conversation.
 
 ## Why Engram
 
@@ -235,28 +235,44 @@ Get or create a session-scoped handle. Auto-generates sessionId if omitted.
 #### `dispose(): Promise<void>`
 Release resources, persist sensory buffer snapshot.
 
-## MCP Server Setup
+## MCP Server Setup (Claude Code)
 
-Engram includes an MCP (Model Context Protocol) server for Claude Code integration. Add to Claude's settings.json:
+Install the MCP server globally:
+
+```bash
+npm install -g @engram-mem/mcp
+```
+
+Add to your `~/.claude/settings.json`:
 
 ```json
 {
   "mcpServers": {
-    "engram-memory": {
-      "command": "node",
-      "args": ["/path/to/openclaw-memory/packages/mcp/dist/index.js"]
+    "engram": {
+      "command": "engram-mcp",
+      "env": {
+        "SUPABASE_URL": "https://your-project.supabase.co",
+        "SUPABASE_KEY": "your-anon-or-service-key",
+        "OPENAI_API_KEY": "sk-..."
+      }
     }
   }
 }
 ```
 
-Then in Claude Code, use the memory tools:
-- `engram_search` — Deep memory search
-- `engram_stats` — Memory statistics
-- `engram_forget` — Lossless deprioritization
-- `engram_consolidate` — Manual consolidation
+Optional — enable Neo4j graph for spreading activation recall:
 
-Messages are automatically ingested and associated across sessions.
+```json
+"env": {
+  "NEO4J_URI": "bolt://localhost:7687",
+  "NEO4J_USER": "neo4j",
+  "NEO4J_PASSWORD": "engram-dev"
+}
+```
+
+Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`.
+
+See [`packages/mcp/README.md`](packages/mcp/README.md) for full tool schemas and troubleshooting.
 
 ## Storage Adapters
 

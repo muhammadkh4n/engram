@@ -198,17 +198,19 @@ export class SqliteStorageAdapter implements StorageAdapter {
     // Brute-force cosine over 500 × 1536-dim vectors is ~5ms.
     const scanLimit = Math.max(limit * 10, 500)
     const results: Array<SearchResult<TypedMemory>> = []
-    const projectFilter = opts?.projectId ? ` AND (project_id = '${opts.projectId.replace(/'/g, "''")}' OR project_id IS NULL)` : ''
+    // Parameterized project filter — SQL clause + params to append to each query
+    const projectFilter = opts?.projectId ? ' AND (project_id = ? OR project_id IS NULL)' : ''
+    const projectParams: unknown[] = opts?.projectId ? [opts.projectId] : []
 
     if (tiers.includes('episode')) {
       let sql: string
       let params: unknown[]
       if (opts?.sessionId) {
         sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ?${projectFilter} LIMIT ?`
-        params = [opts.sessionId, scanLimit]
+        params = [opts.sessionId, ...projectParams, scanLimit]
       } else {
         sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
-        params = [scanLimit]
+        params = [...projectParams, scanLimit]
       }
       const rows = db.prepare(sql).all(...params) as EpisodeRow[]
       for (const row of rows) {
@@ -227,7 +229,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (tiers.includes('digest')) {
       const rows = db.prepare(
         `SELECT * FROM digests WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
-      ).all(scanLimit) as DigestRow[]
+      ).all(...projectParams, scanLimit) as DigestRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const stored = blobToVector(row.embedding)
@@ -241,7 +243,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (tiers.includes('semantic')) {
       const rows = db.prepare(
         `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL${projectFilter} LIMIT ?`
-      ).all(scanLimit) as SemanticRow[]
+      ).all(...projectParams, scanLimit) as SemanticRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const stored = blobToVector(row.embedding)
@@ -255,7 +257,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (tiers.includes('procedural')) {
       const rows = db.prepare(
         `SELECT * FROM procedural WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
-      ).all(scanLimit) as ProceduralRow[]
+      ).all(...projectParams, scanLimit) as ProceduralRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const stored = blobToVector(row.embedding)

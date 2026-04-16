@@ -1,15 +1,19 @@
 /**
  * Engram standalone demo — no API keys, no OpenClaw, just SQLite + BM25.
  *
- * Run: node examples/demo.mjs
+ * Prerequisites:
+ *   npm install @engram-mem/core @engram-mem/sqlite
+ *
+ * Run:
+ *   node demo.mjs
  */
 
-import { createMemory } from '../packages/core/src/create-memory.js'
-import { SqliteStorageAdapter } from '../packages/sqlite/src/adapter.js'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
-// Can't use bare imports without build, so construct directly
-const storage = new SqliteStorageAdapter('./engram-demo.db')
-const memory = createMemory({ storage })
+const memory = createMemory({
+  storage: sqliteAdapter({ path: './engram-demo.db' }),
+})
 
 await memory.initialize()
 console.log('Engram initialized with SQLite (./engram-demo.db)\n')
@@ -39,8 +43,15 @@ for (const msg of messages) {
 
 console.log(`\nIngested ${messages.length} messages.\n`)
 
-// --- Recall with different intents ---
-console.log('=== Testing Recall ===\n')
+// --- Consolidate BEFORE recall — turns episodes into searchable semantic/procedural memories ---
+console.log('=== Running consolidation (light + deep sleep) ===\n')
+const light = await memory.consolidate('light')
+console.log(`  Light sleep: ${light.digestsCreated ?? 0} digests from ${light.episodesProcessed ?? 0} episodes`)
+const deep = await memory.consolidate('deep')
+console.log(`  Deep sleep: ${deep.promoted ?? 0} semantic, ${deep.procedural ?? 0} procedural\n`)
+
+// --- Recall ---
+console.log('=== Recall ===\n')
 
 const queries = [
   'What TypeScript settings does the user prefer?',
@@ -48,73 +59,26 @@ const queries = [
   'How does the user like to develop code?',
   'What should I do before committing?',
   'Where do we deploy?',
-  'hi',  // SOCIAL — should return nothing
 ]
 
 for (const q of queries) {
   const result = await memory.recall(q)
   console.log(`Q: "${q}"`)
-  console.log(`   Intent: ${result.intent.type} (confidence: ${result.intent.confidence})`)
-  console.log(`   Memories found: ${result.memories.length}`)
+  console.log(`   Memories: ${result.memories.length}`)
   if (result.memories.length > 0) {
-    console.log(`   Top result: "${result.memories[0].content.slice(0, 80)}..."`)
-    console.log(`   Relevance: ${result.memories[0].relevance.toFixed(3)}`)
+    const top = result.memories[0]
+    console.log(`   Top: [${top.type}] (${top.relevance.toFixed(3)}) ${top.content.slice(0, 80)}`)
   }
-  console.log(`   Primed topics: [${result.primed.join(', ')}]`)
   console.log()
 }
 
-// --- Run consolidation ---
-console.log('=== Running Consolidation (Light Sleep) ===\n')
-
-const lightResult = await memory.consolidate('light')
-console.log(`  Digests created: ${lightResult.digestsCreated || 0}`)
-console.log(`  Episodes processed: ${lightResult.episodesProcessed || 0}`)
-
-// --- Run deep sleep to extract knowledge ---
-console.log('\n=== Running Consolidation (Deep Sleep) ===\n')
-
-const deepResult = await memory.consolidate('deep')
-console.log(`  Semantic memories promoted: ${deepResult.promoted || 0}`)
-console.log(`  Procedural memories created: ${deepResult.procedural || 0}`)
-console.log(`  Deduplicated: ${deepResult.deduplicated || 0}`)
-
-// --- Check stats ---
-console.log('\n=== Memory Stats ===\n')
+// --- Stats ---
+console.log('=== Stats ===\n')
 const stats = await memory.stats()
-console.log(`  Episodes: ${stats.episodes}`)
-console.log(`  Digests: ${stats.digests}`)
-console.log(`  Semantic: ${stats.semantic}`)
-console.log(`  Procedural: ${stats.procedural}`)
-console.log(`  Associations: ${stats.associations}`)
-
-// --- Recall AFTER consolidation (should find semantic/procedural memories too) ---
-console.log('\n=== Recall After Consolidation ===\n')
-
-const q2 = 'What are the user preferences and workflow?'
-const result2 = await memory.recall(q2)
-console.log(`Q: "${q2}"`)
-console.log(`   Intent: ${result2.intent.type}`)
-console.log(`   Memories found: ${result2.memories.length}`)
-for (const m of result2.memories.slice(0, 5)) {
-  console.log(`   [${m.type}] (${m.relevance.toFixed(3)}) ${m.content.slice(0, 80)}`)
-}
-
-// --- Expand a digest ---
-if (stats.digests > 0) {
-  console.log('\n=== Expand Digest ===\n')
-  // Search for a digest first
-  const digestResult = await memory.recall('conversation summary')
-  const digestMem = digestResult.memories.find(m => m.type === 'digest')
-  if (digestMem) {
-    const expanded = await memory.expand(digestMem.id)
-    console.log(`  Expanded digest "${digestMem.content.slice(0, 50)}..."`)
-    console.log(`  Original episodes: ${expanded.episodes.length}`)
-    for (const ep of expanded.episodes.slice(0, 3)) {
-      console.log(`    [${ep.role}] ${ep.content.slice(0, 60)}`)
-    }
-  }
-}
+console.log(`  Episodes:    ${stats.episodes}`)
+console.log(`  Digests:     ${stats.digests}`)
+console.log(`  Semantic:    ${stats.semantic}`)
+console.log(`  Procedural:  ${stats.procedural}`)
 
 await memory.dispose()
 console.log('\nDone. Database saved to ./engram-demo.db')
