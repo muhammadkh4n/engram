@@ -147,19 +147,23 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const hasVectorSearch = typeof storage.vectorSearch === 'function'
   const hasTextBoost = typeof storage.textBoost === 'function'
 
+  // Wider candidate pool — more candidates into reranker = better ordering
+  const vectorLimit = strategy.maxResults * 4
+
   const vectorResults = hasVectorSearch && embedding.length > 0
     ? await storage.vectorSearch(embedding, {
-        limit: strategy.maxResults * 2,
+        limit: vectorLimit,
         sessionId,
         ...(projectId !== undefined ? { projectId } : {}),
       })
     : []
 
-  // Step 2: BM25 boost — additive, OR semantics
+  // Step 2: BM25 — both boost AND independent candidate source
   const terms = extractTerms(query, expandedTerms)
+  const bm25Limit = strategy.maxResults * 5
   const boostResults = terms.length > 0 && hasTextBoost
     ? await storage.textBoost(terms, {
-        limit: strategy.maxResults * 2,
+        limit: bm25Limit,
         sessionId,
         ...(projectId !== undefined ? { projectId } : {}),
       })
@@ -172,6 +176,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
 
   // Step 3: Score + rank
   const scored: RetrievedMemory[] = []
+  const scoredIds = new Set<string>()
 
   if (vectorResults.length > 0) {
     // Primary path: score vector results with optional BM25 boost
@@ -203,6 +208,44 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
       })
+      scoredIds.add(typed.data.id)
+    }
+
+    // BM25 rescue: add keyword-matched candidates that vector search missed.
+    // These have exact term matches but weak embedding similarity — the
+    // reranker will sort out true relevance.
+    for (const b of boostResults) {
+      if (scoredIds.has(b.id)) continue
+      const typed = await storage.getById(b.id, b.type)
+      if (!typed) continue
+
+      const content = extractContent(typed)
+      const metadata = extractMetadata(typed)
+      const createdAt = extractCreatedAt(typed)
+      const accessCount = extractAccessCount(typed)
+      const role = extractRole(typed)
+      const primingBoost = sensory.getPrimingBoost(content)
+
+      const finalScore = computeScore({
+        cosineSimilarity: 0,
+        bm25Boost: b.boost,
+        recencyBias: strategy.recencyBias,
+        createdAt,
+        accessCount,
+        primingBoost,
+        role,
+        content,
+      })
+
+      scored.push({
+        id: typed.data.id,
+        type: typed.type,
+        content,
+        relevance: finalScore,
+        source: 'recall',
+        metadata: { ...metadata, createdAt: createdAt.toISOString() },
+      })
+      scoredIds.add(typed.data.id)
     }
   } else if (terms.length > 0) {
     // Fallback: text-only search via per-tier .search() methods.

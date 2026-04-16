@@ -194,7 +194,9 @@ export class SqliteStorageAdapter implements StorageAdapter {
     const db = this.assertDb()
     const limit = opts?.limit ?? 15
     const tiers = opts?.tiers ?? ['episode', 'digest', 'semantic', 'procedural']
-    const scanLimit = limit * 3
+    // Scan a wide pool — evidence may be anywhere, not just recent rows.
+    // Brute-force cosine over 500 × 1536-dim vectors is ~5ms.
+    const scanLimit = Math.max(limit * 10, 500)
     const results: Array<SearchResult<TypedMemory>> = []
     const projectFilter = opts?.projectId ? ` AND (project_id = '${opts.projectId.replace(/'/g, "''")}' OR project_id IS NULL)` : ''
 
@@ -202,10 +204,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
       let sql: string
       let params: unknown[]
       if (opts?.sessionId) {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ?${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ?${projectFilter} LIMIT ?`
         params = [opts.sessionId, scanLimit]
       } else {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
         params = [scanLimit]
       }
       const rows = db.prepare(sql).all(...params) as EpisodeRow[]
@@ -224,7 +226,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('digest')) {
       const rows = db.prepare(
-        `SELECT * FROM digests WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        `SELECT * FROM digests WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
       ).all(scanLimit) as DigestRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -238,7 +240,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('semantic')) {
       const rows = db.prepare(
-        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL${projectFilter} LIMIT ?`
       ).all(scanLimit) as SemanticRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -252,7 +254,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('procedural')) {
       const rows = db.prepare(
-        `SELECT * FROM procedural WHERE embedding IS NOT NULL${projectFilter} ORDER BY created_at DESC LIMIT ?`
+        `SELECT * FROM procedural WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
       ).all(scanLimit) as ProceduralRow[]
       for (const row of rows) {
         if (!row.embedding) continue
