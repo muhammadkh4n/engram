@@ -1,13 +1,13 @@
-# @engram/openai
+# @engram-mem/openai
 
 OpenAI embeddings and summarization for Engram. Adds semantic vector search and LLM-powered consolidation.
 
 ## Installation
 
 ```bash
-npm install @engram/openai
-npm install @engram/core
-npm install @engram/sqlite  # or @engram/supabase
+npm install @engram-mem/openai
+npm install @engram-mem/core
+npm install @engram-mem/sqlite  # or @engram-mem/supabase
 ```
 
 Set your API key:
@@ -21,9 +21,9 @@ export OPENAI_API_KEY=sk-...
 Add semantic search to SQLite:
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
-import { openaiIntelligence } from '@engram/openai'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+import { openaiIntelligence } from '@engram-mem/openai'
 
 const memory = createMemory({
   storage: sqliteAdapter(),

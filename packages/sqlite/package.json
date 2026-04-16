@@ -1,6 +1,9 @@
 {
   "name": "@engram-mem/sqlite",
   "version": "0.3.0",
+  "description": "SQLite storage adapter for Engram — zero-config local memory with vector search and FTS5",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "sqlite", "local", "vector-search"],
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -3,7 +3,7 @@
 **Document status:** Implementation plan — an agent should implement this without asking questions.
 **Date authored:** 2026-04-06
 **Repository:** `/Users/muhammadkh4n/Projects/github/muhammadkh4n/engram`
-**Target packages:** new `@engram/bench`, `@engram/core`, `@engram/sqlite`, `@engram/supabase`, `@engram/mcp`
+**Target packages:** new `@engram-mem/bench`, `@engram-mem/core`, `@engram-mem/sqlite`, `@engram-mem/supabase`, `@engram-mem/mcp`
 
 ---
 
@@ -15,21 +15,21 @@ Engram is a brain-inspired cognitive memory engine for AI agents implemented as 
 
 Current packages:
 
-- `packages/core` — `@engram/core`. The pure TypeScript engine. Contains: `Memory` class (`memory.ts`), five memory systems, four consolidation cycles, 11-type intent classifier, hybrid retrieval pipeline. No I/O. All storage goes through adapter interfaces defined in `src/adapters/storage.ts`. Key public export: `createMemory(opts)` from `create-memory.ts`. Recall signature: `memory.recall(query, opts?)` where `opts` is `{ embedding?: number[]; tokenBudget?: number }`. Return type: `RecallResult` (defined in `types.ts`).
+- `packages/core` — `@engram-mem/core`. The pure TypeScript engine. Contains: `Memory` class (`memory.ts`), five memory systems, four consolidation cycles, 11-type intent classifier, hybrid retrieval pipeline. No I/O. All storage goes through adapter interfaces defined in `src/adapters/storage.ts`. Key public export: `createMemory(opts)` from `create-memory.ts`. Recall signature: `memory.recall(query, opts?)` where `opts` is `{ embedding?: number[]; tokenBudget?: number }`. Return type: `RecallResult` (defined in `types.ts`).
 
-- `packages/sqlite` — `@engram/sqlite`. `SqliteStorageAdapter` backed by `better-sqlite3`. Schema migrations use `PRAGMA user_version` in `src/migrations.ts`. Current version is V2 (V1 base tables + V2 `episode_parts`). Note: V2 is the latest migration because Neo4j (not SQLite) handles graph persistence — there is no V3 SQL graph table migration. V3 in Wave 4 is for temporal columns.
+- `packages/sqlite` — `@engram-mem/sqlite`. `SqliteStorageAdapter` backed by `better-sqlite3`. Schema migrations use `PRAGMA user_version` in `src/migrations.ts`. Current version is V2 (V1 base tables + V2 `episode_parts`). Note: V2 is the latest migration because Neo4j (not SQLite) handles graph persistence — there is no V3 SQL graph table migration. V3 in Wave 4 is for temporal columns.
 
-- `packages/supabase` — `@engram/supabase`. `SupabaseStorageAdapter` via `@supabase/supabase-js`. Migration files in `supabase/migrations/`. Latest file: `20260401000001_enable_rls_all_tables.sql`. Wave 4 adds `20260406000001_temporal_columns.sql`.
+- `packages/supabase` — `@engram-mem/supabase`. `SupabaseStorageAdapter` via `@supabase/supabase-js`. Migration files in `supabase/migrations/`. Latest file: `20260401000001_enable_rls_all_tables.sql`. Wave 4 adds `20260406000001_temporal_columns.sql`.
 
-- `packages/openai` — `@engram/openai`. `OpenAIIntelligenceAdapter` implementing `IntelligenceAdapter`.
+- `packages/openai` — `@engram-mem/openai`. `OpenAIIntelligenceAdapter` implementing `IntelligenceAdapter`.
 
-- `packages/mcp` — `@engram/mcp`. MCP server (`src/index.ts`). Currently exposes three tools: `memory_recall`, `memory_ingest`, `memory_forget`. Uses `SupabaseStorageAdapter` + `OpenAIIntelligenceAdapter`.
+- `packages/mcp` — `@engram-mem/mcp`. MCP server (`src/index.ts`). Currently exposes three tools: `memory_recall`, `memory_ingest`, `memory_forget`. Uses `SupabaseStorageAdapter` + `OpenAIIntelligenceAdapter`.
 
-- `packages/graph` — `@engram/graph`. Created in Wave 1. Wraps `neo4j-driver`. Contains `NeuralGraph` class (Cypher-based, all graph state lives in Neo4j — NOT in-process), `SpreadingActivation` engine (Cypher variable-length path traversal), 8 node label types, 13 relationship types, context extraction helpers. All operations go through Neo4j Bolt; there is no in-memory graph object.
+- `packages/graph` — `@engram-mem/graph`. Created in Wave 1. Wraps `neo4j-driver`. Contains `NeuralGraph` class (Cypher-based, all graph state lives in Neo4j — NOT in-process), `SpreadingActivation` engine (Cypher variable-length path traversal), 8 node label types, 13 relationship types, context extraction helpers. All operations go through Neo4j Bolt; there is no in-memory graph object.
 
 ### What Waves 1–3 Built
 
-**Wave 1**: `@engram/graph` package. `NeuralGraph` wrapping `neo4j-driver`. All graph state persisted in a running Neo4j instance (Community Edition, Bolt port 7687). 8 node labels: `Memory`, `Person`, `Topic`, `Entity`, `Emotion`, `Intent`, `Session`, `TimeContext`. 13 relationship types. `SpreadingActivation` using Cypher variable-length path traversal with decay parameters. Context extraction functions. Neo4j constraints and indexes applied on `connect()`.
+**Wave 1**: `@engram-mem/graph` package. `NeuralGraph` wrapping `neo4j-driver`. All graph state persisted in a running Neo4j instance (Community Edition, Bolt port 7687). 8 node labels: `Memory`, `Person`, `Topic`, `Entity`, `Emotion`, `Intent`, `Session`, `TimeContext`. 13 relationship types. `SpreadingActivation` using Cypher variable-length path traversal with decay parameters. Context extraction functions. Neo4j constraints and indexes applied on `connect()`.
 
 **Wave 2**: Graph-aware ingestion and retrieval. On `ingest()`, each episode becomes a `Memory` node in Neo4j with adjacent `Person`, `Topic`, `Entity`, `Emotion`, `Intent`, `Session`, `TimeContext` nodes via `decomposeEpisode()`. Recall pipeline runs 4-way parallel search (vector + BM25 + temporal + entity), passes results to `NeuralGraph.spreadActivation()` as Cypher seeds, merges activated node IDs back to SQL content via `NeuralGraph.getMemoryNodeIds()`, returns `CompositeMemory`. MCP responses include environmental context.
 
@@ -49,7 +49,7 @@ Wave 3 added architectural capability for temporal validity (Neo4j nodes have `v
 
 Wave 4 closes both gaps:
 
-1. **Benchmark harness** (`@engram/bench`): Ingest standard memory benchmarks (LoCoMo, LongMemEval) into Engram, run recall queries, output results in benchmark-expected formats. A `--compare` mode runs with-graph (Neo4j + SQL) and without-graph (SQL only) to prove graph value empirically.
+1. **Benchmark harness** (`@engram-mem/bench`): Ingest standard memory benchmarks (LoCoMo, LongMemEval) into Engram, run recall queries, output results in benchmark-expected formats. A `--compare` mode runs with-graph (Neo4j + SQL) and without-graph (SQL only) to prove graph value empirically.
 
 2. **Temporal validity queries**: `memory.recall()` gains an `asOf?: Date` parameter. When set, all queries filter to what was believed at that point in time. A new MCP tool `memory_timeline` exposes the supersession chain for a topic.
 
@@ -91,7 +91,7 @@ When deep sleep detects a contradiction and would create a new semantic memory s
 
 ---
 
-## Part 1: `@engram/bench` Package
+## Part 1: `@engram-mem/bench` Package
 
 ### 1.1 Directory Structure
 
@@ -128,7 +128,7 @@ packages/bench/
 
 ```json
 {
-  "name": "@engram/bench",
+  "name": "@engram-mem/bench",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -143,9 +143,9 @@ packages/bench/
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram/core": "*",
-    "@engram/sqlite": "*",
-    "@engram/openai": "*",
+    "@engram-mem/core": "*",
+    "@engram-mem/sqlite": "*",
+    "@engram-mem/openai": "*",
     "uuid": "^11.0.0"
   },
   "devDependencies": {
@@ -485,7 +485,7 @@ export type LongMemEvalDataset = LongMemEvalQuestion[]
 ```typescript
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { Memory } from '@engram/core'
+import type { Memory } from '@engram-mem/core'
 import type {
   BenchmarkOpts, LoCoMoResult, LoCoMoConversationResult,
   LoCoMoQAPrediction, LoCoMoEvalFormat, LoCoMoCategoryMetrics,
@@ -772,7 +772,7 @@ export class LoCoMoAdapter {
 ```typescript
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { Memory } from '@engram/core'
+import type { Memory } from '@engram-mem/core'
 import type {
   BenchmarkOpts, LongMemEvalResult, LongMemEvalPrediction,
   LongMemEvalAbilityMetrics, LongMemEvalAbility,
@@ -1232,10 +1232,10 @@ function formatDelta(value: number, unit: string): string {
 Before implementing, verify the `SqliteStorageAdapter` constructor signature by reading `packages/sqlite/src/adapter.ts`. If it accepts a string path, use `new SqliteStorageAdapter(':memory:')`. If it accepts a `better-sqlite3` Database instance, use `new SqliteStorageAdapter(new Database(':memory:'))`. Do not guess — read the file first.
 
 ```typescript
-import { SqliteStorageAdapter } from '@engram/sqlite'
-import { openaiIntelligence } from '@engram/openai'
-import { createMemory } from '@engram/core'
-import type { Memory } from '@engram/core'
+import { SqliteStorageAdapter } from '@engram-mem/sqlite'
+import { openaiIntelligence } from '@engram-mem/openai'
+import { createMemory } from '@engram-mem/core'
+import type { Memory } from '@engram-mem/core'
 import type { BenchmarkOpts } from './types.js'
 
 /**
@@ -2669,7 +2669,7 @@ This is the primary test file for Job 2. It tests the temporal validity system e
 ```typescript
 import { describe, it, expect, beforeEach } from 'vitest'
 import { createBenchMemory } from '../src/memory-factory.js'
-import type { Memory } from '@engram/core'
+import type { Memory } from '@engram-mem/core'
 
 /**
  * Temporal validity test suite.
@@ -2971,9 +2971,9 @@ The root `turbo.json` already defines `build`, `test`, `typecheck`, `clean`. No 
 
 The root uses `"workspaces": ["packages/*"]`. The new package at `packages/bench/` is auto-discovered. No change needed.
 
-### 11.3 Verify `@engram/sqlite` Exports
+### 11.3 Verify `@engram-mem/sqlite` Exports
 
-The bench's `memory-factory.ts` imports `SqliteStorageAdapter` from `@engram/sqlite`. Confirm that `packages/sqlite/src/index.ts` exports it. If not, add:
+The bench's `memory-factory.ts` imports `SqliteStorageAdapter` from `@engram-mem/sqlite`. Confirm that `packages/sqlite/src/index.ts` exports it. If not, add:
 
 ```typescript
 export { SqliteStorageAdapter } from './adapter.js'

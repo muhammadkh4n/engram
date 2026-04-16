@@ -1729,7 +1729,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
 Ensure `SearchResult` is imported at the top of `packages/supabase/src/adapter.ts`:
 
 ```typescript
-import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram/core'
+import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 ```
 
 - [ ] **Step 4: Type-check**
@@ -1764,7 +1764,7 @@ In `packages/sqlite/src/adapter.ts`, add these imports after the existing import
 
 ```typescript
 import { cosineSimilarity, blobToVector } from './vector-search.js'
-import type { SearchResult } from '@engram/core'
+import type { SearchResult } from '@engram-mem/core'
 ```
 
 - [ ] **Step 2: Add vectorSearch to SqliteStorageAdapter**

@@ -4,7 +4,7 @@
 
 **Goal:** Bootstrap the Engram monorepo with all TypeScript types, the composable StorageAdapter interface, and a fully functional SQLite adapter with FTS5 search, producing a testable storage layer that Plan B builds on.
 
-**Architecture:** Turborepo monorepo with `@engram/core` (types + interfaces) and `@engram/sqlite` (better-sqlite3 + FTS5). All types defined first, then SQLite schema created with production-ready migrations, then each storage sub-interface implemented with TDD.
+**Architecture:** Turborepo monorepo with `@engram-mem/core` (types + interfaces) and `@engram-mem/sqlite` (better-sqlite3 + FTS5). All types defined first, then SQLite schema created with production-ready migrations, then each storage sub-interface implemented with TDD.
 
 **Tech Stack:** TypeScript 5.5+, Turborepo, Vitest, better-sqlite3, uuid (v7)
 
@@ -147,13 +147,13 @@ Save to `tsconfig.base.json`:
 }
 ```
 
-- [ ] **Step 3: Create @engram/core package scaffold**
+- [ ] **Step 3: Create @engram-mem/core package scaffold**
 
 Save to `packages/core/package.json`:
 
 ```json
 {
-  "name": "@engram/core",
+  "name": "@engram-mem/core",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -187,13 +187,13 @@ Save to `packages/core/tsconfig.json`:
 }
 ```
 
-- [ ] **Step 4: Create @engram/sqlite package scaffold**
+- [ ] **Step 4: Create @engram-mem/sqlite package scaffold**
 
 Save to `packages/sqlite/package.json`:
 
 ```json
 {
-  "name": "@engram/sqlite",
+  "name": "@engram-mem/sqlite",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -205,7 +205,7 @@ Save to `packages/sqlite/package.json`:
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram/core": "workspace:*",
+    "@engram-mem/core": "workspace:*",
     "better-sqlite3": "^11.0.0",
     "uuid": "^11.0.0"
   },
@@ -1308,7 +1308,7 @@ import Database from 'better-sqlite3'
 import { createTestDb } from './helpers.js'
 import { runMigrations } from '../src/migrations.js'
 import { SqliteEpisodeStorage } from '../src/episodes.js'
-import type { Episode } from '@engram/core'
+import type { Episode } from '@engram-mem/core'
 
 describe('SqliteEpisodeStorage', () => {
   let db: Database.Database
@@ -1439,9 +1439,9 @@ Save to `packages/sqlite/src/episodes.ts`:
 
 ```typescript
 import type Database from 'better-sqlite3'
-import type { Episode, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { EpisodeStorage } from '@engram/core'
+import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { EpisodeStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 
 export class SqliteEpisodeStorage implements EpisodeStorage {
@@ -1747,9 +1747,9 @@ Save to `packages/sqlite/src/digests.ts`:
 
 ```typescript
 import type Database from 'better-sqlite3'
-import type { Digest, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { DigestStorage } from '@engram/core'
+import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 
 export class SqliteDigestStorage implements DigestStorage {
@@ -2028,9 +2028,9 @@ Save to `packages/sqlite/src/semantic.ts`:
 
 ```typescript
 import type Database from 'better-sqlite3'
-import type { SemanticMemory, SearchOptions, SearchResult } from '@engram/core'
-import { generateId } from '@engram/core'
-import type { SemanticStorage } from '@engram/core'
+import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
+import { generateId } from '@engram-mem/core'
+import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 
 export class SqliteSemanticStorage implements SemanticStorage {
@@ -2283,6 +2283,6 @@ End-to-end test that exercises the full adapter:
 
 3. **Type consistency**: `Episode`, `Digest`, `SemanticMemory`, `ProceduralMemory`, `Association` types match between `core/types.ts` and all storage implementations. `row.session_id` maps to `episode.sessionId` consistently via `rowToEpisode()` mappers. Julian Day conversion uses the same `julianToDate()` / `dateToJulian()` utilities throughout.
 
-**Gap found**: Tasks 8-11 reference the exact same `@engram/core` exports but Task 3 (`index.ts`) doesn't re-export `generateId` from the adapters path. Verified: `index.ts` does export it via `export { generateId } from './utils/id.js'` — no gap.
+**Gap found**: Tasks 8-11 reference the exact same `@engram-mem/core` exports but Task 3 (`index.ts`) doesn't re-export `generateId` from the adapters path. Verified: `index.ts` does export it via `export { generateId } from './utils/id.js'` — no gap.
 
 ---

@@ -1,7 +1,7 @@
 # Wave 2: Rewire Ingestion & Retrieval Pipeline (Neo4j)
 
 **Status**: Ready for implementation
-**Depends on**: Wave 1 complete (`@engram/graph` package exists with NeuralGraph wrapping `neo4j-driver`, SpreadingActivation via Cypher, node/edge types)
+**Depends on**: Wave 1 complete (`@engram-mem/graph` package exists with NeuralGraph wrapping `neo4j-driver`, SpreadingActivation via Cypher, node/edge types)
 **Produces**: Graph-enriched ingestion into Neo4j, spreading-activation retrieval via Cypher variable-length paths, composite memory output with environmental context
 
 ---
@@ -28,18 +28,18 @@ The neuroscience vision comes from five empirically-validated principles:
 
 ```
 packages/
-  core/       @engram/core     — The brain. Memory class, 5 memory systems, 4 consolidation
+  core/       @engram-mem/core     — The brain. Memory class, 5 memory systems, 4 consolidation
                                   cycles, 11-type intent classification, hybrid retrieval
-  sqlite/     @engram/sqlite   — SQLite storage (vector cosine sim + BM25 FTS5)
-  supabase/   @engram/supabase — Supabase/Postgres storage (pgvector)
-  openai/     @engram/openai   — OpenAI intelligence adapter
-  mcp/        @engram/mcp      — MCP server (memory_recall, memory_ingest, memory_forget)
-  graph/      @engram/graph    — NEW from Wave 1 (Neo4j-backed NeuralGraph)
+  sqlite/     @engram-mem/sqlite   — SQLite storage (vector cosine sim + BM25 FTS5)
+  supabase/   @engram-mem/supabase — Supabase/Postgres storage (pgvector)
+  openai/     @engram-mem/openai   — OpenAI intelligence adapter
+  mcp/        @engram-mem/mcp      — MCP server (memory_recall, memory_ingest, memory_forget)
+  graph/      @engram-mem/graph    — NEW from Wave 1 (Neo4j-backed NeuralGraph)
 ```
 
 ### What Wave 1 Built (Neo4j Version)
 
-Wave 1 created `packages/graph/` containing `@engram/graph`. An implementing agent must treat the following as ground truth about what exists in that package.
+Wave 1 created `packages/graph/` containing `@engram-mem/graph`. An implementing agent must treat the following as ground truth about what exists in that package.
 
 **Infrastructure**: Neo4j Community Edition runs in Docker, Bolt port 7687. The package wraps `neo4j-driver` (not an in-process graph — all graph state lives in Neo4j, not in JavaScript memory).
 
@@ -147,9 +147,9 @@ ORDER BY activation DESC
 LIMIT $budget
 ```
 
-This is NOT manual BFS in JavaScript. The Cypher engine handles traversal. The `SpreadingActivation` class in `@engram/graph` wraps this query with the correct parameter mapping.
+This is NOT manual BFS in JavaScript. The Cypher engine handles traversal. The `SpreadingActivation` class in `@engram-mem/graph` wraps this query with the correct parameter mapping.
 
-**Context extraction functions** (pure TypeScript, no I/O, re-exported from `@engram/graph`):
+**Context extraction functions** (pure TypeScript, no I/O, re-exported from `@engram-mem/graph`):
 
 ```typescript
 // From packages/graph/src/context-extractors.ts
@@ -212,14 +212,14 @@ In the `Memory` class body, add after the existing `_associations` declaration (
 private _graph: NeuralGraph | null = null
 ```
 
-`NeuralGraph` is imported as a type only to keep `@engram/graph` an optional peer dependency:
+`NeuralGraph` is imported as a type only to keep `@engram-mem/graph` an optional peer dependency:
 
 ```typescript
 // At top of file, after existing imports (line 16):
-import type { NeuralGraph } from '@engram/graph'
+import type { NeuralGraph } from '@engram-mem/graph'
 ```
 
-The concrete instance is created via dynamic import inside `initialize()` so the import never fails when `@engram/graph` is absent.
+The concrete instance is created via dynamic import inside `initialize()` so the import never fails when `@engram-mem/graph` is absent.
 
 ### 1.2 Updated `MemoryOptions` Interface
 
@@ -374,7 +374,7 @@ The `graph` field is optional with no default — TypeScript treats it as `Neura
 Add at the top of `engine.ts`, alongside existing imports:
 
 ```typescript
-import type { NeuralGraph } from '@engram/graph'
+import type { NeuralGraph } from '@engram-mem/graph'
 import { stageActivate } from './spreading-activation.js'
 import { assembleContext } from './context-assembly.js'
 ```
@@ -591,7 +591,7 @@ Define `CompositeMemory` at the top of this file. It is also exported from the f
 ```typescript
 // packages/core/src/retrieval/spreading-activation.ts
 
-import type { NeuralGraph } from '@engram/graph'
+import type { NeuralGraph } from '@engram-mem/graph'
 import type { RetrievedMemory } from '../types.js'
 import type { RecallStrategy } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
@@ -824,7 +824,7 @@ async function getEntitySeeds(
 }
 ```
 
-The Cypher inside `lookupEntityNodes` (implemented in Wave 1's `@engram/graph` package):
+The Cypher inside `lookupEntityNodes` (implemented in Wave 1's `@engram-mem/graph` package):
 
 ```cypher
 UNWIND $entityNames AS name
@@ -993,7 +993,7 @@ export async function stageActivate(
 }
 ```
 
-**Important note on Episode type**: The `Episode` type is imported from `@engram/core`. The `storage.episodes.getByIds(ids: string[])` method exists on `EpisodeStorage` — it returns `Episode[]`. This is the batched path. Do NOT call `storage.getById(id, 'episode')` in a loop.
+**Important note on Episode type**: The `Episode` type is imported from `@engram-mem/core`. The `storage.episodes.getByIds(ids: string[])` method exists on `EpisodeStorage` — it returns `Episode[]`. This is the batched path. Do NOT call `storage.getById(id, 'episode')` in a loop.
 
 ---
 
@@ -1242,9 +1242,9 @@ export function stageReconsolidate(
 
 Every change in Wave 2 is designed so that existing code paths survive without modification. This section documents each compatibility decision.
 
-### 6.1 `@engram/graph` Is Optional
+### 6.1 `@engram-mem/graph` Is Optional
 
-`memory.ts` imports `NeuralGraph` as a type (`import type { NeuralGraph } from '@engram/graph'`). The actual package is never `require()`d at runtime unless `opts.graph` is provided by the caller. Callers that do not install `@engram/graph` see no error. Callers that do not pass `graph` in `MemoryOptions` get `_graph = null` and the system runs in SQL-only mode identically to pre-Wave-2 behavior.
+`memory.ts` imports `NeuralGraph` as a type (`import type { NeuralGraph } from '@engram-mem/graph'`). The actual package is never `require()`d at runtime unless `opts.graph` is provided by the caller. Callers that do not install `@engram-mem/graph` see no error. Callers that do not pass `graph` in `MemoryOptions` get `_graph = null` and the system runs in SQL-only mode identically to pre-Wave-2 behavior.
 
 ### 6.2 `RecallOpts.graph` Is Optional
 
@@ -1398,7 +1398,7 @@ The implementing agent must modify or create exactly these files. No other files
 ### Modified Files
 
 **`/packages/core/src/memory.ts`**
-- Add `import type { NeuralGraph } from '@engram/graph'` at line 17
+- Add `import type { NeuralGraph } from '@engram-mem/graph'` at line 17
 - Add `graph?: NeuralGraph` to `MemoryOptions`
 - Add `private _graph: NeuralGraph | null = null` instance variable
 - Update constructor to store `opts.graph ?? null`
@@ -1408,7 +1408,7 @@ The implementing agent must modify or create exactly these files. No other files
 - Update `forget()` to pass `graph: this._graph` to `engineRecall`
 
 **`/packages/core/src/retrieval/engine.ts`**
-- Add `import type { NeuralGraph } from '@engram/graph'`
+- Add `import type { NeuralGraph } from '@engram-mem/graph'`
 - Add `import { stageActivate } from './spreading-activation.js'`
 - Add `import { assembleContext } from './context-assembly.js'`
 - Add `graph?: NeuralGraph | null` to `RecallOpts`
@@ -1416,7 +1416,7 @@ The implementing agent must modify or create exactly these files. No other files
 - Update `formatMemories()` to accept and render `CompositeMemory | null`
 
 **`/packages/core/src/retrieval/reconsolidation.ts`**
-- Add `import type { NeuralGraph } from '@engram/graph'`
+- Add `import type { NeuralGraph } from '@engram-mem/graph'`
 - Add `graph: NeuralGraph | null = null` parameter to `stageReconsolidate`
 - Add Neo4j edge strengthening block per Section 5
 

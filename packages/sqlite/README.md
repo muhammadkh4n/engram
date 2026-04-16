@@ -1,19 +1,19 @@
-# @engram/sqlite
+# @engram-mem/sqlite
 
 Zero-config SQLite storage adapter for Engram. No API keys, no setup. Local file database with BM25 full-text search.
 
 ## Installation
 
 ```bash
-npm install @engram/sqlite
-npm install @engram/core  # Also required
+npm install @engram-mem/sqlite
+npm install @engram-mem/core  # Also required
 ```
 
 ## Quick Start
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
 // Automatic — creates `./engram.db` if it doesn't exist
 const memory = createMemory({
@@ -75,7 +75,7 @@ FTS5 INDEXES:
 - **BM25** (keyword search) — Instant, great for exact terms and phrases
 - **Vector search** (semantic) — Better for paraphrased queries, requires embeddings
 
-Start with BM25 (level 0). Add embeddings with @engram/openai when needed (level 1+).
+Start with BM25 (level 0). Add embeddings with @engram-mem/openai when needed (level 1+).
 
 ### WAL Mode
 
@@ -125,9 +125,9 @@ const result = await sess.recall('preferences')
 To add semantic search (vector embeddings):
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
-import { openaiIntelligence } from '@engram/openai'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+import { openaiIntelligence } from '@engram-mem/openai'
 
 const memory = createMemory({
   storage: sqliteAdapter(),
@@ -197,7 +197,7 @@ sqlite> SELECT content FROM semantic LIMIT 5;
 
 **Q: Can I use SQLite on a network filesystem?**
 
-A: Not recommended. WAL mode doesn't work well over NFS. For network scenarios, use @engram/supabase instead.
+A: Not recommended. WAL mode doesn't work well over NFS. For network scenarios, use @engram-mem/supabase instead.
 
 **Q: How do I migrate data?**
 
@@ -212,7 +212,7 @@ A: FTS5 supports Latin-based languages and tokenization. For CJK (Chinese, Japan
 
 ## API Reference
 
-All methods are internal to the StorageAdapter. Use the Memory class API instead. See @engram/core README.
+All methods are internal to the StorageAdapter. Use the Memory class API instead. See @engram-mem/core README.
 
 The only public function is:
 

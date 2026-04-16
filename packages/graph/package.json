@@ -1,7 +1,9 @@
 {
   "name": "@engram-mem/graph",
   "version": "0.3.0",
-  "description": "Neo4j-backed neural graph for Engram — spreading activation, engram cells, context nodes",
+  "description": "Neo4j neural graph adapter for Engram — spreading activation, community detection, engram cells",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "neo4j", "spreading-activation", "graph"],
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

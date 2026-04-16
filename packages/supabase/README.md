@@ -1,13 +1,13 @@
-# @engram/supabase
+# @engram-mem/supabase
 
 Cloud storage adapter for Engram using Supabase PostgreSQL and pgvector. Enables distributed agents with shared memory.
 
 ## Installation
 
 ```bash
-npm install @engram/supabase
-npm install @engram/core
-npm install @engram/openai  # Optional but recommended
+npm install @engram-mem/supabase
+npm install @engram-mem/core
+npm install @engram-mem/openai  # Optional but recommended
 ```
 
 ## Setup
@@ -43,8 +43,8 @@ psql $DATABASE_URL < packages/supabase/migrations/002_vector_indexes.sql
 ### 4. Configure in Your App
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { supabaseAdapter } from '@engram/supabase'
+import { createMemory } from '@engram-mem/core'
+import { supabaseAdapter } from '@engram-mem/supabase'
 
 const memory = createMemory({
   storage: supabaseAdapter({
@@ -182,9 +182,9 @@ Sessions still partition by sessionId, but facts (semantic/procedural) are share
 ## Level 2 Setup
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { supabaseAdapter } from '@engram/supabase'
-import { openaiIntelligence } from '@engram/openai'
+import { createMemory } from '@engram-mem/core'
+import { supabaseAdapter } from '@engram-mem/supabase'
+import { openaiIntelligence } from '@engram-mem/openai'
 
 const memory = createMemory({
   storage: supabaseAdapter({
@@ -284,7 +284,7 @@ A: Supabase runs on AWS with 99.99% uptime SLA. Check status at https://status.s
 
 ## API Reference
 
-All methods are internal to the StorageAdapter. Use the Memory class API instead. See @engram/core README.
+All methods are internal to the StorageAdapter. Use the Memory class API instead. See @engram-mem/core README.
 
 The only public function is:
 

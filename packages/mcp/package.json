@@ -1,8 +1,10 @@
 {
   "name": "@engram-mem/mcp",
   "version": "0.3.0",
+  "description": "MCP server for Engram memory — recall, ingest, forget, timeline, overview tools for Claude Code and any MCP client",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "mcp", "claude", "tools"],
+  "license": "Apache-2.0",
   "type": "module",
-  "description": "MCP server exposing Engram memory tools for Claude Code and other MCP clients",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {

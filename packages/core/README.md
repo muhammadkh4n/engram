@@ -1,20 +1,20 @@
-# @engram/core
+# @engram-mem/core
 
 The brain of Engram. Core memory engine with 5 cognitive systems, intent-driven retrieval, and consolidation cycles.
 
 ## Installation
 
 ```bash
-npm install @engram/core
+npm install @engram-mem/core
 ```
 
-Requires a storage adapter. See @engram/sqlite (local) or @engram/supabase (cloud).
+Requires a storage adapter. See @engram-mem/sqlite (local) or @engram-mem/supabase (cloud).
 
 ## Quick Example
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
 const memory = createMemory({ storage: sqliteAdapter() })
 await memory.initialize()

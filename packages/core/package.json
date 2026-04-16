@@ -1,6 +1,9 @@
 {
   "name": "@engram-mem/core",
   "version": "0.3.0",
+  "description": "Cognitive memory engine for AI agents — episodic, semantic, procedural memory with consolidation",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "consolidation", "episodic", "semantic"],
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

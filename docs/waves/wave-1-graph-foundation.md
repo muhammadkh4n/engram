@@ -31,7 +31,7 @@ Each association has: `sourceId`, `sourceType` (MemoryType), `targetId`, `target
 
 ```
 packages/
-  core/       @engram/core     -- The brain. Memory class, 5 memory systems, 4 consolidation
+  core/       @engram-mem/core     -- The brain. Memory class, 5 memory systems, 4 consolidation
                                   cycles, 11-type intent classification, hybrid retrieval.
                                   Key files:
                                     src/types.ts              -- all type definitions
@@ -46,10 +46,10 @@ packages/
                                     src/retrieval/association-walk.ts -- stageAssociate() (SQL CTE walk)
                                     src/systems/association-manager.ts -- AssociationManager
                                     src/consolidation/dream-cycle.ts -- Dream Cycle (association discovery)
-  sqlite/     @engram/sqlite   -- SQLite storage adapter (vector cosine sim + BM25 FTS5)
-  supabase/   @engram/supabase -- Supabase/Postgres storage adapter (pgvector)
-  openai/     @engram/openai   -- OpenAI intelligence adapter (embeddings, summarization)
-  mcp/        @engram/mcp      -- MCP server (memory_recall, memory_ingest, memory_forget)
+  sqlite/     @engram-mem/sqlite   -- SQLite storage adapter (vector cosine sim + BM25 FTS5)
+  supabase/   @engram-mem/supabase -- Supabase/Postgres storage adapter (pgvector)
+  openai/     @engram-mem/openai   -- OpenAI intelligence adapter (embeddings, summarization)
+  mcp/        @engram-mem/mcp      -- MCP server (memory_recall, memory_ingest, memory_forget)
 ```
 
 ### Build Configuration
@@ -96,7 +96,7 @@ The previous plan used `graphology` (in-process JS graph library). Architecture 
 
 ### The Architecture Vision (All Waves)
 
-- **Wave 1** (this document): Create `@engram/graph` package. Stand up Neo4j infrastructure. Build `NeuralGraph` class as a thin typed wrapper over `neo4j-driver`. Implement Cypher-based spreading activation. Build context extraction functions (person, emotion, intent). Purely additive -- does not touch retrieval pipeline.
+- **Wave 1** (this document): Create `@engram-mem/graph` package. Stand up Neo4j infrastructure. Build `NeuralGraph` class as a thin typed wrapper over `neo4j-driver`. Implement Cypher-based spreading activation. Build context extraction functions (person, emotion, intent). Purely additive -- does not touch retrieval pipeline.
 - **Wave 2**: Wire the graph into the retrieval pipeline. On ingest, `Memory.ingest()` calls `NeuralGraph.decomposeEpisode()` to populate the graph. On recall, vector search produces seed node IDs, spreading activation replaces the SQL CTE walk, and graph-activated results are scored alongside vector results.
 - **Wave 3**: Consolidation integration. Light Sleep creates digest nodes and derivation edges. Dream Cycle uses Neo4j GDS community detection (Louvain/Leiden) instead of SQL entity co-occurrence. Decay Pass prunes low-activation graph nodes. Deep Sleep promotes semantic knowledge with graph edges.
 - **Wave 4**: Advanced graph features. Pattern completion as a first-class retrieval mode. Betweenness centrality for bridge memory identification. Graph-aware deduplication. Performance benchmarks at 10K, 50K, 100K nodes.
@@ -105,12 +105,12 @@ The previous plan used `graphology` (in-process JS graph library). Architecture 
 
 ## Wave 1 Scope
 
-Wave 1 is **purely additive**. It creates a new package (`@engram/graph`) and a Docker Compose file for Neo4j. It does NOT modify any existing file in `@engram/core`, `@engram/sqlite`, `@engram/supabase`, or `@engram/mcp`. No existing tests break. No existing behavior changes.
+Wave 1 is **purely additive**. It creates a new package (`@engram-mem/graph`) and a Docker Compose file for Neo4j. It does NOT modify any existing file in `@engram-mem/core`, `@engram-mem/sqlite`, `@engram-mem/supabase`, or `@engram-mem/mcp`. No existing tests break. No existing behavior changes.
 
 What Wave 1 delivers:
 
 1. `docker/docker-compose.neo4j.yml` -- Neo4j Community Edition container with GDS plugin
-2. `@engram/graph` package with `neo4j-driver` as its sole runtime dependency
+2. `@engram-mem/graph` package with `neo4j-driver` as its sole runtime dependency
 3. Neo4j schema (Cypher constraints and indexes) applied automatically on initialization
 4. `NeuralGraph` class -- typed wrapper over `neo4j-driver` with `MERGE`-based node/edge operations
 5. `SpreadingActivation` class -- Cypher variable-length path traversal with configurable decay
@@ -196,7 +196,7 @@ packages/graph/
 
 ```json
 {
-  "name": "@engram/graph",
+  "name": "@engram-mem/graph",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -213,7 +213,7 @@ packages/graph/
     "neo4j-driver": "^5.27.0"
   },
   "peerDependencies": {
-    "@engram/core": "workspace:*"
+    "@engram-mem/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
@@ -222,7 +222,7 @@ packages/graph/
 }
 ```
 
-**Design decision**: `@engram/core` is a `peerDependency`, not a direct dependency. This avoids duplicate type definitions when the consuming application already has `@engram/core` installed. The graph package imports ONLY types from core (`MemoryType`, `IntentType`, `EdgeType`), never runtime functions, so the peer dependency is sufficient.
+**Design decision**: `@engram-mem/core` is a `peerDependency`, not a direct dependency. This avoids duplicate type definitions when the consuming application already has `@engram-mem/core` installed. The graph package imports ONLY types from core (`MemoryType`, `IntentType`, `EdgeType`), never runtime functions, so the peer dependency is sufficient.
 
 **AUDIT FIX**: The previous plan listed `graphology`, `graphology-traversal`, and `graphology-operators` as dependencies. These are completely removed. `neo4j-driver` is the sole runtime dependency.
 
@@ -284,7 +284,7 @@ All node types share a `BaseNodeProperties` interface. Each specialized node typ
 ### File: `src/types.ts`
 
 ```ts
-import type { MemoryType, IntentType, EdgeType as CoreEdgeType } from '@engram/core'
+import type { MemoryType, IntentType, EdgeType as CoreEdgeType } from '@engram-mem/core'
 
 // ============================================================================
 // Neo4j Node Labels
@@ -1887,14 +1887,14 @@ export class SpreadingActivation {
 
 Functions that extract structured context from episode text content. Used by `decomposeEpisode()` (via the Wave 2 ingestion pipeline) to determine which context nodes to create.
 
-**AUDIT FIX**: `extractPersons()` imports and extends `@engram/core`'s `extractEntities()` function. It does NOT duplicate the regex patterns. It calls core's extractor and then filters for person-like entities.
+**AUDIT FIX**: `extractPersons()` imports and extends `@engram-mem/core`'s `extractEntities()` function. It does NOT duplicate the regex patterns. It calls core's extractor and then filters for person-like entities.
 
 **AUDIT FIX**: `classifyEmotion()` requires 2+ pattern matches for non-neutral classification to reduce false positives.
 
 ### File: `src/context-extractors.ts`
 
 ```ts
-import type { IntentType } from '@engram/core'
+import type { IntentType } from '@engram-mem/core'
 import type { EmotionLabel } from './types.js'
 
 // ============================================================================
@@ -1902,7 +1902,7 @@ import type { EmotionLabel } from './types.js'
 // ============================================================================
 
 /**
- * Person name patterns. These supplement @engram/core's extractEntities()
+ * Person name patterns. These supplement @engram-mem/core's extractEntities()
  * which extracts a flat array of [people, technologies, projects].
  *
  * AUDIT FIX: We import core's extractEntities for technology/project extraction
@@ -2067,9 +2067,9 @@ export function classifyEmotion(text: string): EmotionClassification {
 /**
  * Classify the content intent of text.
  *
- * AUDIT FIX: Reuses the exact same INTENT_PATTERNS from @engram/core
+ * AUDIT FIX: Reuses the exact same INTENT_PATTERNS from @engram-mem/core
  * (packages/core/src/intent/intents.ts). Does NOT duplicate patterns.
- * The implementor should import INTENT_PATTERNS from @engram/core and
+ * The implementor should import INTENT_PATTERNS from @engram-mem/core and
  * use this function only as a lightweight wrapper for graph decomposition.
  *
  * This function is provided as a convenience so graph decomposition
@@ -2826,7 +2826,7 @@ describe('Performance benchmarks (integration)', () => {
 ```ts
 import { describe, it, expect } from 'vitest'
 import { extractPersons, classifyEmotion, classifyContentIntent } from '../src/context-extractors.js'
-import { INTENT_PATTERNS } from '@engram/core'
+import { INTENT_PATTERNS } from '@engram-mem/core'
 
 describe('extractPersons', () => {
   it('extracts names from "tell X" pattern', () => {
@@ -3062,7 +3062,7 @@ This section explicitly enumerates every audit finding from the previous graphol
 
 | # | Finding | Resolution |
 |---|---------|-----------|
-| 1 | Context extraction duplicates core's entity extractor | `extractPersons()` is graph-specific. Entity/tech/project extraction delegates to `@engram/core`'s `extractEntities()` via peer dependency. `classifyContentIntent()` takes INTENT_PATTERNS as a parameter, not duplicating patterns. |
+| 1 | Context extraction duplicates core's entity extractor | `extractPersons()` is graph-specific. Entity/tech/project extraction delegates to `@engram-mem/core`'s `extractEntities()` via peer dependency. `classifyContentIntent()` takes INTENT_PATTERNS as a parameter, not duplicating patterns. |
 | 2 | Emotion classification false positives (single pattern match) | `classifyEmotion()` requires 2+ pattern matches for non-neutral. See AUDIT FIX callout in context-extractors.ts. |
 | 3 | No performance tests at scale | Dedicated performance.test.ts with 10K and 50K node benchmarks. |
 | 4 | Entity node IDs not deterministic | All context node IDs use `normalizeForId()` for deterministic generation. Same entity string always produces same node ID. |
@@ -3081,7 +3081,7 @@ This section explicitly enumerates every audit finding from the previous graphol
 
 ### Wave 2: Retrieval Rewiring
 
-Wave 2 wires `@engram/graph` into the existing ingestion and retrieval pipelines in `@engram/core`. Specifically:
+Wave 2 wires `@engram-mem/graph` into the existing ingestion and retrieval pipelines in `@engram-mem/core`. Specifically:
 
 1. **Ingestion hook**: `Memory.ingest()` in `packages/core/src/memory.ts` gains an optional `NeuralGraph` dependency. After inserting the episode into SQL, it calls `graph.decomposeEpisode()` to populate the Neo4j graph. The graph is non-blocking: if Neo4j is unreachable, ingestion still succeeds (fire-and-forget pattern with circuit breaker).
 

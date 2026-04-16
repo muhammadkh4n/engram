@@ -29,7 +29,7 @@ Monorepo with scoped packages:
 ```
 engram/
 ├── packages/
-│   ├── core/                    # @engram/core — the brain
+│   ├── core/                    # @engram-mem/core — the brain
 │   │   ├── src/
 │   │   │   ├── memory.ts        # createMemory() factory
 │   │   │   ├── systems/         # 5 memory systems
@@ -64,26 +64,26 @@ engram/
 │   │   ├── test/
 │   │   └── package.json
 │   │
-│   ├── sqlite/                  # @engram/sqlite — zero-config storage
+│   ├── sqlite/                  # @engram-mem/sqlite — zero-config storage
 │   │   ├── src/
 │   │   │   ├── adapter.ts       # StorageAdapter implementation
 │   │   │   ├── migrations.ts    # SQLite schema + FTS5
 │   │   │   └── search.ts        # BM25 via FTS5
 │   │   └── package.json
 │   │
-│   ├── supabase/                # @engram/supabase — cloud storage
+│   ├── supabase/                # @engram-mem/supabase — cloud storage
 │   │   ├── src/
 │   │   │   ├── adapter.ts       # StorageAdapter implementation
 │   │   │   └── migrations/      # pgvector schema + RPC functions
 │   │   └── package.json
 │   │
-│   ├── openai/                  # @engram/openai — embeddings + LLM
+│   ├── openai/                  # @engram-mem/openai — embeddings + LLM
 │   │   ├── src/
 │   │   │   ├── embeddings.ts    # OpenAI embedding adapter
 │   │   │   └── summarizer.ts    # GPT-based summarization + intent
 │   │   └── package.json
 │   │
-│   └── openclaw/                # @engram/openclaw — plugin adapter
+│   └── openclaw/                # @engram-mem/openclaw — plugin adapter
 │       ├── src/
 │       │   ├── plugin-entry.ts  # OpenClaw context engine wrapper
 │       │   └── tools.ts         # memory_search, memory_expand, etc.
@@ -91,10 +91,10 @@ engram/
 │
 ├── docs/
 ├── examples/
-│   ├── zero-config/             # npm install @engram/core @engram/sqlite
-│   ├── with-openai/             # + @engram/openai
-│   ├── with-supabase/           # + @engram/supabase
-│   └── openclaw-plugin/         # + @engram/openclaw
+│   ├── zero-config/             # npm install @engram-mem/core @engram-mem/sqlite
+│   ├── with-openai/             # + @engram-mem/openai
+│   ├── with-supabase/           # + @engram-mem/supabase
+│   └── openclaw-plugin/         # + @engram-mem/openclaw
 └── package.json                 # monorepo root (turborepo)
 ```
 
@@ -105,8 +105,8 @@ engram/
 ### 3.1 Factory
 
 ```typescript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
 // Zero-config (SQLite + BM25, no API keys)
 const memory = createMemory()
@@ -198,13 +198,13 @@ interface RetrievedMemory {
 const memory = createMemory()
 
 // Level 1: Add embeddings (semantic vector search)
-import { openaiIntelligence } from '@engram/openai'
+import { openaiIntelligence } from '@engram-mem/openai'
 const memory = createMemory({
   intelligence: openaiIntelligence({ apiKey: process.env.OPENAI_API_KEY }),
 })
 
 // Level 2: Add cloud storage (distributed agents, shared memory)
-import { supabaseAdapter } from '@engram/supabase'
+import { supabaseAdapter } from '@engram-mem/supabase'
 const memory = createMemory({
   storage: supabaseAdapter({ url: '...', key: '...' }),
   intelligence: openaiIntelligence({ apiKey: '...' }),
@@ -1453,7 +1453,7 @@ All memory tables reference a `memories` table as the sole ID authority. This so
 
 IDs use UUID v7 (time-ordered) for monotonic B-tree insert performance, replacing UUID v4 which causes 50% page splits.
 
-### 8.2 SQLite Adapter (@engram/sqlite)
+### 8.2 SQLite Adapter (@engram-mem/sqlite)
 
 Zero-config storage using better-sqlite3 with FTS5 full-text search.
 
@@ -1486,7 +1486,7 @@ PRAGMA wal_autocheckpoint = 1000; -- prevent unbounded WAL growth
 
 **Level 0 quality note**: BM25 keyword search without embeddings will produce lower recall quality than vector search for paraphrase queries. Level 0 is suitable for demos and low-stakes use. Level 1+ (with embeddings) is recommended for production.
 
-### 8.3 Supabase Adapter (@engram/supabase)
+### 8.3 Supabase Adapter (@engram-mem/supabase)
 
 Cloud storage using PostgreSQL 15+ with pgvector and HNSW indexes.
 
@@ -1562,10 +1562,10 @@ interface KnowledgeCandidate {
 | Intent classification | Pattern matching (Section 5.1 heuristic patterns) |
 | Embeddings | Not available in Level 0; search uses BM25 only |
 
-### 9.1 OpenAI Adapter (@engram/openai)
+### 9.1 OpenAI Adapter (@engram-mem/openai)
 
 ```typescript
-import { openaiIntelligence } from '@engram/openai'
+import { openaiIntelligence } from '@engram-mem/openai'
 
 const intelligence = openaiIntelligence({
   apiKey: process.env.OPENAI_API_KEY,
@@ -1580,13 +1580,13 @@ Wraps OpenAI's embedding and chat completion APIs with circuit breaker + timeout
 
 ---
 
-## 10. OpenClaw Adapter (@engram/openclaw)
+## 10. OpenClaw Adapter (@engram-mem/openclaw)
 
 Thin wrapper that maps OpenClaw's ContextEngine lifecycle to Engram's API.
 
 ```typescript
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
-import { createMemory } from '@engram/core'
+import { createMemory } from '@engram-mem/core'
 
 export default definePluginEntry({
   id: 'engram',
@@ -1812,7 +1812,7 @@ The existing openclaw-memory codebase contains substantial working code that map
 
 **Reason**: An engram is the neuroscience term for the physical trace a memory leaves in a substrate — the hypothetical means by which memories are stored. It is the exact concept this library implements: persistent, strengthening, decaying traces of experience in a computational substrate.
 
-**Package names**: `@engram/core`, `@engram/sqlite`, `@engram/supabase`, `@engram/openai`, `@engram/openclaw`
+**Package names**: `@engram-mem/core`, `@engram-mem/sqlite`, `@engram-mem/supabase`, `@engram-mem/openai`, `@engram-mem/openclaw`
 
 ---
 

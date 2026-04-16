@@ -1,11 +1,35 @@
 # Engram: Brain-Inspired Cognitive Memory for AI Agents
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![npm](https://img.shields.io/badge/npm-@engram-blue.svg)](https://www.npmjs.com/search?q=%40engram)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178c6.svg)](https://www.typescriptlang.org/)
+[![npm](https://img.shields.io/badge/npm-@engram--mem-blue.svg)](https://www.npmjs.com/search?q=%40engram-mem)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.0+-3178c6.svg)](https://www.typescriptlang.org/)
 [![Tests](https://img.shields.io/badge/tests-Vitest-6e9f18.svg)](https://vitest.dev/)
 
 Brain-inspired cognitive memory engine for AI agents. While other context engines compress and retrieve, Engram consolidates, associates, primes, and strengthens — like biological memory.
+
+## What's New in v0.3.0
+
+**Retrieval overhaul — 3.4x recall improvement.**
+
+| Change | Impact |
+|--------|--------|
+| Cross-encoder reranking | LLM pointwise scoring for precise semantic ordering |
+| Wide vector scan pool | Scan 500 candidates instead of 90, no recency bias |
+| BM25 as independent candidates | Keyword matches enter the pipeline even with weak embeddings |
+| Contextual embedding | Preceding turns prepended at ingest for richer vectors |
+
+**LoCoMo Benchmark (conversational QA, 199 questions):**
+
+| Category | R@K |
+|----------|-----|
+| Single-hop | 34.4% |
+| Multi-hop | 70.3% |
+| Temporal | 46.2% |
+| Commonsense | 71.4% |
+| Adversarial | 85.1% |
+| **Overall** | **66.8%** |
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history.
 
 ## Why Engram
 
@@ -56,8 +80,8 @@ RECALL → [BM25/Vector Search, Association Walk, Priming, Reconsolidation]
 Zero-config, no API keys required:
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
 const memory = createMemory({ storage: sqliteAdapter() })
 await memory.initialize()
@@ -78,12 +102,14 @@ That's it. SQLite + BM25, no setup. Upgrade to embeddings and cloud storage late
 
 | Package | Purpose | Key Features |
 |---------|---------|--------------|
-| `@engram/core` | Memory engine | 5 memory systems, 4-stage recall, consolidation cycles, intent analysis, salience detection |
-| `@engram/sqlite` | Local storage | Zero-config SQLite + BM25 full-text search, zero dependencies |
-| `@engram/openai` | Intelligence | OpenAI embeddings, vector search, LLM-based summarization |
-| `@engram/supabase` | Cloud storage | PostgreSQL + pgvector, distributed agents, scalable |
-| `@engram/openclaw` | Framework integration | OpenClaw ContextEngine plugin, 4 memory tools, auto-consolidation |
-| `@engram/mcp` | Claude integration | MCP server for Claude Code, memory tools for AI assistants |
+| `@engram-mem/core` | Memory engine | 5 memory systems, 4-stage recall, consolidation cycles, intent analysis, salience detection |
+| `@engram-mem/sqlite` | Local storage | Zero-config SQLite + BM25 full-text search, zero dependencies |
+| `@engram-mem/openai` | Intelligence | OpenAI embeddings, vector search, LLM-based summarization |
+| `@engram-mem/supabase` | Cloud storage | PostgreSQL + pgvector, distributed agents, scalable |
+| `@engram-mem/graph` | Neural graph | Neo4j spreading activation, community detection, pattern completion |
+| `@engram-mem/openclaw` | Framework integration | OpenClaw ContextEngine plugin, 4 memory tools, auto-consolidation |
+| `@engram-mem/mcp` | Claude integration | MCP server for Claude Code, memory tools for AI assistants |
+| `@engram-mem/bench` | Benchmarks | LoCoMo + LongMemEval evaluation, comparison mode, CLI runner |
 
 ## Core Concepts
 
@@ -120,13 +146,13 @@ Pick a level. Start at 0. Upgrade anytime.
 // Level 0 (included, shown above)
 
 // Level 1: Add embeddings
-import { openaiIntelligence } from '@engram/openai'
+import { openaiIntelligence } from '@engram-mem/openai'
 const memory = createMemory({
   intelligence: openaiIntelligence({ apiKey: process.env.OPENAI_API_KEY })
 })
 
 // Level 2: Add cloud storage
-import { supabaseAdapter } from '@engram/supabase'
+import { supabaseAdapter } from '@engram-mem/supabase'
 const memory = createMemory({
   storage: supabaseAdapter({ url: '...', key: '...' }),
   intelligence: openaiIntelligence({ apiKey: '...' })
@@ -238,7 +264,7 @@ Engram ships with multiple storage adapters. Choose based on your needs:
 
 ### SQLite (Local, Zero-Config)
 ```javascript
-import { sqliteAdapter } from '@engram/sqlite'
+import { sqliteAdapter } from '@engram-mem/sqlite'
 
 const memory = createMemory({
   storage: sqliteAdapter({ path: './engram.db' })
@@ -249,7 +275,7 @@ Best for: Development, single-agent, no infrastructure.
 
 ### Supabase (Cloud, Distributed)
 ```javascript
-import { supabaseAdapter } from '@engram/supabase'
+import { supabaseAdapter } from '@engram-mem/supabase'
 
 const memory = createMemory({
   storage: supabaseAdapter({
@@ -275,7 +301,7 @@ Or manually:
 ```bash
 cd ~/.openclaw
 mkdir -p engram/dist
-npm init -y && npm install @engram/core @engram/sqlite @engram/openai
+npm init -y && npm install @engram-mem/core @engram-mem/sqlite @engram-mem/openai
 # Copy compiled plugin to engram/dist/openclaw-plugin.js
 # Update openclaw.json to load plugin and set context engine
 ```
@@ -295,9 +321,9 @@ npm init -y && npm install @engram/core @engram/sqlite @engram/openai
 Engram is framework-agnostic. Use without OpenClaw:
 
 ```javascript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
-import { openaiIntelligence } from '@engram/openai'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+import { openaiIntelligence } from '@engram-mem/openai'
 
 const memory = createMemory({
   storage: sqliteAdapter({ path: './my-memory.db' }),

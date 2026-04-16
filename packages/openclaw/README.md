@@ -1,4 +1,4 @@
-# @engram/openclaw
+# @engram-mem/openclaw
 
 Engram plug-and-play plugin for OpenClaw. Adds cognitive memory with 5 memory systems, intent-driven recall, and consolidation cycles.
 
@@ -48,7 +48,7 @@ cp dist/openclaw-plugin.js ~/.openclaw/engram/dist/
 # 4. Install dependencies
 cd ~/.openclaw/engram
 npm init -y
-npm install @engram/core @engram/sqlite @engram/openai
+npm install @engram-mem/core @engram-mem/sqlite @engram-mem/openai
 
 # 5. Update openclaw.json manually
 # Add to plugins.load.paths:
@@ -348,14 +348,14 @@ Useful for agents with specific storage requirements.
 To use Supabase instead of SQLite:
 
 1. Create a Supabase project
-2. Run migrations (see @engram/supabase README)
+2. Run migrations (see @engram-mem/supabase README)
 3. Modify plugin to use supabaseAdapter:
 
 Edit the plugin source (advanced):
 
 ```typescript
 // packages/openclaw/src/openclaw-plugin.ts
-import { supabaseAdapter } from '@engram/supabase'
+import { supabaseAdapter } from '@engram-mem/supabase'
 
 // In register():
 const storage = supabaseAdapter({

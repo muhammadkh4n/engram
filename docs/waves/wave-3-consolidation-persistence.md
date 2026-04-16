@@ -3,7 +3,7 @@
 **Document status:** Implementation plan — an agent should implement this without asking questions.
 **Date authored:** 2026-04-06
 **Repository:** `/Users/muhammadkh4n/Projects/github/muhammadkh4n/engram`
-**Target packages:** `@engram/core`, `@engram/graph`, `@engram/mcp`
+**Target packages:** `@engram-mem/core`, `@engram-mem/graph`, `@engram-mem/mcp`
 
 ---
 
@@ -16,11 +16,11 @@ Engram is a cognitive memory engine for AI agents. Its purpose is to give agents
 The monorepo at `/Users/muhammadkh4n/Projects/github/muhammadkh4n/engram` contains:
 
 - `packages/core` — the pure TypeScript engine: five memory systems, four consolidation cycles, an 11-type intent classifier, an association walk, and a vector-first retrieval pipeline. No I/O. All storage goes through adapter interfaces.
-- `packages/sqlite` — the `SqliteStorageAdapter` implementing `StorageAdapter` from `@engram/core`, backed by `better-sqlite3`. Current schema is at version 2 (V1 tables + V2 episode_parts table).
+- `packages/sqlite` — the `SqliteStorageAdapter` implementing `StorageAdapter` from `@engram-mem/core`, backed by `better-sqlite3`. Current schema is at version 2 (V1 tables + V2 episode_parts table).
 - `packages/supabase` — the `SupabaseStorageAdapter`, connecting to a Supabase project via `@supabase/supabase-js`. Same interface as sqlite.
 - `packages/openai` — the `OpenAIIntelligenceAdapter` implementing `IntelligenceAdapter`.
 - `packages/mcp` — the MCP server wrapper that makes Engram accessible to Claude and other MCP clients.
-- `packages/graph` — the `@engram/graph` package created in Wave 1, wrapping `neo4j-driver`. Contains `NeuralGraph` class and `SpreadingActivation`.
+- `packages/graph` — the `@engram-mem/graph` package created in Wave 1, wrapping `neo4j-driver`. Contains `NeuralGraph` class and `SpreadingActivation`.
 
 ### The Five Memory Systems
 
@@ -61,7 +61,7 @@ Wave 3 extends this metaphor into the Neo4j graph layer. The hippocampus replays
 
 ## What Waves 1 and 2 Built
 
-### Wave 1: `@engram/graph` Package (Neo4j Version)
+### Wave 1: `@engram-mem/graph` Package (Neo4j Version)
 
 Wave 1 created `packages/graph/` with the following architecture. An implementing agent must treat this as the ground truth about what already exists.
 

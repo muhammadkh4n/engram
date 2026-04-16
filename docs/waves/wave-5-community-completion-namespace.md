@@ -17,19 +17,19 @@ The monorepo packages:
 
 ```
 packages/
-  core/       @engram/core     — The engine. Memory class, 5 memory systems,
+  core/       @engram-mem/core     — The engine. Memory class, 5 memory systems,
                                   4 consolidation cycles, 11-type intent classifier,
                                   vector-first hybrid retrieval pipeline.
-  sqlite/     @engram/sqlite   — SqliteStorageAdapter. better-sqlite3. Schema V3
+  sqlite/     @engram-mem/sqlite   — SqliteStorageAdapter. better-sqlite3. Schema V3
                                   after Wave 4 adds valid_from/valid_until columns.
-  supabase/   @engram/supabase — SupabaseStorageAdapter. pgvector + supabase-js.
-  openai/     @engram/openai   — OpenAIIntelligenceAdapter. Embeddings, summarization,
+  supabase/   @engram-mem/supabase — SupabaseStorageAdapter. pgvector + supabase-js.
+  openai/     @engram-mem/openai   — OpenAIIntelligenceAdapter. Embeddings, summarization,
                                   query expansion, HyDE doc generation.
-  mcp/        @engram/mcp      — MCP server. Exposes memory_recall, memory_ingest,
+  mcp/        @engram-mem/mcp      — MCP server. Exposes memory_recall, memory_ingest,
                                   memory_forget, memory_timeline (Wave 4) via stdio.
-  graph/      @engram/graph    — NeuralGraph wrapping neo4j-driver + SpreadingActivation
+  graph/      @engram-mem/graph    — NeuralGraph wrapping neo4j-driver + SpreadingActivation
                                   via Cypher (built in Wave 1).
-  bench/      @engram/bench    — Benchmark harness (Wave 4). LoCoMo + LongMemEval
+  bench/      @engram-mem/bench    — Benchmark harness (Wave 4). LoCoMo + LongMemEval
                                   adapters, CLI runner, comparison mode.
 ```
 
@@ -98,13 +98,13 @@ There is NO V3 SQL graph table migration. Neo4j handles graph storage entirely.
 
 ### What Waves 1–4 Built
 
-**Wave 1**: `@engram/graph` package wrapping `neo4j-driver`. `NeuralGraph` class with all graph state persisted in Neo4j. 8 node labels: `Memory`, `Person`, `Topic`, `Entity`, `Emotion`, `Intent`, `Session`, `TimeContext`. 13 relationship types. `SpreadingActivation` using Cypher variable-length path traversal with decay parameters. Context extraction functions. Neo4j constraints and indexes applied on `connect()`.
+**Wave 1**: `@engram-mem/graph` package wrapping `neo4j-driver`. `NeuralGraph` class with all graph state persisted in Neo4j. 8 node labels: `Memory`, `Person`, `Topic`, `Entity`, `Emotion`, `Intent`, `Session`, `TimeContext`. 13 relationship types. `SpreadingActivation` using Cypher variable-length path traversal with decay parameters. Context extraction functions. Neo4j constraints and indexes applied on `connect()`.
 
 **Wave 2**: Graph-aware ingestion and retrieval. On `ingest()`, each episode is decomposed into Neo4j via `NeuralGraph.decomposeEpisode()` — single Cypher write transaction. Recall pipeline runs 4-way parallel search (vector + BM25 + temporal + entity), passes results to `NeuralGraph.spreadActivation()` as Cypher seeds, merges activated node IDs back to SQL content via `NeuralGraph.getMemoryNodeIds()`, returns `CompositeMemory`. `Memory._graph: NeuralGraph | null` — when null, system operates in SQL-only mode.
 
 **Wave 3**: All 4 consolidation cycles are graph-aware via Neo4j GDS. Light sleep creates digest Memory nodes in Neo4j with `DERIVES_FROM` relationships. Deep sleep creates semantic/procedural Memory nodes with temporal validity (`validFrom`/`validUntil` as Neo4j node properties) and `CONTRADICTS` relationships. Dream cycle uses GDS Louvain (`gds.louvain.write()`), betweenness centrality (`gds.betweenness.write()`), and hippocampal replay via Cypher spreading activation. Decay pass uses GDS PageRank (`gds.pageRank.write()`) to protect hub memories.
 
-**Wave 4**: `@engram/bench` package with LoCoMo and LongMemEval benchmark adapters, CLI runner with `--compare` mode. Temporal validity queries: `asOf?: Date` parameter on `recall()`, SQL `searchAtTime()` with half-open `[valid_from, valid_until)` boundaries, `memory_timeline` MCP tool. Schema V3 migration for temporal columns.
+**Wave 4**: `@engram-mem/bench` package with LoCoMo and LongMemEval benchmark adapters, CLI runner with `--compare` mode. Temporal validity queries: `asOf?: Date` parameter on `recall()`, SQL `searchAtTime()` with half-open `[valid_from, valid_until)` boundaries, `memory_timeline` MCP tool. Schema V3 migration for temporal columns.
 
 ### Node and Edge Type Inventory (Post Wave 3)
 
@@ -134,7 +134,7 @@ In `packages/core/src/retrieval/engine.ts`, the `recall()` function:
 2. Embeds the query via `intelligence.embed()`
 3. Calls `unifiedSearch()` which runs: vector cosine search + BM25 text boost → RRF fusion → top-N results
 4. HyDE fallback: if top score < 0.3, generates hypothetical document, embeds it, re-searches, merges
-5. Association walk (deep mode only): uses `NeuralGraph.spreadActivation()` from `@engram/graph` with vector/BM25 result IDs as Cypher seeds
+5. Association walk (deep mode only): uses `NeuralGraph.spreadActivation()` from `@engram-mem/graph` with vector/BM25 result IDs as Cypher seeds
 6. Topic priming: updates `SensoryBuffer` with frequent entities from recalled memories
 7. Reconsolidation: strengthens `CO_RECALLED` edges between returned memories via `NeuralGraph.strengthenTraversedEdges()`
 
@@ -1166,7 +1166,7 @@ async findMatchingContextNodes(input: {
 }
 ```
 
-### 2.3 New Function: `runPatternCompletion()` in `@engram/graph`
+### 2.3 New Function: `runPatternCompletion()` in `@engram-mem/graph`
 
 **File to create:** `packages/graph/src/pattern-completion.ts`
 
@@ -1341,12 +1341,12 @@ const isRecallExplicit = /\b(remember|recall|what did|did we|last time|previousl
 
 if (graph && isRecallExplicit && topScore < 0.2) {
   try {
-    const { runPatternCompletion } = await import('@engram/graph')
-    const { extractEmotionKeywords } = await import('@engram/graph')
+    const { runPatternCompletion } = await import('@engram-mem/graph')
+    const { extractEmotionKeywords } = await import('@engram-mem/graph')
 
     // Extract attributes from the query text
-    const queryEntities = extractEntities(query)         // existing @engram/core function
-    const queryEmotions = extractEmotionKeywords(query)  // new @engram/graph function
+    const queryEntities = extractEntities(query)         // existing @engram-mem/core function
+    const queryEmotions = extractEmotionKeywords(query)  // new @engram-mem/graph function
 
     // Separate person-like entities from tech entities
     const queryPersons = queryEntities.filter(e => /^[A-Z][a-z]/.test(e))
@@ -1789,7 +1789,7 @@ async findBridges(projectA: string, projectB: string): Promise<BridgeResult[]> {
 
 These are mechanical changes required to satisfy the above interface additions. They must all be made for the system to compile.
 
-### 4.1 `@engram/sqlite` Episode Row
+### 4.1 `@engram-mem/sqlite` Episode Row
 
 In `packages/sqlite/src/episodes.ts`, the `rowToEpisode()` helper gains:
 ```typescript
@@ -1798,13 +1798,13 @@ projectId: row.project_id ?? null,
 
 In the SELECT statements, add `project_id` to the column list.
 
-### 4.2 `@engram/sqlite` Digest, Semantic, Procedural Storage
+### 4.2 `@engram-mem/sqlite` Digest, Semantic, Procedural Storage
 
 Same pattern: add `project_id TEXT` to INSERT statements and `rowTo*()` helpers. The `projectId` value comes from the calling `lightSleep()` / `deepSleep()` which receive it from `Memory.consolidate()`.
 
 Specifically: `lightSleep()`, `deepSleep()`, `dreamCycle()`, and `decayPass()` all gain an optional `opts.projectId?: string` passed into storage insert calls.
 
-### 4.3 `@engram/supabase` Storage
+### 4.3 `@engram-mem/supabase` Storage
 
 Apply the same changes to all Supabase sub-stores: add `project_id` to INSERT and SELECT operations, with `OR project_id IS NULL` in query filters.
 
@@ -1848,7 +1848,7 @@ All tests live in `test/` subdirectories within each package. Test framework is 
 Tests that interact with the graph require a running Neo4j instance. Use the test Docker Compose at `docker/docker-compose.neo4j.yml`. Each test suite clears test data before running:
 
 ```typescript
-import { createNeuralGraph, type NeuralGraph } from '@engram/graph'
+import { createNeuralGraph, type NeuralGraph } from '@engram-mem/graph'
 
 let graph: NeuralGraph
 
@@ -2158,7 +2158,7 @@ describe('Project namespace isolation', () => {
 ```typescript
 import { describe, it, expect } from 'vitest'
 import { createMemory } from '../src/create-memory.js'
-import { SqliteStorageAdapter } from '@engram/sqlite'
+import { SqliteStorageAdapter } from '@engram-mem/sqlite'
 
 describe('Namespace integration', () => {
   it('memories ingested into project_a are not visible in project_b', async () => {
@@ -2266,7 +2266,7 @@ describe('Cross-project bridge queries', () => {
 
 ## Part 6: Exports and Public API Surface
 
-### 6.1 `@engram/graph` New Exports
+### 6.1 `@engram-mem/graph` New Exports
 
 In `packages/graph/src/index.ts`, add:
 
@@ -2278,7 +2278,7 @@ export { extractEmotionKeywords } from './emotion-extractor.js'
 
 The `:Community` node label and `MEMBER_OF` relationship type are handled entirely through Cypher — no new TypeScript type exports needed beyond what `NeuralGraph` already exposes.
 
-### 6.2 `@engram/core` New Exports
+### 6.2 `@engram-mem/core` New Exports
 
 In `packages/core/src/index.ts`, add:
 
@@ -2286,7 +2286,7 @@ In `packages/core/src/index.ts`, add:
 export type { BridgeResult } from './memory.js'
 ```
 
-### 6.3 `@engram/mcp` Tool Count
+### 6.3 `@engram-mem/mcp` Tool Count
 
 After Wave 5, the MCP server exposes 6 tools:
 1. `memory_recall` — unchanged, gains optional `project_id`
@@ -2391,7 +2391,7 @@ This is the fifth and final implementation wave. With all five waves complete, E
 
 ### Benchmarking
 
-- `@engram/bench` package with LoCoMo and LongMemEval dataset adapters
+- `@engram-mem/bench` package with LoCoMo and LongMemEval dataset adapters
 - CLI runner with comparison mode measuring graph vs. no-graph recall accuracy (P@k), temporal accuracy, and latency (p50/p95)
 
 ### Integration Surface

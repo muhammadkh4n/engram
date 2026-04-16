@@ -12,7 +12,7 @@
     "clean": "turbo run clean"
   },
   "author": "Muhammad Khan",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "packageManager": "npm@11.8.0",
   "devDependencies": {
     "@types/node": "^25.6.0",

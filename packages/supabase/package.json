@@ -1,6 +1,9 @@
 {
   "name": "@engram-mem/supabase",
   "version": "0.3.0",
+  "description": "Supabase storage adapter for Engram — cloud-hosted memory with pgvector and full-text search",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "supabase", "postgres", "pgvector"],
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

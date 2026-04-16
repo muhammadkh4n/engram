@@ -13,8 +13,8 @@ Thank you for your interest in contributing to Engram! This guide explains how t
 
 ```bash
 # Clone the repository
-git clone https://github.com/muhammadkh4n/openclaw-memory.git
-cd openclaw-memory
+git clone https://github.com/muhammadkh4n/engram.git
+cd engram
 
 # Install dependencies
 npm install
@@ -37,9 +37,9 @@ npm clean
 Engram is a Turborepo-based monorepo. Each package is independent but shares type definitions and adapters.
 
 ```
-openclaw-memory/
+engram/
 ├── packages/
-│   ├── core/              # @engram/core — Memory engine
+│   ├── core/              # @engram-mem/core — Memory engine
 │   │   ├── src/
 │   │   │   ├── memory.ts  # Memory class and createMemory() factory
 │   │   │   ├── systems/   # 5 memory systems (sensory, episodic, semantic, procedural, associations)
@@ -51,27 +51,27 @@ openclaw-memory/
 │   │   ├── test/          # Vitest test files
 │   │   └── package.json
 │   │
-│   ├── sqlite/            # @engram/sqlite — Local storage
+│   ├── sqlite/            # @engram-mem/sqlite — Local storage
 │   │   ├── src/
 │   │   │   ├── adapter.ts       # StorageAdapter implementation
 │   │   │   ├── migrations.ts    # SQLite schema
 │   │   │   └── search.ts        # BM25 via FTS5
 │   │   └── test/
 │   │
-│   ├── openai/            # @engram/openai — Embeddings + summarization
+│   ├── openai/            # @engram-mem/openai — Embeddings + summarization
 │   │   ├── src/
 │   │   │   ├── embeddings.ts    # OpenAI embedding service
 │   │   │   ├── summarizer.ts    # LLM-based summarization
 │   │   │   └── index.ts         # Intelligence adapter factory
 │   │   └── test/
 │   │
-│   ├── supabase/          # @engram/supabase — Cloud storage
+│   ├── supabase/          # @engram-mem/supabase — Cloud storage
 │   │   ├── src/
 │   │   │   ├── adapter.ts
 │   │   │   └── migrations/
 │   │   └── test/
 │   │
-│   └── openclaw/          # @engram/openclaw — OpenClaw plugin
+│   └── openclaw/          # @engram-mem/openclaw — OpenClaw plugin
 │       ├── src/
 │       │   └── openclaw-plugin.ts
 │       └── package.json
@@ -115,7 +115,7 @@ openclaw-memory/
 
 ### Adding a New Storage Adapter
 
-Storage adapters implement the `StorageAdapter` interface from `@engram/core`.
+Storage adapters implement the `StorageAdapter` interface from `@engram-mem/core`.
 
 **Steps**:
 
@@ -345,7 +345,7 @@ Fixes #123
 
 ## License
 
-By contributing to Engram, you agree that your contributions will be licensed under the MIT License.
+By contributing to Engram, you agree that your contributions will be licensed under the Apache License 2.0.
 
 ---
 

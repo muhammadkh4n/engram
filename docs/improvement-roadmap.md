@@ -215,7 +215,7 @@ This produces more natural memory dynamics: frequently and recently accessed mem
 ### 4.2 Plugin Registration
 
 ```typescript
-// @engram/openclaw plugin-entry.ts
+// @engram-mem/openclaw plugin-entry.ts
 export function register(api) {
   api.registerContextEngine('engram', (config) => {
     return new EngramContextEngine(config)
@@ -238,8 +238,8 @@ The ContextEngine interface provides hooks for the full conversation lifecycle:
 
 ### 4.4 Distribution Strategy
 
-1. **ClawHub**: Publish `@engram/openclaw` as a context engine plugin on ClawHub (primary)
-2. **npm**: Publish all packages (`@engram/core`, `@engram/sqlite`, etc.) on npm (for standalone usage)
+1. **ClawHub**: Publish `@engram-mem/openclaw` as a context engine plugin on ClawHub (primary)
+2. **npm**: Publish all packages (`@engram-mem/core`, `@engram-mem/sqlite`, etc.) on npm (for standalone usage)
 3. **GitHub**: Source code + documentation
 4. **Dual identity**: ClawHub for OpenClaw users, npm for standalone library users
 
@@ -251,21 +251,21 @@ The ContextEngine interface provides hooks for the full conversation lifecycle:
 
 | Framework | Package | Integration Pattern | Priority |
 |-----------|---------|-------------------|----------|
-| **OpenClaw** | `@engram/openclaw` | Context engine plugin | Already planned |
-| **Vercel AI SDK** | `@engram/vercel-ai` | Memory provider (like Mem0's integration) | High |
-| **LangChain/LangGraph** | `@engram/langchain` | BaseMemory subclass + LangGraph store | High |
-| **AutoGen** | `@engram/autogen` | Memory plugin | Medium |
-| **Mastra** | `@engram/mastra` | Memory integration | Medium |
-| **Plain TypeScript** | `@engram/core` + `@engram/sqlite` | Direct API | Already the default |
+| **OpenClaw** | `@engram-mem/openclaw` | Context engine plugin | Already planned |
+| **Vercel AI SDK** | `@engram-mem/vercel-ai` | Memory provider (like Mem0's integration) | High |
+| **LangChain/LangGraph** | `@engram-mem/langchain` | BaseMemory subclass + LangGraph store | High |
+| **AutoGen** | `@engram-mem/autogen` | Memory plugin | Medium |
+| **Mastra** | `@engram-mem/mastra` | Memory integration | Medium |
+| **Plain TypeScript** | `@engram-mem/core` + `@engram-mem/sqlite` | Direct API | Already the default |
 
 ### 5.2 Vercel AI SDK Integration
 
 Mem0 already has a Vercel AI SDK provider. Engram should follow the same pattern:
 
 ```typescript
-import { createMemory } from '@engram/core'
-import { sqliteAdapter } from '@engram/sqlite'
-import { engramProvider } from '@engram/vercel-ai'
+import { createMemory } from '@engram-mem/core'
+import { sqliteAdapter } from '@engram-mem/sqlite'
+import { engramProvider } from '@engram-mem/vercel-ai'
 
 const memory = createMemory({ storage: sqliteAdapter() })
 const provider = engramProvider({ memory })
@@ -281,7 +281,7 @@ const result = await generateText({
 ### 5.3 LangChain Integration
 
 ```typescript
-import { EngramMemory } from '@engram/langchain'
+import { EngramMemory } from '@engram-mem/langchain'
 
 const memory = new EngramMemory({ path: './memory.db' })
 const chain = new ConversationChain({ llm, memory })
@@ -346,7 +346,7 @@ Publishing this benchmark establishes Engram as the authority on cognitive memor
 The $6.27B agentic AI memory market (2025) growing to $28.45B by 2030 is dominated by cloud services. Engram's position:
 
 1. **Local-first**: No cloud, no API keys, no data leaving the machine. Privacy-sensitive industries (healthcare, legal, finance) need this.
-2. **Zero-config**: `npm install @engram/core @engram/sqlite` and it works. No Supabase, no Neo4j, no Redis.
+2. **Zero-config**: `npm install @engram-mem/core @engram-mem/sqlite` and it works. No Supabase, no Neo4j, no Redis.
 3. **Cognitive, not just storage**: Brain-inspired architecture is a story that sells. Developers and product managers understand "your AI agent has a brain" better than "your AI agent has a vector database."
 4. **Framework-agnostic**: Works with OpenClaw, Vercel AI SDK, LangChain, or standalone. Not locked to any ecosystem.
 
@@ -380,7 +380,7 @@ Publishing workflow:
 1. PR includes a changeset file describing the change
 2. CI runs `turbo run build lint test`
 3. Merge to main triggers `changeset version` (bumps versions) + `changeset publish` (publishes to npm)
-4. GitHub Action also publishes `@engram/openclaw` to ClawHub
+4. GitHub Action also publishes `@engram-mem/openclaw` to ClawHub
 
 Start with **fixed versioning** (all packages share version). Move to independent versioning when packages stabilize.
 
@@ -416,8 +416,8 @@ Based on what makes successful AI libraries stand out:
 
 | # | Item | Impact | Effort | Details |
 |---|------|--------|--------|---------|
-| 1 | **Implement @engram/core** | Critical | Large | createMemory() factory, 5 memory systems, intent analyzer, recall engine, consolidation scheduler |
-| 2 | **Implement @engram/sqlite with sqlite-vec** | Critical | Medium | SQLite adapter with FTS5 + sqlite-vec hybrid search, migration system |
+| 1 | **Implement @engram-mem/core** | Critical | Large | createMemory() factory, 5 memory systems, intent analyzer, recall engine, consolidation scheduler |
+| 2 | **Implement @engram-mem/sqlite with sqlite-vec** | Critical | Medium | SQLite adapter with FTS5 + sqlite-vec hybrid search, migration system |
 | 3 | **Nomic Embed v2 local adapter** | High | Small | Local embedding without API keys, runs on CPU |
 | 4 | **Hierarchical digest DAG** | High | Medium | digest_groups table, auto-grouping at 100 digests |
 | 5 | **Three-level summarization escalation** | High | Small | LLM -> bullets -> truncation fallback |
@@ -431,12 +431,12 @@ Based on what makes successful AI libraries stand out:
 
 | # | Item | Impact | Effort | Details |
 |---|------|--------|--------|---------|
-| 9 | **@engram/openclaw plugin** | Critical | Medium | Register as context engine, implement 7 lifecycle hooks, publish to ClawHub |
+| 9 | **@engram-mem/openclaw plugin** | Critical | Medium | Register as context engine, implement 7 lifecycle hooks, publish to ClawHub |
 | 10 | **ACT-R activation function** | High | Medium | Replace linear scoring with psychologically-grounded activation (recency, frequency, decay, noise) |
 | 11 | **Hebbian association strengthening** | High | Medium | Co-recall strengthens edges, non-activation weakens them |
 | 12 | **Enhanced dream cycle** | Medium | Medium | Replay, pruning, novel linking, interference resolution |
-| 13 | **@engram/vercel-ai adapter** | High | Small | Memory provider for Vercel AI SDK |
-| 14 | **@engram/langchain adapter** | High | Small | BaseMemory subclass for LangChain/LangGraph |
+| 13 | **@engram-mem/vercel-ai adapter** | High | Small | Memory provider for Vercel AI SDK |
+| 14 | **@engram-mem/langchain adapter** | High | Small | BaseMemory subclass for LangChain/LangGraph |
 | 15 | **Large file handling** | Medium | Medium | MIME-aware summarization for files >25K tokens |
 | 16 | **Engram-Bench** | High | Medium | Custom cognitive memory benchmark (associations, priming, decay, patterns) |
 | 17 | **Bun runtime support** | Medium | Small | Test and optimize for bun:sqlite (3-6x faster) |
@@ -506,7 +506,7 @@ Based on what makes successful AI libraries stand out:
 - [ ] `createMemory()` works zero-config with SQLite + BM25
 - [ ] All 5 memory systems implemented with tests
 - [ ] LoCoMo score measured and published
-- [ ] Published to npm as `@engram/core` and `@engram/sqlite`
+- [ ] Published to npm as `@engram-mem/core` and `@engram-mem/sqlite`
 
 ### v0.5
 - [ ] LoCoMo score >70%

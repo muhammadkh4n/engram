@@ -1,6 +1,9 @@
 {
   "name": "@engram-mem/bench",
   "version": "0.3.0",
+  "description": "Benchmark harness for Engram — LoCoMo and LongMemEval evaluation with comparison mode",
+  "keywords": ["memory", "ai", "agents", "cognitive", "embeddings", "recall", "benchmark", "locomo", "evaluation"],
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
