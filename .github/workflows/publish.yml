@@ -45,27 +45,27 @@ jobs:
       - run: npm run build
 
       # Publish packages in dependency order (|| true: skip already-published versions)
-      - run: npm publish --workspace=packages/core --provenance --access public || true
+      - run: npm publish --workspace=packages/core --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/graph --provenance --access public || true
+      - run: npm publish --workspace=packages/graph --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/openai --provenance --access public || true
+      - run: npm publish --workspace=packages/openai --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/sqlite --provenance --access public || true
+      - run: npm publish --workspace=packages/sqlite --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/supabase --provenance --access public || true
+      - run: npm publish --workspace=packages/supabase --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/mcp --provenance --access public || true
+      - run: npm publish --workspace=packages/mcp --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/bench --provenance --access public || true
+      - run: npm publish --workspace=packages/bench --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/openclaw --provenance --access public || true
+      - run: npm publish --workspace=packages/openclaw --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
