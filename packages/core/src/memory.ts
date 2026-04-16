@@ -203,17 +203,33 @@ export class Memory {
     const salience = scoreSalience({ role: message.role, content: cleanText })
     const entities = extractEntities(cleanText)
 
-    // Embed the clean text. When cleanText is too short to be meaningful (e.g.
-    // a single word after stripping), fall back to whatever string form of the
-    // original content we can extract, so the embedding call is not skipped for
-    // short-but-valid messages like "first message" or "got it".
-    // A failure is non-fatal: BM25 fallback still works without a vector.
+    // Fetch recent session episodes BEFORE embedding — we use them for
+    // contextual embedding (below) and temporal edges (after insert).
+    const recentEpisodes = await this.storage.episodes.getBySession(sessionId, {
+      since: new Date(Date.now() - 30 * 60 * 1000), // last 30 minutes
+    })
+
+    // Contextual embedding: prepend 1-2 preceding turns so the embedding
+    // model captures conversational flow. Short casual turns (~123 chars)
+    // embed weakly in isolation; with context they match queries better.
+    // episode.content stays as bare cleanText — only the vector changes.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
-        const textToEmbed = cleanText.length > 20
-          ? cleanText
-          : (typeof message.content === 'string' ? message.content : cleanText)
+        let textToEmbed: string
+        if (cleanText.length > 20) {
+          const contextTurns = recentEpisodes
+            .slice(-2)
+            .map(e => e.content)
+          if (contextTurns.length > 0) {
+            const context = contextTurns.join('\n').slice(-500)
+            textToEmbed = `${context}\n${cleanText}`.slice(-1000)
+          } else {
+            textToEmbed = cleanText
+          }
+        } else {
+          textToEmbed = typeof message.content === 'string' ? message.content : cleanText
+        }
         embedding = await this.intelligence.embed(textToEmbed)
       } catch (err) {
         console.error('[engram] embedding failed, storing without vector:', err)
@@ -245,12 +261,9 @@ export class Memory {
       projectId: this._projectId ?? null,
     })
 
-    // Create temporal edges linking this episode to recent session episodes.
+    // Temporal edges linking this episode to recent session episodes.
     // Fire-and-forget: temporal edges enrich the association graph but a
     // failure here must not block the caller.
-    const recentEpisodes = await this.storage.episodes.getBySession(sessionId, {
-      since: new Date(Date.now() - 30 * 60 * 1000), // last 30 minutes
-    })
     const recentIds = recentEpisodes
       .filter(e => e.id !== episode.id)
       .slice(-4) // up to 4 preceding episodes
