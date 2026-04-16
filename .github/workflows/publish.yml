@@ -45,34 +45,12 @@ jobs:
       - run: npm run build
 
       # Publish packages in dependency order (|| true: skip already-published versions)
-      - run: npm publish --workspace=packages/core --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/graph --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/openai --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/sqlite --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/supabase --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/mcp --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/bench --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - run: npm publish --workspace=packages/openclaw --provenance || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Auth via npm trusted publishers (OIDC) — no NODE_AUTH_TOKEN needed.
+      - run: npm publish --workspace=packages/core --provenance --access public || true
+      - run: npm publish --workspace=packages/graph --provenance --access public || true
+      - run: npm publish --workspace=packages/openai --provenance --access public || true
+      - run: npm publish --workspace=packages/sqlite --provenance --access public || true
+      - run: npm publish --workspace=packages/supabase --provenance --access public || true
+      - run: npm publish --workspace=packages/mcp --provenance --access public || true
+      - run: npm publish --workspace=packages/bench --provenance --access public || true
+      - run: npm publish --workspace=packages/openclaw --provenance --access public || true
