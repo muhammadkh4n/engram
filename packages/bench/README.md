@@ -108,16 +108,16 @@ Data:          ./data/locomo/
 Graph layer:   ON (Neo4j)
 Consolidation: ON
 
-LOCOMO v0.3.0 — Retrieval Recall @ K
+LOCOMO v0.3.0 — Retrieval Recall @ K (10 conversations, 1,986 QAs)
 
 Category Breakdown:
-  Single-hop:    34.4%
-  Multi-hop:     70.3%
-  Temporal:      46.2%
-  Commonsense:   71.4%
-  Adversarial:   85.1%
+  Single-hop:    45.4%
+  Multi-hop:     57.6%
+  Temporal:      30.2%
+  Commonsense:   59.6%
+  Adversarial:   67.0%
 
-Overall:       66.8%
+Overall:       57.5%
 
 Results written to: ./results/locomo-results.json
 Eval format:       ./results/locomo-eval.json
@@ -210,25 +210,27 @@ SUPABASE_KEY=...
 NEO4J_URI=bolt://localhost:7687
 ```
 
-## Benchmark Results (v0.3.0, preliminary)
+## Benchmark Results (v0.3.0)
 
-### LoCoMo Conv-26 — 1 of 10 conversations (199 QAs)
-
-> Full 10-conversation run is in progress. These numbers are preliminary from a single conversation.
+### LoCoMo — full 10 conversations (1,986 QAs)
 
 | Category | Recall @ K |
 |----------|-----------|
-| Overall | 66.8% |
-| Single-hop | 34.4% |
-| Multi-hop | 70.3% |
-| Temporal | 46.2% |
-| Commonsense | 71.4% |
-| Adversarial | 85.1% |
+| **Overall** | **57.5%** |
+| Single-hop | 45.4% |
+| Multi-hop | 57.6% |
+| Temporal | 30.2% |
+| Commonsense | 59.6% |
+| Adversarial | 67.0% |
+
+**Per-conversation range:** 47.7% (conv-42) to 69.5% (conv-30).
 
 **Notes:**
-- Results from SQL-only baseline. Graph mode adds ~5-8% on multi-hop questions.
+- Baseline (pre-v0.3.0 retrieval overhaul): 19.6% R@K on conv-26.
+- SQL-only baseline. Graph mode adds ~5-8% on multi-hop questions.
 - Consolidation enabled (light + deep sleep cycles).
-- Top-10 retrieval per question.
+- Top-10 retrieval per question with cross-encoder reranking.
+- Temporal queries are the current weak spot and top priority for v0.3.3+.
 
 ## Troubleshooting
 

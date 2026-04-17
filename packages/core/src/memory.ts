@@ -651,11 +651,26 @@ export class Memory {
 
     const confirm = opts?.confirm ?? false
 
+    // Embed query so vector search can find matches. Without this, forget()
+    // returns no results because engineRecall's vector path requires a
+    // non-empty embedding and text-only fallback is narrower.
+    let embedding: number[] = []
+    if (this.intelligence?.embed) {
+      try {
+        embedding = await this.intelligence.embed(query)
+      } catch (err) {
+        console.error('[engram] forget: embedding failed, falling back to text-only search:', err)
+      }
+    }
+
     // Search matching memories across relevant tiers using deep strategy
     const result = await engineRecall(query, this.storage, this.sensory, {
       strategy: RECALL_STRATEGIES['deep'],
-      embedding: [],
+      embedding,
+      intelligence: this.intelligence,
       graph: this._graph,
+      ...(this._defaultProject ? { project: this._defaultProject } : {}),
+      ...(this._projectId ? { projectId: this._projectId } : {}),
     })
 
     const allMemories = [...result.memories, ...result.associations]

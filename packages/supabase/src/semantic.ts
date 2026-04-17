@@ -168,7 +168,7 @@ export class SupabaseSemanticStorage implements SemanticStorage {
       if (error) {
         // If the RPC doesn't exist, do a direct update
         const { count } = await this.client
-          .from('semantic')
+          .from('memory_semantic')
           .update({ confidence: 0.05 }) // floor — can't do math in Supabase client
           .eq('id', u.id)
           .is('superseded_by', null)
@@ -204,7 +204,7 @@ export class SupabaseSemanticStorage implements SemanticStorage {
     opts?: { fromDate?: Date; toDate?: Date },
   ): Promise<SemanticMemory[]> {
     let query = this.client
-      .from('semantic')
+      .from('memory_semantic')
       .select('*')
       .or(`topic.eq.${sanitizeIlike(topic)},topic.ilike.%${sanitizeIlike(topic)}%`)
       .order('created_at', { ascending: true })

@@ -9,6 +9,8 @@
 
 Other memory systems remember what you told them. Engram learns what matters and forgets what doesn't — across sessions, projects, and agents. Five memory systems, graph-based spreading activation, and consolidation cycles that turn conversations into semantic knowledge.
 
+> Published as [`@engram-mem/*`](https://www.npmjs.com/search?q=%40engram-mem) on npm. Not affiliated with `engram-sdk` or engram.fyi — different project, different architecture.
+
 ## Start in 30 seconds
 
 **For Claude Code users:**
@@ -52,18 +54,20 @@ No API keys required. SQLite + BM25 out of the box. Upgrade to embeddings, cloud
 | BM25 as independent candidates | Keyword matches enter the pipeline even with weak embeddings |
 | Contextual embedding | Preceding turns prepended at ingest for richer vectors |
 
-**LoCoMo Benchmark — preliminary results** (1 of 10 conversations, 199 questions, Conv-26):
+**LoCoMo Benchmark — full 10-conversation evaluation** (1,986 questions across all 10 LoCoMo conversations):
 
 | Category | R@K |
 |----------|-----|
-| Single-hop | 34.4% |
-| Multi-hop | 70.3% |
-| Temporal | 46.2% |
-| Commonsense | 71.4% |
-| Adversarial | 85.1% |
-| **Overall** | **66.8%** |
+| Single-hop | 45.4% |
+| Multi-hop | 57.6% |
+| Temporal | 30.2% |
+| Commonsense | 59.6% |
+| Adversarial | 67.0% |
+| **Overall** | **57.5%** |
 
-> **Note:** These numbers are from a single LoCoMo conversation. Full 10-conversation evaluation is in progress — results will be updated here and in [CHANGELOG.md](CHANGELOG.md). Baseline before these changes: 19.6% R@K on the same conversation.
+> **Baseline before v0.3.0 retrieval overhaul:** 19.6% R@K. Today: **57.5%** — roughly 3× improvement. Per-conversation R@K ranges from 47.7% (conv-42) to 69.5% (conv-30); temporal queries are the current weak spot. See [packages/bench/README.md](packages/bench/README.md) for methodology and [CHANGELOG.md](CHANGELOG.md) for the four retrieval changes (cross-encoder reranking, wide scan pool, BM25 as independent candidates, contextual embedding).
+>
+> **Metric note:** R@K (Recall at K) measures whether the evidence turn is present in the top-K retrieved memories. It is **not directly comparable** to published LoCoMo leaderboard scores, which use answer-level F1 or accuracy after an LLM generates a response. Engram's internal optimization target is retrieval quality; we'll add F1 numbers in a future release for leaderboard-style comparison.
 
 ## Why Engram
 
