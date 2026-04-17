@@ -4,6 +4,39 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-04-17
+
+### Fixed
+- `memory.forget()` was a silent no-op — passed an empty embedding to the retrieval pipeline, so vector search returned zero candidates and nothing was ever forgotten. Now embeds the query via the intelligence adapter and forwards project / projectId context so `engineRecall` can actually match memories.
+- `memory_timeline` MCP tool threw "schema cache missing `public.semantic`". Two stray `.from('semantic')` calls in the Supabase adapter referenced a non-existent table; the real table is `memory_semantic`. Fixed both call sites.
+
+### Documentation
+- README benchmark table now shows the full 10-conversation LoCoMo aggregate (57.5% R@K across 1,986 QAs) instead of the conv-26 cherry (66.8%). Baseline context and per-category breakdown retained.
+- Added metric caveat: R@K is **not** directly comparable to published LoCoMo leaderboard F1 / accuracy numbers.
+- Added naming disambiguation: "Not affiliated with `engram-sdk` or engram.fyi."
+
+## [0.3.2] - 2026-04-16
+
+### Fixed
+- SQL injection in SQLite `vectorSearch` — `projectId` now parameterized instead of string-interpolated.
+- `memory.stats()` now uses fast `COUNT(*)` with O(N) scan as legacy fallback; no more OOM on large DBs.
+- Silent-discard warning when `ingest()` receives content that cleans down to empty.
+
+### Changed
+- Root README rewritten for launch: visceral hook, dual (MCP + library) quickstart, corrected MCP setup using the global `engram-mcp` binary.
+- Example (`examples/demo.mjs`) now imports published npm packages instead of monorepo source paths (was broken for every user who tried it).
+
+### Added
+- `examples/claude-code-memory.mjs` — cross-session memory demo (Session 1 ingests preferences, Session 2 recalls them without prompting).
+- Package READMEs for `@engram-mem/mcp`, `@engram-mem/graph`, `@engram-mem/bench`.
+- `CHANGELOG.md`, `SECURITY.md`, GitHub issue / PR templates.
+
+## [0.3.1] - 2026-04-16
+
+### Changed
+- Publish workflow: switched to npm granular tokens with 2FA bypass after classic automation tokens + trusted publishers hit `E403 Two-factor authentication required`. Also dropped `--provenance` flag that conflicted with granular token policy.
+- Republished all 8 packages with updated metadata.
+
 ## [0.3.0] - 2026-04-16
 
 ### Added
