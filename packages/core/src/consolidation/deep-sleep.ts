@@ -195,8 +195,28 @@ export async function deepSleep(
   // Process semantic candidates
   const semanticCandidates = allCandidates.filter(c => c.kind === 'semantic')
   for (const candidate of semanticCandidates) {
-    const existing = await storage.semantic.search(candidate.content, { limit: 5 })
-    const duplicate = existing.find(e => e.similarity > 0.92)
+    // Pass an embedding so semantic.search uses hybrid BM25+vector.
+    // BM25-only dedup misses LLM paraphrases of the same fact
+    // ("X published v1.0" ↔ "MK noted X shipped 1.0") because their
+    // token sets differ. Cosine similarity catches the semantic match.
+    let candidateEmbedding: number[] | undefined
+    if (intelligence?.embed) {
+      try {
+        candidateEmbedding = await intelligence.embed(candidate.content)
+      } catch {
+        // ignore — fall back to BM25-only path below
+      }
+    }
+
+    const searchOpts: { limit: number; embedding?: number[] } = { limit: 5 }
+    if (candidateEmbedding) searchOpts.embedding = candidateEmbedding
+
+    const existing = await storage.semantic.search(candidate.content, searchOpts)
+    // Cosine threshold is lower than the previous BM25 threshold because
+    // the scales differ: 0.92 BM25 ≈ near-identical tokens; 0.88 cosine
+    // on text-embedding-3-small is "same claim, different phrasing".
+    const dedupThreshold = candidateEmbedding ? 0.88 : 0.92
+    const duplicate = existing.find(e => e.similarity > dedupThreshold)
 
     if (duplicate) {
       await storage.semantic.recordAccessAndBoost(duplicate.item.id, 0.1)

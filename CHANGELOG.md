@@ -4,6 +4,16 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2026-04-17
+
+### Fixed
+- **Semantic duplication** — `memory_timeline` accumulated 30+ copies of the same fact over time. Two independent gaps closed:
+  - `pre-compact` hook (`packages/mcp/src/pre-compact.ts`) now calls `findDuplicate` before `memory.ingest()`, so daily session summaries that re-state long-running facts boost the existing memory instead of inserting a near-duplicate. Wider 30-day lookback window and 0.82 similarity threshold tuned for longer session-summary text.
+  - Deep-sleep consolidation (`packages/core/src/consolidation/deep-sleep.ts`) now passes an embedding to `storage.semantic.search`, switching from BM25-only to hybrid BM25+vector dedup. Threshold drops 0.92 (BM25) → 0.88 (cosine) because scales differ. Catches LLM paraphrases like "X published v1.0" ↔ "MK noted X shipped 1.0" that BM25 tokenization missed.
+
+### Tests
+- Added two deep-sleep paraphrase-dedup tests: cosine threshold (0.88) triggers with embeddings; BM25 threshold (0.92) preserved when no embedding adapter is present.
+
 ## [0.3.3] - 2026-04-17
 
 ### Fixed

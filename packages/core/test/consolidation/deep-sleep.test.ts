@@ -335,6 +335,62 @@ describe('deepSleep', () => {
       expect(storage.semantic.insert).not.toHaveBeenCalled()
     })
 
+    it('uses cosine threshold 0.88 when an embedding adapter is available', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      // 0.89 is below the old BM25 threshold (0.92) but above the new
+      // cosine threshold (0.88). With embeddings available, this should
+      // now be treated as a duplicate.
+      const semanticSearchResults = [
+        makeSemanticSearchResult('existing-sem-1', 'TypeScript is preferred by me.', 0.89),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        semanticSearchResults,
+      })
+
+      const embed = vi.fn(async (_text: string) => [0.1, 0.2, 0.3])
+      const intelligence = { embed }
+
+      const result = await deepSleep(storage, intelligence, { minDigests: 3 })
+
+      expect(embed).toHaveBeenCalled()
+      expect(storage.semantic.search).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ embedding: [0.1, 0.2, 0.3] }),
+      )
+      expect(result.deduplicated).toBeGreaterThanOrEqual(1)
+    })
+
+    it('keeps BM25 threshold 0.92 when no embedding adapter is available', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      // 0.89 would dedup with the cosine threshold, but without an
+      // embedding adapter the BM25-only 0.92 threshold still applies.
+      const semanticSearchResults = [
+        makeSemanticSearchResult('existing-sem-1', 'I prefer TypeScript.', 0.89),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        semanticSearchResults,
+      })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.deduplicated).toBe(0)
+      expect(storage.semantic.insert).toHaveBeenCalled()
+    })
+
     it('inserts when similarity is below deduplication threshold (0.92)', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.' }),

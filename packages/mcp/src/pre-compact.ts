@@ -15,6 +15,7 @@ import { createMemory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
+import { findDuplicate, boostDuplicate } from './ingest/dedup.js'
 import OpenAI from 'openai'
 
 // ---------------------------------------------------------------------------
@@ -185,20 +186,36 @@ async function main(): Promise<void> {
   })
   await memory.initialize()
 
-  await memory.ingest({
-    content: summary,
-    role: 'system',
-    sessionId: hookInput.session_id ?? 'claude-code',
-    metadata: {
-      source: 'claude-code',
-      type: 'pre-compact-summary',
-      trigger: hookInput.trigger,
-      cwd: hookInput.cwd,
-      extractedAt: new Date().toISOString(),
-    },
+  // Dedup: session summaries re-state long-running facts across days.
+  // If this summary substantially overlaps a recent one, boost the
+  // existing memory instead of inserting a near-duplicate. Wider window
+  // than the 7-day default because session summaries echo facts that
+  // persist for weeks.
+  const dup = await findDuplicate(summary, storage, intelligence, {
+    threshold: 0.82,
+    windowDays: 30,
   })
 
-  process.stderr.write(`[engram-compact] Persisted ${summary.length} chars to long-term memory.\n`)
+  if (dup.duplicateId) {
+    await boostDuplicate(storage, dup.duplicateId)
+    process.stderr.write(
+      `[engram-compact] Duplicate of ${dup.duplicateId} (sim=${dup.similarity.toFixed(3)}) — boosted, not re-ingested.\n`,
+    )
+  } else {
+    await memory.ingest({
+      content: summary,
+      role: 'system',
+      sessionId: hookInput.session_id ?? 'claude-code',
+      metadata: {
+        source: 'claude-code',
+        type: 'pre-compact-summary',
+        trigger: hookInput.trigger,
+        cwd: hookInput.cwd,
+        extractedAt: new Date().toISOString(),
+      },
+    })
+    process.stderr.write(`[engram-compact] Persisted ${summary.length} chars to long-term memory.\n`)
+  }
 
   // Return additionalContext to inject after compaction
   if (keyFacts) {
