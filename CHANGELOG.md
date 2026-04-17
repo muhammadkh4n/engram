@@ -4,6 +4,11 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-04-17
+
+### Fixed
+- Pre-compact dedup threshold lowered from 0.82 to 0.62. Empirical testing against the live Supabase memory showed cosine similarity on `text-embedding-3-small` for two paraphrased day-over-day session summaries tops out around 0.65 (not 0.80+ like short fact strings). At 0.82, every session summary was inserted as "new" — the dedup path in 0.3.4 correctly executed but the threshold was unreachable for long text. At 0.62, paraphrased summaries dedup cleanly while unrelated summaries (cosine ~0.40) are still safely rejected via the `minScore = threshold - 0.05` RPC filter.
+
 ## [0.3.4] - 2026-04-17
 
 ### Fixed

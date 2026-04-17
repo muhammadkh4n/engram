@@ -188,11 +188,20 @@ async function main(): Promise<void> {
 
   // Dedup: session summaries re-state long-running facts across days.
   // If this summary substantially overlaps a recent one, boost the
-  // existing memory instead of inserting a near-duplicate. Wider window
-  // than the 7-day default because session summaries echo facts that
-  // persist for weeks.
+  // existing memory instead of inserting a near-duplicate.
+  //
+  // Threshold tuning: empirically on text-embedding-3-small, cosine
+  // similarity between two day-over-day session summaries paraphrasing
+  // the same work sits around 0.65; cosine between unrelated long
+  // summaries sits around 0.40. We pick 0.62 — below that, paraphrased
+  // summaries are reliably caught; above 0.70, near-duplicates slip
+  // through because long-text cosine simply doesn't reach higher values.
+  // See /tmp/dedup-tune.mjs sweep (2026-04-17).
+  //
+  // Window is wider than the 7-day dedup default because session
+  // summaries echo facts that persist for weeks.
   const dup = await findDuplicate(summary, storage, intelligence, {
-    threshold: 0.82,
+    threshold: 0.62,
     windowDays: 30,
   })
 
