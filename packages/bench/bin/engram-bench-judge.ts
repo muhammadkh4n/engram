@@ -21,6 +21,8 @@ interface CliArgs {
   smokeQuestions?: number
   consolidate: boolean
   graph: boolean
+  concurrency?: number
+  checkpointPath?: string
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -41,6 +43,10 @@ function parseArgs(argv: string[]): CliArgs {
 
   const qFlag = args['smoke-questions']
   const smokeQuestions = typeof qFlag === 'string' ? parseInt(qFlag, 10) : undefined
+  const concurrency = typeof args['concurrency'] === 'string'
+    ? parseInt(args['concurrency'] as string, 10) : undefined
+  const checkpointPath = typeof args['checkpoint'] === 'string'
+    ? path.resolve(args['checkpoint'] as string) : undefined
 
   return {
     data: path.resolve(args['data'] as string),
@@ -49,6 +55,8 @@ function parseArgs(argv: string[]): CliArgs {
     ...(smokeQuestions !== undefined ? { smokeQuestions } : {}),
     consolidate: args['consolidate'] !== false,
     graph: args['graph'] === true,
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(checkpointPath !== undefined ? { checkpointPath } : {}),
   }
 }
 
@@ -61,12 +69,16 @@ async function main(): Promise<void> {
     consolidate: boolean
     graph: boolean
     smokeQuestions?: number
+    concurrency?: number
+    checkpointPath?: string
   } = {
     smoke: args.smoke,
     consolidate: args.consolidate,
     graph: args.graph,
   }
   if (args.smokeQuestions !== undefined) runOpts.smokeQuestions = args.smokeQuestions
+  if (args.concurrency !== undefined) runOpts.concurrency = args.concurrency
+  if (args.checkpointPath !== undefined) runOpts.checkpointPath = args.checkpointPath
 
   const result = await runLoCoMoJudgeBench(args.data, runOpts)
 

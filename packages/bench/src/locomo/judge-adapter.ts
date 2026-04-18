@@ -246,6 +246,13 @@ interface JudgeOpts {
   smoke?: boolean
   smokeQuestions?: number
   graph?: boolean
+  /** Max concurrent conversations. Default 3 — bounded to avoid OpenAI rate limits. */
+  concurrency?: number
+  /**
+   * Optional checkpoint path — results are written after each conv
+   * completes. Resumes from checkpoint on re-run. Omit to disable.
+   */
+  checkpointPath?: string
 }
 
 interface QuestionDetail {
@@ -446,17 +453,53 @@ export async function runLoCoMoJudgeBench(
 
   const client = makeClient(apiKey)
   const runStart = Date.now()
-  const allDetails: QuestionDetail[] = []
+  const concurrency = Math.max(1, Math.min(opts.concurrency ?? 3, conversations.length))
 
-  for (let i = 0; i < conversations.length; i++) {
-    const conv = conversations[i]!
+  // Resume from checkpoint
+  let allDetails: QuestionDetail[] = []
+  const doneConvs = new Set<number>()
+  if (opts.checkpointPath) {
     try {
-      const convDetails = await benchConversation(conv, i, client, opts)
-      allDetails.push(...convDetails)
-    } catch (err) {
-      console.error(`  Conv ${i} FAILED: ${err instanceof Error ? err.message : String(err)}`)
-    }
+      const raw = await fs.readFile(opts.checkpointPath, 'utf8')
+      const ckpt = JSON.parse(raw) as { details: QuestionDetail[]; doneConvs: number[] }
+      allDetails = ckpt.details ?? []
+      for (const c of ckpt.doneConvs ?? []) doneConvs.add(c)
+      console.log(`  Resuming: ${doneConvs.size} convs done, ${allDetails.length} answers`)
+    } catch { /* no checkpoint or unreadable */ }
   }
+
+  const saveCheckpoint = async (): Promise<void> => {
+    if (!opts.checkpointPath) return
+    await fs.writeFile(
+      opts.checkpointPath,
+      JSON.stringify({ details: allDetails, doneConvs: Array.from(doneConvs).sort() }),
+      'utf8',
+    )
+  }
+
+  // Concurrency-bounded pool: keep `concurrency` conversations in flight.
+  // Each conversation owns its own memory instance (fresh :memory: SQLite)
+  // so parallelism is storage-safe.
+  let nextIdx = 0
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const i = nextIdx++
+      if (i >= conversations.length) return
+      if (doneConvs.has(i)) { console.log(`  Conv ${i}: SKIPPED (checkpoint)`); continue }
+      const conv = conversations[i]!
+      try {
+        const convDetails = await benchConversation(conv, i, client, opts)
+        allDetails.push(...convDetails)
+        doneConvs.add(i)
+        await saveCheckpoint()
+        const correct = convDetails.filter(d => d.correct).length
+        console.log(`  Conv ${i} saved: ${correct}/${convDetails.length} correct (checkpoint: ${doneConvs.size}/${conversations.length})`)
+      } catch (err) {
+        console.error(`  Conv ${i} FAILED: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+  })
+  await Promise.all(workers)
 
   const scores = scoreResults(allDetails)
   const totalSeconds = (Date.now() - runStart) / 1000
