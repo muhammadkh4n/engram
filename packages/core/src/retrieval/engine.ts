@@ -543,17 +543,26 @@ export async function recall(
   // When the intelligence adapter provides a reranker, re-score candidates
   // for precise semantic ordering. This is the highest-leverage retrieval
   // improvement: bi-encoder search finds candidates, reranking orders them.
+  //
+  // Blend ratio signal-adaptive:
+  //   - Default single-hop: 70% rerank / 30% original — original relevance
+  //     contributes tiebreaking signal and embedding confidence.
+  //   - Multi-hop / temporal: 85% rerank / 15% original — RRF-rescued
+  //     candidates have weak initial vector scores but the reranker can
+  //     correctly order the joint pool; downweighting original avoids
+  //     handicapping the BM25/HyDE-rescued evidence.
   if (intelligence?.rerank && memories.length > 1) {
     try {
       const docs = memories.map(m => ({ id: m.id, content: m.content }))
       const reranked = await intelligence.rerank(query, docs)
       const scoreMap = new Map(reranked.map(r => [r.id, r.score]))
+      const rerankWeight = signals.multiHop || signals.temporal ? 0.85 : 0.7
+      const originalWeight = 1 - rerankWeight
       memories = memories
         .map(m => {
           const rerankScore = scoreMap.get(m.id)
           if (rerankScore === undefined) return m
-          // Blend: reranker dominates (70%) with original for tiebreaking (30%)
-          const blended = rerankScore * 0.7 + m.relevance * 0.3
+          const blended = rerankScore * rerankWeight + m.relevance * originalWeight
           return { ...m, relevance: blended }
         })
         .sort((a, b) => b.relevance - a.relevance)

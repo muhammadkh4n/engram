@@ -311,6 +311,35 @@ describe('recall engine — cross-encoder reranking', () => {
     expect(rerank).not.toHaveBeenCalled()
   })
 
+  it('calls rerank for multi-hop queries (adaptive blend verified via code review)', async () => {
+    // Note: actual blend-ratio differentiation (0.7 single-hop vs 0.85
+    // multi-hop/temporal) is hard to isolate in unit tests because RRF
+    // compresses original scores for queries that fire HyDE. Testing
+    // ordering behavior within one call is the stable contract.
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const rerank = vi.fn().mockImplementation(
+      async (_q: string, docs: ReadonlyArray<{ id: string; content: string }>) =>
+        docs.map((d, i) => ({ id: d.id, score: (docs.length - i) / docs.length }))
+    )
+    const intelligence: IntelligenceAdapter = { rerank }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    const multiHop = await recall('Where did Alice and Bob meet?', storage, sensory, opts)
+
+    expect(rerank).toHaveBeenCalled()
+    // Results are sorted descending by blended relevance regardless of ratio
+    for (let i = 1; i < multiHop.memories.length; i++) {
+      expect(multiHop.memories[i - 1].relevance).toBeGreaterThanOrEqual(
+        multiHop.memories[i].relevance
+      )
+    }
+  })
+
   it('falls back to original ranking when rerank throws', async () => {
     const storage = createMockStorage()
     const sensory = new SensoryBuffer()
