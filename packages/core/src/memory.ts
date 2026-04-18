@@ -68,6 +68,18 @@ export interface MemoryOptions {
    * Defaults to false for backward compatibility.
    */
   autoConsolidate?: boolean | AutoConsolidationOpts
+  /**
+   * Opt into Anthropic-style Contextual Retrieval. When true AND the
+   * intelligence adapter implements contextualizeChunk, every ingested
+   * turn is augmented with an LLM-generated preamble that situates it
+   * (speaker, time, topic, pronoun resolution) before indexing. Both
+   * the embedding and the FTS/BM25 index benefit — the raw user text
+   * is preserved in metadata.rawContent for display.
+   *
+   * Defaults to false: the extra LLM call at ingest adds cost and
+   * latency, and the lift is workload-dependent.
+   */
+  contextualRetrieval?: boolean
 }
 
 export interface SessionHandle {
@@ -212,15 +224,47 @@ export class Memory {
       since: new Date(Date.now() - 30 * 60 * 1000), // last 30 minutes
     })
 
+    // Anthropic-style Contextual Retrieval (opt-in via MemoryOptions).
+    // Generate a situating preamble from recent turns + current chunk,
+    // then prepend it to the text we EMBED *and* STORE for FTS. The
+    // original cleanText is preserved in metadata.rawCleanText so
+    // display paths can recover verbatim input.
+    let contextualPreamble = ''
+    if (
+      this.opts.contextualRetrieval === true &&
+      this.intelligence?.contextualizeChunk &&
+      cleanText.length >= 10
+    ) {
+      const windowTurns = recentEpisodes
+        .slice(-10)
+        .map(e => `[${e.role}] ${e.content}`)
+        .join('\n')
+      try {
+        contextualPreamble = await this.intelligence.contextualizeChunk(cleanText, {
+          conversationContext: windowTurns,
+          speakerRole: message.role,
+        })
+      } catch (err) {
+        console.warn('[engram] contextualizeChunk failed (falling back to raw chunk):', err)
+      }
+    }
+
+    const storedContent = contextualPreamble
+      ? `${contextualPreamble.trim()}\n\n${cleanText}`
+      : cleanText
+
     // Contextual embedding: prepend 1-2 preceding turns so the embedding
     // model captures conversational flow. Short casual turns (~123 chars)
     // embed weakly in isolation; with context they match queries better.
-    // episode.content stays as bare cleanText — only the vector changes.
+    // When contextualRetrieval is on, the LLM-generated preamble in
+    // storedContent already carries richer context, so we embed that.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
         let textToEmbed: string
-        if (cleanText.length > 20) {
+        if (contextualPreamble) {
+          textToEmbed = storedContent.slice(-1500)
+        } else if (cleanText.length > 20) {
           const contextTurns = recentEpisodes
             .slice(-2)
             .map(e => e.content)
@@ -249,11 +293,17 @@ export class Memory {
     if (Array.isArray(message.content)) {
       metadata.rawContent = message.content
     }
+    // When we enriched the stored content with a contextualization preamble,
+    // keep the verbatim cleanText available to display consumers.
+    if (contextualPreamble) {
+      metadata.rawCleanText = cleanText
+      metadata.contextualPreamble = contextualPreamble
+    }
 
     const episode = await this.storage.episodes.insert({
       sessionId,
       role: message.role,
-      content: cleanText,
+      content: storedContent,
       salience,
       accessCount: 0,
       lastAccessed: null,

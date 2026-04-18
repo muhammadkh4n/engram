@@ -505,6 +505,65 @@ export class OpenAISummarizer {
   }
 
   /**
+   * Anthropic-style Contextual Retrieval preamble generator.
+   *
+   * Given a chunk (single conversational turn) and its surrounding context
+   * (recent turns in the same session), generate 1-2 sentences that situate
+   * the chunk — disambiguating pronouns, dates, topics, and subjects that
+   * downstream search would otherwise miss.
+   *
+   * Uses gpt-4.1-mini (a separate RPD bucket from gpt-4o-mini) with a
+   * short prompt modelled on Anthropic's published pattern. Non-fatal on
+   * failure: returns an empty string so the caller proceeds with the raw
+   * chunk. ~$0.0001 per contextualization at current pricing.
+   */
+  async contextualizeChunk(
+    chunk: string,
+    opts: { conversationContext: string; speakerRole?: string },
+  ): Promise<string> {
+    if (chunk.trim().length === 0) return ''
+    const context = opts.conversationContext.slice(-2000)
+    if (context.trim().length === 0) {
+      // First turn or no prior context — nothing to situate against.
+      return ''
+    }
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `You generate short contextual preambles for conversational memory chunks, so a downstream search index can retrieve them without the surrounding dialogue. Produce ONE or TWO short sentences that:
+- Identify the speaker by name if derivable from context, not by pronoun
+- Resolve any pronouns, demonstratives, or time references ("she" → "Melanie"; "that trip" → "the Paris trip"; "last week" → the concrete period)
+- Name the topic succinctly
+
+Do NOT restate the chunk. Do NOT invent facts not present in the context or the chunk. If the context is insufficient to situate the chunk, output an empty string.
+
+Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
+          },
+          {
+            role: 'user',
+            content: `<conversation_context>\n${context}\n</conversation_context>\n\n<chunk role="${opts.speakerRole ?? 'unknown'}">\n${chunk}\n</chunk>\n\nPreamble:`,
+          },
+        ],
+        max_tokens: 80,
+        temperature: 0,
+      })
+
+      const raw = resp.choices[0]?.message?.content?.trim() ?? ''
+      // Guardrail: keep it bounded and scrub accidental markdown wrappers.
+      return raw.replace(/^["'`*_]+|["'`*_]+$/g, '').slice(0, 400)
+    } catch (err) {
+      process.stderr.write(
+        `[openai] contextualizeChunk failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return ''
+    }
+  }
+
+  /**
    * Cross-encoder reranking via LLM pointwise scoring.
    *
    * Sends all candidates in a single prompt, asks for relevance scores.
