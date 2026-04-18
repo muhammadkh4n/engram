@@ -354,11 +354,21 @@ export async function recall(
     }
   }
 
-  // Expand query terms when strategy says so and intelligence supports it
+  // Classify query signals once — shared across expansion, HyDE, future gates.
+  const signals = classifyQuery(query)
+
+  // Expand query terms when:
+  //   - strategy.expand is set (deep mode), OR
+  //   - query is multi-hop (benefits from keyword variants that feed BM25
+  //     rescue for "X OR Y OR Z" style evidence spread across turns), OR
+  //   - query is temporal (time-phrases often appear with alternative
+  //     forms in source text — "last Tuesday" → "May 7, 2023")
   let expandedTerms: string[] | undefined
-  if (strategy.expand && intelligence?.expandQuery) {
+  const shouldExpand = intelligence?.expandQuery !== undefined &&
+    (strategy.expand || signals.multiHop || signals.temporal)
+  if (shouldExpand) {
     try {
-      expandedTerms = await intelligence.expandQuery(query)
+      expandedTerms = await intelligence!.expandQuery!(query)
     } catch {
       // expansion failed — proceed without it
     }
@@ -393,7 +403,6 @@ export async function recall(
   // while vector search has it at rank 50 — both signals contribute without
   // the stronger raw score overwriting the fused rank.
   const topScore = memories[0]?.relevance ?? 0
-  const signals = classifyQuery(query)
   const shouldFireHyDE =
     intelligence?.generateHypotheticalDoc !== undefined &&
     intelligence?.embed !== undefined &&

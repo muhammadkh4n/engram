@@ -121,6 +121,51 @@ describe('recall engine — deep mode', () => {
     expect(expandQuery).toHaveBeenCalledWith('TypeScript strict mode?')
   })
 
+  it('calls expandQuery for multi-hop queries even in light mode', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['Alice', 'Bob', 'meeting'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('Where did Alice and Bob first meet?', storage, sensory, opts)
+
+    expect(expandQuery).toHaveBeenCalledWith('Where did Alice and Bob first meet?')
+  })
+
+  it('calls expandQuery for temporal queries even in light mode', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['discuss', 'last', 'week'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('What did we discuss last week?', storage, sensory, opts)
+
+    expect(expandQuery).toHaveBeenCalledWith('What did we discuss last week?')
+  })
+
+  it('does NOT call expandQuery for plain light-mode single-hop queries', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue([])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('TypeScript strict mode', storage, sensory, opts)
+
+    expect(expandQuery).not.toHaveBeenCalled()
+  })
+
   it('runs association walk', async () => {
     const storage = createMockStorage()
     const sensory = new SensoryBuffer()
