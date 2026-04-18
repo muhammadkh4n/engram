@@ -1,10 +1,21 @@
 // Shared
+export type RerankerBackend = 'openai' | 'onnx' | 'none'
+
 export interface BenchmarkOpts {
   consolidate?: boolean  // default true
   graph?: boolean        // default true
   topK?: number          // default 10
   limit?: number         // max conversations to evaluate (default: all)
   noRerank?: boolean     // disable cross-encoder reranking for A/B comparison
+  /**
+   * Cross-encoder backend. 'openai' (default) uses LLM pointwise scoring via
+   * gpt-4o-mini; 'onnx' uses a local mxbai-rerank ONNX model (no API cost,
+   * lower latency, typically stronger ordering); 'none' disables rerank.
+   * When set, takes precedence over noRerank.
+   */
+  rerankerBackend?: RerankerBackend
+  /** HF model id when rerankerBackend='onnx'. Default: mxbai-rerank-large-v1. */
+  onnxRerankerModel?: string
   openaiApiKey?: string
   outputPath?: string
 }

@@ -253,6 +253,10 @@ interface JudgeOpts {
    * completes. Resumes from checkpoint on re-run. Omit to disable.
    */
   checkpointPath?: string
+  /** 'openai' (default), 'onnx' (local mxbai-rerank), or 'none'. */
+  rerankerBackend?: 'openai' | 'onnx' | 'none'
+  /** HF model id when rerankerBackend='onnx'. */
+  onnxRerankerModel?: string
 }
 
 interface QuestionDetail {
@@ -310,7 +314,11 @@ async function benchConversation(
   const nQs = opts.smoke ? (opts.smokeQuestions ?? 5) : qas.length
 
   console.log(`  [engram-mem] Conv ${convIdx} (${sid}): ingesting...`)
-  const memory = await createBenchMemory({ graph: opts.graph ?? false })
+  const memory = await createBenchMemory({
+    graph: opts.graph ?? false,
+    ...(opts.rerankerBackend ? { rerankerBackend: opts.rerankerBackend } : {}),
+    ...(opts.onnxRerankerModel ? { onnxRerankerModel: opts.onnxRerankerModel } : {}),
+  })
 
   const ingestStart = Date.now()
   const msgCount = await ingestConversationForJudge(conv, memory)

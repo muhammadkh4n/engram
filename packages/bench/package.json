@@ -30,7 +30,8 @@
   "dependencies": {
     "@engram-mem/core": "*",
     "@engram-mem/sqlite": "*",
-    "@engram-mem/openai": "*"
+    "@engram-mem/openai": "*",
+    "@engram-mem/rerank-onnx": "*"
   },
   "devDependencies": {
     "typescript": "^6.0.2",

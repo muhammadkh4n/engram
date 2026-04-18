@@ -23,6 +23,8 @@ interface CliArgs {
   graph: boolean
   concurrency?: number
   checkpointPath?: string
+  rerankerBackend?: 'openai' | 'onnx' | 'none'
+  onnxRerankerModel?: string
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -48,6 +50,17 @@ function parseArgs(argv: string[]): CliArgs {
   const checkpointPath = typeof args['checkpoint'] === 'string'
     ? path.resolve(args['checkpoint'] as string) : undefined
 
+  const rerankFlag = args['reranker']
+  let rerankerBackend: 'openai' | 'onnx' | 'none' | undefined
+  if (rerankFlag === 'openai' || rerankFlag === 'onnx' || rerankFlag === 'none') {
+    rerankerBackend = rerankFlag
+  } else if (rerankFlag !== undefined) {
+    console.error(`Error: --reranker must be one of openai|onnx|none, got ${String(rerankFlag)}`)
+    process.exit(1)
+  }
+  const onnxRerankerModel = typeof args['onnx-model'] === 'string'
+    ? args['onnx-model'] as string : undefined
+
   return {
     data: path.resolve(args['data'] as string),
     output: path.resolve((args['output'] as string | undefined) ?? './results/engram_mem_v1_run1.json'),
@@ -57,6 +70,8 @@ function parseArgs(argv: string[]): CliArgs {
     graph: args['graph'] === true,
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(checkpointPath !== undefined ? { checkpointPath } : {}),
+    ...(rerankerBackend !== undefined ? { rerankerBackend } : {}),
+    ...(onnxRerankerModel !== undefined ? { onnxRerankerModel } : {}),
   }
 }
 
@@ -71,6 +86,8 @@ async function main(): Promise<void> {
     smokeQuestions?: number
     concurrency?: number
     checkpointPath?: string
+    rerankerBackend?: 'openai' | 'onnx' | 'none'
+    onnxRerankerModel?: string
   } = {
     smoke: args.smoke,
     consolidate: args.consolidate,
@@ -79,6 +96,8 @@ async function main(): Promise<void> {
   if (args.smokeQuestions !== undefined) runOpts.smokeQuestions = args.smokeQuestions
   if (args.concurrency !== undefined) runOpts.concurrency = args.concurrency
   if (args.checkpointPath !== undefined) runOpts.checkpointPath = args.checkpointPath
+  if (args.rerankerBackend !== undefined) runOpts.rerankerBackend = args.rerankerBackend
+  if (args.onnxRerankerModel !== undefined) runOpts.onnxRerankerModel = args.onnxRerankerModel
 
   const result = await runLoCoMoJudgeBench(args.data, runOpts)
 
