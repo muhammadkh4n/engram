@@ -16,6 +16,13 @@ export interface BenchmarkOpts {
   rerankerBackend?: RerankerBackend
   /** HF model id when rerankerBackend='onnx'. Default: mxbai-rerank-large-v1. */
   onnxRerankerModel?: string
+  /**
+   * Enable Anthropic-style Contextual Retrieval at ingest time. Requires
+   * intelligence adapter with contextualizeChunk(). Adds one LLM call per
+   * turn during ingest, so only useful when the downstream lift justifies
+   * the extra latency + cost.
+   */
+  contextualRetrieval?: boolean
   openaiApiKey?: string
   outputPath?: string
 }

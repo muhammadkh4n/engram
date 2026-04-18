@@ -257,6 +257,8 @@ interface JudgeOpts {
   rerankerBackend?: 'openai' | 'onnx' | 'none'
   /** HF model id when rerankerBackend='onnx'. */
   onnxRerankerModel?: string
+  /** Anthropic-style Contextual Retrieval at ingest time. */
+  contextualRetrieval?: boolean
 }
 
 interface QuestionDetail {
@@ -318,6 +320,7 @@ async function benchConversation(
     graph: opts.graph ?? false,
     ...(opts.rerankerBackend ? { rerankerBackend: opts.rerankerBackend } : {}),
     ...(opts.onnxRerankerModel ? { onnxRerankerModel: opts.onnxRerankerModel } : {}),
+    ...(opts.contextualRetrieval ? { contextualRetrieval: true } : {}),
   })
 
   const ingestStart = Date.now()

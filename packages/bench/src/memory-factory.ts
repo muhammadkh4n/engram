@@ -28,6 +28,7 @@ export async function createBenchMemory(opts?: BenchmarkOpts): Promise<Memory> {
   const memory = createMemory({
     storage,
     intelligence,
+    ...(opts?.contextualRetrieval ? { contextualRetrieval: true } : {}),
   })
 
   await memory.initialize()
