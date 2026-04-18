@@ -253,13 +253,45 @@ export class OpenAISummarizer {
   }
 
   async expandQuery(query: string): Promise<string[]> {
+    // Query expansion for BM25 rescue — generate alternative keyword
+    // phrases that might appear in stored conversation turns. The
+    // output feeds textBoost() which does tsquery OR-matching.
+    //
+    // Key behaviors:
+    // - Always include the ORIGINAL proper nouns from the query (they
+    //   are the strongest retrieval signal and should never be
+    //   rephrased away).
+    // - For temporal queries, emit both the relative phrase ("last
+    //   week") and plausible concrete dates ("May 7", "2023-05-07")
+    //   since stored turns often contain both forms.
+    // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
+    //   IDF naturally, but short queries get dropped entirely if
+    //   they're all stopwords.
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages: [
         {
           role: 'system',
           content:
-            'Given a search query about past conversations or memories, generate 3-5 alternative keyword phrases that might appear in the stored content. Output ONLY a JSON array of strings. Do not explain. Focus on nouns, tools, technologies, and action words that the stored content would contain.',
+            [
+              'You generate keyword variants for retrieval from past conversations.',
+              '',
+              'Given a question, output 4-6 alternative phrases that might appear',
+              'verbatim in the stored dialogue turns answering the question.',
+              '',
+              'Rules:',
+              '1. INCLUDE every proper noun from the question unchanged (names, places, products).',
+              '2. For temporal queries, include BOTH relative phrases ("last week") AND',
+              '   plausible concrete forms ("Monday", "May 7", "last month", "2023").',
+              '3. Prefer nouns, verbs, and named entities. Skip articles and auxiliaries.',
+              '4. Output ONLY a JSON array of strings, no explanation.',
+              '',
+              'Examples:',
+              '- Q: "Where did Alice and Bob meet?"',
+              '  A: ["Alice Bob", "Alice met Bob", "Bob and Alice", "first time meeting", "meeting place"]',
+              '- Q: "What did we discuss last week?"',
+              '  A: ["last week", "discussed", "previous week", "Monday Tuesday Wednesday", "talked about"]',
+            ].join('\n'),
         },
         { role: 'user', content: query },
       ],
