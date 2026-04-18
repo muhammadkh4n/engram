@@ -18,7 +18,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "engram-bench": "dist/bin/engram-bench.js"
+    "engram-bench": "dist/bin/engram-bench.js",
+    "engram-bench-judge": "dist/bin/engram-bench-judge.js"
   },
   "scripts": {
     "build": "tsc",
