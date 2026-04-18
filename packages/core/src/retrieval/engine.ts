@@ -11,6 +11,7 @@ import { stagePrime } from './priming.js'
 import { stageReconsolidate } from './reconsolidation.js'
 import { stageActivate, type CompositeMemory } from './spreading-activation.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
+import { classifyQuery } from './query-classifier.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -249,6 +250,55 @@ function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
 }
 
 /**
+ * Fuse two ranked memory lists via Reciprocal Rank Fusion.
+ *
+ * RRF score: Σ 1/(k + rank_i(d)) for each list d appears in.
+ * k=60 is the standard from Cormack et al. 2009 — large enough that
+ * rank 1 vs rank 2 contributes comparably (1/61 vs 1/62) but rank 50
+ * barely registers (1/110). This is why RRF handles heterogeneous
+ * score scales gracefully: a BM25 score of 15 and a cosine of 0.82
+ * can't be linearly combined, but their ranks always can.
+ *
+ * For HyDE fusion specifically: a candidate that's rank 3 in vector
+ * search AND rank 5 in HyDE-re-search gets ~(1/63 + 1/65) = 0.031,
+ * beating a candidate that's rank 1 in vector alone at (1/61) = 0.016.
+ * That's the point — cross-list consensus beats single-list dominance.
+ *
+ * Preserves the original top-relevance memory's metadata; the final
+ * `relevance` field is overwritten with the RRF score (caller-visible
+ * ordering is what matters, not absolute score magnitude).
+ */
+function fuseByReciprocalRank(
+  listA: RetrievedMemory[],
+  listB: RetrievedMemory[],
+  maxResults: number,
+  k = 60,
+): RetrievedMemory[] {
+  const scores = new Map<string, number>()
+  const byId = new Map<string, RetrievedMemory>()
+
+  for (let rank = 0; rank < listA.length; rank++) {
+    const m = listA[rank]!
+    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1))
+    if (!byId.has(m.id)) byId.set(m.id, m)
+  }
+
+  for (let rank = 0; rank < listB.length; rank++) {
+    const m = listB[rank]!
+    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1))
+    if (!byId.has(m.id)) byId.set(m.id, m)
+  }
+
+  return Array.from(scores.entries())
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, maxResults)
+    .map(([id, score]) => {
+      const base = byId.get(id)!
+      return { ...base, relevance: score }
+    })
+}
+
+/**
  * Apply project soft-preference to a ranked memory list.
  * Same-project matches get a +0.10 relevance boost. When strict is on,
  * explicit different-project matches are dropped (null project is kept
@@ -333,13 +383,26 @@ export async function recall(
     memories = applyProjectPreference(memories, project, projectStrict)
   }
 
-  // HyDE fallback: when top result is weak, generate a hypothetical answer,
-  // embed it, and run a second search pass. Merge results (highest score wins).
+  // HyDE: fires on weak direct-match scores OR multi-hop / temporal queries.
+  // Multi-hop and temporal queries often have decent vector scores on ONE hop
+  // while the full evidence chain lives elsewhere — HyDE expands the search
+  // into embedding-space neighbors that share the hypothetical answer's shape.
+  //
+  // Merge strategy: Reciprocal Rank Fusion (k=60, standard) instead of
+  // max-wins. RRF handles the case where HyDE surfaces a candidate at rank 3
+  // while vector search has it at rank 50 — both signals contribute without
+  // the stronger raw score overwriting the fused rank.
   const topScore = memories[0]?.relevance ?? 0
-  if (topScore < 0.3 && intelligence?.generateHypotheticalDoc && intelligence?.embed) {
+  const signals = classifyQuery(query)
+  const shouldFireHyDE =
+    intelligence?.generateHypotheticalDoc !== undefined &&
+    intelligence?.embed !== undefined &&
+    (topScore < 0.3 || signals.multiHop || signals.temporal)
+
+  if (shouldFireHyDE) {
     try {
-      const hydeDoc = await intelligence.generateHypotheticalDoc(query)
-      const hydeEmbedding = await intelligence.embed(hydeDoc)
+      const hydeDoc = await intelligence!.generateHypotheticalDoc!(query)
+      const hydeEmbedding = await intelligence!.embed!(hydeDoc)
       const hydeMemories = await unifiedSearch({
         query,
         embedding: hydeEmbedding,
@@ -351,20 +414,10 @@ export async function recall(
         projectId,
       })
 
-      // Merge: unique IDs, prefer highest score
-      const merged = new Map<string, RetrievedMemory>()
-      for (const m of [...memories, ...hydeMemories]) {
-        const existing = merged.get(m.id)
-        if (!existing || m.relevance > existing.relevance) {
-          merged.set(m.id, m)
-        }
-      }
-      memories = Array.from(merged.values())
-        .sort((a, b) => b.relevance - a.relevance)
-        .slice(0, strategy.maxResults)
+      memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)
     } catch (err) {
       // HyDE failed — use direct results
-      console.error('[engram] HyDE fallback error:', err)
+      console.error('[engram] HyDE error:', err)
     }
   }
 
