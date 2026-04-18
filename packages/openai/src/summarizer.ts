@@ -212,17 +212,41 @@ export class OpenAISummarizer {
   }
 
   async generateHypotheticalDoc(query: string): Promise<string> {
+    // HyDE (Hypothetical Document Embeddings): generate a passage
+    // that WOULD appear in the stored text if it answered the query.
+    // Embedding that passage gives better retrieval than embedding the
+    // question itself because conversational storage contains
+    // declarative sentences, not interrogatives.
+    //
+    // Prompt emphasises: (a) include entities verbatim — "Alice" stays
+    // "Alice", not "a person", so BM25 overlaps exactly with source
+    // text; (b) preserve temporal markers literally — "last week"
+    // stays "last week" so the retrieval catches the same phrasing in
+    // conversation turns; (c) write in conversational style, not
+    // encyclopedic — source is dialogue, not Wikipedia.
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages: [
         {
           role: 'system',
           content:
-            'Given a query about past conversations or memories, write a short paragraph (2-3 sentences) that would be the CONTENT of the memory being searched for. Do not explain or answer the question — write what the stored memory would contain. Be specific and include likely keywords.',
+            [
+              'You generate hypothetical conversation excerpts for retrieval.',
+              '',
+              'Given a question about a past conversation, write a 2-3 sentence excerpt',
+              'that would appear VERBATIM in the stored turn if it answered the question.',
+              '',
+              'Rules:',
+              '1. Include ALL proper nouns from the question verbatim (names, places, products).',
+              '2. Preserve temporal phrases verbatim ("last week", "on Monday", "2023").',
+              '3. Write in conversational first/second person — this is dialogue, not an article.',
+              '4. Do not explain or answer — write what the stored turn would literally say.',
+              '5. If the question has multiple entities, have them appear together in the excerpt.',
+            ].join('\n'),
         },
         { role: 'user', content: query },
       ],
-      max_tokens: 150,
+      max_tokens: 180,
       temperature: 0.7,
     })
     return response.choices[0].message.content ?? query
