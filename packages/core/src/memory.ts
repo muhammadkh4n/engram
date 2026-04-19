@@ -225,10 +225,11 @@ export class Memory {
     })
 
     // Anthropic-style Contextual Retrieval (opt-in via MemoryOptions).
-    // Generate a situating preamble from recent turns + current chunk,
-    // then prepend it to the text we EMBED *and* STORE for FTS. The
-    // original cleanText is preserved in metadata.rawCleanText so
-    // display paths can recover verbatim input.
+    // Split signal: the LLM-generated preamble enriches the EMBEDDING only.
+    // The content column stays pristine so FTS5/BM25 keeps exact lexical
+    // precision for dates, proper nouns, and literal tokens — otherwise the
+    // preamble "about Jon's banking job" outranks the literal "Jan 19, 2023"
+    // at retrieval time and hurts temporal queries (Wave 2 bench confirmed).
     let contextualPreamble = ''
     if (
       this.opts.contextualRetrieval === true &&
@@ -249,21 +250,16 @@ export class Memory {
       }
     }
 
-    const storedContent = contextualPreamble
-      ? `${contextualPreamble.trim()}\n\n${cleanText}`
-      : cleanText
-
-    // Contextual embedding: prepend 1-2 preceding turns so the embedding
-    // model captures conversational flow. Short casual turns (~123 chars)
-    // embed weakly in isolation; with context they match queries better.
-    // When contextualRetrieval is on, the LLM-generated preamble in
-    // storedContent already carries richer context, so we embed that.
+    // Contextual embedding: prepend the situating preamble (when present) or
+    // the last 1-2 preceding turns so the embedding model captures
+    // conversational flow. Short casual turns (~123 chars) embed weakly in
+    // isolation; with context they match queries better.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
         let textToEmbed: string
         if (contextualPreamble) {
-          textToEmbed = storedContent.slice(-1500)
+          textToEmbed = `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
         } else if (cleanText.length > 20) {
           const contextTurns = recentEpisodes
             .slice(-2)
@@ -293,17 +289,16 @@ export class Memory {
     if (Array.isArray(message.content)) {
       metadata.rawContent = message.content
     }
-    // When we enriched the stored content with a contextualization preamble,
-    // keep the verbatim cleanText available to display consumers.
+    // Preamble is stored in metadata only (not concatenated to content) so
+    // downstream consumers can inspect it without FTS/BM25 seeing it.
     if (contextualPreamble) {
-      metadata.rawCleanText = cleanText
       metadata.contextualPreamble = contextualPreamble
     }
 
     const episode = await this.storage.episodes.insert({
       sessionId,
       role: message.role,
-      content: storedContent,
+      content: cleanText,
       salience,
       accessCount: 0,
       lastAccessed: null,
