@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [check]
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v6
@@ -69,3 +69,18 @@ jobs:
       - run: npm publish --workspace=packages/openclaw --access public || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Create a GitHub Release for the pushed tag with auto-generated notes.
+      # Idempotent: re-runs on an existing tag skip instead of failing.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists — skipping."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi

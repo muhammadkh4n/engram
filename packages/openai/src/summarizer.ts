@@ -212,30 +212,86 @@ export class OpenAISummarizer {
   }
 
   async generateHypotheticalDoc(query: string): Promise<string> {
+    // HyDE (Hypothetical Document Embeddings): generate a passage
+    // that WOULD appear in the stored text if it answered the query.
+    // Embedding that passage gives better retrieval than embedding the
+    // question itself because conversational storage contains
+    // declarative sentences, not interrogatives.
+    //
+    // Prompt emphasises: (a) include entities verbatim — "Alice" stays
+    // "Alice", not "a person", so BM25 overlaps exactly with source
+    // text; (b) preserve temporal markers literally — "last week"
+    // stays "last week" so the retrieval catches the same phrasing in
+    // conversation turns; (c) write in conversational style, not
+    // encyclopedic — source is dialogue, not Wikipedia.
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages: [
         {
           role: 'system',
           content:
-            'Given a query about past conversations or memories, write a short paragraph (2-3 sentences) that would be the CONTENT of the memory being searched for. Do not explain or answer the question — write what the stored memory would contain. Be specific and include likely keywords.',
+            [
+              'You generate hypothetical conversation excerpts for retrieval.',
+              '',
+              'Given a question about a past conversation, write a 2-3 sentence excerpt',
+              'that would appear VERBATIM in the stored turn if it answered the question.',
+              '',
+              'Rules:',
+              '1. Include ALL proper nouns from the question verbatim (names, places, products).',
+              '2. Preserve temporal phrases verbatim ("last week", "on Monday", "2023").',
+              '3. Write in conversational first/second person — this is dialogue, not an article.',
+              '4. Do not explain or answer — write what the stored turn would literally say.',
+              '5. If the question has multiple entities, have them appear together in the excerpt.',
+            ].join('\n'),
         },
         { role: 'user', content: query },
       ],
-      max_tokens: 150,
+      max_tokens: 180,
       temperature: 0.7,
     })
     return response.choices[0].message.content ?? query
   }
 
   async expandQuery(query: string): Promise<string[]> {
+    // Query expansion for BM25 rescue — generate alternative keyword
+    // phrases that might appear in stored conversation turns. The
+    // output feeds textBoost() which does tsquery OR-matching.
+    //
+    // Key behaviors:
+    // - Always include the ORIGINAL proper nouns from the query (they
+    //   are the strongest retrieval signal and should never be
+    //   rephrased away).
+    // - For temporal queries, emit both the relative phrase ("last
+    //   week") and plausible concrete dates ("May 7", "2023-05-07")
+    //   since stored turns often contain both forms.
+    // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
+    //   IDF naturally, but short queries get dropped entirely if
+    //   they're all stopwords.
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages: [
         {
           role: 'system',
           content:
-            'Given a search query about past conversations or memories, generate 3-5 alternative keyword phrases that might appear in the stored content. Output ONLY a JSON array of strings. Do not explain. Focus on nouns, tools, technologies, and action words that the stored content would contain.',
+            [
+              'You generate keyword variants for retrieval from past conversations.',
+              '',
+              'Given a question, output 4-6 alternative phrases that might appear',
+              'verbatim in the stored dialogue turns answering the question.',
+              '',
+              'Rules:',
+              '1. INCLUDE every proper noun from the question unchanged (names, places, products).',
+              '2. For temporal queries, include BOTH relative phrases ("last week") AND',
+              '   plausible concrete forms ("Monday", "May 7", "last month", "2023").',
+              '3. Prefer nouns, verbs, and named entities. Skip articles and auxiliaries.',
+              '4. Output ONLY a JSON array of strings, no explanation.',
+              '',
+              'Examples:',
+              '- Q: "Where did Alice and Bob meet?"',
+              '  A: ["Alice Bob", "Alice met Bob", "Bob and Alice", "first time meeting", "meeting place"]',
+              '- Q: "What did we discuss last week?"',
+              '  A: ["last week", "discussed", "previous week", "Monday Tuesday Wednesday", "talked about"]',
+            ].join('\n'),
         },
         { role: 'user', content: query },
       ],
@@ -445,6 +501,65 @@ export class OpenAISummarizer {
       return Array.from(seen.values())
     } catch {
       return []
+    }
+  }
+
+  /**
+   * Anthropic-style Contextual Retrieval preamble generator.
+   *
+   * Given a chunk (single conversational turn) and its surrounding context
+   * (recent turns in the same session), generate 1-2 sentences that situate
+   * the chunk — disambiguating pronouns, dates, topics, and subjects that
+   * downstream search would otherwise miss.
+   *
+   * Uses gpt-4.1-mini (a separate RPD bucket from gpt-4o-mini) with a
+   * short prompt modelled on Anthropic's published pattern. Non-fatal on
+   * failure: returns an empty string so the caller proceeds with the raw
+   * chunk. ~$0.0001 per contextualization at current pricing.
+   */
+  async contextualizeChunk(
+    chunk: string,
+    opts: { conversationContext: string; speakerRole?: string },
+  ): Promise<string> {
+    if (chunk.trim().length === 0) return ''
+    const context = opts.conversationContext.slice(-2000)
+    if (context.trim().length === 0) {
+      // First turn or no prior context — nothing to situate against.
+      return ''
+    }
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model: 'gpt-4.1-mini',
+        messages: [
+          {
+            role: 'system',
+            content: `You generate short contextual preambles for conversational memory chunks, so a downstream search index can retrieve them without the surrounding dialogue. Produce ONE or TWO short sentences that:
+- Identify the speaker by name if derivable from context, not by pronoun
+- Resolve any pronouns, demonstratives, or time references ("she" → "Melanie"; "that trip" → "the Paris trip"; "last week" → the concrete period)
+- Name the topic succinctly
+
+Do NOT restate the chunk. Do NOT invent facts not present in the context or the chunk. If the context is insufficient to situate the chunk, output an empty string.
+
+Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
+          },
+          {
+            role: 'user',
+            content: `<conversation_context>\n${context}\n</conversation_context>\n\n<chunk role="${opts.speakerRole ?? 'unknown'}">\n${chunk}\n</chunk>\n\nPreamble:`,
+          },
+        ],
+        max_tokens: 80,
+        temperature: 0,
+      })
+
+      const raw = resp.choices[0]?.message?.content?.trim() ?? ''
+      // Guardrail: keep it bounded and scrub accidental markdown wrappers.
+      return raw.replace(/^["'`*_]+|["'`*_]+$/g, '').slice(0, 400)
+    } catch (err) {
+      process.stderr.write(
+        `[openai] contextualizeChunk failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      )
+      return ''
     }
   }
 

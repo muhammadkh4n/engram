@@ -119,6 +119,24 @@ export interface IntelligenceAdapter {
   /** Generate 3-5 keyword variants to bridge vocabulary gap for BM25 boost */
   expandQuery?(query: string): Promise<string[]>
   /**
+   * Anthropic-style Contextual Retrieval: given a chunk and surrounding
+   * conversation context, produce a 1-2 sentence preamble that situates
+   * the chunk. The preamble is prepended to the chunk before embedding
+   * and BM25 indexing, dramatically reducing retrieval failures on
+   * queries that can't resolve the chunk without situational cues
+   * ("who is 'she' referring to?", "which trip is this?").
+   *
+   * Implementations should:
+   *   - Return a concise preamble (≤80 tokens).
+   *   - Focus on disambiguating entities, times, and topics not literally
+   *     present in the chunk but needed to resolve references.
+   *   - Be robust to empty context (first turn of a session).
+   */
+  contextualizeChunk?(
+    chunk: string,
+    opts: { conversationContext: string; speakerRole?: string },
+  ): Promise<string>
+  /**
    * Cross-encoder reranking: given a query and candidate documents,
    * return documents with relevance scores (0-1) based on deeper
    * semantic analysis than bi-encoder similarity.

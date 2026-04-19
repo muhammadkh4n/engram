@@ -121,6 +121,51 @@ describe('recall engine — deep mode', () => {
     expect(expandQuery).toHaveBeenCalledWith('TypeScript strict mode?')
   })
 
+  it('calls expandQuery for multi-hop queries even in light mode', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['Alice', 'Bob', 'meeting'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('Where did Alice and Bob first meet?', storage, sensory, opts)
+
+    expect(expandQuery).toHaveBeenCalledWith('Where did Alice and Bob first meet?')
+  })
+
+  it('calls expandQuery for temporal queries even in light mode', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['discuss', 'last', 'week'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('What did we discuss last week?', storage, sensory, opts)
+
+    expect(expandQuery).toHaveBeenCalledWith('What did we discuss last week?')
+  })
+
+  it('does NOT call expandQuery for plain light-mode single-hop queries', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue([])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    await recall('TypeScript strict mode', storage, sensory, opts)
+
+    expect(expandQuery).not.toHaveBeenCalled()
+  })
+
   it('runs association walk', async () => {
     const storage = createMockStorage()
     const sensory = new SensoryBuffer()
@@ -264,6 +309,35 @@ describe('recall engine — cross-encoder reranking', () => {
     await recall('TypeScript', storage, sensory, opts)
 
     expect(rerank).not.toHaveBeenCalled()
+  })
+
+  it('calls rerank for multi-hop queries (adaptive blend verified via code review)', async () => {
+    // Note: actual blend-ratio differentiation (0.7 single-hop vs 0.85
+    // multi-hop/temporal) is hard to isolate in unit tests because RRF
+    // compresses original scores for queries that fire HyDE. Testing
+    // ordering behavior within one call is the stable contract.
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const rerank = vi.fn().mockImplementation(
+      async (_q: string, docs: ReadonlyArray<{ id: string; content: string }>) =>
+        docs.map((d, i) => ({ id: d.id, score: (docs.length - i) / docs.length }))
+    )
+    const intelligence: IntelligenceAdapter = { rerank }
+    const opts = makeOpts({
+      strategy: RECALL_STRATEGIES.light,
+      intelligence,
+    })
+
+    const multiHop = await recall('Where did Alice and Bob meet?', storage, sensory, opts)
+
+    expect(rerank).toHaveBeenCalled()
+    // Results are sorted descending by blended relevance regardless of ratio
+    for (let i = 1; i < multiHop.memories.length; i++) {
+      expect(multiHop.memories[i - 1].relevance).toBeGreaterThanOrEqual(
+        multiHop.memories[i].relevance
+      )
+    }
   })
 
   it('falls back to original ranking when rerank throws', async () => {

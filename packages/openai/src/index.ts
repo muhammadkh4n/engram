@@ -68,5 +68,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     rerank(query, documents) {
       return summarizer.rerank(query, documents)
     },
+    contextualizeChunk(chunk, ctxOpts) {
+      return summarizer.contextualizeChunk(chunk, ctxOpts)
+    },
   }
 }

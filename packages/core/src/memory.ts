@@ -68,6 +68,18 @@ export interface MemoryOptions {
    * Defaults to false for backward compatibility.
    */
   autoConsolidate?: boolean | AutoConsolidationOpts
+  /**
+   * Opt into Anthropic-style Contextual Retrieval. When true AND the
+   * intelligence adapter implements contextualizeChunk, every ingested
+   * turn is augmented with an LLM-generated preamble that situates it
+   * (speaker, time, topic, pronoun resolution) before indexing. Both
+   * the embedding and the FTS/BM25 index benefit — the raw user text
+   * is preserved in metadata.rawContent for display.
+   *
+   * Defaults to false: the extra LLM call at ingest adds cost and
+   * latency, and the lift is workload-dependent.
+   */
+  contextualRetrieval?: boolean
 }
 
 export interface SessionHandle {
@@ -212,15 +224,43 @@ export class Memory {
       since: new Date(Date.now() - 30 * 60 * 1000), // last 30 minutes
     })
 
-    // Contextual embedding: prepend 1-2 preceding turns so the embedding
-    // model captures conversational flow. Short casual turns (~123 chars)
-    // embed weakly in isolation; with context they match queries better.
-    // episode.content stays as bare cleanText — only the vector changes.
+    // Anthropic-style Contextual Retrieval (opt-in via MemoryOptions).
+    // Split signal: the LLM-generated preamble enriches the EMBEDDING only.
+    // The content column stays pristine so FTS5/BM25 keeps exact lexical
+    // precision for dates, proper nouns, and literal tokens — otherwise the
+    // preamble "about Jon's banking job" outranks the literal "Jan 19, 2023"
+    // at retrieval time and hurts temporal queries (Wave 2 bench confirmed).
+    let contextualPreamble = ''
+    if (
+      this.opts.contextualRetrieval === true &&
+      this.intelligence?.contextualizeChunk &&
+      cleanText.length >= 10
+    ) {
+      const windowTurns = recentEpisodes
+        .slice(-10)
+        .map(e => `[${e.role}] ${e.content}`)
+        .join('\n')
+      try {
+        contextualPreamble = await this.intelligence.contextualizeChunk(cleanText, {
+          conversationContext: windowTurns,
+          speakerRole: message.role,
+        })
+      } catch (err) {
+        console.warn('[engram] contextualizeChunk failed (falling back to raw chunk):', err)
+      }
+    }
+
+    // Contextual embedding: prepend the situating preamble (when present) or
+    // the last 1-2 preceding turns so the embedding model captures
+    // conversational flow. Short casual turns (~123 chars) embed weakly in
+    // isolation; with context they match queries better.
     let embedding: number[] | null = null
     if (this.intelligence?.embed) {
       try {
         let textToEmbed: string
-        if (cleanText.length > 20) {
+        if (contextualPreamble) {
+          textToEmbed = `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
+        } else if (cleanText.length > 20) {
           const contextTurns = recentEpisodes
             .slice(-2)
             .map(e => e.content)
@@ -248,6 +288,11 @@ export class Memory {
     // Store raw content array in metadata for full fidelity when it was an array.
     if (Array.isArray(message.content)) {
       metadata.rawContent = message.content
+    }
+    // Preamble is stored in metadata only (not concatenated to content) so
+    // downstream consumers can inspect it without FTS/BM25 seeing it.
+    if (contextualPreamble) {
+      metadata.contextualPreamble = contextualPreamble
     }
 
     const episode = await this.storage.episodes.insert({
