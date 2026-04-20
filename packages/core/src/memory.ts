@@ -94,6 +94,12 @@ export interface SessionHandle {
 
 const DEFAULT_SESSION_ID = 'default'
 const CONFIDENCE_FLOOR = 0.05
+// Minimum relevance required for a memory to count as "affected" by forget().
+// computeScore() sums cosine similarity + bm25 boost + recency + access + role
+// bumps; a typical strong match lands around 0.6–1.1, weak semantic adjacency
+// around 0.25–0.45, and pure gibberish rarely clears 0.35. 0.5 keeps the
+// targeted-prune ergonomic without false-positives on unrelated content.
+const DEFAULT_FORGET_MIN_RELEVANCE = 0.5
 
 export class Memory {
   private storage: StorageAdapter
@@ -690,11 +696,17 @@ export class Memory {
    */
   async forget(
     query: string,
-    opts?: { tier?: string; confirm?: boolean }
+    opts?: { tier?: string; confirm?: boolean; minRelevance?: number }
   ): Promise<{ count: number; previewed: RetrievedMemory[] }> {
     this.assertInitialized()
 
     const confirm = opts?.confirm ?? false
+    // Forget needs narrower targeting than recall. Recall's 'deep' mode is
+    // designed to cast a wide net (15 base + 2-hop associations), which for
+    // forget means a gibberish query still matches 70–90+ memories — a foot-
+    // gun with confirm=true. Default to the 'light' strategy (no association
+    // expansion, 8 results) and add a minimum-relevance gate on top.
+    const minRelevance = opts?.minRelevance ?? DEFAULT_FORGET_MIN_RELEVANCE
 
     // Embed query so vector search can find matches. Without this, forget()
     // returns no results because engineRecall's vector path requires a
@@ -708,9 +720,8 @@ export class Memory {
       }
     }
 
-    // Search matching memories across relevant tiers using deep strategy
     const result = await engineRecall(query, this.storage, this.sensory, {
-      strategy: RECALL_STRATEGIES['deep'],
+      strategy: RECALL_STRATEGIES['light'],
       embedding,
       intelligence: this.intelligence,
       graph: this._graph,
@@ -718,7 +729,11 @@ export class Memory {
       ...(this._projectId ? { projectId: this._projectId } : {}),
     })
 
+    // Score-gate: only memories whose relevance clears the threshold are
+    // considered "affected". Without this, forget returns the entire scan
+    // pool and confirm=true would carpet-bomb the store on a weak query.
     const allMemories = [...result.memories, ...result.associations]
+      .filter(m => m.relevance >= minRelevance)
 
     // Filter by tier if specified
     const filtered = opts?.tier
