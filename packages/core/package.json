@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/core",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Cognitive memory engine for AI agents — episodic, semantic, procedural memory with consolidation",
   "keywords": [
     "memory",

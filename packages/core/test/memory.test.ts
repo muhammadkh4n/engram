@@ -637,6 +637,38 @@ describe('Memory — forget()', () => {
     expect(typeof result.count).toBe('number')
     expect(result.count).toBe(result.previewed.length)
   })
+
+  // Issue #7: forget() used to match 73–99 memories for any query (including
+  // gibberish) because 'deep' strategy + no score gate = entire scan pool is
+  // "affected". Regression: confirm the narrow-strategy + minRelevance gate
+  // keeps gibberish from sweeping the store.
+  it('gibberish query does not carpet-bomb the store (issue #7)', async () => {
+    await memory.ingestBatch([
+      { role: 'user', content: 'I prefer TypeScript over JavaScript', sessionId: 'forget-gibberish' },
+      { role: 'assistant', content: 'TypeScript strict mode enables type checking', sessionId: 'forget-gibberish' },
+      { role: 'user', content: 'Python has good async support', sessionId: 'forget-gibberish' },
+      { role: 'assistant', content: 'asyncio handles concurrent I/O in Python', sessionId: 'forget-gibberish' },
+      { role: 'user', content: 'Go channels are great for concurrency', sessionId: 'forget-gibberish' },
+      { role: 'assistant', content: 'goroutines spawn cheaply compared to threads', sessionId: 'forget-gibberish' },
+    ])
+
+    const result = await memory.forget('xyzzy_nonexistent_gibberish_12345')
+
+    // Before the fix, this returned 70+ (or at least all ingested + associations).
+    // After the fix, the minRelevance gate prunes the entire pool.
+    expect(result.count).toBeLessThanOrEqual(1)
+  })
+
+  it('minRelevance override lets callers relax or tighten the gate', async () => {
+    await memory.ingestBatch([
+      { role: 'user', content: 'TypeScript is a typed superset of JavaScript', sessionId: 'forget-override' },
+      { role: 'assistant', content: 'TypeScript adds static typing', sessionId: 'forget-override' },
+    ])
+
+    // 999 is unreachable; nothing should pass the gate.
+    const tight = await memory.forget('TypeScript', { minRelevance: 999 })
+    expect(tight.count).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
