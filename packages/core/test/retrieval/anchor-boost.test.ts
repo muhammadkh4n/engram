@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractQueryAnchors } from '../../src/retrieval/search.js'
+import { extractQueryAnchors, computeAnchorIdfMap } from '../../src/retrieval/search.js'
 
 describe('extractQueryAnchors — lever #2 precision signal', () => {
   it('extracts proper nouns but skips sentence-start capitalization', () => {
@@ -42,5 +42,57 @@ describe('extractQueryAnchors — lever #2 precision signal', () => {
     expect(a.entities).toHaveLength(0)
     expect(a.dates).toHaveLength(0)
     expect(a.quoted).toHaveLength(0)
+  })
+})
+
+describe('computeAnchorIdfMap — lever #2 v2 (IDF weighting)', () => {
+  it('assigns max weight (1.0) to a rare anchor and zero to a saturated one', () => {
+    const anchors = extractQueryAnchors('What did Melanie tell Rob about January 19, 2023?')
+    // Pool: every chunk mentions "Melanie", only one mentions the date.
+    const pool = [
+      'Melanie said she was tired',
+      'Melanie was working on her novel',
+      'Melanie visited Paris',
+      'Melanie and Rob talked about January 19, 2023',
+      'Melanie played clarinet',
+    ]
+    const idf = computeAnchorIdfMap(anchors, pool)
+    // Saturated anchor: near-zero after normalization
+    expect(idf.get('melanie') ?? 0).toBeLessThan(0.1)
+    // Rare anchor (date) or rare entity (Rob, 1 chunk): max weight
+    const rob = idf.get('rob') ?? 0
+    const date = idf.get('january 19, 2023') ?? 0
+    expect(Math.max(rob, date)).toBeCloseTo(1.0, 1)
+  })
+
+  it('returns empty map when no anchors or pool is empty', () => {
+    const anchors = extractQueryAnchors('what happened here')
+    expect(computeAnchorIdfMap(anchors, ['some content']).size).toBe(0)
+
+    const anchors2 = extractQueryAnchors('What did Rob say?')
+    expect(computeAnchorIdfMap(anchors2, []).size).toBe(0)
+  })
+
+  it('returns empty map when every anchor is in every chunk (no signal)', () => {
+    const anchors = extractQueryAnchors('Did Rob talk to Melanie?')
+    const pool = [
+      'Rob told Melanie about it',
+      'Melanie replied to Rob',
+      'Rob and Melanie went out',
+    ]
+    // Both "rob" and "melanie" have df=3 of 3 → raw IDF = log(4/4)=0, maxIdf=0, map is empty.
+    const idf = computeAnchorIdfMap(anchors, pool)
+    expect(idf.size).toBe(0)
+  })
+
+  it('handles dates (already lower-cased at extraction time)', () => {
+    const anchors = extractQueryAnchors('What happened on 2023-05-11?')
+    const pool = [
+      'nothing happened',
+      'I went to the store',
+      'on 2023-05-11 we met',
+    ]
+    const idf = computeAnchorIdfMap(anchors, pool)
+    expect(idf.get('2023-05-11') ?? 0).toBeCloseTo(1.0, 1)
   })
 })

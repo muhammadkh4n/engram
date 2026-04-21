@@ -77,11 +77,10 @@ interface ScoringInput {
   primingBoost: number
   role: string | undefined
   content: string
-  /** Count of query-side "anchors" (proper nouns / dates / quoted literals)
-   *  that appear verbatim in the chunk. Discriminates chunks that contain
-   *  the exact entity the question asks about from adjacent chunks that
-   *  merely share the topic — directly targets the WRONG_FACT miss mode. */
-  anchorMatches: number
+  /** Pre-computed IDF-weighted anchor boost ∈ [0, ANCHOR_BOOST_MAX].
+   *  Caller builds this via computeAnchorBoost(queryAnchors, content, idfMap)
+   *  where idfMap is computed once per query from the candidate pool. */
+  anchorBoost: number
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +93,14 @@ export interface QueryAnchors {
   quoted: readonly string[]   // verbatim quoted spans
 }
 
-/** Per-anchor-match boost on computeScore's output. 4 matches saturate. */
+/** Per-anchor-match boost on computeScore's output. Weighted by normalized IDF.
+ *  - PER_MATCH is the weight when IDF is maximal (rarest anchor in the pool).
+ *  - Common anchors (e.g. recurring speaker names that appear in every chunk)
+ *    get IDF ≈ 0 and contribute nothing — this is the explicit fix for v1's
+ *    conv-26 failure where "Melanie"/"Caroline" in every chunk saturated the
+ *    flat boost.
+ *  - MAX caps the summed contribution from all matched anchors.
+ *  Set ANCHOR_BOOST_MAX = 0 to disable the feature without removing code. */
 const ANCHOR_BOOST_PER_MATCH = 0.12
 const ANCHOR_BOOST_MAX = 0.48
 
@@ -143,13 +149,71 @@ export function extractQueryAnchors(query: string): QueryAnchors {
   }
 }
 
-function countAnchorMatches(anchors: QueryAnchors, content: string): number {
+/** Flatten the three anchor categories into a single lowercase key set.
+ *  Dates are already lower-cased in extractQueryAnchors; entities/quoted are not. */
+function flattenAnchors(anchors: QueryAnchors): string[] {
+  const out = new Set<string>()
+  for (const e of anchors.entities) out.add(e.toLowerCase())
+  for (const d of anchors.dates) out.add(d)
+  for (const q of anchors.quoted) out.add(q.toLowerCase())
+  return [...out]
+}
+
+/** Compute a normalized IDF weight ∈ [0, 1] for every query anchor against
+ *  the candidate pool. Pool-local DF is the right conditional estimator —
+ *  we're discriminating among topic-relevant candidates, not the global
+ *  corpus. A recurring speaker name saturates near 0; a literal date or a
+ *  one-off entity lands near 1. */
+export function computeAnchorIdfMap(
+  anchors: QueryAnchors,
+  poolContents: readonly string[],
+): ReadonlyMap<string, number> {
+  const keys = flattenAnchors(anchors)
+  const map = new Map<string, number>()
+  if (keys.length === 0 || poolContents.length === 0) return map
+
+  const lcContents = poolContents.map(c => c.toLowerCase())
+  const N = lcContents.length
+
+  const rawIdf = new Map<string, number>()
+  let maxIdf = 0
+  for (const k of keys) {
+    let df = 0
+    for (const c of lcContents) if (c.includes(k)) df++
+    // Plus-one smoothing: an anchor that matches nothing still yields a
+    // positive IDF (a signal: "this chunk is unusual because it lacks any
+    // query anchors" is handled by absence of boost, not negative boost).
+    const idf = Math.log((N + 1) / (df + 1))
+    rawIdf.set(k, idf)
+    if (idf > maxIdf) maxIdf = idf
+  }
+
+  if (maxIdf <= 0) return map // every anchor appears in every chunk, no signal
+  for (const [k, v] of rawIdf) map.set(k, v / maxIdf)
+  return map
+}
+
+/** Compute the per-chunk anchor boost given the pre-built IDF map. */
+function computeAnchorBoost(
+  anchors: QueryAnchors,
+  content: string,
+  idfMap: ReadonlyMap<string, number>,
+): number {
+  if (idfMap.size === 0) return 0
   const lc = content.toLowerCase()
-  let hits = 0
-  for (const e of anchors.entities) if (lc.includes(e.toLowerCase())) hits++
-  for (const d of anchors.dates) if (lc.includes(d)) hits++ // already lower-cased where needed
-  for (const q of anchors.quoted) if (lc.includes(q.toLowerCase())) hits++
-  return hits
+  let sum = 0
+  for (const e of anchors.entities) {
+    const k = e.toLowerCase()
+    if (lc.includes(k)) sum += (idfMap.get(k) ?? 0) * ANCHOR_BOOST_PER_MATCH
+  }
+  for (const d of anchors.dates) {
+    if (lc.includes(d)) sum += (idfMap.get(d) ?? 0) * ANCHOR_BOOST_PER_MATCH
+  }
+  for (const q of anchors.quoted) {
+    const k = q.toLowerCase()
+    if (lc.includes(k)) sum += (idfMap.get(k) ?? 0) * ANCHOR_BOOST_PER_MATCH
+  }
+  return Math.min(ANCHOR_BOOST_MAX, sum)
 }
 
 /**
@@ -175,7 +239,7 @@ function computeScore(input: ScoringInput): number {
     primingBoost,
     role,
     content,
-    anchorMatches,
+    anchorBoost,
   } = input
 
   const baseScore = baseSim
@@ -184,11 +248,6 @@ function computeScore(input: ScoringInput): number {
   const recencyScore = recencyBias * Math.exp(-ageHours / 720)
   const accessBoost = Math.min(0.1, accessCount * 0.01)
   const roleBoost = role === 'assistant' ? 0.05 : 0
-  // Anchor boost: up to +0.48 for chunks containing the exact proper nouns /
-  // dates / quoted spans from the query. Targets the WRONG_FACT failure mode
-  // (59% of misses) where the retriever surfaces a topic-adjacent chunk but
-  // misses the specific one naming the entity the question is about.
-  const anchorBoost = Math.min(ANCHOR_BOOST_MAX, anchorMatches * ANCHOR_BOOST_PER_MATCH)
 
   // Recall failure noise: assistant parroting "I can't find [topic]" has
   // high similarity to the topic but zero information. 60% penalty.
@@ -256,80 +315,72 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     boostMap.set(b.id, b.boost)
   }
 
-  // Step 3: Score + rank
+  // Step 3: Assemble full candidate pool BEFORE scoring so IDF sees the
+  // union of vector + BM25 rescue candidates. A chunk's anchor boost is
+  // weighted against pool-local document frequency, so the pool must be
+  // stable before any score is computed.
   const scored: RetrievedMemory[] = []
-  const scoredIds = new Set<string>()
 
   if (vectorResults.length > 0) {
-    // Primary path: score vector results with optional BM25 boost
+    type PoolEntry = {
+      typed: TypedMemory
+      cosineSimilarity: number
+      bm25RawBoost: number
+    }
+    const pool: PoolEntry[] = []
+    const seen = new Set<string>()
+
     for (const { item: typed, similarity } of vectorResults) {
-      const content = extractContent(typed)
-      const metadata = extractMetadata(typed)
-      const createdAt = extractCreatedAt(typed)
-      const accessCount = extractAccessCount(typed)
-      const role = extractRole(typed)
-      const primingBoost = sensory.getPrimingBoost(content)
-      const bm25RawBoost = boostMap.get(typed.data.id) ?? 0
-
-      const finalScore = computeScore({
+      pool.push({
+        typed,
         cosineSimilarity: similarity,
-        bm25Boost: bm25RawBoost,
-        recencyBias: strategy.recencyBias,
-        createdAt,
-        accessCount,
-        primingBoost,
-        role,
-        content,
-        anchorMatches: countAnchorMatches(queryAnchors, content),
+        bm25RawBoost: boostMap.get(typed.data.id) ?? 0,
       })
-
-      scored.push({
-        id: typed.data.id,
-        type: typed.type,
-        content,
-        relevance: finalScore,
-        source: 'recall',
-        metadata: { ...metadata, createdAt: createdAt.toISOString() },
-      })
-      scoredIds.add(typed.data.id)
+      seen.add(typed.data.id)
     }
 
-    // BM25 rescue: add keyword-matched candidates that vector search missed.
-    // These have exact term matches but weak embedding similarity — the
-    // reranker will sort out true relevance.
+    // BM25 rescue: keyword-matched candidates that vector search missed.
+    // Load them now so IDF includes their content in the pool-local DF.
     for (const b of boostResults) {
-      if (scoredIds.has(b.id)) continue
+      if (seen.has(b.id)) continue
       const typed = await storage.getById(b.id, b.type)
       if (!typed) continue
+      pool.push({ typed, cosineSimilarity: 0, bm25RawBoost: b.boost })
+      seen.add(typed.data.id)
+    }
 
-      const content = extractContent(typed)
-      const metadata = extractMetadata(typed)
-      const createdAt = extractCreatedAt(typed)
-      const accessCount = extractAccessCount(typed)
-      const role = extractRole(typed)
+    const poolContents = pool.map(p => extractContent(p.typed))
+    const anchorIdfMap = computeAnchorIdfMap(queryAnchors, poolContents)
+
+    for (let i = 0; i < pool.length; i++) {
+      const p = pool[i]!
+      const content = poolContents[i]!
+      const metadata = extractMetadata(p.typed)
+      const createdAt = extractCreatedAt(p.typed)
+      const accessCount = extractAccessCount(p.typed)
+      const role = extractRole(p.typed)
       const primingBoost = sensory.getPrimingBoost(content)
 
       const finalScore = computeScore({
-        cosineSimilarity: 0,
-        bm25Boost: b.boost,
+        cosineSimilarity: p.cosineSimilarity,
+        bm25Boost: p.bm25RawBoost,
         recencyBias: strategy.recencyBias,
         createdAt,
         accessCount,
         primingBoost,
         role,
         content,
-        anchorMatches: countAnchorMatches(queryAnchors, content),
+        anchorBoost: computeAnchorBoost(queryAnchors, content, anchorIdfMap),
       })
 
       scored.push({
-        id: typed.data.id,
-        type: typed.type,
+        id: p.typed.data.id,
+        type: p.typed.type,
         content,
         relevance: finalScore,
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
       })
-      scoredIds.add(typed.data.id)
     }
   } else if (terms.length > 0) {
     // Fallback: text-only search via per-tier .search() methods.
@@ -365,8 +416,12 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       })
     }
 
-    for (const { typed, similarity } of textHits) {
-      const content = extractContent(typed)
+    const textContents = textHits.map(h => extractContent(h.typed))
+    const anchorIdfMap = computeAnchorIdfMap(queryAnchors, textContents)
+
+    for (let i = 0; i < textHits.length; i++) {
+      const { typed, similarity } = textHits[i]!
+      const content = textContents[i]!
       const metadata = extractMetadata(typed)
       const createdAt = extractCreatedAt(typed)
       const accessCount = extractAccessCount(typed)
@@ -382,7 +437,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         primingBoost,
         role,
         content,
-        anchorMatches: countAnchorMatches(queryAnchors, content),
+        anchorBoost: computeAnchorBoost(queryAnchors, content, anchorIdfMap),
       })
 
       scored.push({
