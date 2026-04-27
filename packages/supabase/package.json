@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
-    "@supabase/supabase-js": "^2.103.0"
+    "@supabase/supabase-js": "^2.104.1"
   },
   "devDependencies": {
     "typescript": "^6.0.2",
