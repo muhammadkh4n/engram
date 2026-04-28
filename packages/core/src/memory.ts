@@ -1,4 +1,4 @@
-import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RetrievedMemory } from './types.js'
+import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, RetrievedMemory } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -85,7 +85,7 @@ export interface MemoryOptions {
 export interface SessionHandle {
   readonly sessionId: string
   ingest(message: Omit<Message, 'sessionId'>): Promise<void>
-  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number }) : Promise<RecallResult>
+  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy> }) : Promise<RecallResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -418,16 +418,23 @@ export class Memory {
   // Recall
   // ---------------------------------------------------------------------------
 
-  /** Intent-analyzed, association-walked, primed recall. */
+  /** Intent-analyzed, association-walked, primed recall.
+   *
+   *  `strategyOverride` is a forensics/bench escape hatch: when set, the
+   *  classified strategy is shallow-merged with the override before retrieval.
+   *  Production callers should leave it undefined; only forensic harnesses
+   *  use it to vary maxResults / association hops without re-classifying. */
   async recall(
     query: string,
-    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date }
+    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date; strategyOverride?: Partial<RecallStrategy> }
   ): Promise<RecallResult> {
     this.assertInitialized()
 
     // Classify intent using new 3-mode system
     const mode = classifyMode(query)
-    const strategy = RECALL_STRATEGIES[mode]
+    const strategy: RecallStrategy = opts?.strategyOverride
+      ? { ...RECALL_STRATEGIES[mode], ...opts.strategyOverride }
+      : RECALL_STRATEGIES[mode]
 
     // Still run old analyzer for backward compat (intent field in result)
     const intent = this.intentAnalyzer.analyze(query, {
@@ -782,7 +789,7 @@ export class Memory {
       ingest: (message: Omit<Message, 'sessionId'>) => {
         return this.ingest({ ...message, sessionId: sid })
       },
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number }) => {
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy> }) => {
         return this.recall(query, opts)
       },
     }

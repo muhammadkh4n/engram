@@ -115,7 +115,6 @@ async function main(): Promise<void> {
   const byConversation: Record<string, ConvBucket> = {}
 
   for (const d of judge.details) {
-    const cat = CATEGORY_NAMES[d.category]
     if (!byConversation[d.conversation_id]) {
       byConversation[d.conversation_id] = {
         total_wrong: 0,

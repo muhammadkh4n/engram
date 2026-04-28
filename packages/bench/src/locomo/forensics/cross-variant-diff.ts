@@ -239,7 +239,7 @@ function printSummary(
   baseline: VariantSummary,
   variants: VariantSummary[],
   flips: Record<string, { wins: PerQRow[]; regressions: PerQRow[]; agreed_hit: number; agreed_miss: number; baseline_only_hit: number; variant_only_hit: number }>,
-  rows: PerQRow[],
+  _rows: PerQRow[],
 ): void {
   console.log()
   console.log('═══ Cross-Variant Recall Diff ═══')
