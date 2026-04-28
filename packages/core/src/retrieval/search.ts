@@ -102,7 +102,7 @@ export interface QueryAnchors {
  *  - MAX caps the summed contribution from all matched anchors.
  *  Set ANCHOR_BOOST_MAX = 0 to disable the feature without removing code. */
 const ANCHOR_BOOST_PER_MATCH = 0.12
-const ANCHOR_BOOST_MAX = 0.48
+const ANCHOR_BOOST_MAX = 0
 
 const MONTH_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b(?:\s+\d{1,2}(?:st|nd|rd|th)?)?(?:,?\s+\d{4})?/gi
 const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g
