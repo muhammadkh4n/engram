@@ -3,6 +3,13 @@ import { NeuralGraph } from '../../src/neural-graph.js'
 import { SpreadingActivation } from '../../src/spreading-activation.js'
 import type { GraphConfig } from '../../src/config.js'
 
+/**
+ * Guard flag for integration tests that require a running Neo4j instance.
+ * Set NEO4J_TEST_READY=1 in the environment to enable these tests.
+ * When unset (e.g. in CI without a Neo4j sidecar), the tests are skipped.
+ */
+export const neo4jReady = !!process.env.NEO4J_TEST_READY
+
 export function getTestConfig(): GraphConfig {
   return {
     neo4jUri: process.env.NEO4J_TEST_URI ?? 'bolt://localhost:7687',

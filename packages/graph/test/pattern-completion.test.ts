@@ -2,38 +2,26 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { NeuralGraph } from '../src/neural-graph.js'
 import { parseGraphConfig } from '../src/config.js'
 import { runPatternCompletion } from '../src/pattern-completion.js'
+import { neo4jReady } from './helpers/setup.js'
 
 let graph: NeuralGraph
-let skip = false
 
-beforeAll(async () => {
-  try {
+describe.skipIf(!neo4jReady)('Pattern completion', () => {
+  beforeAll(async () => {
     const config = parseGraphConfig()
     graph = new NeuralGraph(config)
-    await graph.connect()
-    const available = await graph.isAvailable()
-    if (!available) {
-      skip = true
-    }
-  } catch {
-    skip = true
-  }
-})
+    await graph.initialize()
+  })
 
-afterAll(async () => {
-  if (!skip && graph) {
-    await graph.disconnect()
-  }
-})
+  afterAll(async () => {
+    await graph.dispose()
+  })
 
-describe('Pattern completion', () => {
   beforeEach(async () => {
-    if (skip) return
     await graph.runCypherWrite('MATCH (n) DETACH DELETE n')
   })
 
   it('finds correct memory from partial attributes (emotion + entity)', async () => {
-    if (skip) return
 
     // Target memory connected to 'negative' emotion and 'TypeScript' entity
     await graph.runCypherWrite(`
@@ -63,8 +51,6 @@ describe('Pattern completion', () => {
   })
 
   it('applies convergence bonus when multiple attributes reach the same memory', async () => {
-    if (skip) return
-
     await graph.runCypherWrite(`
       CREATE (m:Memory {id: 'ep-t', label: 'Target', memoryType: 'episode', projectId: null}),
              (e:Emotion {id: 'emotion:s1:negative', label: 'negative'}),
@@ -88,8 +74,6 @@ describe('Pattern completion', () => {
   })
 
   it('returns empty results when no graph nodes match any attribute', async () => {
-    if (skip) return
-
     await graph.runCypherWrite(`
       CREATE (m:Memory {id: 'ep1', label: 'Some memory', memoryType: 'episode', projectId: null})
     `)

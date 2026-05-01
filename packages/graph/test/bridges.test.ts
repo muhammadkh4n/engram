@@ -1,38 +1,26 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { NeuralGraph } from '../src/neural-graph.js'
 import { parseGraphConfig } from '../src/config.js'
+import { neo4jReady } from './helpers/setup.js'
 
 let graph: NeuralGraph
-let skip = false
 
-beforeAll(async () => {
-  try {
+describe.skipIf(!neo4jReady)('Cross-project bridge queries', () => {
+  beforeAll(async () => {
     const config = parseGraphConfig()
     graph = new NeuralGraph(config)
-    await graph.connect()
-    const available = await graph.isAvailable()
-    if (!available) {
-      skip = true
-    }
-  } catch {
-    skip = true
-  }
-})
+    await graph.initialize()
+  })
 
-afterAll(async () => {
-  if (!skip && graph) {
-    await graph.disconnect()
-  }
-})
+  afterAll(async () => {
+    await graph.dispose()
+  })
 
-describe('Cross-project bridge queries', () => {
   beforeEach(async () => {
-    if (skip) return
     await graph.runCypherWrite('MATCH (n) DETACH DELETE n')
   })
 
   it('finds shared Person node bridging two projects', async () => {
-    if (skip) return
 
     await graph.runCypherWrite(`
       CREATE (p:Person {id: 'person:sarah', label: 'Sarah'}),
@@ -53,8 +41,6 @@ describe('Cross-project bridge queries', () => {
   })
 
   it('finds shared Entity node bridging two projects', async () => {
-    if (skip) return
-
     await graph.runCypherWrite(`
       CREATE (ent:Entity {id: 'entity:postgresql', label: 'PostgreSQL', entityType: 'tech'}),
              (m1:Memory {id: 'ep-a1', label: 'Alpha uses PostgreSQL', projectId: 'alpha', memoryType: 'episode'}),
@@ -70,8 +56,6 @@ describe('Cross-project bridge queries', () => {
   })
 
   it('returns empty when no shared nodes exist between projects', async () => {
-    if (skip) return
-
     await graph.runCypherWrite(`
       CREATE (m1:Memory {id: 'ep-1', label: 'Alpha only', projectId: 'alpha', memoryType: 'episode'}),
              (m2:Memory {id: 'ep-2', label: 'Beta only', projectId: 'beta', memoryType: 'episode'})

@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { NeuralGraph } from '../src/neural-graph.js'
-import { createTestGraph } from './helpers/setup.js'
+import { createTestGraph, neo4jReady } from './helpers/setup.js'
 
-describe('NeuralGraph (integration)', () => {
+describe.skipIf(!neo4jReady)('NeuralGraph (integration)', () => {
   let graph: NeuralGraph
 
   beforeAll(async () => {
