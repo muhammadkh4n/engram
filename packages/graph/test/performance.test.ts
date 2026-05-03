@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { NeuralGraph } from '../src/neural-graph.js'
 import { SpreadingActivation } from '../src/spreading-activation.js'
-import { createTestGraph, createTestActivation } from './helpers/setup.js'
+import { createTestGraph, createTestActivation, neo4jReady } from './helpers/setup.js'
 
-describe('Performance benchmarks (integration)', () => {
+describe.skipIf(!neo4jReady)('Performance benchmarks (integration)', () => {
   let graph: NeuralGraph
   let activation: SpreadingActivation
 

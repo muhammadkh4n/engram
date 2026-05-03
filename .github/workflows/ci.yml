@@ -18,7 +18,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
-      # Tests are skipped in CI until the graph package's integration
-      # tests learn to skipIf(!process.env.NEO4J_TEST_READY). Running
-      # them without that guard hangs the runner waiting for a Bolt
-      # connection the test helpers don't retry-guard.
+      # NEO4J_TEST_READY is intentionally unset: graph integration tests
+      # are skipped via describe.skipIf(!process.env.NEO4J_TEST_READY).
+      - run: npm test

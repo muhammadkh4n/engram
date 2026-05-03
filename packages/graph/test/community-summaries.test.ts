@@ -1,41 +1,26 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { NeuralGraph } from '../src/neural-graph.js'
 import { parseGraphConfig } from '../src/config.js'
+import { neo4jReady } from './helpers/setup.js'
 
-// ---------------------------------------------------------------------------
-// Skip the entire suite when Neo4j is not available (CI without Neo4j sidecar)
-// ---------------------------------------------------------------------------
 let graph: NeuralGraph
-let skip = false
 
-beforeAll(async () => {
-  try {
+describe.skipIf(!neo4jReady)('Community summary generation', () => {
+  beforeAll(async () => {
     const config = parseGraphConfig()
     graph = new NeuralGraph(config)
-    await graph.connect()
-    const available = await graph.isAvailable()
-    if (!available) {
-      skip = true
-    }
-  } catch {
-    skip = true
-  }
-})
+    await graph.initialize()
+  })
 
-afterAll(async () => {
-  if (!skip && graph) {
-    await graph.disconnect()
-  }
-})
+  afterAll(async () => {
+    await graph.dispose()
+  })
 
-describe('Community summary generation', () => {
   beforeEach(async () => {
-    if (skip) return
     await graph.runCypherWrite('MATCH (n) DETACH DELETE n')
   })
 
   it('getCommunityMembers returns communities with >= minSize members', async () => {
-    if (skip) return
 
     // Create community A: 6 Memory nodes with communityId='0'
     for (let i = 0; i < 6; i++) {
@@ -66,8 +51,6 @@ describe('Community summary generation', () => {
   })
 
   it('getCommunityContext returns frequency counts by context type', async () => {
-    if (skip) return
-
     const topicId = 'topic:authentication'
     await graph.runCypherWrite(`CREATE (t:Topic {id: $id, label: 'authentication'})`, { id: topicId })
 
@@ -92,8 +75,6 @@ describe('Community summary generation', () => {
   })
 
   it('upsertCommunityNode creates Community node and MEMBER_OF relationships', async () => {
-    if (skip) return
-
     for (let i = 0; i < 3; i++) {
       await graph.runCypherWrite(`
         CREATE (m:Memory {id: $id, label: 'mem', communityId: '0', memoryType: 'episode', projectId: null})
