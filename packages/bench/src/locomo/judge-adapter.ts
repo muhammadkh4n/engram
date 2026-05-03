@@ -125,6 +125,13 @@ interface ParsedMessage {
   recipient: string
   timestamp: string
   session: string
+  /**
+   * Pre-computed hypothetical questions (Phase 5.3 ingestion fix).
+   * When `JudgeOpts.withHypotheticalQuestions` is set and these are
+   * present, each HQ is dual-ingested as a Q-prefixed augmented chunk
+   * sharing this turn's session/speaker/timestamp metadata.
+   */
+  hypotheticalQuestions?: string[]
 }
 
 function formatMessage(m: ParsedMessage): string {
@@ -152,7 +159,16 @@ function parseConv(conv: LoCoMoConversationFile): ParsedMessage[] {
       const ts = sdt
         ? new Date(sdt.getTime() + i * 30_000).toISOString().slice(0, 19)
         : ds
-      msgs.push({ content: ct, speaker: sp, recipient, timestamp: ts, session: sk })
+      msgs.push({
+        content: ct,
+        speaker: sp,
+        recipient,
+        timestamp: ts,
+        session: sk,
+        ...(Array.isArray(t.hypotheticalQuestions) && t.hypotheticalQuestions.length > 0
+          ? { hypotheticalQuestions: t.hypotheticalQuestions }
+          : {}),
+      })
     }
   }
   return msgs
@@ -259,6 +275,13 @@ interface JudgeOpts {
   onnxRerankerModel?: string
   /** Anthropic-style Contextual Retrieval at ingest time. */
   contextualRetrieval?: boolean
+  /**
+   * Phase 5 ingestion fix: dual-ingest each turn alongside any pre-computed
+   * `hypotheticalQuestions` on the dataset. Each HQ becomes a Q-prefixed
+   * augmented chunk that improves recall on specific-entity queries where
+   * query vocabulary differs from content vocabulary.
+   */
+  withHypotheticalQuestions?: boolean
 }
 
 interface QuestionDetail {
@@ -285,24 +308,50 @@ async function retrieveContext(memory: Memory, question: string): Promise<string
   return top.map((m, i) => `[Memory ${i + 1}] ${m.content}`).join('\n\n')
 }
 
-async function ingestConversationForJudge(conv: LoCoMoConversationFile, memory: Memory): Promise<number> {
+async function ingestConversationForJudge(
+  conv: LoCoMoConversationFile,
+  memory: Memory,
+  opts?: { withHypotheticalQuestions?: boolean },
+): Promise<number> {
   const convId = conv.sample_id
   const msgs = parseConv(conv)
+  const withHQ = opts?.withHypotheticalQuestions === true
+  let count = 0
   for (const msg of msgs) {
     const role: 'user' | 'assistant' = msg.speaker === (conv.conversation.speaker_b as string) ? 'assistant' : 'user'
+    const sharedMetadata = {
+      locomoConvId: convId,
+      locomoSpeaker: msg.speaker,
+      locomoSession: msg.session,
+      locomoTimestamp: msg.timestamp,
+    }
+
+    // Original turn (formatted with timestamp + speaker prefix).
     await memory.ingest({
       role,
       content: formatMessage(msg),
       sessionId: `locomo:${convId}:${msg.session}`,
-      metadata: {
-        locomoConvId: convId,
-        locomoSpeaker: msg.speaker,
-        locomoSession: msg.session,
-        locomoTimestamp: msg.timestamp,
-      },
+      metadata: { ...sharedMetadata, locomoChunkKind: 'turn' },
     })
+    count++
+
+    // HQ-augmented chunks: each hypothetical question prepended to the
+    // formatted turn body. Question carries query-style vocabulary
+    // (matches LoCoMo question phrasing in cosine space) while the
+    // turn body anchors the answer-bearing content.
+    if (withHQ && Array.isArray(msg.hypotheticalQuestions) && msg.hypotheticalQuestions.length > 0) {
+      for (const hq of msg.hypotheticalQuestions) {
+        await memory.ingest({
+          role,
+          content: `Q: ${hq}\n${formatMessage(msg)}`,
+          sessionId: `locomo:${convId}:${msg.session}`,
+          metadata: { ...sharedMetadata, locomoChunkKind: 'hq_augmented', locomoHQ: hq },
+        })
+        count++
+      }
+    }
   }
-  return msgs.length
+  return count
 }
 
 async function benchConversation(
@@ -324,7 +373,9 @@ async function benchConversation(
   })
 
   const ingestStart = Date.now()
-  const msgCount = await ingestConversationForJudge(conv, memory)
+  const msgCount = await ingestConversationForJudge(conv, memory, {
+    withHypotheticalQuestions: opts.withHypotheticalQuestions === true,
+  })
   if (opts.consolidate !== false) {
     await memory.consolidate('light')
     await memory.consolidate('deep')

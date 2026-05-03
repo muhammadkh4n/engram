@@ -94,11 +94,13 @@ export class LoCoMoAdapter {
   async ingestConversation(
     conv: LoCoMoConversationFile,
     memory: Memory,
+    opts?: { withHypotheticalQuestions?: boolean },
   ): Promise<{ episodesIngested: number; sessionsCreated: string[] }> {
     const convId = conv.sample_id
     const sessions = this.extractSessions(conv)
     const sessionsCreated: string[] = []
     let episodesIngested = 0
+    const withHQ = opts?.withHypotheticalQuestions === true
 
     for (const session of sessions) {
       const sessionId = `locomo:${convId}:session-${session.segmentIndex}`
@@ -110,20 +112,39 @@ export class LoCoMoAdapter {
         // Map speaker name to role
         const role: 'user' | 'assistant' = turn.speaker === session.speakerB ? 'assistant' : 'user'
 
+        const sharedMetadata = {
+          locomoConvId: convId,
+          locomoDiaId: turn.dia_id, // e.g. "D1:3" — the evidence ID directly
+          locomoSegmentIndex: session.segmentIndex,
+          locomoSpeaker: turn.speaker,
+          locomoDate: session.dateTime,
+        }
+
+        // Always ingest the original turn.
         await memory.ingest({
           role,
           content: turn.text.trim(),
           sessionId,
-          metadata: {
-            locomoConvId: convId,
-            locomoDiaId: turn.dia_id, // e.g. "D1:3" — the evidence ID directly
-            locomoSegmentIndex: session.segmentIndex,
-            locomoSpeaker: turn.speaker,
-            locomoDate: session.dateTime,
-          },
+          metadata: { ...sharedMetadata, locomoChunkKind: 'turn' },
         })
-
         episodesIngested++
+
+        // HQ-augmented chunks: each hypothetical question prepended to the
+        // turn body, sharing the same locomoDiaId so recall@K still scores
+        // correctly. The Q-prefix carries query-style vocabulary (matches
+        // LoCoMo question phrasing in cosine space) while the turn body
+        // anchors the answer-bearing content.
+        if (withHQ && Array.isArray(turn.hypotheticalQuestions) && turn.hypotheticalQuestions.length > 0) {
+          for (const hq of turn.hypotheticalQuestions) {
+            await memory.ingest({
+              role,
+              content: `Q: ${hq}\n${turn.text.trim()}`,
+              sessionId,
+              metadata: { ...sharedMetadata, locomoChunkKind: 'hq_augmented', locomoHQ: hq },
+            })
+            episodesIngested++
+          }
+        }
       }
     }
 
@@ -232,7 +253,9 @@ export class LoCoMoAdapter {
     const memory = await createBenchMemory(opts)
 
     const ingestStart = Date.now()
-    const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory)
+    const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory, {
+      withHypotheticalQuestions: opts?.withHypotheticalQuestions === true,
+    })
 
     if (opts?.consolidate !== false) {
       await memory.consolidate('light')
