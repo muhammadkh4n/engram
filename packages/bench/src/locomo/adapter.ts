@@ -120,31 +120,30 @@ export class LoCoMoAdapter {
           locomoDate: session.dateTime,
         }
 
-        // Always ingest the original turn.
+        // Build chunk content. With Plan B HQ-replacement (Phase 5.4b): if
+        // hypothetical questions were pre-computed, prepend them to the turn
+        // body as `Q: ${hq}` lines so this single chunk carries BOTH the
+        // query-form vocabulary (for cosine match against LoCoMo questions)
+        // AND the answer-bearing content. One chunk per turn — no rerank-pool
+        // dilution (Phase 5α dual-ingest failed at -7pp on multi-hop because
+        // 3× chunks crowded the rerank pool).
+        const hqs = withHQ && Array.isArray(turn.hypotheticalQuestions) ? turn.hypotheticalQuestions : []
+        const turnBody = turn.text.trim()
+        const content = hqs.length > 0
+          ? `${hqs.map((q) => `Q: ${q}`).join('\n')}\n${turnBody}`
+          : turnBody
+
         await memory.ingest({
           role,
-          content: turn.text.trim(),
+          content,
           sessionId,
-          metadata: { ...sharedMetadata, locomoChunkKind: 'turn' },
+          metadata: {
+            ...sharedMetadata,
+            locomoChunkKind: hqs.length > 0 ? 'turn_with_hq' : 'turn',
+            ...(hqs.length > 0 ? { locomoHQCount: hqs.length } : {}),
+          },
         })
         episodesIngested++
-
-        // HQ-augmented chunks: each hypothetical question prepended to the
-        // turn body, sharing the same locomoDiaId so recall@K still scores
-        // correctly. The Q-prefix carries query-style vocabulary (matches
-        // LoCoMo question phrasing in cosine space) while the turn body
-        // anchors the answer-bearing content.
-        if (withHQ && Array.isArray(turn.hypotheticalQuestions) && turn.hypotheticalQuestions.length > 0) {
-          for (const hq of turn.hypotheticalQuestions) {
-            await memory.ingest({
-              role,
-              content: `Q: ${hq}\n${turn.text.trim()}`,
-              sessionId,
-              metadata: { ...sharedMetadata, locomoChunkKind: 'hq_augmented', locomoHQ: hq },
-            })
-            episodesIngested++
-          }
-        }
       }
     }
 

@@ -326,30 +326,28 @@ async function ingestConversationForJudge(
       locomoTimestamp: msg.timestamp,
     }
 
-    // Original turn (formatted with timestamp + speaker prefix).
+    // Plan B (Phase 5.4b): single chunk per turn. If hypothetical questions
+    // were pre-computed, prepend them as `Q: ${hq}` lines to the formatted
+    // turn body. One chunk = both query-vocabulary (for cosine match) AND
+    // answer-bearing content. Same chunk count as baseline → no rerank-pool
+    // dilution (Phase 5α dual-ingest failed for that reason).
+    const hqs = withHQ && Array.isArray(msg.hypotheticalQuestions) ? msg.hypotheticalQuestions : []
+    const formatted = formatMessage(msg)
+    const content = hqs.length > 0
+      ? `${hqs.map((q) => `Q: ${q}`).join('\n')}\n${formatted}`
+      : formatted
+
     await memory.ingest({
       role,
-      content: formatMessage(msg),
+      content,
       sessionId: `locomo:${convId}:${msg.session}`,
-      metadata: { ...sharedMetadata, locomoChunkKind: 'turn' },
+      metadata: {
+        ...sharedMetadata,
+        locomoChunkKind: hqs.length > 0 ? 'turn_with_hq' : 'turn',
+        ...(hqs.length > 0 ? { locomoHQCount: hqs.length } : {}),
+      },
     })
     count++
-
-    // HQ-augmented chunks: each hypothetical question prepended to the
-    // formatted turn body. Question carries query-style vocabulary
-    // (matches LoCoMo question phrasing in cosine space) while the
-    // turn body anchors the answer-bearing content.
-    if (withHQ && Array.isArray(msg.hypotheticalQuestions) && msg.hypotheticalQuestions.length > 0) {
-      for (const hq of msg.hypotheticalQuestions) {
-        await memory.ingest({
-          role,
-          content: `Q: ${hq}\n${formatMessage(msg)}`,
-          sessionId: `locomo:${convId}:${msg.session}`,
-          metadata: { ...sharedMetadata, locomoChunkKind: 'hq_augmented', locomoHQ: hq },
-        })
-        count++
-      }
-    }
   }
   return count
 }
