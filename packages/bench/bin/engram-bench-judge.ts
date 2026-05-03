@@ -26,6 +26,7 @@ interface CliArgs {
   rerankerBackend?: 'openai' | 'onnx' | 'none'
   onnxRerankerModel?: string
   contextualRetrieval: boolean
+  withHypotheticalQuestions: boolean
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -39,6 +40,7 @@ function parseArgs(argv: string[]): CliArgs {
     if (a === '--no-graph') { args['graph'] = false; continue }
     if (a === '--contextualize') { args['contextualize'] = true; continue }
     if (a === '--no-contextualize') { args['contextualize'] = false; continue }
+    if (a === '--with-hypothetical-questions') { args['with-hypothetical-questions'] = true; continue }
     if (a.startsWith('--')) {
       args[a.slice(2)] = argv[i + 1] ?? true
       i++
@@ -76,6 +78,7 @@ function parseArgs(argv: string[]): CliArgs {
     ...(rerankerBackend !== undefined ? { rerankerBackend } : {}),
     ...(onnxRerankerModel !== undefined ? { onnxRerankerModel } : {}),
     contextualRetrieval: args['contextualize'] === true,
+    withHypotheticalQuestions: args['with-hypothetical-questions'] === true,
   }
 }
 
@@ -93,6 +96,7 @@ async function main(): Promise<void> {
     rerankerBackend?: 'openai' | 'onnx' | 'none'
     onnxRerankerModel?: string
     contextualRetrieval?: boolean
+    withHypotheticalQuestions?: boolean
   } = {
     smoke: args.smoke,
     consolidate: args.consolidate,
@@ -104,6 +108,7 @@ async function main(): Promise<void> {
   if (args.rerankerBackend !== undefined) runOpts.rerankerBackend = args.rerankerBackend
   if (args.onnxRerankerModel !== undefined) runOpts.onnxRerankerModel = args.onnxRerankerModel
   if (args.contextualRetrieval) runOpts.contextualRetrieval = true
+  if (args.withHypotheticalQuestions) runOpts.withHypotheticalQuestions = true
 
   const result = await runLoCoMoJudgeBench(args.data, runOpts)
 

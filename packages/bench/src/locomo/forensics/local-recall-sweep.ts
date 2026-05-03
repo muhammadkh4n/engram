@@ -42,6 +42,7 @@ interface SweepArgs {
   noConsolidate: boolean
   noGraph: boolean
   noRerank: boolean
+  withHypotheticalQuestions: boolean
   output: string
 }
 
@@ -91,7 +92,9 @@ async function main(): Promise<void> {
 
     try {
       const ingestStart = Date.now()
-      const { episodesIngested, sessionsCreated } = await adapter.ingestConversation(conv, memory)
+      const { episodesIngested, sessionsCreated } = await adapter.ingestConversation(conv, memory, {
+        withHypotheticalQuestions: args.withHypotheticalQuestions,
+      })
       if (!args.noConsolidate) {
         await memory.consolidate('light')
         await memory.consolidate('deep')
@@ -277,6 +280,7 @@ function parseSweepArgs(argv: string[]): SweepArgs {
     noConsolidate: has('no-consolidate'),
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
+    withHypotheticalQuestions: has('with-hypothetical-questions'),
     output: get('output') ?? './results/forensics/local-recall-sweep.json',
   }
 }

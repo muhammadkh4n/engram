@@ -94,11 +94,13 @@ export class LoCoMoAdapter {
   async ingestConversation(
     conv: LoCoMoConversationFile,
     memory: Memory,
+    opts?: { withHypotheticalQuestions?: boolean },
   ): Promise<{ episodesIngested: number; sessionsCreated: string[] }> {
     const convId = conv.sample_id
     const sessions = this.extractSessions(conv)
     const sessionsCreated: string[] = []
     let episodesIngested = 0
+    const withHQ = opts?.withHypotheticalQuestions === true
 
     for (const session of sessions) {
       const sessionId = `locomo:${convId}:session-${session.segmentIndex}`
@@ -110,19 +112,37 @@ export class LoCoMoAdapter {
         // Map speaker name to role
         const role: 'user' | 'assistant' = turn.speaker === session.speakerB ? 'assistant' : 'user'
 
+        const sharedMetadata = {
+          locomoConvId: convId,
+          locomoDiaId: turn.dia_id, // e.g. "D1:3" — the evidence ID directly
+          locomoSegmentIndex: session.segmentIndex,
+          locomoSpeaker: turn.speaker,
+          locomoDate: session.dateTime,
+        }
+
+        // Build chunk content. With Plan B HQ-replacement (Phase 5.4b): if
+        // hypothetical questions were pre-computed, prepend them to the turn
+        // body as `Q: ${hq}` lines so this single chunk carries BOTH the
+        // query-form vocabulary (for cosine match against LoCoMo questions)
+        // AND the answer-bearing content. One chunk per turn — no rerank-pool
+        // dilution (Phase 5α dual-ingest failed at -7pp on multi-hop because
+        // 3× chunks crowded the rerank pool).
+        const hqs = withHQ && Array.isArray(turn.hypotheticalQuestions) ? turn.hypotheticalQuestions : []
+        const turnBody = turn.text.trim()
+        const content = hqs.length > 0
+          ? `${hqs.map((q) => `Q: ${q}`).join('\n')}\n${turnBody}`
+          : turnBody
+
         await memory.ingest({
           role,
-          content: turn.text.trim(),
+          content,
           sessionId,
           metadata: {
-            locomoConvId: convId,
-            locomoDiaId: turn.dia_id, // e.g. "D1:3" — the evidence ID directly
-            locomoSegmentIndex: session.segmentIndex,
-            locomoSpeaker: turn.speaker,
-            locomoDate: session.dateTime,
+            ...sharedMetadata,
+            locomoChunkKind: hqs.length > 0 ? 'turn_with_hq' : 'turn',
+            ...(hqs.length > 0 ? { locomoHQCount: hqs.length } : {}),
           },
         })
-
         episodesIngested++
       }
     }
@@ -232,7 +252,9 @@ export class LoCoMoAdapter {
     const memory = await createBenchMemory(opts)
 
     const ingestStart = Date.now()
-    const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory)
+    const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory, {
+      withHypotheticalQuestions: opts?.withHypotheticalQuestions === true,
+    })
 
     if (opts?.consolidate !== false) {
       await memory.consolidate('light')

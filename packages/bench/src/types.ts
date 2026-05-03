@@ -23,6 +23,16 @@ export interface BenchmarkOpts {
    * the extra latency + cost.
    */
   contextualRetrieval?: boolean
+  /**
+   * Phase 5 ingestion fix: dual-ingest each turn alongside any pre-computed
+   * `turn.hypotheticalQuestions[]` on the dataset. Each HQ is prepended to
+   * the turn body and ingested as an augmented chunk sharing the same
+   * `locomoDiaId`. Designed to fix the query-vocabulary-vs-content-vocabulary
+   * mismatch on specific-entity recall (Phase 5.1 found 68.8% of judge-WRONGs
+   * are pool-misses of this form). Requires the dataset to have been run
+   * through `preprocess-hypothetical-qs.ts` first.
+   */
+  withHypotheticalQuestions?: boolean
   openaiApiKey?: string
   outputPath?: string
 }
