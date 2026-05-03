@@ -8,14 +8,13 @@ import type { SummarizeOptions } from '@engram-mem/core'
 const mockChatCreate = vi.fn()
 
 vi.mock('openai', () => {
+  // Vitest 4.1.5 tightened mock-factory semantics: `vi.fn().mockImplementation(arrow)`
+  // no longer works as a constructor (arrow functions aren't constructable).
+  // Class-based mock satisfies `new OpenAI(...)` from production code.
   return {
-    default: vi.fn().mockImplementation(() => ({
-      chat: {
-        completions: {
-          create: mockChatCreate,
-        },
-      },
-    })),
+    default: class MockOpenAI {
+      chat = { completions: { create: mockChatCreate } }
+    },
   }
 })
 
@@ -293,10 +292,13 @@ describe('OpenAISummarizer', () => {
 
       expect(call.messages).toHaveLength(2)
       expect(call.messages[0].role).toBe('system')
-      expect(call.messages[0].content).toContain('CONTENT of the memory')
+      // System prompt was rewritten to instruct hypothetical-document generation
+      // (HyDE for retrieval). Match the actual current copy.
+      expect(call.messages[0].content).toContain('hypothetical conversation excerpts')
       expect(call.messages[1].role).toBe('user')
       expect(call.messages[1].content).toBe('How do we deploy our services?')
-      expect(call.max_tokens).toBe(150)
+      // Production max_tokens for HyDE was bumped to 180 to allow more verbose excerpts.
+      expect(call.max_tokens).toBe(180)
       expect(call.temperature).toBe(0.7)
     })
 
