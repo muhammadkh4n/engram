@@ -186,7 +186,10 @@ describe('recall engine — HyDE fallback', () => {
 
   it('triggers HyDE when top score < 0.3', async () => {
     const weakResults = makeWeakVectorResults()
-    const storage = createMockStorage({ vectorSearchResults: weakResults })
+    // textBoostResults: [] suppresses the BM25-rescue path (added in 1b49e2d)
+    // that would otherwise inject default-strength candidates and lift topScore
+    // above 0.3, masking the HyDE trigger.
+    const storage = createMockStorage({ vectorSearchResults: weakResults, textBoostResults: [] })
     const sensory = new SensoryBuffer()
 
     const hydeDoc = 'A detailed hypothetical document about deployment.'
@@ -299,7 +302,9 @@ describe('recall engine — cross-encoder reranking', () => {
     const singleResult: SearchResult<TypedMemory>[] = [
       { item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 },
     ]
-    const storage = createMockStorage({ vectorSearchResults: singleResult })
+    // textBoostResults: [] needed since 1b49e2d — BM25-rescue would add candidates
+    // and the test premise of "only one memory" wouldn't hold.
+    const storage = createMockStorage({ vectorSearchResults: singleResult, textBoostResults: [] })
     const sensory = new SensoryBuffer()
 
     const rerank = vi.fn()

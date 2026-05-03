@@ -57,8 +57,9 @@ describe('unifiedSearch', () => {
       storage,
       sensory,
     })
+    // vectorLimit = strategy.maxResults * 4 (LIGHT_STRATEGY.maxResults = 8 → 32)
     expect(storage.vectorSearch).toHaveBeenCalledWith(embedding, {
-      limit: 16,
+      limit: 32,
       sessionId: undefined,
     })
   })
