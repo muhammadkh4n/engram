@@ -8,12 +8,13 @@ import { CircuitOpenError, TimeoutError } from '@engram-mem/core'
 const mockCreate = vi.fn()
 
 vi.mock('openai', () => {
+  // Vitest 4.1.5 tightened mock-factory semantics: `vi.fn().mockImplementation(arrow)`
+  // no longer works as a constructor (arrow functions aren't constructable).
+  // Class-based mock satisfies `new OpenAI(...)` from production code.
   return {
-    default: vi.fn().mockImplementation(() => ({
-      embeddings: {
-        create: mockCreate,
-      },
-    })),
+    default: class MockOpenAI {
+      embeddings = { create: mockCreate }
+    },
   }
 })
 
