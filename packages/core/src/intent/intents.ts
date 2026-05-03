@@ -244,7 +244,18 @@ export function classifyMode(message: string): RecallMode {
   return 'light'
 }
 
-/** Strategy table for the 3 recall modes. */
+/** Strategy table for the 3 recall modes.
+ *
+ * `maxResults` is set to 30 for both `light` and `deep` based on
+ * the LoCoMo recall sweep at results/forensics/local-recall-sweep-mr30.json:
+ * 30 sits at the rerank-dilution sweet spot — small enough that the
+ * cross-encoder reliably keeps gold candidates in top-10
+ * (recall@10 = 68% on conv-26 in degraded mode, beating the
+ * production-mode baseline of 67%), large enough that recall@30
+ * captures another +3pp of golds the reranker disperses to positions
+ * 11-30. mr50 is the dilution cliff (recall@10 collapses to 33%);
+ * mr15-20 leaves recall@30 capacity unused. See
+ * results/forensics/findings.md §"Phase 2b" for the full curve. */
 export const RECALL_STRATEGIES: Record<RecallMode, RecallStrategy> = {
   skip: {
     mode: 'skip',
@@ -256,7 +267,7 @@ export const RECALL_STRATEGIES: Record<RecallMode, RecallStrategy> = {
   },
   light: {
     mode: 'light',
-    maxResults: 8,
+    maxResults: 30,
     associations: false,
     associationHops: 0,
     expand: false,
@@ -264,7 +275,7 @@ export const RECALL_STRATEGIES: Record<RecallMode, RecallStrategy> = {
   },
   deep: {
     mode: 'deep',
-    maxResults: 15,
+    maxResults: 30,
     associations: true,
     associationHops: 2,
     expand: true,

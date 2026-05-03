@@ -50,19 +50,19 @@ describe('RECALL_STRATEGIES — strategy table', () => {
     expect(s.associations).toBe(false)
   })
 
-  it('light strategy: maxResults=8, no expansion, no associations', () => {
+  it('light strategy: maxResults=30, no expansion, no associations', () => {
     const s = RECALL_STRATEGIES.light
     expect(s.mode).toBe('light')
-    expect(s.maxResults).toBe(8)
+    expect(s.maxResults).toBe(30)
     expect(s.expand).toBe(false)
     expect(s.associations).toBe(false)
     expect(s.recencyBias).toBe(0.4)
   })
 
-  it('deep strategy: maxResults=15, expansion=true, associations=true with 2 hops', () => {
+  it('deep strategy: maxResults=30, expansion=true, associations=true with 2 hops', () => {
     const s = RECALL_STRATEGIES.deep
     expect(s.mode).toBe('deep')
-    expect(s.maxResults).toBe(15)
+    expect(s.maxResults).toBe(30)
     expect(s.expand).toBe(true)
     expect(s.associations).toBe(true)
     expect(s.associationHops).toBe(2)
