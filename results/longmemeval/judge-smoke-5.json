@@ -1,0 +1,109 @@
+{
+  "meta": {
+    "args": {
+      "recallOutput": "./results/longmemeval/smoke-5-batched.json",
+      "data": "./data/longmemeval/longmemeval_s_cleaned.json",
+      "genModel": "gpt-4o-mini",
+      "judgeModel": "gpt-4o-mini",
+      "topSessions": 5,
+      "limit": 0,
+      "output": "./results/longmemeval/judge-smoke-5.json"
+    },
+    "total_questions": 5,
+    "total_cost_usd": 0.009027899999999998,
+    "total_seconds": 15.064,
+    "generated_at": "2026-05-24T20:12:59.044Z"
+  },
+  "accuracy": {
+    "correct": 5,
+    "partial": 0,
+    "total": 5,
+    "accuracy": 1,
+    "accuracy_lenient": 1
+  },
+  "by_question_type": {
+    "single-session-user": {
+      "correct": 5,
+      "partial": 0,
+      "total": 5,
+      "accuracy": 1
+    }
+  },
+  "rows": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "gold_answer": "Business Administration",
+      "generated_answer": "You graduated with a degree in Business Administration.",
+      "judge_verdict": "correct",
+      "judge_reasoning": "The generated answer matches the gold answer semantically.",
+      "retrieved_sessions_used": 5,
+      "gen_tokens_in": 11131,
+      "gen_tokens_out": 9,
+      "judge_tokens_in": 138,
+      "judge_tokens_out": 23,
+      "cost_usd": 0.00170955
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "question": "How long is my daily commute to work?",
+      "gold_answer": "45 minutes each way",
+      "generated_answer": "Your daily commute to work is 45 minutes each way.",
+      "judge_verdict": "correct",
+      "judge_reasoning": "The generated answer matches the gold answer semantically.",
+      "retrieved_sessions_used": 5,
+      "gen_tokens_in": 15373,
+      "gen_tokens_out": 12,
+      "judge_tokens_in": 146,
+      "judge_tokens_out": 23,
+      "cost_usd": 0.0023488499999999995
+    },
+    {
+      "question_id": "51a45a95",
+      "question_type": "single-session-user",
+      "question": "Where did I redeem a $5 coupon on coffee creamer?",
+      "gold_answer": "Target",
+      "generated_answer": "You redeemed a $5 coupon on coffee creamer at Target.",
+      "judge_verdict": "correct",
+      "judge_reasoning": "The generated answer matches the gold answer semantically.",
+      "retrieved_sessions_used": 5,
+      "gen_tokens_in": 12798,
+      "gen_tokens_out": 13,
+      "judge_tokens_in": 147,
+      "judge_tokens_out": 23,
+      "cost_usd": 0.0019633499999999996
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "question": "What play did I attend at the local community theater?",
+      "gold_answer": "The Glass Menagerie",
+      "generated_answer": "You attended a production of \"The Glass Menagerie\" at the local community theater.",
+      "judge_verdict": "correct",
+      "judge_reasoning": "The generated answer matches the gold answer semantically by confirming the same play title.",
+      "retrieved_sessions_used": 5,
+      "gen_tokens_in": 6611,
+      "gen_tokens_out": 17,
+      "judge_tokens_in": 152,
+      "judge_tokens_out": 29,
+      "cost_usd": 0.00104205
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "question": "What is the name of the playlist I created on Spotify?",
+      "gold_answer": "Summer Vibes",
+      "generated_answer": "The name of the playlist you created on Spotify is \"Summer Vibes.\"",
+      "judge_verdict": "correct",
+      "judge_reasoning": "The generated answer matches the gold answer semantically.",
+      "retrieved_sessions_used": 5,
+      "gen_tokens_in": 12792,
+      "gen_tokens_out": 15,
+      "judge_tokens_in": 150,
+      "judge_tokens_out": 23,
+      "cost_usd": 0.0019641
+    }
+  ]
+}

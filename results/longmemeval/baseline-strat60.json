@@ -1,0 +1,1936 @@
+{
+  "meta": {
+    "args": {
+      "data": "./data/longmemeval/longmemeval_s_strat50.json",
+      "limit": 0,
+      "maxResults": 30,
+      "noConsolidate": false,
+      "noGraph": false,
+      "noRerank": false,
+      "output": "./results/longmemeval/baseline-strat60.json"
+    },
+    "K_values": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "total_questions": 60,
+    "total_seconds": 9334,
+    "generated_at": "2026-05-24T17:45:19.366Z"
+  },
+  "recall_at_K": {
+    "5": {
+      "hits": 59,
+      "total": 60,
+      "rate": 0.9833333333333333
+    },
+    "10": {
+      "hits": 60,
+      "total": 60,
+      "rate": 1
+    },
+    "20": {
+      "hits": 60,
+      "total": 60,
+      "rate": 1
+    },
+    "30": {
+      "hits": 60,
+      "total": 60,
+      "rate": 1
+    }
+  },
+  "by_question_type": {
+    "single-session-user": {
+      "5": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    },
+    "multi-session": {
+      "5": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    },
+    "single-session-preference": {
+      "5": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    },
+    "temporal-reasoning": {
+      "5": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    },
+    "knowledge-update": {
+      "5": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    },
+    "single-session-assistant": {
+      "5": {
+        "hits": 9,
+        "total": 10,
+        "rate": 0.9
+      },
+      "10": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "20": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      },
+      "30": {
+        "hits": 10,
+        "total": 10,
+        "rate": 1
+      }
+    }
+  },
+  "rows": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "gold_session_ids": [
+        "answer_280352e9"
+      ],
+      "retrieved_session_ids": [
+        "answer_280352e9",
+        "sharegpt_Jcy1CVN_0",
+        "sharegpt_UnjngE7_65",
+        "sharegpt_QZMeA7V_17",
+        "d414cac5_4",
+        "sharegpt_PdnvIns_0",
+        "ultrachat_458322",
+        "sharegpt_T1EiHWI_13",
+        "f6859b48_2",
+        "sharegpt_DGTCD7D_0",
+        "02bd2b90_3",
+        "7045db85_1",
+        "41abc171_4",
+        "sharegpt_BvwQVCO_0",
+        "ec6ca9ef",
+        "52c34859_1"
+      ],
+      "retrieved_count": 16,
+      "episodes_ingested": 550,
+      "ingest_ms": 156772,
+      "eval_ms": 8422,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "question": "How long is my daily commute to work?",
+      "gold_session_ids": [
+        "answer_40a90d51"
+      ],
+      "retrieved_session_ids": [
+        "answer_40a90d51",
+        "7d8b5834_1",
+        "5209e813_2",
+        "c22571ff_2",
+        "004edb32",
+        "afe04238_1",
+        "0afa904a",
+        "db73b7e4_4",
+        "d600c646",
+        "db50c0f6",
+        "b5f561f5_2",
+        "f0fc84ea",
+        "ultrachat_20736",
+        "ultrachat_311002"
+      ],
+      "retrieved_count": 14,
+      "episodes_ingested": 485,
+      "ingest_ms": 136718,
+      "eval_ms": 7671,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "51a45a95",
+      "question_type": "single-session-user",
+      "question": "Where did I redeem a $5 coupon on coffee creamer?",
+      "gold_session_ids": [
+        "answer_d61669c7"
+      ],
+      "retrieved_session_ids": [
+        "answer_d61669c7",
+        "f32d1ccf_1",
+        "4679a05c",
+        "sharegpt_MKMWjX0_25",
+        "07d1915d_1",
+        "55e0c6db_2",
+        "6e0b1800_2",
+        "sharegpt_0dVk0BE_1",
+        "d680a212_1",
+        "sharegpt_apWLb2c_0",
+        "ultrachat_105249"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 529,
+      "ingest_ms": 156465,
+      "eval_ms": 7095,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "question": "What play did I attend at the local community theater?",
+      "gold_session_ids": [
+        "answer_355c48bb"
+      ],
+      "retrieved_session_ids": [
+        "answer_355c48bb",
+        "ultrachat_155546",
+        "ultrachat_221066",
+        "sharegpt_9qAGH5s_0",
+        "sharegpt_KmMXLp3_0",
+        "08469b58",
+        "sharegpt_53zErgw_0",
+        "793382f9_2",
+        "ultrachat_71618",
+        "ultrachat_304942",
+        "7e17ae56_5",
+        "sharegpt_PancT1q_0"
+      ],
+      "retrieved_count": 12,
+      "episodes_ingested": 616,
+      "ingest_ms": 181470,
+      "eval_ms": 13934,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "question": "What is the name of the playlist I created on Spotify?",
+      "gold_session_ids": [
+        "answer_3e012175"
+      ],
+      "retrieved_session_ids": [
+        "answer_3e012175",
+        "8020d945_2",
+        "01bd9def",
+        "2d0d0004",
+        "ultrachat_271928",
+        "sharegpt_Clr6oyu_0",
+        "sharegpt_bph7DTk_7",
+        "sharegpt_85Y0l0J_365",
+        "7b1d1f43_1"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 510,
+      "ingest_ms": 138971,
+      "eval_ms": 8566,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "c5e8278d",
+      "question_type": "single-session-user",
+      "question": "What was my last name before I changed it?",
+      "gold_session_ids": [
+        "answer_f6168136"
+      ],
+      "retrieved_session_ids": [
+        "answer_f6168136",
+        "aaf71ce2_2",
+        "d777e7da_1",
+        "f58317c6",
+        "89c1cdfa_1",
+        "0fe848c5_3",
+        "ultrachat_351273",
+        "89b1028d_1",
+        "64767b7f",
+        "524597e4_1",
+        "9330ccce_2",
+        "dc832f73"
+      ],
+      "retrieved_count": 12,
+      "episodes_ingested": 469,
+      "ingest_ms": 131064,
+      "eval_ms": 9221,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6ade9755",
+      "question_type": "single-session-user",
+      "question": "Where do I take yoga classes?",
+      "gold_session_ids": [
+        "answer_9398da02"
+      ],
+      "retrieved_session_ids": [
+        "de5634fc_2",
+        "answer_9398da02",
+        "ultrachat_462",
+        "ec8fa65d_2",
+        "ultrachat_270925",
+        "5df2f487",
+        "4f29941e_1",
+        "00cca725_2"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 513,
+      "ingest_ms": 149809,
+      "eval_ms": 10310,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6f9b354f",
+      "question_type": "single-session-user",
+      "question": "What color did I repaint my bedroom walls?",
+      "gold_session_ids": [
+        "answer_feb5200f"
+      ],
+      "retrieved_session_ids": [
+        "answer_feb5200f",
+        "0c0f2449_2",
+        "de877349",
+        "ultrachat_549317",
+        "68d4de04_2",
+        "c22eca8c_1",
+        "sharegpt_VAELSB3_0",
+        "40643340_2"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 500,
+      "ingest_ms": 147288,
+      "eval_ms": 7888,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "58ef2f1c",
+      "question_type": "single-session-user",
+      "question": "When did I volunteer at the local animal shelter's fundraising dinner?",
+      "gold_session_ids": [
+        "answer_59547700"
+      ],
+      "retrieved_session_ids": [
+        "answer_59547700",
+        "e6ab6a7b_2",
+        "ultrachat_246324",
+        "ultrachat_5212"
+      ],
+      "retrieved_count": 4,
+      "episodes_ingested": 518,
+      "ingest_ms": 146181,
+      "eval_ms": 11129,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "f8c5f88b",
+      "question_type": "single-session-user",
+      "question": "Where did I buy my new tennis racket from?",
+      "gold_session_ids": [
+        "answer_c3567066"
+      ],
+      "retrieved_session_ids": [
+        "answer_c3567066",
+        "1ede478b",
+        "15232887_1",
+        "68ace657_1",
+        "91880423",
+        "84a93262"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 487,
+      "ingest_ms": 143758,
+      "eval_ms": 12601,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "0a995998",
+      "question_type": "multi-session",
+      "question": "How many items of clothing do I need to pick up or return from a store?",
+      "gold_session_ids": [
+        "answer_afa9873b_2",
+        "answer_afa9873b_3",
+        "answer_afa9873b_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_afa9873b_1",
+        "answer_afa9873b_3",
+        "answer_afa9873b_2",
+        "85846900_2"
+      ],
+      "retrieved_count": 4,
+      "episodes_ingested": 484,
+      "ingest_ms": 147443,
+      "eval_ms": 9860,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6d550036",
+      "question_type": "multi-session",
+      "question": "How many projects have I led or am currently leading?",
+      "gold_session_ids": [
+        "answer_ec904b3c_1",
+        "answer_ec904b3c_4",
+        "answer_ec904b3c_3",
+        "answer_ec904b3c_2"
+      ],
+      "retrieved_session_ids": [
+        "2e4430d8_2",
+        "answer_ec904b3c_1",
+        "sharegpt_J7ZAFLd_0",
+        "answer_ec904b3c_2",
+        "sharegpt_zciCXP1_12",
+        "answer_ec904b3c_4",
+        "a9981dc6_3",
+        "sharegpt_nVi6tIt_0",
+        "sharegpt_fV5wNsl_0",
+        "sharegpt_UbMVpdp_93"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 505,
+      "ingest_ms": 151490,
+      "eval_ms": 11365,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_59c863d7",
+      "question_type": "multi-session",
+      "question": "How many model kits have I worked on or bought?",
+      "gold_session_ids": [
+        "answer_593bdffd_4",
+        "answer_593bdffd_1",
+        "answer_593bdffd_3",
+        "answer_593bdffd_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_593bdffd_4",
+        "answer_593bdffd_1",
+        "answer_593bdffd_2",
+        "answer_593bdffd_3",
+        "2f09d4c8"
+      ],
+      "retrieved_count": 5,
+      "episodes_ingested": 481,
+      "ingest_ms": 136375,
+      "eval_ms": 10039,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "b5ef892d",
+      "question_type": "multi-session",
+      "question": "How many days did I spend on camping trips in the United States this year?",
+      "gold_session_ids": [
+        "answer_a8b4290f_3",
+        "answer_a8b4290f_1",
+        "answer_a8b4290f_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_a8b4290f_3",
+        "answer_a8b4290f_1",
+        "answer_a8b4290f_2",
+        "12cff183_1",
+        "ultrachat_565056"
+      ],
+      "retrieved_count": 5,
+      "episodes_ingested": 516,
+      "ingest_ms": 155655,
+      "eval_ms": 10561,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "e831120c",
+      "question_type": "multi-session",
+      "question": "How many weeks did it take me to watch all the Marvel Cinematic Universe movies and the main Star Wars films?",
+      "gold_session_ids": [
+        "answer_86c505e7_1",
+        "answer_86c505e7_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_86c505e7_2",
+        "answer_86c505e7_1",
+        "8fb3fe3a_1",
+        "ba6b67af_2",
+        "63388005"
+      ],
+      "retrieved_count": 5,
+      "episodes_ingested": 481,
+      "ingest_ms": 145226,
+      "eval_ms": 7098,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "3a704032",
+      "question_type": "multi-session",
+      "question": "How many plants did I acquire in the last month?",
+      "gold_session_ids": [
+        "answer_c2204106_2",
+        "answer_c2204106_3",
+        "answer_c2204106_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_c2204106_1",
+        "answer_c2204106_2",
+        "answer_c2204106_3",
+        "ultrachat_501733"
+      ],
+      "retrieved_count": 4,
+      "episodes_ingested": 479,
+      "ingest_ms": 142158,
+      "eval_ms": 9187,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_d84a3211",
+      "question_type": "multi-session",
+      "question": "How much total money have I spent on bike-related expenses since the start of the year?",
+      "gold_session_ids": [
+        "answer_2880eb6c_2",
+        "answer_2880eb6c_4",
+        "answer_2880eb6c_1",
+        "answer_2880eb6c_3"
+      ],
+      "retrieved_session_ids": [
+        "answer_2880eb6c_2",
+        "answer_2880eb6c_4",
+        "answer_2880eb6c_3",
+        "answer_2880eb6c_1"
+      ],
+      "retrieved_count": 4,
+      "episodes_ingested": 495,
+      "ingest_ms": 146612,
+      "eval_ms": 9866,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "aae3761f",
+      "question_type": "multi-session",
+      "question": "How many hours in total did I spend driving to my three road trip destinations combined?",
+      "gold_session_ids": [
+        "answer_526354c8_1",
+        "answer_526354c8_3",
+        "answer_526354c8_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_526354c8_2",
+        "answer_526354c8_3",
+        "answer_526354c8_1",
+        "b192ae00_2",
+        "072b4f50_1",
+        "ultrachat_92484"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 485,
+      "ingest_ms": 150324,
+      "eval_ms": 10545,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_f2262a51",
+      "question_type": "multi-session",
+      "question": "How many different doctors did I visit?",
+      "gold_session_ids": [
+        "answer_55a6940c_3",
+        "answer_55a6940c_1",
+        "answer_55a6940c_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_55a6940c_3",
+        "answer_55a6940c_2",
+        "answer_55a6940c_1",
+        "sharegpt_BWMyoNr_0",
+        "ultrachat_268434",
+        "dd81b163_1",
+        "8db0ab95_2"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 479,
+      "ingest_ms": 154314,
+      "eval_ms": 7871,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "dd2973ad",
+      "question_type": "multi-session",
+      "question": "What time did I go to bed on the day before I had a doctor's appointment?",
+      "gold_session_ids": [
+        "answer_f9de4602_2",
+        "answer_f9de4602_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_f9de4602_2",
+        "answer_f9de4602_1",
+        "sharegpt_5BYr1yR_0",
+        "56266c38_1",
+        "bc542ef7_2",
+        "sharegpt_O6NO7Vo_9",
+        "6551be60_3",
+        "0f73eee7_2",
+        "sharegpt_WGS6keq_29",
+        "1a70d1f3_2",
+        "e5f08e40"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 515,
+      "ingest_ms": 158732,
+      "eval_ms": 9222,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "8a2466db",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend some resources where I can learn more about video editing?",
+      "gold_session_ids": [
+        "answer_edb03329"
+      ],
+      "retrieved_session_ids": [
+        "d8b3e1c8_2",
+        "answer_edb03329",
+        "sharegpt_osTHjYi_0",
+        "6a5b5a78",
+        "6dcf5fa0_1",
+        "3392c0c7",
+        "76967d22"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 508,
+      "ingest_ms": 148420,
+      "eval_ms": 8879,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "06878be2",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest some accessories that would complement my current photography setup?",
+      "gold_session_ids": [
+        "answer_555dfb94"
+      ],
+      "retrieved_session_ids": [
+        "answer_555dfb94",
+        "8fcfbe43_2",
+        "465e7ef9",
+        "3e9fce53_1",
+        "ca929779_1",
+        "79d53fd0_2",
+        "85b50955_1",
+        "9863a1c8_3"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 443,
+      "ingest_ms": 133427,
+      "eval_ms": 7186,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "75832dbd",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend some recent publications or conferences that I might find interesting?",
+      "gold_session_ids": [
+        "answer_d87a6ef8"
+      ],
+      "retrieved_session_ids": [
+        "answer_d87a6ef8",
+        "sharegpt_xni9yYO_6",
+        "sharegpt_FYqt26U_0",
+        "sharegpt_E0YL5SX_157",
+        "c51583cd_1",
+        "e765a945_2",
+        "be753d18",
+        "47ec1674_2",
+        "ultrachat_533748",
+        "d49b1a24_1"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 474,
+      "ingest_ms": 145247,
+      "eval_ms": 7419,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest a hotel for my upcoming trip to Miami?",
+      "gold_session_ids": [
+        "answer_d586e9cd"
+      ],
+      "retrieved_session_ids": [
+        "answer_d586e9cd",
+        "8464304d_2",
+        "f20e72e4_1",
+        "3c3a9042_3"
+      ],
+      "retrieved_count": 4,
+      "episodes_ingested": 475,
+      "ingest_ms": 144448,
+      "eval_ms": 7204,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "35a27287",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend some interesting cultural events happening around me this weekend?",
+      "gold_session_ids": [
+        "answer_9b182436"
+      ],
+      "retrieved_session_ids": [
+        "answer_9b182436",
+        "ultrachat_267380",
+        "58ae7c4f_3",
+        "a98ff421_1",
+        "880ee13e",
+        "ultrachat_360890",
+        "02f2ab8e_2",
+        "465f0d1b_1",
+        "5dcfc9e1_1",
+        "99887392_1",
+        "e4a1b565_2"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 519,
+      "ingest_ms": 151166,
+      "eval_ms": 8989,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "32260d93",
+      "question_type": "single-session-preference",
+      "question": "Can you recommend a show or movie for me to watch tonight?",
+      "gold_session_ids": [
+        "answer_0250ae1c"
+      ],
+      "retrieved_session_ids": [
+        "answer_0250ae1c",
+        "d6bbe94d_3",
+        "04bef53b",
+        "573dc24b_1",
+        "ultrachat_507667",
+        "6d3f5c68_4",
+        "5ace29d7_1",
+        "60ff3a8c",
+        "35c5419d_abs_2",
+        "sharegpt_H4jw5s7_39"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 524,
+      "ingest_ms": 158087,
+      "eval_ms": 10061,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "195a1a1b",
+      "question_type": "single-session-preference",
+      "question": "Can you suggest some activities that I can do in the evening?",
+      "gold_session_ids": [
+        "answer_6dc4305e"
+      ],
+      "retrieved_session_ids": [
+        "answer_6dc4305e",
+        "1b71c896_2",
+        "d03b6a05_2",
+        "ed9dad6c_2",
+        "89a1800c_2",
+        "9b90460f_3",
+        "9f12daa1_1",
+        "b76006cb_2",
+        "87fff4b4_1",
+        "ce79a004",
+        "ultrachat_199480",
+        "af0ab6ab",
+        "668a301e"
+      ],
+      "retrieved_count": 13,
+      "episodes_ingested": 515,
+      "ingest_ms": 161014,
+      "eval_ms": 10544,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "afdc33df",
+      "question_type": "single-session-preference",
+      "question": "My kitchen's becoming a bit of a mess again. Any tips for keeping it clean?",
+      "gold_session_ids": [
+        "answer_8549e5e0"
+      ],
+      "retrieved_session_ids": [
+        "answer_8549e5e0",
+        "d5128b51",
+        "0b0bc8ae_2",
+        "e58109ed_1",
+        "d03b6a05_3",
+        "22f9f163_3",
+        "43b53ac4_1",
+        "d70b7418",
+        "b6558bfb",
+        "ca929779_1"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 502,
+      "ingest_ms": 148778,
+      "eval_ms": 8501,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "question": "I've been struggling with my slow cooker recipes. Any advice on getting better results?",
+      "gold_session_ids": [
+        "answer_2fc6aabb"
+      ],
+      "retrieved_session_ids": [
+        "answer_2fc6aabb",
+        "sharegpt_3D7Qpuq_14",
+        "147e93c4",
+        "4374f9a6_2",
+        "bd6d0687",
+        "eb0d8dc1_6"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 493,
+      "ingest_ms": 139461,
+      "eval_ms": 7098,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "54026fce",
+      "question_type": "single-session-preference",
+      "question": "I've been thinking about ways to stay connected with my colleagues. Any suggestions?",
+      "gold_session_ids": [
+        "answer_f7b22c66"
+      ],
+      "retrieved_session_ids": [
+        "answer_f7b22c66",
+        "ultrachat_166270",
+        "ef5d4aa7_1",
+        "fab585c2_1",
+        "e6195229",
+        "ef2e4f61_1",
+        "1c95e152_1"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 472,
+      "ingest_ms": 135890,
+      "eval_ms": 5691,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_59149c77",
+      "question_type": "temporal-reasoning",
+      "question": "How many days passed between my visit to the Museum of Modern Art (MoMA) and the 'Ancient Civilizations' exhibit at the Metropolitan Museum of Art?",
+      "gold_session_ids": [
+        "answer_d00ba6d0_1",
+        "answer_d00ba6d0_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_d00ba6d0_2",
+        "9e2c2a6c_2",
+        "6e672b84_1",
+        "answer_d00ba6d0_1",
+        "sharegpt_XlNs8Lz_199",
+        "9242fbe3_1"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 484,
+      "ingest_ms": 145329,
+      "eval_ms": 8858,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_f49edff3",
+      "question_type": "temporal-reasoning",
+      "question": "Which three events happened in the order from first to last: the day I helped my friend prepare the nursery, the day I helped my cousin pick out stuff for her baby shower, and the day I ordered a customized phone case for my friend's birthday?",
+      "gold_session_ids": [
+        "answer_3e9fce53_1",
+        "answer_3e9fce53_2",
+        "answer_3e9fce53_3"
+      ],
+      "retrieved_session_ids": [
+        "answer_3e9fce53_1",
+        "answer_3e9fce53_2",
+        "answer_3e9fce53_3",
+        "8e226a86",
+        "4376945f",
+        "bb27df5e_3",
+        "0f6a2099_1",
+        "sharegpt_u4Y5hfK_0",
+        "76703db4_3"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 498,
+      "ingest_ms": 146698,
+      "eval_ms": 6578,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "71017276",
+      "question_type": "temporal-reasoning",
+      "question": "How many weeks ago did I meet up with my aunt and receive the crystal chandelier?",
+      "gold_session_ids": [
+        "answer_0b4a8adc_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_0b4a8adc_1",
+        "sharegpt_duoAhsS_0",
+        "398f23e7",
+        "f78a22b6_4",
+        "323609c6_3",
+        "sharegpt_CjoQMV6_0",
+        "sharegpt_qevDNvo_0",
+        "sharegpt_tCLMKZY_0",
+        "ultrachat_431324"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 614,
+      "ingest_ms": 176552,
+      "eval_ms": 9203,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "question": "How many months have passed since I participated in two charity events in a row, on consecutive days?",
+      "gold_session_ids": [
+        "answer_4bfcc250_4",
+        "answer_4bfcc250_3",
+        "answer_4bfcc250_2",
+        "answer_4bfcc250_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_4bfcc250_1",
+        "answer_4bfcc250_3",
+        "f598d30f_1",
+        "sharegpt_KCGdZJP_0",
+        "b2542345_2",
+        "9d754f54",
+        "47311a4c_1",
+        "53949711_2",
+        "answer_4bfcc250_4",
+        "aeab3296",
+        "ultrachat_150417"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 478,
+      "ingest_ms": 141378,
+      "eval_ms": 8854,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_fa19884c",
+      "question_type": "temporal-reasoning",
+      "question": "How many days passed between the day I started playing along to my favorite songs on my old keyboard and the day I discovered a bluegrass band?",
+      "gold_session_ids": [
+        "answer_ff201786_1",
+        "answer_ff201786_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_ff201786_1",
+        "answer_ff201786_2",
+        "f4f4b504_2",
+        "e8de3056_2",
+        "70de1bd2",
+        "ultrachat_423544",
+        "f3745025_1"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 507,
+      "ingest_ms": 149825,
+      "eval_ms": 13457,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "0bc8ad92",
+      "question_type": "temporal-reasoning",
+      "question": "How many months have passed since I last visited a museum with a friend?",
+      "gold_session_ids": [
+        "answer_f4ea84fb_3",
+        "answer_f4ea84fb_2",
+        "answer_f4ea84fb_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_f4ea84fb_3",
+        "ultrachat_349938",
+        "answer_f4ea84fb_2",
+        "d3cc5bdc_1",
+        "answer_f4ea84fb_1",
+        "0868982f_1",
+        "881acf41_1"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 443,
+      "ingest_ms": 126878,
+      "eval_ms": 8037,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "af082822",
+      "question_type": "temporal-reasoning",
+      "question": "How many weeks ago did I attend the friends and family sale at Nordstrom?",
+      "gold_session_ids": [
+        "answer_b51b6115_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_b51b6115_1",
+        "1dfef591_2",
+        "1fcb4134_2",
+        "1040e24b_1",
+        "1a920713_2",
+        "e132259f",
+        "bf38543d_2",
+        "facef6e0_1",
+        "09c3d921",
+        "bc5827b5"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 495,
+      "ingest_ms": 138745,
+      "eval_ms": 9353,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_4929293a",
+      "question_type": "temporal-reasoning",
+      "question": "Which event happened first, my cousin's wedding or Michael's engagement party?",
+      "gold_session_ids": [
+        "answer_add9b012_2",
+        "answer_add9b012_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_add9b012_1",
+        "answer_add9b012_2",
+        "ebf89bc9_2",
+        "ultrachat_329640",
+        "5a81277c",
+        "1126be1e_2",
+        "c1e598cd_1"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 486,
+      "ingest_ms": 139419,
+      "eval_ms": 7501,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "question": "How many days ago did I attend the Maundy Thursday service at the Episcopal Church?",
+      "gold_session_ids": [
+        "answer_a17423e7_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_a17423e7_1",
+        "5053474c_2",
+        "d743153b_1",
+        "0de045b3",
+        "ultrachat_142856",
+        "44c62f26",
+        "sharegpt_FqOC5e9_169",
+        "sharegpt_6QUDIXG_104",
+        "a53c7542_1",
+        "c81aa33c_2",
+        "555e1a02",
+        "12b34e79_1"
+      ],
+      "retrieved_count": 12,
+      "episodes_ingested": 537,
+      "ingest_ms": 160488,
+      "eval_ms": 8738,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "9a707b81",
+      "question_type": "temporal-reasoning",
+      "question": "How many days ago did I attend a baking class at a local culinary school when I made my friend's birthday cake?",
+      "gold_session_ids": [
+        "answer_dba89487_2",
+        "answer_dba89487_1"
+      ],
+      "retrieved_session_ids": [
+        "answer_dba89487_2",
+        "answer_dba89487_1",
+        "sharegpt_l4wRaiy_13",
+        "990f3ef9_6",
+        "e75c302b_2",
+        "4abbeb2a_2",
+        "6862e478_2"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 530,
+      "ingest_ms": 154037,
+      "eval_ms": 9053,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6a1eabeb",
+      "question_type": "knowledge-update",
+      "question": "What was my personal best time in the charity 5K run?",
+      "gold_session_ids": [
+        "answer_a25d4a91_1",
+        "answer_a25d4a91_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_a25d4a91_2",
+        "answer_a25d4a91_1",
+        "4c49e37f",
+        "4aaf678f_3",
+        "9b3a7f2c_1",
+        "5b71808d"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 413,
+      "ingest_ms": 114572,
+      "eval_ms": 7127,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6aeb4375",
+      "question_type": "knowledge-update",
+      "question": "How many Korean restaurants have I tried in my city?",
+      "gold_session_ids": [
+        "answer_3f9693b7_1",
+        "answer_3f9693b7_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_3f9693b7_2",
+        "answer_3f9693b7_1",
+        "sharegpt_MWlvrvZ_0",
+        "402e0082_5",
+        "1bc87711_1",
+        "2e21c7d5"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 468,
+      "ingest_ms": 131190,
+      "eval_ms": 7706,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "830ce83f",
+      "question_type": "knowledge-update",
+      "question": "Where did Rachel move to after her recent relocation?",
+      "gold_session_ids": [
+        "answer_0b1a0942_1",
+        "answer_0b1a0942_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_0b1a0942_1",
+        "47c5482a",
+        "sharegpt_GewGpB8_35",
+        "answer_0b1a0942_2",
+        "639cec58",
+        "ultrachat_288747",
+        "dfbda5e9",
+        "8d77be9a_2",
+        "d1e7d11c_2",
+        "114c1fb7_5",
+        "7ddf575b"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 511,
+      "ingest_ms": 152919,
+      "eval_ms": 7596,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "852ce960",
+      "question_type": "knowledge-update",
+      "question": "What was the amount I was pre-approved for when I got my mortgage from Wells Fargo?",
+      "gold_session_ids": [
+        "answer_3a6f1e82_1",
+        "answer_3a6f1e82_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_3a6f1e82_1",
+        "answer_3a6f1e82_2",
+        "sharegpt_V2j1zkI_1",
+        "a76e7e3c_1",
+        "114c1fb7_4",
+        "bdfcb4d3",
+        "sharegpt_eN4o9Zr_0",
+        "sharegpt_uiECyCD_66",
+        "ultrachat_444553"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 396,
+      "ingest_ms": 122907,
+      "eval_ms": 5585,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "945e3d21",
+      "question_type": "knowledge-update",
+      "question": "How often do I attend yoga classes to help with my anxiety?",
+      "gold_session_ids": [
+        "answer_6a4f8626_1",
+        "answer_6a4f8626_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_6a4f8626_1",
+        "sharegpt_E7VUcfj_0",
+        "answer_6a4f8626_2",
+        "sharegpt_zn81iL6_9",
+        "5fcca8bc_1",
+        "ultrachat_518638",
+        "9bbd38a6",
+        "9418c255"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 489,
+      "ingest_ms": 134959,
+      "eval_ms": 9011,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "d7c942c3",
+      "question_type": "knowledge-update",
+      "question": "Is my mom using the same grocery list method as me?",
+      "gold_session_ids": [
+        "answer_eecb10d9_1",
+        "answer_eecb10d9_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_eecb10d9_2",
+        "answer_eecb10d9_1",
+        "sharegpt_h8nh892_29",
+        "b2243528_1",
+        "4f435d20_2",
+        "cf8e2761",
+        "f0b803b0_2",
+        "8bd5b3c4_2",
+        "sharegpt_eIgPNa5_0",
+        "ultrachat_386918"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 520,
+      "ingest_ms": 144731,
+      "eval_ms": 7821,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "71315a70",
+      "question_type": "knowledge-update",
+      "question": "How many hours have I spent on my abstract ocean sculpture?",
+      "gold_session_ids": [
+        "answer_c44b9df4_1",
+        "answer_c44b9df4_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_c44b9df4_1",
+        "answer_c44b9df4_2",
+        "b5e94516_2",
+        "8cfa91c3_1",
+        "773aebbd_1",
+        "ultrachat_399278"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 514,
+      "ingest_ms": 154130,
+      "eval_ms": 9316,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "89941a93",
+      "question_type": "knowledge-update",
+      "question": "How many bikes do I currently own?",
+      "gold_session_ids": [
+        "answer_e1403127_1",
+        "answer_e1403127_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_e1403127_1",
+        "answer_e1403127_2",
+        "c9b1c309_4",
+        "60db2dd6_1",
+        "sharegpt_6QV1gPO_151",
+        "ultrachat_400703",
+        "286aa281_1",
+        "1e88ebca"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 528,
+      "ingest_ms": 183142,
+      "eval_ms": 10218,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "ce6d2d27",
+      "question_type": "knowledge-update",
+      "question": "What day of the week do I take a cocktail-making class?",
+      "gold_session_ids": [
+        "answer_73540165_1",
+        "answer_73540165_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_73540165_2",
+        "answer_73540165_1",
+        "0e250059_1",
+        "9f6bec4f",
+        "7a4d00b3_2",
+        "cd92ac85_1",
+        "54f0d6f9_2",
+        "58de8f9b"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 521,
+      "ingest_ms": 142883,
+      "eval_ms": 7452,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "question": "Where did I go on my most recent family trip?",
+      "gold_session_ids": [
+        "answer_02e66dec_1",
+        "answer_02e66dec_2"
+      ],
+      "retrieved_session_ids": [
+        "answer_02e66dec_1",
+        "answer_02e66dec_2",
+        "418c27fa",
+        "8c8b180e",
+        "6e2cca63_1",
+        "9bf5da2d",
+        "29695e1c_2",
+        "62e6593e_1",
+        "ultrachat_512641",
+        "66cffcc7"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 537,
+      "ingest_ms": 148250,
+      "eval_ms": 6977,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant",
+      "question": "I'm checking our previous chat about the shift rotation sheet for GM social media agents. Can you remind me what was the rotation for Admon on a Sunday?",
+      "gold_session_ids": [
+        "answer_sharegpt_5Lzox6N_0"
+      ],
+      "retrieved_session_ids": [
+        "answer_sharegpt_5Lzox6N_0",
+        "sharegpt_yguSguz_0",
+        "sharegpt_vbNrVtS_143",
+        "sharegpt_qRHOKTO_28",
+        "5aed819f",
+        "dba97bb1_4",
+        "ad361482_1",
+        "5850de18_2",
+        "ultrachat_89092"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 550,
+      "ingest_ms": 158957,
+      "eval_ms": 6322,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "c4f10528",
+      "question_type": "single-session-assistant",
+      "question": "I'm planning to visit Bandung again and I was wondering if you could remind me of the name of that restaurant in Cihampelas Walk that serves a great Nasi Goreng?",
+      "gold_session_ids": [
+        "answer_ultrachat_234453"
+      ],
+      "retrieved_session_ids": [
+        "answer_ultrachat_234453",
+        "de55485d_1",
+        "367b6c01",
+        "51c89181_1",
+        "107d40f0",
+        "c8c90a81_1",
+        "bf5bfb7b_3"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 485,
+      "ingest_ms": 140888,
+      "eval_ms": 7714,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant",
+      "question": "I'm going back to our previous conversation about the children's book on dinosaurs. Can you remind me what color was the scaly body of the Plesiosaur in the image?",
+      "gold_session_ids": [
+        "answer_sharegpt_YkWn1Ne_0"
+      ],
+      "retrieved_session_ids": [
+        "ultrachat_442154",
+        "644e1d00",
+        "sharegpt_CqJTtJZ_78",
+        "26f9a255_2",
+        "8c1da8f9_1",
+        "answer_sharegpt_YkWn1Ne_0",
+        "ultrachat_66044",
+        "07f3f0e0_2",
+        "51c262b6_2",
+        "sharegpt_M9T66Xd_5",
+        "ultrachat_468629",
+        "ultrachat_11001",
+        "1ddc89e9_3",
+        "9c722816",
+        "sharegpt_kshUqZh_6",
+        "07e363d9_2",
+        "990f3ef9_7"
+      ],
+      "retrieved_count": 17,
+      "episodes_ingested": 467,
+      "ingest_ms": 132800,
+      "eval_ms": 7873,
+      "recall_at_k": {
+        "5": false,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant",
+      "question": "I'm planning to revisit Orlando. I was wondering if you could remind me of that unique dessert shop with the giant milkshakes we talked about last time?",
+      "gold_session_ids": [
+        "answer_ultrachat_480665"
+      ],
+      "retrieved_session_ids": [
+        "answer_ultrachat_480665",
+        "61e1ba53_2",
+        "ba944cdc",
+        "c0d099e6_2",
+        "c58fdf1e_2",
+        "sharegpt_Q7EQHIJ_0"
+      ],
+      "retrieved_count": 6,
+      "episodes_ingested": 533,
+      "ingest_ms": 147971,
+      "eval_ms": 8362,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "4c36ccef",
+      "question_type": "single-session-assistant",
+      "question": "Can you remind me of the name of the romantic Italian restaurant in Rome you recommended for dinner?",
+      "gold_session_ids": [
+        "answer_ultrachat_448704"
+      ],
+      "retrieved_session_ids": [
+        "answer_ultrachat_448704",
+        "sharegpt_m8F4NxL_0",
+        "5fc83435_2",
+        "3dc8ba5f_2",
+        "ultrachat_149723",
+        "1ba83815_4",
+        "7db28e68_1",
+        "89d49715_1",
+        "52381716_2"
+      ],
+      "retrieved_count": 9,
+      "episodes_ingested": 521,
+      "ingest_ms": 153097,
+      "eval_ms": 4978,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "6ae235be",
+      "question_type": "single-session-assistant",
+      "question": "I remember you told me about the refining processes at CITGO's three refineries earlier. Can you remind me what kind of processes are used at the Lake Charles Refinery?",
+      "gold_session_ids": [
+        "answer_sharegpt_IUWQYGQ_0"
+      ],
+      "retrieved_session_ids": [
+        "answer_sharegpt_IUWQYGQ_0",
+        "ultrachat_431987",
+        "61a91bc9_2",
+        "sharegpt_TVK4gjw_24",
+        "43811b62",
+        "sharegpt_AEwb22H_18",
+        "ultrachat_140851",
+        "31cde680",
+        "1e957711",
+        "67620dbc_3",
+        "99188307"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 454,
+      "ingest_ms": 134320,
+      "eval_ms": 7514,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "7e00a6cb",
+      "question_type": "single-session-assistant",
+      "question": "I'm planning my trip to Amsterdam again and I was wondering, what was the name of that hostel near the Red Light District that you recommended last time?",
+      "gold_session_ids": [
+        "answer_ultrachat_370515"
+      ],
+      "retrieved_session_ids": [
+        "answer_ultrachat_370515",
+        "4dd1ba8d_2",
+        "24f78a31_2",
+        "sharegpt_0dfpdJm_0",
+        "e2cd250e_1",
+        "ultrachat_188131",
+        "5534efcb_2",
+        "174cccbc",
+        "2fa50779_5",
+        "956ce238"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 564,
+      "ingest_ms": 166970,
+      "eval_ms": 14642,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "1903aded",
+      "question_type": "single-session-assistant",
+      "question": "I think we discussed work from home jobs for seniors earlier. Can you remind me what was the 7th job in the list you provided?",
+      "gold_session_ids": [
+        "answer_sharegpt_hA7AkP3_0"
+      ],
+      "retrieved_session_ids": [
+        "answer_sharegpt_hA7AkP3_0",
+        "sharegpt_ELyN256_27",
+        "sharegpt_emE20LI_0",
+        "fa68c9d6_1",
+        "sharegpt_64onasJ_0",
+        "66369fde_1",
+        "9f8c432e_2",
+        "f8246a66_1",
+        "4774287c_1",
+        "8adb232f_1",
+        "9b4c070c"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 486,
+      "ingest_ms": 135940,
+      "eval_ms": 7295,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "ceb54acb",
+      "question_type": "single-session-assistant",
+      "question": "In our previous chat, you suggested 'sexual compulsions' and a few other options for alternative terms for certain behaviors. Can you remind me what the other four options were?",
+      "gold_session_ids": [
+        "answer_sharegpt_cGdjmYo_0"
+      ],
+      "retrieved_session_ids": [
+        "answer_sharegpt_cGdjmYo_0",
+        "dddce60a_1",
+        "de293134_1",
+        "511bdbe3_2",
+        "sharegpt_yePPued_0",
+        "sharegpt_iTrNGx4_13",
+        "f6fd00cf",
+        "sharegpt_uATA5m5_41",
+        "63b72857",
+        "0bbd7094_1",
+        "sharegpt_mWFmQxk_0",
+        "7aa2a9af_2",
+        "44202c74_2"
+      ],
+      "retrieved_count": 13,
+      "episodes_ingested": 493,
+      "ingest_ms": 146891,
+      "eval_ms": 5796,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "f523d9fe",
+      "question_type": "single-session-assistant",
+      "question": "I wanted to check back on our previous conversation about Netflix. I mentioned that I wanted to be able to access all seasons of old shows? Do you remember what show I used as an example, the one that only had the last season available?",
+      "gold_session_ids": [
+        "answer_sharegpt_m2xJfjo_0"
+      ],
+      "retrieved_session_ids": [
+        "answer_sharegpt_m2xJfjo_0",
+        "22aa7cca_4",
+        "a07f9d5c_1",
+        "fbfda981",
+        "193c23bd_1",
+        "debc34d7_1",
+        "44165708"
+      ],
+      "retrieved_count": 7,
+      "episodes_ingested": 484,
+      "ingest_ms": 143658,
+      "eval_ms": 6165,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    }
+  ]
+}

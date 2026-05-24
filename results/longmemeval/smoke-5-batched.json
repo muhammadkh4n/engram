@@ -1,0 +1,230 @@
+{
+  "meta": {
+    "args": {
+      "data": "./data/longmemeval/longmemeval_s_cleaned.json",
+      "limit": 5,
+      "maxResults": 30,
+      "noConsolidate": false,
+      "noGraph": false,
+      "noRerank": false,
+      "output": "./results/longmemeval/smoke-5-batched.json"
+    },
+    "K_values": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "total_questions": 5,
+    "total_seconds": 98.1,
+    "generated_at": "2026-05-24T20:06:21.269Z"
+  },
+  "recall_at_K": {
+    "5": {
+      "hits": 5,
+      "total": 5,
+      "rate": 1
+    },
+    "10": {
+      "hits": 5,
+      "total": 5,
+      "rate": 1
+    },
+    "20": {
+      "hits": 5,
+      "total": 5,
+      "rate": 1
+    },
+    "30": {
+      "hits": 5,
+      "total": 5,
+      "rate": 1
+    }
+  },
+  "by_question_type": {
+    "single-session-user": {
+      "5": {
+        "hits": 5,
+        "total": 5,
+        "rate": 1
+      },
+      "10": {
+        "hits": 5,
+        "total": 5,
+        "rate": 1
+      },
+      "20": {
+        "hits": 5,
+        "total": 5,
+        "rate": 1
+      },
+      "30": {
+        "hits": 5,
+        "total": 5,
+        "rate": 1
+      }
+    }
+  },
+  "rows": [
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "question": "What degree did I graduate with?",
+      "gold_session_ids": [
+        "answer_280352e9"
+      ],
+      "retrieved_session_ids": [
+        "answer_280352e9",
+        "sharegpt_Jcy1CVN_0",
+        "sharegpt_UnjngE7_65",
+        "sharegpt_QZMeA7V_17",
+        "d414cac5_4",
+        "sharegpt_PdnvIns_0",
+        "ultrachat_458322",
+        "sharegpt_BvwQVCO_0",
+        "sharegpt_T1EiHWI_13",
+        "f6859b48_2",
+        "02bd2b90_3",
+        "sharegpt_DGTCD7D_0",
+        "ultrachat_214101",
+        "7045db85_1",
+        "41abc171_4",
+        "ec6ca9ef",
+        "52c34859_1"
+      ],
+      "retrieved_count": 17,
+      "episodes_ingested": 550,
+      "ingest_ms": 14979,
+      "eval_ms": 7451,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "question": "How long is my daily commute to work?",
+      "gold_session_ids": [
+        "answer_40a90d51"
+      ],
+      "retrieved_session_ids": [
+        "answer_40a90d51",
+        "7d8b5834_1",
+        "5209e813_2",
+        "c22571ff_2",
+        "004edb32",
+        "afe04238_1",
+        "0afa904a",
+        "db73b7e4_4",
+        "d600c646",
+        "db50c0f6",
+        "b5f561f5_2",
+        "f0fc84ea",
+        "ultrachat_20736",
+        "628c958c_7"
+      ],
+      "retrieved_count": 14,
+      "episodes_ingested": 485,
+      "ingest_ms": 11085,
+      "eval_ms": 6744,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "51a45a95",
+      "question_type": "single-session-user",
+      "question": "Where did I redeem a $5 coupon on coffee creamer?",
+      "gold_session_ids": [
+        "answer_d61669c7"
+      ],
+      "retrieved_session_ids": [
+        "answer_d61669c7",
+        "07d1915d_1",
+        "f32d1ccf_1",
+        "4679a05c",
+        "sharegpt_MKMWjX0_25",
+        "55e0c6db_2",
+        "6e0b1800_2",
+        "sharegpt_0dVk0BE_1",
+        "d680a212_1",
+        "ultrachat_105249"
+      ],
+      "retrieved_count": 10,
+      "episodes_ingested": 529,
+      "ingest_ms": 11691,
+      "eval_ms": 8290,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "58bf7951",
+      "question_type": "single-session-user",
+      "question": "What play did I attend at the local community theater?",
+      "gold_session_ids": [
+        "answer_355c48bb"
+      ],
+      "retrieved_session_ids": [
+        "answer_355c48bb",
+        "ultrachat_155546",
+        "7e17ae56_5",
+        "sharegpt_gTiQ90w_0",
+        "sharegpt_KmMXLp3_0",
+        "sharegpt_9qAGH5s_0",
+        "08469b58",
+        "793382f9_2",
+        "ultrachat_71618",
+        "ultrachat_304942",
+        "ultrachat_221066"
+      ],
+      "retrieved_count": 11,
+      "episodes_ingested": 616,
+      "ingest_ms": 12980,
+      "eval_ms": 4652,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "question": "What is the name of the playlist I created on Spotify?",
+      "gold_session_ids": [
+        "answer_3e012175"
+      ],
+      "retrieved_session_ids": [
+        "answer_3e012175",
+        "sharegpt_Clr6oyu_0",
+        "8020d945_2",
+        "sharegpt_bph7DTk_7",
+        "2d0d0004",
+        "01bd9def",
+        "7b1d1f43_1",
+        "ultrachat_271928"
+      ],
+      "retrieved_count": 8,
+      "episodes_ingested": 510,
+      "ingest_ms": 11062,
+      "eval_ms": 8713,
+      "recall_at_k": {
+        "5": true,
+        "10": true,
+        "20": true,
+        "30": true
+      }
+    }
+  ]
+}
