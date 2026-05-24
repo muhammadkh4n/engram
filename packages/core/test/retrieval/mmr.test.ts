@@ -128,21 +128,32 @@ describe('mmrConfigFromEnv', () => {
     }
   })
 
-  it('returns null when ENGRAM_MMR_PRE_RERANK is unset', () => {
+  it('returns config (enabled) when ENGRAM_MMR_PRE_RERANK is unset — default ON', () => {
     delete process.env['ENGRAM_MMR_PRE_RERANK']
-    expect(mmrConfigFromEnv()).toBeNull()
+    delete process.env['ENGRAM_MMR_LAMBDA']
+    delete process.env['ENGRAM_MMR_MAX_CANDIDATES']
+    expect(mmrConfigFromEnv()).toEqual({ lambda: 0.5, maxOut: 50 })
   })
 
-  it('returns null when ENGRAM_MMR_PRE_RERANK is "false"', () => {
+  it('returns null when ENGRAM_MMR_PRE_RERANK is explicitly "false" — off-switch', () => {
     process.env['ENGRAM_MMR_PRE_RERANK'] = 'false'
     expect(mmrConfigFromEnv()).toBeNull()
   })
 
-  it('returns defaults when only the flag is set', () => {
+  it('stays enabled with backward-compatible "true" value', () => {
     process.env['ENGRAM_MMR_PRE_RERANK'] = 'true'
     delete process.env['ENGRAM_MMR_LAMBDA']
     delete process.env['ENGRAM_MMR_MAX_CANDIDATES']
     expect(mmrConfigFromEnv()).toEqual({ lambda: 0.5, maxOut: 50 })
+  })
+
+  it('treats unknown values (typos) as enabled rather than disabled', () => {
+    // Safer to default ON for typos than to silently disable. Only the
+    // literal string "false" turns MMR off.
+    process.env['ENGRAM_MMR_PRE_RERANK'] = 'flase' // common typo
+    expect(mmrConfigFromEnv()).not.toBeNull()
+    process.env['ENGRAM_MMR_PRE_RERANK'] = '0' // sometimes used as falsy
+    expect(mmrConfigFromEnv()).not.toBeNull()
   })
 
   it('reads custom lambda and maxOut', () => {
@@ -153,7 +164,7 @@ describe('mmrConfigFromEnv', () => {
   })
 
   it('falls back to safe defaults when env supplies garbage', () => {
-    process.env['ENGRAM_MMR_PRE_RERANK'] = 'true'
+    delete process.env['ENGRAM_MMR_PRE_RERANK'] // default ON
     process.env['ENGRAM_MMR_LAMBDA'] = 'not-a-number'
     process.env['ENGRAM_MMR_MAX_CANDIDATES'] = '-5'
     expect(mmrConfigFromEnv()).toEqual({ lambda: 0.5, maxOut: 50 })

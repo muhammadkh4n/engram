@@ -547,7 +547,8 @@ export async function recall(
   // sees a diverse slate. Lemma-Jaccard similarity over content — no extra
   // embeddings, deterministic, catches near-duplicate text (the failure
   // mode that has historically broken chunk-multiplier experiments).
-  // Env-gated, default OFF. See packages/core/src/retrieval/mmr.ts.
+  // Default ON since v0.3.9. Set ENGRAM_MMR_PRE_RERANK=false to opt out.
+  // See packages/core/src/retrieval/mmr.ts for full env semantics.
   const mmrCfg = mmrConfigFromEnv()
   if (mmrCfg !== null && memories.length > 1) {
     memories = applyMMR(memories, mmrCfg.lambda, mmrCfg.maxOut)

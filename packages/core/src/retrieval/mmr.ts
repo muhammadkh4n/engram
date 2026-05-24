@@ -17,6 +17,9 @@
  * Similarity: lemma-Jaccard over content. Lightweight, deterministic,
  * needs no extra embeddings, and catches the exact near-duplicate shape
  * we've seen (proposition + source turn sharing 80%+ of content lemmas).
+ *
+ * Default behavior: ENABLED. Off-switch is `ENGRAM_MMR_PRE_RERANK=false`.
+ * See `mmrConfigFromEnv()` for env-var semantics.
  */
 import type { RetrievedMemory } from '../types.js'
 
@@ -91,10 +94,21 @@ export function applyMMR(
 
 /**
  * Read MMR config from environment.
- * Returns null when disabled (so callers can no-op trivially).
+ *
+ * Default: ENABLED. MMR runs on every recall unless the env var explicitly
+ * disables it. Validated on conv-26 (overall r@30 +3.02pp, multi_hop
+ * +5.41pp) and confirmed not catastrophically regressive across the full
+ * LoCoMo 10-conv corpus (1986 questions). Default flipped to ON in the
+ * v0.3.9 release.
+ *
+ * Off-switch: `ENGRAM_MMR_PRE_RERANK=false` (any non-"false" value, including
+ * unset, "true", or a typo, keeps MMR enabled). Preserves backward
+ * compatibility with deployments that previously set `=true` to opt in.
+ *
+ * Returns null when explicitly disabled (so callers can no-op trivially).
  */
 export function mmrConfigFromEnv(): { lambda: number; maxOut: number } | null {
-  if (process.env['ENGRAM_MMR_PRE_RERANK'] !== 'true') return null
+  if (process.env['ENGRAM_MMR_PRE_RERANK'] === 'false') return null
   const lambda = parseFloat(process.env['ENGRAM_MMR_LAMBDA'] ?? '0.5')
   const maxOut = parseInt(process.env['ENGRAM_MMR_MAX_CANDIDATES'] ?? '50', 10)
   // Defensive: if env supplies garbage, fall back to safe defaults rather
