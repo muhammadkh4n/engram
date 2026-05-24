@@ -14,6 +14,25 @@ export interface DreamCycleOptions {
   minCommunitySize?: number
   /** Wave 5: Scope community summary generation to a specific project namespace. */
   projectId?: string
+  /**
+   * v0.3.12: Hard ceiling on the number of communities receiving an LLM
+   * summary in a single run. Communities are processed largest-first
+   * (memberNodeIds.length DESC); anything beyond this count is left
+   * un-summarized this cycle and will be eligible next time. Default 200.
+   */
+  maxCommunities?: number
+  /**
+   * v0.3.12: Hard ceiling on estimated LLM spend in USD per run. The loop
+   * tracks a per-call estimate (input tokens × input_rate + output tokens
+   * × output_rate) and aborts before exceeding this cap. Default $2.00.
+   * Estimate is best-effort — actual billed cost may differ slightly.
+   */
+  maxLlmCallsUsd?: number
+  /**
+   * v0.3.12: Which model the LLM-cost estimator should price against.
+   * Default 'gpt-4o-mini'. Unknown models fall back to gpt-4o-mini pricing.
+   */
+  llmCostModel?: 'gpt-4o-mini' | 'gpt-4o' | 'claude-haiku' | 'claude-sonnet'
 }
 
 // ---------------------------------------------------------------------------
@@ -25,6 +44,35 @@ function topNByFrequency(freq: Map<string, number>, n: number): string[] {
     .sort((a, b) => b[1] - a[1])
     .slice(0, n)
     .map(([label]) => label)
+}
+
+/**
+ * Best-effort USD cost estimate for one LLM summarize() call.
+ *
+ * Token-count estimation: ~4 chars per token (a common rule of thumb for
+ * English-language prompts; off by 10-20% in either direction depending on
+ * vocabulary and whitespace). Pricing reflects published per-1M-token rates
+ * as of 2026-05. Unknown models fall back to gpt-4o-mini pricing — the
+ * cheapest option, which is the safer side to err on when used as a cost
+ * ceiling (we'd hit the cap sooner with bad pricing than we should, never
+ * later).
+ */
+function estimateLlmCallCost(
+  promptChars: number,
+  outputChars: number,
+  model: 'gpt-4o-mini' | 'gpt-4o' | 'claude-haiku' | 'claude-sonnet',
+): number {
+  const inputTokens = promptChars / 4
+  const outputTokens = outputChars / 4
+  // [inputPerM, outputPerM] in USD
+  const pricing: Record<string, [number, number]> = {
+    'gpt-4o-mini':   [0.150, 0.600],
+    'gpt-4o':        [2.500, 10.000],
+    'claude-haiku':  [0.800, 4.000],
+    'claude-sonnet': [3.000, 15.000],
+  }
+  const [inUsd, outUsd] = pricing[model] ?? pricing['gpt-4o-mini']!
+  return (inputTokens * inUsd + outputTokens * outUsd) / 1_000_000
 }
 
 function buildHeuristicSummary(
@@ -96,6 +144,10 @@ export async function dreamCycle(
   let replayEdgesCreated = 0
   let causalEdgesCreated = 0
   let communitySummariesGenerated = 0
+  // v0.3.12 observability + ceiling tracking
+  let llmCallsCount = 0
+  let llmCallsUsdEstimate = 0
+  let cappedAt: 'maxCommunities' | 'maxLlmCallsUsd' | undefined
 
   const graphAvailable = graph?.runCypher && graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
   const gdsAvailable = graphAvailable && graph?.isGdsAvailable ? await graph.isGdsAvailable().catch(() => false) : false
@@ -166,6 +218,11 @@ export async function dreamCycle(
     // -----------------------------------------------------------------------
     const generateSummaries = opts?.generateCommunitySummaries ?? true
     const minCommunitySize = opts?.minCommunitySize ?? 5
+    // v0.3.12 ceilings — protect against runaway LLM cost on first-run
+    // dream cycles over large graphs.
+    const maxCommunities = opts?.maxCommunities ?? 200
+    const maxLlmCallsUsd = opts?.maxLlmCallsUsd ?? 2.00
+    const llmCostModel = opts?.llmCostModel ?? 'gpt-4o-mini'
 
     if (
       generateSummaries &&
@@ -174,12 +231,31 @@ export async function dreamCycle(
       typeof graph?.upsertCommunityNode === 'function'
     ) {
       try {
-        const communities = await graph.getCommunityMembers!({
+        const allCommunities = await graph.getCommunityMembers!({
           minSize: minCommunitySize,
           projectId: opts?.projectId,
         })
+        // Process largest communities first — the highest-value summaries
+        // and the ones most likely to surface in memory_overview. If a
+        // ceiling cuts us off mid-loop, we lose the smallest (least
+        // valuable) ones rather than the most important.
+        const communities = [...allCommunities].sort(
+          (a, b) => b.memberNodeIds.length - a.memberNodeIds.length,
+        )
 
         for (const community of communities) {
+          // Ceiling #1: community count
+          if (communitySummariesGenerated >= maxCommunities) {
+            cappedAt = 'maxCommunities'
+            console.warn(`[dream-cycle] hit maxCommunities=${maxCommunities} cap — ${communities.length - communitySummariesGenerated} communities un-summarized this run`)
+            break
+          }
+          // Ceiling #2: estimated LLM cost
+          if (llmCallsUsdEstimate >= maxLlmCallsUsd) {
+            cappedAt = 'maxLlmCallsUsd'
+            console.warn(`[dream-cycle] hit maxLlmCallsUsd=$${maxLlmCallsUsd.toFixed(2)} cap at ~$${llmCallsUsdEstimate.toFixed(4)} — ${communities.length - communitySummariesGenerated} communities un-summarized this run`)
+            break
+          }
           const { communityId, memberNodeIds, memberLabels } = community
 
           const context = await graph.getCommunityContext!(communityId, opts?.projectId)
@@ -214,6 +290,10 @@ export async function dreamCycle(
             try {
               const result = await intelligence.summarize(prompt, { mode: 'bullet_points', targetTokens: 150 })
               summaryLabel = result.text.slice(0, 200)
+              // Cost accounting — best-effort estimate. summarize() doesn't
+              // return token counts so we approximate from string lengths.
+              llmCallsCount++
+              llmCallsUsdEstimate += estimateLlmCallCost(prompt.length, result.text.length, llmCostModel)
             } catch {
               summaryLabel = buildHeuristicSummary(topTopics, topEntities, topPersons, memberNodeIds.length)
             }
@@ -487,5 +567,9 @@ export async function dreamCycle(
     replayEdgesCreated: graphAvailable ? replayEdgesCreated : undefined,
     causalEdgesCreated: graphAvailable ? causalEdgesCreated : undefined,
     communitySummariesGenerated: communitySummariesGenerated > 0 ? communitySummariesGenerated : undefined,
+    // v0.3.12 observability
+    llmCallsCount: llmCallsCount > 0 ? llmCallsCount : undefined,
+    llmCallsUsdEstimate: llmCallsUsdEstimate > 0 ? llmCallsUsdEstimate : undefined,
+    cappedAt,
   }
 }

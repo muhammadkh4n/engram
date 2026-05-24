@@ -16,7 +16,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { createMemory } from '@engram-mem/core'
+import { createMemory, startConsolidationWorker } from '@engram-mem/core'
+import type { StorageAdapter, IntelligenceAdapter, GraphPort } from '@engram-mem/core'
 import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
@@ -61,9 +62,9 @@ export async function getMemory(): Promise<Memory> {
   const supabaseKey = requireEnv('SUPABASE_KEY')
   const openaiApiKey = requireEnv('OPENAI_API_KEY')
 
-  const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
-  const intelligence = openaiIntelligence({ apiKey: openaiApiKey })
-  const graph = await tryCreateGraph('[engram-mcp]')
+  const storage: StorageAdapter = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const intelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
+  const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 
   memory = createMemory({
     storage,
@@ -72,6 +73,19 @@ export async function getMemory(): Promise<Memory> {
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
+
+  // v0.3.12: start the Phase 2 consolidation worker for cheap cycles only.
+  // dreamCycle is intentionally excluded — it runs via the separate
+  // engram-dream-cycle systemd timer for predictable cost + isolated
+  // failure. See results/research/2026-05-24-auto-consolidation-implementation-plan.md.
+  const worker = startConsolidationWorker(storage, intelligence, graph, {
+    cycles: ['light', 'deep', 'decay'],
+    intervalMs: 60_000,
+  })
+  // Best-effort graceful shutdown — stops the interval so the process can exit
+  // cleanly when systemd / docker / a test harness sends SIGTERM.
+  process.once('SIGTERM', () => worker.stop())
+  process.once('SIGINT', () => worker.stop())
 
   return memory
 }
@@ -214,6 +228,15 @@ const TOOLS = [
         project_b: { type: 'string', description: 'Second project ID.' },
       },
       required: ['project_a', 'project_b'],
+    },
+  },
+  {
+    name: 'memory_consolidation_status',
+    description:
+      'Return when each Engram consolidation cycle last ran and its result. Use this to verify auto-consolidation is healthy, see whether dream cycle has produced community summaries recently, or diagnose why memory_overview returns no clusters. Reads from the consolidation_runs table — no compute, just lookups.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
     },
   },
 ]
@@ -419,6 +442,53 @@ export function createEngramServer(): Server {
         return {
           content: [{ type: 'text' as const, text: lines.join('\n') }],
         }
+      }
+
+      if (name === 'memory_consolidation_status') {
+        // Pull recent runs from the SQL tracker. Storage adapters that
+        // haven't implemented consolidationRuns yet (e.g. Supabase as of
+        // v0.3.12) just return "tracker unavailable" — the tool still
+        // serves the diagnostic intent of "tell me whether consolidation
+        // is happening" by saying clearly that no records are kept.
+        const storage = (mem as unknown as { storage: StorageAdapter }).storage
+        const tracker = storage?.consolidationRuns
+        if (!tracker) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: '## Engram — Consolidation Status\n\nThe storage adapter does not implement consolidation_runs tracking, so no per-cycle history is available. The in-process Phase 2 worker (lightSleep / deepSleep / decay) may still be running — check journalctl for the engram-mcp process. Dream cycle status is visible via the engram-dream-cycle systemd timer logs on the host.',
+            }],
+          }
+        }
+        const cycles: Array<'light' | 'deep' | 'dream' | 'decay'> = ['light', 'deep', 'dream', 'decay']
+        const lines = ['## Engram — Consolidation Status', '']
+        for (const cycle of cycles) {
+          const last = await tracker.getLastRun(cycle).catch(() => null)
+          if (!last) {
+            lines.push(`- **${cycle}**: never run`)
+            continue
+          }
+          const status = last.status
+          const when = last.completedAt ? last.completedAt.toISOString() : last.startedAt.toISOString()
+          const dur = last.durationMs !== null ? ` in ${last.durationMs}ms` : ''
+          lines.push(`- **${cycle}**: ${status} at ${when}${dur}`)
+          if (last.result) {
+            const r = last.result
+            const detail: string[] = []
+            if (r.digestsCreated !== undefined) detail.push(`digests=${r.digestsCreated}`)
+            if (r.promoted !== undefined) detail.push(`promoted=${r.promoted}`)
+            if (r.associationsCreated !== undefined) detail.push(`associations=${r.associationsCreated}`)
+            if (r.communitiesDetected !== undefined) detail.push(`communities=${r.communitiesDetected}`)
+            if (r.communitySummariesGenerated !== undefined) detail.push(`summaries=${r.communitySummariesGenerated}`)
+            if (r.llmCallsCount !== undefined) detail.push(`llmCalls=${r.llmCallsCount}`)
+            if (r.llmCallsUsdEstimate !== undefined) detail.push(`~$${r.llmCallsUsdEstimate.toFixed(4)}`)
+            if (r.episodeCount !== undefined) detail.push(`episodeCount=${r.episodeCount}`)
+            if (r.cappedAt !== undefined) detail.push(`cappedAt=${r.cappedAt}`)
+            if (detail.length > 0) lines.push(`  - ${detail.join(', ')}`)
+          }
+          if (last.error) lines.push(`  - error: ${last.error}`)
+        }
+        return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
       }
 
       return {
