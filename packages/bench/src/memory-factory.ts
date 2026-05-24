@@ -4,14 +4,28 @@ import { createMemory } from '@engram-mem/core'
 import type { Memory, IntelligenceAdapter } from '@engram-mem/core'
 import { createOnnxReranker, type OnnxReranker } from '@engram-mem/rerank-onnx'
 import type { BenchmarkOpts } from './types.js'
+import { tryCreateBenchGraph } from './bench-graph.js'
 
 /**
  * Create an in-memory SQLite-backed Memory instance for benchmark use.
- * Each call returns a fresh database — benchmarks start with clean slate.
+ * Each call returns a fresh SQLite database — benchmarks start with clean
+ * slate per call.
  *
- * - graph option controls Neo4j: when false, Memory.graph is null and all
- *   graph codepaths are skipped via null-checks (Wave 2 pattern).
- * - rerankerBackend selects the cross-encoder implementation:
+ * Graph wiring (NEW):
+ *   • opts.graph === false                  → Memory.graph is null (SQL-only,
+ *                                              old behavior)
+ *   • opts.graph !== false AND
+ *     ENGRAM_BENCH_NEO4J_URI is set         → NeuralGraph wired (see
+ *                                              bench-graph.ts for env contract)
+ *   • opts.graph !== false AND env unset    → silently SQL-only (preserves
+ *                                              prior bench behavior — no env
+ *                                              required for non-graph runs)
+ *
+ *   The bench env is INTENTIONALLY separate from the MCP server's NEO4J_URI
+ *   so benchmarks can't accidentally write into the live graph that engram-mcp
+ *   serves from. Operators wire bench against a separate Neo4j container.
+ *
+ * Reranker backend:
  *     'openai' (default when noRerank is false) → LLM pointwise via gpt-4o-mini
  *     'onnx'                                    → local mxbai-rerank ONNX model
  *     'none'                                    → rerank disabled (same as noRerank)
@@ -25,9 +39,14 @@ export async function createBenchMemory(opts?: BenchmarkOpts): Promise<Memory> {
   const backend = resolveBackend(opts)
   const intelligence = await composeIntelligence(fullIntelligence, backend, opts?.onnxRerankerModel)
 
+  // Honor opts.graph — previously plumbed but ignored. Bench Neo4j is opt-in
+  // via ENGRAM_BENCH_NEO4J_URI (NOT the prod NEO4J_URI). See bench-graph.ts.
+  const graph = opts?.graph === false ? null : await tryCreateBenchGraph()
+
   const memory = createMemory({
     storage,
     intelligence,
+    ...(graph ? { graph } : {}),
     ...(opts?.contextualRetrieval ? { contextualRetrieval: true } : {}),
   })
 
