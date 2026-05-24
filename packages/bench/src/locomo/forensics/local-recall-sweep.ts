@@ -290,12 +290,16 @@ function validateEnv(args: SweepArgs): void {
     console.error('Missing OPENAI_API_KEY')
     process.exit(1)
   }
-  if (!args.noGraph) {
-    const graphReq = ['NEO4J_URI', 'NEO4J_USER', 'NEO4J_PASSWORD']
-    const graphMissing = graphReq.filter((k) => !process.env[k])
-    if (graphMissing.length > 0) {
-      console.error(`Missing graph env vars: ${graphMissing.join(', ')} (or pass --no-graph)`)
-      process.exit(1)
-    }
+  // Graph wiring is opt-in: warn (don't exit) when --no-graph is unset but
+  // the bench-specific Neo4j env is also unset. The factory will silently
+  // fall back to SQL-only — same behavior as the historical bench runs,
+  // but with the warning so operators don't think graph is firing when it
+  // isn't. To actually exercise graph, set ENGRAM_BENCH_NEO4J_URI (which
+  // MUST point at a non-production Neo4j to avoid polluting live data).
+  if (!args.noGraph && !process.env['ENGRAM_BENCH_NEO4J_URI']) {
+    console.warn(
+      '[sweep] graph=true but ENGRAM_BENCH_NEO4J_URI not set — running SQL-only. ' +
+      'Set ENGRAM_BENCH_NEO4J_URI (separate from prod NEO4J_URI) to wire NeuralGraph.',
+    )
   }
 }

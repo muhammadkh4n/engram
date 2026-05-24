@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
+    "@engram-mem/graph": "*",
     "@engram-mem/sqlite": "*",
     "@engram-mem/openai": "*",
     "@engram-mem/rerank-onnx": "*"
