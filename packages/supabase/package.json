@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/supabase",
-  "version": "0.3.12",
+  "version": "0.3.13",
   "description": "Supabase storage adapter for Engram \u2014 cloud-hosted memory with pgvector and full-text search",
   "keywords": [
     "memory",
