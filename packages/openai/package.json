@@ -1,7 +1,7 @@
 {
   "name": "@engram-mem/openai",
-  "version": "0.3.8",
-  "description": "OpenAI intelligence adapter for Engram — embeddings, summarization, entity extraction, cross-encoder reranking",
+  "version": "0.3.9",
+  "description": "OpenAI intelligence adapter for Engram \u2014 embeddings, summarization, entity extraction, cross-encoder reranking",
   "keywords": [
     "memory",
     "ai",

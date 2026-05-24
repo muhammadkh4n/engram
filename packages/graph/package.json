@@ -1,7 +1,7 @@
 {
   "name": "@engram-mem/graph",
-  "version": "0.3.8",
-  "description": "Neo4j neural graph adapter for Engram — spreading activation, community detection, engram cells",
+  "version": "0.3.9",
+  "description": "Neo4j neural graph adapter for Engram \u2014 spreading activation, community detection, engram cells",
   "keywords": [
     "memory",
     "ai",
