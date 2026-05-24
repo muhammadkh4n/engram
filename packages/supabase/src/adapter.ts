@@ -6,6 +6,7 @@ import { SupabaseDigestStorage } from './digests.js'
 import { SupabaseSemanticStorage } from './semantic.js'
 import { SupabaseProceduralStorage } from './procedural.js'
 import { SupabaseAssociationStorage } from './associations.js'
+import { SupabaseConsolidationRunStorage } from './consolidation-runs.js'
 
 export interface SupabaseAdapterOptions {
   url: string
@@ -21,6 +22,7 @@ export class SupabaseStorageAdapter implements StorageAdapter {
   private _semantic: SupabaseSemanticStorage | null = null
   private _procedural: SupabaseProceduralStorage | null = null
   private _associations: SupabaseAssociationStorage | null = null
+  private _consolidationRuns: SupabaseConsolidationRunStorage | null = null
 
   constructor(opts: SupabaseAdapterOptions) {
     this.client = createClient(opts.url, opts.key)
@@ -55,6 +57,7 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     this._semantic = new SupabaseSemanticStorage(this.client)
     this._procedural = new SupabaseProceduralStorage(this.client)
     this._associations = new SupabaseAssociationStorage(this.client)
+    this._consolidationRuns = new SupabaseConsolidationRunStorage(this.client)
   }
 
   async dispose(): Promise<void> {
@@ -64,6 +67,7 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     this._semantic = null
     this._procedural = null
     this._associations = null
+    this._consolidationRuns = null
   }
 
   get episodes(): SupabaseEpisodeStorage {
@@ -99,6 +103,17 @@ export class SupabaseStorageAdapter implements StorageAdapter {
       throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
     }
     return this._associations
+  }
+
+  /**
+   * v0.3.13: optional ConsolidationRunStorage. Returns undefined when
+   * the adapter hasn't been initialize()'d yet so the optional-field
+   * contract is honored (callers in core check `if (storage.consolidationRuns)`).
+   * Reads/writes hit memory_consolidation_runs — see the
+   * 20260524000001_consolidation_runs.sql migration.
+   */
+  get consolidationRuns(): SupabaseConsolidationRunStorage | undefined {
+    return this._consolidationRuns ?? undefined
   }
 
   async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
