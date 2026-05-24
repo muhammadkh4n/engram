@@ -101,6 +101,48 @@ const CONFIDENCE_FLOOR = 0.05
 // targeted-prune ergonomic without false-positives on unrelated content.
 const DEFAULT_FORGET_MIN_RELEVANCE = 0.5
 
+/**
+ * Build the contextual text the embedding model sees for a single message.
+ * Extracted as a module-level helper so ingest() and ingestBatch() use the
+ * exact same construction rules — drift would silently produce different
+ * embedding spaces between the per-message and batched paths.
+ *
+ * Rules (from the Wave 0 contextual-embedding lift, +17.1% on LoCoMo):
+ *  - If a contextualPreamble exists (Anthropic-style opt-in), use it as
+ *    the prefix and cap the whole thing at 1500 chars.
+ *  - Else if cleanText is long enough to benefit from neighbor context
+ *    (>20 chars) and we have prior turns, prepend the last up-to-2 turns
+ *    (capped at 500 chars of prior context) and cap the whole at 1000.
+ *  - Otherwise embed the cleanText (or raw string content) directly.
+ */
+function buildTextToEmbed(
+  message: Message,
+  cleanText: string,
+  contextualPreamble: string,
+  recentContextTurns: readonly string[],
+): string {
+  // Tier 1 (Anthropic-style): preamble + cleanText, capped at 1500 chars
+  if (contextualPreamble) {
+    return `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
+  }
+  // Tier 2 (Wave 0 contextual): long-enough cleanText benefits from
+  // neighbor-turn context when we have any
+  if (cleanText.length > 20) {
+    if (recentContextTurns.length > 0) {
+      const context = recentContextTurns.join('\n').slice(-500)
+      return `${context}\n${cleanText}`.slice(-1000)
+    }
+    // Long-enough but isolated — embed cleanText alone (strips noise like
+    // timestamps and tool-call markers; covered by memory.test.ts:195).
+    return cleanText
+  }
+  // Tier 3 (short messages): the cleanText would be too thin to embed
+  // meaningfully on its own. Fall back to the raw string content so the
+  // embedder sees whatever surrounding tokens were there. Preserves the
+  // legacy behavior for short utterances.
+  return typeof message.content === 'string' ? message.content : cleanText
+}
+
 export class Memory {
   private storage: StorageAdapter
   private intelligence: IntelligenceAdapter | undefined
@@ -204,7 +246,23 @@ export class Memory {
   // ---------------------------------------------------------------------------
 
   /** Store a message. Auto-detects salience, extracts entities. */
-  async ingest(message: Message): Promise<void> {
+  async ingest(
+    message: Message,
+    opts?: {
+      /**
+       * Skip the intelligence.embed call and use this vector instead.
+       * Used by ingestBatch() to amortize one batched embed call across
+       * many messages. The caller is responsible for ensuring the vector
+       * was computed for the same `textToEmbed` shape that ingest() would
+       * have built — see ingestBatch for the construction rules.
+       *
+       * `null` is distinct from `undefined`: null means "embedding failed
+       * upstream, store without vector" while undefined means "compute
+       * the embedding normally inside ingest()".
+       */
+      precomputedEmbedding?: number[] | null
+    },
+  ): Promise<void> {
     this.assertInitialized()
 
     const sessionId = message.sessionId ?? DEFAULT_SESSION_ID
@@ -260,25 +318,14 @@ export class Memory {
     // the last 1-2 preceding turns so the embedding model captures
     // conversational flow. Short casual turns (~123 chars) embed weakly in
     // isolation; with context they match queries better.
-    let embedding: number[] | null = null
-    if (this.intelligence?.embed) {
+    //
+    // ingestBatch can supply a precomputed embedding via opts to amortize a
+    // single batched embedBatch call across many messages — when present we
+    // skip the per-message embed round-trip entirely.
+    let embedding: number[] | null = opts?.precomputedEmbedding ?? null
+    if (embedding === null && opts?.precomputedEmbedding === undefined && this.intelligence?.embed) {
       try {
-        let textToEmbed: string
-        if (contextualPreamble) {
-          textToEmbed = `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
-        } else if (cleanText.length > 20) {
-          const contextTurns = recentEpisodes
-            .slice(-2)
-            .map(e => e.content)
-          if (contextTurns.length > 0) {
-            const context = contextTurns.join('\n').slice(-500)
-            textToEmbed = `${context}\n${cleanText}`.slice(-1000)
-          } else {
-            textToEmbed = cleanText
-          }
-        } else {
-          textToEmbed = typeof message.content === 'string' ? message.content : cleanText
-        }
+        const textToEmbed = buildTextToEmbed(message, cleanText, contextualPreamble, recentEpisodes.slice(-2).map((e) => e.content))
         embedding = await this.intelligence.embed(textToEmbed)
       } catch (err) {
         console.error('[engram] embedding failed, storing without vector:', err)
@@ -409,8 +456,82 @@ export class Memory {
   async ingestBatch(messages: Message[]): Promise<void> {
     this.assertInitialized()
 
+    // Fast-path: no batch embed support OR small batch — fall back to
+    // sequential ingest. The batch round-trip overhead doesn't pay back
+    // for tiny batches.
+    if (messages.length < 4 || !this.intelligence?.embedBatch) {
+      for (const message of messages) {
+        await this.ingest(message)
+      }
+      return
+    }
+
+    // Phase 1: filter out short / empty messages BEFORE embedding. Those
+    // would have been discarded by ingest() anyway and we'd be paying for
+    // their embeddings for nothing.
+    type Prepared = {
+      message: Message
+      cleanText: string
+      preamble: string
+      textToEmbed: string
+    }
+    const prepared: Prepared[] = []
+    const dropped: Message[] = []
     for (const message of messages) {
-      await this.ingest(message)
+      const cleanText = parseContent(message.content).cleanText
+      if (cleanText.length < 2) {
+        dropped.push(message)
+        continue
+      }
+      // We don't run the contextualPreamble LLM call in batch mode — its
+      // own latency would defeat the batch. Callers that need contextual
+      // retrieval should use single-message ingest(). Empty preamble means
+      // buildTextToEmbed falls back to the neighbor-turn prefix path.
+      const preamble = ''
+      // The "preceding 2 turns of context" the embedding sees comes from
+      // the batch-local prior messages first (we know what's about to be
+      // inserted before this one), then from storage if the batch is at
+      // the start of a fresh session. This matches the behavior ingest()
+      // would produce if it ran the messages sequentially with no other
+      // traffic in between.
+      const idx = prepared.length
+      const localPrior = prepared.slice(Math.max(0, idx - 2)).map((p) => p.cleanText)
+      const textToEmbed = buildTextToEmbed(message, cleanText, preamble, localPrior)
+      prepared.push({ message, cleanText, preamble, textToEmbed })
+    }
+    for (const d of dropped) {
+      // Match the warning shape ingest() emits for skipped messages so
+      // operator observability stays consistent.
+      console.warn('[engram] ingestBatch: message discarded — no usable text content after parsing.', { role: d.role })
+    }
+
+    if (prepared.length === 0) return
+
+    // Phase 2: batched embeddings. text-embedding-3-small accepts up to
+    // 2048 inputs per call but in practice the bolt connection caps total
+    // payload size — keep chunks at 256 to stay well under any limit.
+    const CHUNK_SIZE = 256
+    const embeddings: Array<number[] | null> = new Array(prepared.length).fill(null)
+    for (let start = 0; start < prepared.length; start += CHUNK_SIZE) {
+      const chunk = prepared.slice(start, start + CHUNK_SIZE)
+      try {
+        const vectors = await this.intelligence.embedBatch(chunk.map((p) => p.textToEmbed))
+        for (let i = 0; i < vectors.length; i++) {
+          embeddings[start + i] = vectors[i] ?? null
+        }
+      } catch (err) {
+        console.error('[engram] ingestBatch: chunk embed failed, those messages will store without vectors:', (err as Error).message)
+        // Leave embeddings[start..start+chunk.length-1] as null — the
+        // sequential ingest below will store them without a vector.
+      }
+    }
+
+    // Phase 3: sequential ingest with precomputed embeddings. Each per-
+    // message side-effect (SQL insert, temporal edges, graph decomposition)
+    // still runs in order so existing invariants (recent-episodes context,
+    // temporal-edge chains) are preserved.
+    for (let i = 0; i < prepared.length; i++) {
+      await this.ingest(prepared[i]!.message, { precomputedEmbedding: embeddings[i] })
     }
   }
 

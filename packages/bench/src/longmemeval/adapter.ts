@@ -61,13 +61,34 @@ export class LongMemEvalAdapter {
     question: LongMemEvalQuestion,
     memory: Memory,
   ): Promise<{ episodesIngested: number; sessionsCreated: number }> {
-    let episodesIngested = 0
     const sessionsCreated = new Set<string>()
 
     const n = Math.min(
       question.haystack_session_ids.length,
       question.haystack_sessions.length,
     )
+
+    // Flatten ALL haystack turns into a single ordered list, then ingest as
+    // one batch. This lets Memory.ingestBatch amortize the embedding call
+    // across the whole haystack — text-embedding-3-small in chunks of 256.
+    // Empirically the ~470 turns per LongMemEval question drop from ~70s
+    // of pure embed round-trips to ~2s.
+    //
+    // Why one batch (not per-session): the batch's contextual-embedding
+    // prefix derives from prior batch members, and sessions are independent
+    // (different sessionId tags). Mixing them in one batch gives the
+    // last-2-turns context prefix a slight cross-session "leakage" on the
+    // first turn of each new session — but those leaks are bounded to
+    // 2 turns of preamble that's irrelevant to retrieval scoring, and the
+    // alternative (per-session batches of ~10 turns) loses most of the
+    // amortization win. Keeps the batch flat.
+    type BatchMsg = {
+      role: 'user' | 'assistant'
+      content: string
+      sessionId: string
+      metadata: Record<string, unknown>
+    }
+    const batch: BatchMsg[] = []
 
     for (let s = 0; s < n; s++) {
       const lmeSessionId = question.haystack_session_ids[s]!
@@ -80,7 +101,7 @@ export class LongMemEvalAdapter {
         const msg = turns[t]!
         if (!msg.content || msg.content.trim().length === 0) continue
 
-        await memory.ingest({
+        batch.push({
           role: msg.role,
           content: msg.content.trim(),
           sessionId: engSessionId,
@@ -92,11 +113,12 @@ export class LongMemEvalAdapter {
             lmeQuestionType: question.question_type,
           },
         })
-        episodesIngested++
       }
     }
 
-    return { episodesIngested, sessionsCreated: sessionsCreated.size }
+    await memory.ingestBatch(batch)
+
+    return { episodesIngested: batch.length, sessionsCreated: sessionsCreated.size }
   }
 
   /**
