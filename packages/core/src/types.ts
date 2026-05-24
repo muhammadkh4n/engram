@@ -275,6 +275,16 @@ export interface ConsolidateResult {
   isolatedNodesDeprioritized?: number
   // Wave 5 additions:
   communitySummariesGenerated?: number
+  // v0.3.12 additions — consolidation observability + cost ceilings:
+  /** Total episode count snapshotted at the end of this run. Used by the
+   *  delta gate in isDreamCycleDue() to skip runs when ingest has been quiet. */
+  episodeCount?: number
+  /** Number of LLM summary calls actually issued during this run. */
+  llmCallsCount?: number
+  /** Best-effort USD estimate of LLM cost (input + output tokens × per-call pricing). */
+  llmCallsUsdEstimate?: number
+  /** Set to the ceiling name when a cap aborted the run. null/undefined = ran to completion. */
+  cappedAt?: 'maxCommunities' | 'maxLlmCallsUsd'
 }
 
 export interface ConsolidationRun {

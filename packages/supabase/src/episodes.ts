@@ -245,6 +245,19 @@ export class SupabaseEpisodeStorage implements EpisodeStorage {
 
     return { createdAt: new Date(episodes[0].created_at) }
   }
+
+  /**
+   * Total episode count. Optional in EpisodeStorage; implementing here so
+   * the v0.3.12 auto-consolidation delta gate can skip no-op dream cycles
+   * by comparing count() against the snapshot stored at the previous run.
+   */
+  async count(): Promise<number> {
+    const { count, error } = await this.client
+      .from('memory_episodes')
+      .select('id', { count: 'exact', head: true })
+    if (error) throw error
+    return count ?? 0
+  }
 }
 
 // ---------------------------------------------------------------------------

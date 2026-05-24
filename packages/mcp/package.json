@@ -20,6 +20,7 @@
   "bin": {
     "engram-mcp": "dist/index.js",
     "engram-mcp-http": "dist/index-http.js",
+    "engram-dream-cycle": "dist/dream-cycle-cli.js",
     "engram-session-summary": "dist/session-summary.js",
     "engram-pre-compact": "dist/pre-compact.js",
     "engram-backfill-graph": "dist/backfill-graph.js",
