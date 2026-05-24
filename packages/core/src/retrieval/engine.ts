@@ -12,6 +12,7 @@ import { stageReconsolidate } from './reconsolidation.js'
 import { stageActivate, type CompositeMemory } from './spreading-activation.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
 import { classifyQuery } from './query-classifier.js'
+import { applyMMR, mmrConfigFromEnv } from './mmr.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -537,6 +538,20 @@ export async function recall(
       console.error('[engram] pattern completion fallback error:', err)
       // non-fatal: continue with existing weak results
     }
+  }
+
+  // Stage 1a.7: MMR pre-rerank diversification.
+  // Cross-encoder rerankers waste capacity on near-duplicate candidates and
+  // can push genuinely different relevant items out of the final top-K.
+  // MMR re-orders (and optionally caps) the candidate list so the reranker
+  // sees a diverse slate. Lemma-Jaccard similarity over content — no extra
+  // embeddings, deterministic, catches near-duplicate text (the failure
+  // mode that has historically broken chunk-multiplier experiments).
+  // Default ON since v0.3.9. Set ENGRAM_MMR_PRE_RERANK=false to opt out.
+  // See packages/core/src/retrieval/mmr.ts for full env semantics.
+  const mmrCfg = mmrConfigFromEnv()
+  if (mmrCfg !== null && memories.length > 1) {
+    memories = applyMMR(memories, mmrCfg.lambda, mmrCfg.maxOut)
   }
 
   // Stage 1b: Cross-encoder reranking
