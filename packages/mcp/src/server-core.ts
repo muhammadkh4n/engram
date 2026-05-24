@@ -8,6 +8,9 @@
  * Used by both stdio (index.ts) and Streamable HTTP (index-http.ts) entries.
  */
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import {
   CallToolRequestSchema,
@@ -18,6 +21,28 @@ import { SupabaseStorageAdapter } from '@engram-mem/supabase'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
+
+/**
+ * Read the package version once at module load from the colocated package.json.
+ * Resolves correctly from both `src/server-core.ts` (dev) and `dist/server-core.js`
+ * (published) because both sit one level below `package.json`.
+ *
+ * Falls back to "0.0.0" rather than throwing if the file is missing or
+ * malformed — server startup should never fail just because the version
+ * string is unavailable.
+ */
+function readPackageVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const pkgPath = join(here, '..', 'package.json')
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
+const PACKAGE_VERSION = readPackageVersion()
 
 function requireEnv(name: string): string {
   const val = process.env[name]
@@ -195,7 +220,7 @@ const TOOLS = [
 
 export function createEngramServer(): Server {
   const server = new Server(
-    { name: 'engram-memory', version: '0.3.8' },
+    { name: 'engram-memory', version: PACKAGE_VERSION },
     {
       capabilities: { tools: {} },
       instructions: INSTRUCTIONS,
