@@ -57,6 +57,41 @@ function topNByFrequency(freq: Map<string, number>, n: number): string[] {
  * ceiling (we'd hit the cap sooner with bad pricing than we should, never
  * later).
  */
+/**
+ * GDS `gds.graph.project` is strict — passing any relationship type or
+ * node label that doesn't exist in the database causes the WHOLE
+ * projection to fail with `Invalid relationship projection`. The dream
+ * cycle was hard-coding the full taxonomy (TEMPORAL, TOPICAL,
+ * CONTEXTUAL, DERIVES_FROM, CO_RECALLED, CONTRADICTS, …) but only a
+ * subset of those types actually gets written by current ingest code,
+ * so Louvain silently never ran on the production graph.
+ *
+ * Fix: query the live schema first and filter the requested list down
+ * to what actually exists. Empty intersection → caller skips the
+ * projection entirely (no-op cycle, not a failure).
+ */
+async function existingNodeLabels(graph: GraphPort, requested: readonly string[]): Promise<string[]> {
+  try {
+    const result = await graph.runCypher!('CALL db.labels() YIELD label RETURN collect(label) AS labels')
+    const all = (result.records[0]?.get('labels') as string[] | undefined) ?? []
+    return requested.filter((l) => all.includes(l))
+  } catch {
+    // db.labels unavailable (test stub?) — fall back to original list,
+    // GDS will surface the missing-label error as before.
+    return [...requested]
+  }
+}
+
+async function existingRelTypes(graph: GraphPort, requested: readonly string[]): Promise<string[]> {
+  try {
+    const result = await graph.runCypher!('CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS types')
+    const all = (result.records[0]?.get('types') as string[] | undefined) ?? []
+    return requested.filter((t) => all.includes(t))
+  } catch {
+    return [...requested]
+  }
+}
+
 function estimateLlmCallCost(
   promptChars: number,
   outputChars: number,
@@ -167,20 +202,28 @@ export async function dreamCycle(
       // Drop stale projection if exists
       try { await graph.runCypher(`CALL gds.graph.drop('memory-graph', false)`) } catch { /* ok */ }
 
+      // v0.3.13: build the projection adaptively against the live schema.
+      // gds.graph.project fails if ANY listed type/label is missing — and
+      // current ingest code writes only a subset of the historical full
+      // taxonomy. Filtering down to actually-existing types lets Louvain
+      // run on the real graph instead of silently no-op'ing.
+      const wantLabels = ['Memory', 'Person', 'Topic', 'Entity'] as const
+      const wantRels = ['SPOKE', 'CONTEXTUAL', 'TOPICAL', 'TEMPORAL', 'DERIVES_FROM', 'EMOTIONAL', 'INTENTIONAL'] as const
+      const labels = await existingNodeLabels(graph, wantLabels)
+      const rels = await existingRelTypes(graph, wantRels)
+      if (labels.length === 0 || rels.length === 0) {
+        console.warn(`[dream-cycle] Skipping Louvain: no usable labels/rels in projection (labels=${labels.join(',')}, rels=${rels.join(',')})`)
+        throw new Error('empty projection — skip louvain')
+      }
+      const labelLiteral = `[${labels.map((l) => `'${l}'`).join(', ')}]`
+      const relLiteral = `{ ${rels.map((r) => `${r}: { orientation: 'UNDIRECTED', properties: ['weight'] }`).join(', ')} }`
+
       // Project the graph
       await graph.runCypher(`
         CALL gds.graph.project(
           'memory-graph',
-          ['Memory', 'Person', 'Topic', 'Entity'],
-          {
-            SPOKE:        { orientation: 'UNDIRECTED', properties: ['weight'] },
-            CONTEXTUAL:   { orientation: 'UNDIRECTED', properties: ['weight'] },
-            TOPICAL:      { orientation: 'UNDIRECTED', properties: ['weight'] },
-            TEMPORAL:     { orientation: 'UNDIRECTED', properties: ['weight'] },
-            DERIVES_FROM: { orientation: 'UNDIRECTED', properties: ['weight'] },
-            EMOTIONAL:    { orientation: 'UNDIRECTED', properties: ['weight'] },
-            INTENTIONAL:  { orientation: 'UNDIRECTED', properties: ['weight'] }
-          }
+          ${labelLiteral},
+          ${relLiteral}
         )
         YIELD graphName, nodeCount, relationshipCount
         RETURN graphName, nodeCount, relationshipCount
@@ -348,12 +391,21 @@ export async function dreamCycle(
       // Drop stale projection
       try { await graph.runCypher(`CALL gds.graph.drop('bridge-graph', false)`) } catch { /* ok */ }
 
+      // v0.3.13: adaptive projection (see Louvain block above for rationale).
+      const bridgeWantRels = ['TEMPORAL', 'TOPICAL', 'CONTEXTUAL', 'DERIVES_FROM', 'CO_RECALLED', 'CONTRADICTS'] as const
+      const bridgeRels = await existingRelTypes(graph, bridgeWantRels)
+      if (bridgeRels.length === 0) {
+        console.warn('[dream-cycle] Skipping betweenness: no usable rel types in projection')
+        throw new Error('empty projection — skip betweenness')
+      }
+      const bridgeRelLiteral = `[${bridgeRels.map((r) => `'${r}'`).join(', ')}]`
+
       // Project Memory-only graph
       await graph.runCypher(`
         CALL gds.graph.project(
           'bridge-graph',
           'Memory',
-          ['TEMPORAL', 'TOPICAL', 'CONTEXTUAL', 'DERIVES_FROM', 'CO_RECALLED', 'CONTRADICTS']
+          ${bridgeRelLiteral}
         )
         YIELD graphName, nodeCount, relationshipCount
         RETURN graphName, nodeCount, relationshipCount
@@ -398,14 +450,22 @@ export async function dreamCycle(
   // -----------------------------------------------------------------------
   if (graphAvailable && graph?.runCypher && graph.spreadActivation) {
     try {
-      // Get N most recent Memory nodes as seeds
+      // Get N most recent Memory nodes as seeds.
+      // v0.3.13: inline the LIMIT as a literal integer. Passing the value
+      // as $replaySeeds parameter fails on Neo4j 5+ ("'5.0' is not a valid
+      // value. Must be a non-negative integer") because the bolt driver
+      // serializes JS numbers as Float64 by default and Cypher's LIMIT
+      // requires an integer. Math.floor sanitizes; replaySeeds is
+      // operator-controlled (DreamCycleOptions, default 5) so no
+      // injection-class concern.
+      const seedLimit = Math.max(1, Math.floor(replaySeeds))
       const seedResult = await graph.runCypher(`
         MATCH (m:Memory)
         WHERE m.createdAt IS NOT NULL
         ORDER BY m.createdAt DESC
-        LIMIT $replaySeeds
+        LIMIT ${seedLimit}
         RETURN m.id AS memoryId
-      `, { replaySeeds })
+      `)
 
       const seeds = seedResult.records.map((r: { get(key: string): unknown }) => ({ memoryId: r.get('memoryId') as string }))
 
