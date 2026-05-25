@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type {
   Association,
   MemoryType,
@@ -10,7 +10,7 @@ import { generateId } from '@engram-mem/core'
 import type { AssociationStorage } from '@engram-mem/core'
 
 export class PostgRestAssociationStorage implements AssociationStorage {
-  constructor(private readonly client: SupabaseClient) {}
+  constructor(private readonly client: PostgrestClient) {}
 
   async insert(association: Omit<Association, 'id' | 'createdAt'>): Promise<Association> {
     const id = generateId()

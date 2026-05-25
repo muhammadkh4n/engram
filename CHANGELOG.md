@@ -4,6 +4,22 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-05-25
+
+### Fixed
+
+- **`@engram-mem/postgrest@0.4.0` was broken against bare PostgREST endpoints.** The package depended on `@supabase/supabase-js`, which unconditionally prepends `/rest/v1/` to every query URL — Supabase's hosted gateway handles that prefix, but bare PostgREST serves at root and returns 404. Anyone following the package's "BYO infra: self-hosted Postgres + PostgREST" pitch hit `Supabase connection failed: undefined` with zero traffic at PostgREST. v0.4.1 swaps the underlying client from `@supabase/supabase-js` to bare `@supabase/postgrest-js` (constructor signature unchanged, same `.from()` / `.rpc()` query API). Both hosted Supabase and bare self-hosted PostgREST now work out of the box, no proxy required.
+
+  Verified end-to-end against bare PostgREST: `initialize()` connects, `vectorSearch` returns results, `getById` round-trips real rows.
+
+  `@engram-mem/postgrest@0.4.0` and `@engram-mem/supabase@0.4.0` will be `npm deprecate`d with a notice pointing to v0.4.1+. No public API change between 0.4.0 and 0.4.1 — drop-in upgrade.
+
+- Removed the (now-false) claim in `packages/postgrest/README.md` that `@supabase/supabase-js` "works against any PostgREST endpoint." It didn't; v0.4.1's bare client does.
+
+### Operator runbook addendum
+
+- The nginx path-rewrite proxy described in `docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md` (errata block) is **only required when running an engram-mcp-http built against `@engram-mem/postgrest@0.4.0`**. After upgrading to 0.4.1+, the proxy can be removed and `SUPABASE_URL` pointed directly at the bare PostgREST endpoint.
+
 ## [0.4.0] - 2026-05-25
 
 ### BREAKING (with shim)

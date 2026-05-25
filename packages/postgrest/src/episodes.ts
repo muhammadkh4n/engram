@@ -1,4 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { EpisodeStorage } from '@engram-mem/core'
@@ -12,7 +12,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
    *   and used until migrations 004-007 are applied.
    */
   constructor(
-    private readonly client: SupabaseClient,
+    private readonly client: PostgrestClient,
     private readonly legacyMode: boolean = false,
   ) {}
 

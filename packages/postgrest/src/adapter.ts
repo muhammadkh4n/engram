@@ -1,4 +1,4 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { PostgrestClient } from '@supabase/postgrest-js'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 import type { StorageAdapter } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
@@ -15,7 +15,7 @@ export interface PostgRestAdapterOptions {
 }
 
 export class PostgRestStorageAdapter implements StorageAdapter {
-  private client: SupabaseClient
+  private client: PostgrestClient
   private _isLegacy: boolean = false
   private _episodes: PostgRestEpisodeStorage | null = null
   private _digests: PostgRestDigestStorage | null = null
@@ -25,7 +25,15 @@ export class PostgRestStorageAdapter implements StorageAdapter {
   private _consolidationRuns: PostgRestConsolidationRunStorage | null = null
 
   constructor(opts: PostgRestAdapterOptions) {
-    this.client = createClient(opts.url, opts.key)
+    // Bare PostgREST client — no /rest/v1/ prefix, no auth/storage/realtime.
+    // The `apikey` header is harmless against bare PostgREST and required
+    // by Supabase's hosted gateway, so we set both for cross-deployment compat.
+    this.client = new PostgrestClient(opts.url, {
+      headers: {
+        Authorization: `Bearer ${opts.key}`,
+        apikey: opts.key,
+      },
+    })
   }
 
   async initialize(): Promise<void> {
@@ -43,10 +51,10 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         .select('id')
         .limit(1)
       if (legacyError) {
-        throw new Error(`Supabase connection failed: ${legacyError.message}`)
+        throw new Error(`PostgREST connection failed: ${legacyError.message}`)
       }
       // Legacy mode: memories table absent, use compatibility wrappers.
-      console.log('[engram] Supabase legacy schema detected — running in compatibility mode (no memories pool table)')
+      console.log('[engram] legacy schema detected — running in compatibility mode (no memories pool table)')
       this._isLegacy = true
     } else {
       this._isLegacy = false
@@ -61,7 +69,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
   }
 
   async dispose(): Promise<void> {
-    // Supabase client has no explicit close method — no-op
+    // PostgREST client is HTTP — no explicit close method, no-op.
     this._episodes = null
     this._digests = null
     this._semantic = null

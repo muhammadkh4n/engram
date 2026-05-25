@@ -1,11 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class PostgRestDigestStorage implements DigestStorage {
-  constructor(private readonly client: SupabaseClient) {}
+  constructor(private readonly client: PostgrestClient) {}
 
   async insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest> {
     const id = generateId()

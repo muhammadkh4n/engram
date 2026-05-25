@@ -1,11 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class PostgRestSemanticStorage implements SemanticStorage {
-  constructor(private readonly client: SupabaseClient) {}
+  constructor(private readonly client: PostgrestClient) {}
 
   async insert(
     memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>

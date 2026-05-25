@@ -137,6 +137,48 @@ are folded in.)
 
 This is a ~1 day task done carefully. Do it during a window where engram can be down for ~30 minutes during the cutover. The migration is fully reversible until you delete the Supabase project.
 
+### ⚠ Runbook errata — discovered during the 2026-05-25 cutover
+
+The first run-through of this runbook surfaced three problems. Read these before following the phases:
+
+1. **Use `pgvector/pgvector:pg17`, not `pg16`.** Supabase runs PostgreSQL 17.6 (as of this writing); pg_dump from a 17.x source against a 16.x target client gets refused with `server version mismatch`. Phase 1 below still says pg16 — substitute pg17.
+
+2. **Phase 2 "replay the seven migrations" does NOT produce a working schema.** Both `./migrations/` and `./supabase/migrations/` in this repo are demonstrably incomplete: they reference `memory_semantic`, `memory_procedural`, `memory_associations` (no CREATE TABLE anywhere) and `memory_episodes.salience` / `.access_count` (no ADD COLUMN anywhere). Production Supabase was hand-edited via Studio / `supabase db push` outside the committed files. **Replace Phase 2 with `pg_dump --schema-only --schema=public --no-owner --no-acl` from Supabase, strip the dump's `CREATE SCHEMA public;` line, then apply.** The dump-as-source-of-truth approach is safer regardless — separate follow-up should backfill the missing migrations into `./supabase/migrations/`.
+
+3. **PostgREST + supabase-js need an nginx path-rewrite proxy in front — ONLY for v0.4.0.** v0.4.0 of `@engram-mem/postgrest` depended on `@supabase/supabase-js`, which unconditionally prepends `/rest/v1/` to every query; bare PostgREST serves at root, so engram-mcp-http got 404 on every call and died with `Supabase connection failed: undefined`. Workaround for v0.4.0: insert a "Phase 3.5" `nginx:alpine` container that rewrites `/rest/v1/* → /*` and stubs `/auth/v1/*` + `/storage/v1/*` with 200; point `SUPABASE_URL` at the proxy.
+
+   **v0.4.1+ fixed this at the source** — the package now uses bare `@supabase/postgrest-js`, no prefix, no proxy required. If you're following this runbook with engram built against v0.4.1+, skip the nginx phase entirely and point `SUPABASE_URL` directly at the PostgREST port. The nginx config below is preserved for v0.4.0 deployments and as a reference if you ever need an inline proxy.
+
+Minimal nginx config used during the cutover (saved as `/root/engram-postgrest-proxy/default.conf`):
+
+```nginx
+server {
+  listen 80 default_server;
+  server_name _;
+  client_max_body_size 32m;
+
+  location /rest/v1/ {
+    rewrite ^/rest/v1/(.*)$ /$1 break;
+    proxy_pass http://engram-postgrest:3000;
+    proxy_set_header Host $host;
+    proxy_pass_request_headers on;
+  }
+  location ~ ^/auth/v1/    { add_header Content-Type application/json; return 200 "{}"; }
+  location ~ ^/storage/v1/ { add_header Content-Type application/json; return 200 "{}"; }
+  location ~ ^/realtime/v1/ { return 404; }
+
+  location / {
+    proxy_pass http://engram-postgrest:3000;
+    proxy_set_header Host $host;
+    proxy_pass_request_headers on;
+  }
+}
+```
+
+Run with `docker run -d --name engram-postgrest-proxy --restart unless-stopped --link engram-postgrest -v /root/engram-postgrest-proxy/default.conf:/etc/nginx/conf.d/default.conf:ro -p 127.0.0.1:3002:80 nginx:alpine`. Port 3000 was already in use by adguardhome on rexvps; 3002 was free.
+
+The phases below are kept as originally written for historical accuracy; apply the three corrections above when following them.
+
 ### Pre-flight
 
 | Item | What | Status |

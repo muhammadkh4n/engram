@@ -164,9 +164,9 @@ const result = await memory2.recall('TypeScript strict mode')
 
 ## Connection model
 
-`PostgRestStorageAdapter` constructs a `SupabaseClient` from `@supabase/supabase-js`. That library is itself a wrapper around `postgrest-js` plus auth/realtime/storage — engram only uses the PostgREST query-builder, so the same client works against any PostgREST endpoint (Supabase-hosted, self-hosted, EnterpriseDB cloud, etc.). The "SupabaseClient" type name is just the library's; it has nothing to do with the deployment target.
+`PostgRestStorageAdapter` constructs a bare `PostgrestClient` from `@supabase/postgrest-js`. That client is the same query-builder Supabase's hosted gateway uses internally; pointing it at any PostgREST endpoint (Supabase-hosted, self-hosted, EnterpriseDB cloud, etc.) works the same. The constructor sets both `Authorization: Bearer <key>` and `apikey: <key>` headers — the `apikey` header is harmless against bare PostgREST and required by Supabase's hosted gateway, so the same config works for both deployment targets.
 
-A future minor version may swap to bare `postgrest-js` to drop the realtime/storage/auth bundle weight. No public API impact.
+**v0.4.0 history**: v0.4.0 of this package wrapped `@supabase/supabase-js` instead of bare `postgrest-js`. That worked against hosted Supabase but failed against bare self-hosted PostgREST because `supabase-js` prepends `/rest/v1/` to every query URL — bare PostgREST serves at root. v0.4.1 fixed it. If you're on 0.4.0, upgrade.
 
 ## Backup
 

@@ -11,7 +11,7 @@
  * the tracker non-fatal (a tracker failure should not abort the actual
  * consolidation work).
  */
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { ConsolidationRun, ConsolidateResult } from '@engram-mem/core'
 import type { ConsolidationRunStorage } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
@@ -32,7 +32,7 @@ interface RunRow {
 }
 
 export class PostgRestConsolidationRunStorage implements ConsolidationRunStorage {
-  constructor(private client: SupabaseClient) {}
+  constructor(private client: PostgrestClient) {}
 
   async recordStart(cycle: Cycle): Promise<string> {
     const id = generateId()

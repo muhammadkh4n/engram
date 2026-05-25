@@ -1,11 +1,11 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
 export class PostgRestProceduralStorage implements ProceduralStorage {
-  constructor(private readonly client: SupabaseClient) {}
+  constructor(private readonly client: PostgrestClient) {}
 
   async insert(
     memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>
