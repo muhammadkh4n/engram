@@ -269,7 +269,21 @@ function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
  * `relevance` field is overwritten with the RRF score (caller-visible
  * ordering is what matters, not absolute score magnitude).
  */
-function fuseByReciprocalRank(
+/**
+ * @internal — exported for unit tests; not part of the public API.
+ *
+ * Reciprocal-Rank Fusion of two ranked lists. Each list contributes
+ * `1 / (k + rank + 1)` to each item's score; items appearing in both
+ * lists accumulate from both contributions.
+ *
+ * Metadata merge: when the same memory id appears in both lists, metadata
+ * is shallow-merged with later-list keys winning conflicts. This preserves
+ * per-pass enrichments (HyDE, pattern-completion, reranker annotations)
+ * that earlier code silently dropped via a first-seen-only `byId` cache.
+ * Top-level fields (type, content, source) are stable per memory id so
+ * keep first-seen semantics for them.
+ */
+export function fuseByReciprocalRank(
   listA: RetrievedMemory[],
   listB: RetrievedMemory[],
   maxResults: number,
@@ -278,17 +292,24 @@ function fuseByReciprocalRank(
   const scores = new Map<string, number>()
   const byId = new Map<string, RetrievedMemory>()
 
-  for (let rank = 0; rank < listA.length; rank++) {
-    const m = listA[rank]!
-    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1))
-    if (!byId.has(m.id)) byId.set(m.id, m)
+  const ingest = (list: RetrievedMemory[]) => {
+    for (let rank = 0; rank < list.length; rank++) {
+      const m = list[rank]!
+      scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1))
+      const existing = byId.get(m.id)
+      if (!existing) {
+        byId.set(m.id, m)
+      } else {
+        byId.set(m.id, {
+          ...existing,
+          metadata: { ...existing.metadata, ...m.metadata },
+        })
+      }
+    }
   }
 
-  for (let rank = 0; rank < listB.length; rank++) {
-    const m = listB[rank]!
-    scores.set(m.id, (scores.get(m.id) ?? 0) + 1 / (k + rank + 1))
-    if (!byId.has(m.id)) byId.set(m.id, m)
-  }
+  ingest(listA)
+  ingest(listB)
 
   return Array.from(scores.entries())
     .sort(([, a], [, b]) => b - a)
