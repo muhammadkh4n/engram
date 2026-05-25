@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [0.4.1] - 2026-05-25
 
+All 10 `@engram-mem/*` packages bumped to 0.4.1 to keep the version line coherent (matches the v0.4.0 lockstep pattern). The only behavioral change is in `@engram-mem/postgrest` and the `@engram-mem/supabase` shim that re-exports it; the other 8 packages (`core`, `graph`, `openai`, `sqlite`, `rerank-onnx`, `mcp`, `bench`, `openclaw`) are unchanged content-wise from 0.4.0 and republished only to keep the release-line aligned.
+
 ### Fixed
 
 - **`@engram-mem/postgrest@0.4.0` was broken against bare PostgREST endpoints.** The package depended on `@supabase/supabase-js`, which unconditionally prepends `/rest/v1/` to every query URL — Supabase's hosted gateway handles that prefix, but bare PostgREST serves at root and returns 404. Anyone following the package's "BYO infra: self-hosted Postgres + PostgREST" pitch hit `Supabase connection failed: undefined` with zero traffic at PostgREST. v0.4.1 swaps the underlying client from `@supabase/supabase-js` to bare `@supabase/postgrest-js` (constructor signature unchanged, same `.from()` / `.rpc()` query API). Both hosted Supabase and bare self-hosted PostgREST now work out of the box, no proxy required.
