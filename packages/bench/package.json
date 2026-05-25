@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/bench",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "description": "Benchmark harness for Engram \u2014 LoCoMo and LongMemEval evaluation with comparison mode",
   "keywords": [
     "memory",
