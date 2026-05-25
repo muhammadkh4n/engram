@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/openclaw",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "OpenClaw plugin for Engram \u2014 persistent cross-session memory for OpenClaw AI agents",
   "keywords": [
     "memory",
@@ -48,7 +48,7 @@
     "@engram-mem/core": "*",
     "@engram-mem/openai": "*",
     "@engram-mem/sqlite": "*",
-    "@engram-mem/postgrest": "*",
+    "@engram-mem/postgrest": "0.4.4",
     "@sinclair/typebox": "^0.34.49"
   },
   "peerDependencies": {

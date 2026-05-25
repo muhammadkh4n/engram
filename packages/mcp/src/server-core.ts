@@ -58,11 +58,19 @@ function requireEnv(name: string): string {
  * Optionally swap the rerank stage to a local ONNX cross-encoder.
  *
  * When `ENGRAM_RERANK_LOCAL=true`, dynamically loads `@engram-mem/rerank-onnx`
- * (mxbai-rerank-large-v1 by default) and spreads its `rerank` over the
- * provided intelligence adapter. The 113MB ONNX weights are downloaded on
- * first use and cached under the HF cache dir; `.load()` is fired
- * fire-and-forget at startup so the cache warm-up overlaps the first user
- * request rather than blocking it.
+ * and spreads its `rerank` over the provided intelligence adapter.
+ *
+ * Model variant is selected via `ENGRAM_RERANK_LOCAL_MODEL`:
+ *   - `mixedbread-ai/mxbai-rerank-large-v1`  (default) — best quality, ~113MB
+ *     q8 weights, ~1-1.5GB peak RAM at load, ~80ms per (query, doc) pair.
+ *   - `mixedbread-ai/mxbai-rerank-base-v1`   — 3× faster, ~50-70MB, small
+ *     quality drop. Good default for memory-constrained boxes (<8GB RAM).
+ *   - `mixedbread-ai/mxbai-rerank-xsmall-v1` — fastest, ~30MB, further drop.
+ *     Last resort if base still OOMs.
+ *
+ * Weights are downloaded on first use and cached under the HF cache dir.
+ * `.load()` is fired fire-and-forget at startup so the cache warm-up
+ * overlaps the first user request rather than blocking it.
  *
  * Falls back to the input adapter unchanged if the env flag is off or the
  * package fails to load (e.g. not installed). Errors during load are logged
@@ -74,14 +82,16 @@ async function maybeWithLocalRerank(
   if (process.env.ENGRAM_RERANK_LOCAL !== 'true') return intelligence
   try {
     const mod = await import('@engram-mem/rerank-onnx')
-    const onnx = mod.createOnnxReranker()
+    const model = process.env.ENGRAM_RERANK_LOCAL_MODEL?.trim() || undefined
+    const onnx = mod.createOnnxReranker(model ? { model } : {})
     // Fire-and-forget warm-up. First real query waits at most until model is
     // resident; subsequent queries are zero-latency setup.
     onnx.load().catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[engram-mcp] rerank-onnx warmup failed (will retry on first call): ${msg}`)
     })
-    console.log('[engram-mcp] ENGRAM_RERANK_LOCAL=true — using local mxbai-rerank cross-encoder')
+    const modelLabel = model ?? 'mixedbread-ai/mxbai-rerank-large-v1 (default)'
+    console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
       ...intelligence,
       rerank: (query, documents) => onnx.rerank(query, documents),

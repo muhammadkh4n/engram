@@ -36,11 +36,8 @@ export {
   PostgRestStorageAdapter,
   createPostgRestAdapter,
   supabaseAdapter,
+  getSchemaSQL,
   getMigrationSQL,
-  MIGRATION_004,
-  MIGRATION_005,
-  MIGRATION_006,
-  MIGRATION_007,
 } from '@engram-mem/postgrest'
 
 export type {

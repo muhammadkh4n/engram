@@ -4,6 +4,35 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-05-25
+
+All 10 `@engram-mem/*` packages bumped to 0.4.4 (lockstep). Repo cleanup + schema consolidation + rerank model flag. No public API breakage on the recall/ingest paths; `getMigrationSQL()` is kept as a deprecated alias for one minor cycle.
+
+### Changed
+
+- **`packages/postgrest/schema.sql`** is now the single idempotent source of truth for the database schema. Generated from the live production dump (post-v0.4.0 rebrand cutover) and scrubbed for re-runnability: `CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, `CREATE INDEX IF NOT EXISTS`, `DROP POLICY IF EXISTS … ; CREATE POLICY …`, `CREATE EXTENSION IF NOT EXISTS vector`. Apply with `psql -U postgres -d engram -f schema.sql`.
+- **`migrations.ts` exposes `getSchemaSQL()`** which reads `schema.sql` at runtime (lazy + cached). `getMigrationSQL()` is now a deprecated alias of the same function — will be removed in v0.5.0.
+- The 7-file `packages/postgrest/migrations/` directory and the four `MIGRATION_004` … `MIGRATION_007` embedded JS strings (~640 LOC) are **removed**. They described the schema piecewise but had drifted from production; the live dump is authoritative. Schema evolution history is preserved in git log on `migrations.ts` and the deleted `migrations/` directory.
+
+### Why
+
+Supabase's own docs split into imperative migrations vs declarative schemas + `supabase db diff`; both patterns assume the Supabase CLI is generating diffs. Self-host installs (the v0.4.0 BYO-PostgREST thesis) have neither the CLI nor the diff machinery, so a single idempotent schema file is the simpler match: one `psql -f schema.sql` bootstraps any database state.
+
+### Added
+
+- **`ENGRAM_RERANK_LOCAL_MODEL`** env var — selects the mxbai-rerank variant when `ENGRAM_RERANK_LOCAL=true`. Defaults to `mixedbread-ai/mxbai-rerank-large-v1` (best quality, ~1-1.5GB peak RAM at load). Set to `mixedbread-ai/mxbai-rerank-base-v1` for 3× faster inference and ~50-70MB footprint (recommended for memory-constrained VPS boxes); or `mixedbread-ai/mxbai-rerank-xsmall-v1` for the smallest footprint. The 4GB swap workaround added to rexvps in v0.4.3 is now optional — `base-v1` fits comfortably in <500MB.
+
+### Repo cleanup (in same release)
+
+- Deleted legacy pre-monorepo `src/` and `test/` directories (37 files, zero edges into `packages/` per the knowledge-graph analysis — "self-contained legacy island").
+- Deleted entire `docs/` directory (16 files: design docs, audits, research, wave docs, migration runbook). Replaced by git history + serena memory for ops state. README.md and CHANGELOG.md remain.
+- Deleted the orphan root `openclaw.plugin.json` (its only edge configured `src/plugin-entry.ts` which we deleted; the live manifest lives at `packages/openclaw/openclaw.plugin.json`).
+- Deleted `migrations/`, `run-migrations.mjs`, `supabase/config.toml`, `supabase/.temp/` and the entire `supabase/` directory.
+- Untracked `.claude/` (laptop-local Claude Code state).
+- Broadened `.gitignore`: `.understand-anything/`, `results/`, `data/`, `supabase/.temp/`.
+
+Net repo: 261 → 250 tracked files after all v0.4.4 work.
+
 ## [0.4.3] - 2026-05-25
 
 All 10 `@engram-mem/*` packages bumped to 0.4.3 (lockstep). Adds two opt-in retrieval improvements + a backfill CLI. Safe drop-in for 0.4.2 — both new flags default OFF.

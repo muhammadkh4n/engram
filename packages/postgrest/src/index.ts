@@ -14,7 +14,7 @@
  */
 export { PostgRestStorageAdapter } from './adapter.js'
 export type { PostgRestAdapterOptions } from './adapter.js'
-export { getMigrationSQL, MIGRATION_004, MIGRATION_005, MIGRATION_006, MIGRATION_007 } from './migrations.js'
+export { getSchemaSQL, getMigrationSQL } from './migrations.js'
 
 import { PostgRestStorageAdapter } from './adapter.js'
 import type { PostgRestAdapterOptions } from './adapter.js'

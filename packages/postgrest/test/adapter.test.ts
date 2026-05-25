@@ -697,10 +697,12 @@ describe('PostgRestAssociationStorage', () => {
 })
 
 describe('PostgRestStorageAdapter', () => {
-  it('exposes getMigrationSQL that returns a non-empty SQL string', () => {
-    const sql = getMigrationSQL()
+  it('exposes getSchemaSQL that returns a non-empty idempotent SQL string', () => {
+    const sql = getMigrationSQL() // deprecated alias of getSchemaSQL, both must work
     expect(typeof sql).toBe('string')
     expect(sql.length).toBeGreaterThan(100)
+    // v0.4.4: schema.sql is the production dump, made idempotent.
+    // Functions present in production:
     expect(sql).toContain('memory_episodes')
     expect(sql).toContain('memory_semantic')
     expect(sql).toContain('memory_procedural')
@@ -709,7 +711,13 @@ describe('PostgRestStorageAdapter', () => {
     expect(sql).toContain('engram_association_walk')
     expect(sql).toContain('engram_record_access')
     expect(sql).toContain('engram_decay_pass')
-    expect(sql).toContain('engram_dream_cycle')
+    expect(sql).toContain('engram_hybrid_recall')
+    expect(sql).toContain('engram_vector_search')
+    expect(sql).toContain('engram_text_boost')
+    // idempotency markers — must be re-runnable safely
+    expect(sql).toContain('CREATE TABLE IF NOT EXISTS')
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION')
+    expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS vector')
   })
 
   it('throws before initialize() is called', () => {
