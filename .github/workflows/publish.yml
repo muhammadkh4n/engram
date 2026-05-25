@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+  # Manual re-trigger from any ref (e.g. main) when a tag was already
+  # pushed but the publish step failed — see v0.4.0 incident docs.
+  workflow_dispatch:
 
 concurrency:
   group: publish
@@ -44,35 +47,38 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      # Publish packages in dependency order (|| true: skip already-published versions)
-      - run: npm publish --workspace=packages/core --access public || true
+      # Publish every @engram-mem workspace in dependency order.
+      #
+      # Skip-or-fail policy: if the exact name@version is already on the
+      # registry, skip cleanly (idempotent re-runs are safe). Otherwise
+      # publish — and any real error (auth, network) FAILS the run.
+      #
+      # Replaces the previous `npm publish ... || true` chain which
+      # swallowed E401/E404 token-permission errors and silently shipped
+      # nothing for seven consecutive releases (v0.3.9 through v0.4.0).
+      - name: Publish all @engram-mem workspaces
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/graph --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/openai --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/sqlite --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/supabase --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/mcp --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/bench --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace=packages/openclaw --access public || true
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          WORKSPACES=(core graph openai sqlite rerank-onnx postgrest supabase mcp bench openclaw)
+          for w in "${WORKSPACES[@]}"; do
+            VER=$(node -p "require('./packages/$w/package.json').version")
+            PKG="@engram-mem/$w"
+            echo "::group::$PKG@$VER"
+            if npm view "${PKG}@${VER}" version >/dev/null 2>&1; then
+              echo "already published — skipping"
+            else
+              npm publish --workspace=packages/$w --access public
+            fi
+            echo "::endgroup::"
+          done
 
       # Create a GitHub Release for the pushed tag with auto-generated notes.
       # Idempotent: re-runs on an existing tag skip instead of failing.
+      # Skipped on workflow_dispatch (no tag context to release from).
       - name: Create GitHub Release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
