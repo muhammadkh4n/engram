@@ -1,7 +1,19 @@
 // =============================================================================
 // Engram PostgreSQL Migrations
-// Apply these SQL strings via Supabase dashboard, psql, or a migration tool.
+// Apply these SQL strings via psql, PostgREST tooling, or a migration runner.
 // =============================================================================
+//
+// This file is the SELF-HOST BOOTSTRAP — four embedded JS strings (004-007)
+// that create the full schema, RPC functions, and RLS policies from scratch.
+// Use `getMigrationSQL()` to concatenate them into one runnable script.
+//
+// The companion directory `packages/postgrest/migrations/*.sql` holds the
+// per-step historical migrations (timestamped Supabase-CLI style) that
+// describe how the production schema evolved over time. Those are useful
+// for diffing against a live database; this file is the canonical
+// self-host setup.
+//
+// Both are shipped in the published npm package — see package.json `files`.
 
 /**
  * Migration 004: Add Engram columns to existing tables and rename memory_knowledge.
