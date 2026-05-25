@@ -197,7 +197,7 @@ sqlite> SELECT content FROM semantic LIMIT 5;
 
 **Q: Can I use SQLite on a network filesystem?**
 
-A: Not recommended. WAL mode doesn't work well over NFS. For network scenarios, use @engram-mem/supabase instead.
+A: Not recommended. WAL mode doesn't work well over NFS. For network/multi-host scenarios, use @engram-mem/postgrest instead (any PostgREST endpoint — hosted Supabase or self-hosted Postgres).
 
 **Q: How do I migrate data?**
 

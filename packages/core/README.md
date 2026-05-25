@@ -8,7 +8,7 @@ The brain of Engram. Core memory engine with 5 cognitive systems, intent-driven 
 npm install @engram-mem/core
 ```
 
-Requires a storage adapter. See @engram-mem/sqlite (local) or @engram-mem/supabase (cloud).
+Requires a storage adapter. See @engram-mem/sqlite (local SQLite + BM25) or @engram-mem/postgrest (any PostgREST endpoint — hosted Supabase or self-hosted Postgres).
 
 ## Quick Example
 

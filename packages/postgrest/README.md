@@ -39,7 +39,7 @@ await memory.initialize()
 
 ### Option B — Self-hosted Postgres + PostgREST (BYO infra)
 
-Two Docker containers (Postgres + PostgREST). Recommended for single-tenant deployments where you want full IO/latency/cost control. Full runbook at [`docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md`](../../docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md) in the repo.
+Two Docker containers (Postgres + PostgREST). Recommended for single-tenant deployments where you want full IO/latency/cost control. The package ships an idempotent `schema.sql` for one-shot bootstrap (see "Self-host schema" below).
 
 Short version:
 

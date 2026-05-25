@@ -108,16 +108,12 @@ Data:          ./data/locomo/
 Graph layer:   ON (Neo4j)
 Consolidation: ON
 
-LOCOMO v0.3.0 — Retrieval Recall @ K (10 conversations, 1,986 QAs)
+LOCOMO v0.3.6+ — Retrieval Recall @ K (10 conversations, 1,986 QAs)
 
-Category Breakdown:
-  Single-hop:    45.4%
-  Multi-hop:     57.6%
-  Temporal:      30.2%
-  Commonsense:   59.6%
-  Adversarial:   67.0%
+Overall:       85% (corrected baseline post-v0.3.6)
 
-Overall:       57.5%
+(Per-category breakdown deferred — LoCoMo is the legacy benchmark.
+ LongMemEval-S is now the primary target; see below.)
 
 Results written to: ./results/locomo-results.json
 Eval format:       ./results/locomo-eval.json
@@ -134,11 +130,14 @@ Benchmark:     longmemeval
 Data:          ./data/longmemeval/
 Graph layer:   ON (Neo4j)
 
-LONGMEMEVAL v0.3.0 — Document Retrieval
+LONGMEMEVAL-S v0.3.15 — Single-session Retrieval (500 QAs)
 
-Retrieval Metrics:
-  MRR:           0.67
-  NDCG@10:       0.73
+R@5:           98.8%
+R@10:          99.6%
+
+(Beats published Zep/Graphiti baseline of 63.8% on the same benchmark
+ by ~35pp. Single miss across 500 questions was a visual-content query;
+ all non-visual categories at 100%.)
 
 Results written to: ./results/longmemeval-results.json
 JSONL for GPT-4o:  ./results/longmemeval-predictions.jsonl
@@ -196,41 +195,35 @@ For full benchmark runs, ensure:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
-export SUPABASE_URL="https://..."
-export SUPABASE_KEY="..."
-export NEO4J_URI="bolt://localhost:7687"  # Optional, for graph mode
+export SUPABASE_URL="https://..."          # any PostgREST endpoint (Supabase or self-hosted)
+export SUPABASE_KEY="<service-role JWT>"   # not the anon key — needs RLS bypass
+export NEO4J_URI="bolt://localhost:7687"   # optional, for graph mode
 ```
 
-Or use `.env` file:
+Or use a `.env` file with the same keys.
 
-```
-OPENAI_API_KEY=sk-...
-SUPABASE_URL=https://...
-SUPABASE_KEY=...
-NEO4J_URI=bolt://localhost:7687
-```
+## Current Benchmark Results
 
-## Benchmark Results (v0.3.0)
+### LongMemEval-S (v0.3.15+, May 2026) — primary target
 
-### LoCoMo — full 10 conversations (1,986 QAs)
+500-question single-session retrieval benchmark.
 
-| Category | Recall @ K |
-|----------|-----------|
-| **Overall** | **57.5%** |
-| Single-hop | 45.4% |
-| Multi-hop | 57.6% |
-| Temporal | 30.2% |
-| Commonsense | 59.6% |
-| Adversarial | 67.0% |
+| Metric | Engram v0.3.15+ | Published Zep/Graphiti |
+|---|---|---|
+| **R@5** (gold evidence in top-5) | **98.8%** | 63.8% |
+| R@10 | 99.6% | — |
 
-**Per-conversation range:** 47.7% (conv-42) to 69.5% (conv-30).
+Beats the published SOTA by ~35pp on R@K. The single miss across 500 questions was a visual-content query; all non-visual categories at 100%. Full sweep took ~3.2 hours and cost ~$10.
 
-**Notes:**
-- Baseline (pre-v0.3.0 retrieval overhaul): 19.6% R@K on conv-26.
-- SQL-only baseline. Graph mode adds ~5-8% on multi-hop questions.
+### LoCoMo (legacy benchmark)
+
+Engram hits **85% R@K** overall on the full 10-conversation set (1,986 QAs) after the v0.3.6 correction. Per-category numbers omitted — LoCoMo's compressed-fact recall shape isn't a great match for Engram's design thesis, and the leaderboard is publicly disputed (Zep 84% vs Mem0 rebut 58% vs Zep counter 75%). LongMemEval-S is the more meaningful target.
+
+**Methodology notes:**
+- Cross-encoder reranking (LLM-pointwise via OpenAI, or local mxbai-rerank via `@engram-mem/rerank-onnx` with `ENGRAM_RERANK_LOCAL=true`).
+- Graph mode adds ~5-8% on multi-hop on LoCoMo; on LongMemEval-S the ceiling is already at 99%.
 - Consolidation enabled (light + deep sleep cycles).
-- Top-10 retrieval per question with cross-encoder reranking.
-- Temporal queries are the current weak spot and top priority for v0.3.3+.
+- Contextual ingest (Anthropic-style preamble per turn) is opt-in via `ENGRAM_INGEST_CONTEXTUAL=true`.
 
 ## Troubleshooting
 

@@ -23,7 +23,7 @@ Add Engram to your `~/.claude/settings.json`:
       "command": "engram-mcp",
       "env": {
         "SUPABASE_URL": "https://your-project.supabase.co",
-        "SUPABASE_KEY": "your-anon-key",
+        "SUPABASE_KEY": "<service-role JWT — needs RLS bypass to write>",
         "OPENAI_API_KEY": "sk-..."
       }
     }
@@ -34,9 +34,15 @@ Add Engram to your `~/.claude/settings.json`:
 ### 2. Set Environment Variables
 
 **Required:**
-- `SUPABASE_URL` — Supabase project URL
-- `SUPABASE_KEY` — Supabase anon or service key
-- `OPENAI_API_KEY` — OpenAI API key (for embeddings + summarization)
+- `SUPABASE_URL` — PostgREST endpoint URL (hosted Supabase project URL, self-hosted Postgres + PostgREST, or any PostgREST-compatible deployment; env keys kept named `SUPABASE_*` for back-compat per v0.4.0)
+- `SUPABASE_KEY` — service-role JWT signed with your `PGRST_JWT_SECRET` (the anon key won't authorize writes — RLS bypass is required)
+- `OPENAI_API_KEY` — OpenAI API key (for embeddings + summarization + contextualization + rerank if not using local)
+
+**Optional v0.4.x env flags:**
+
+- `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for the local mxbai-rerank cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
+- `ENGRAM_RERANK_LOCAL_MODEL` — pick the mxbai variant. Default: `mixedbread-ai/mxbai-rerank-large-v1` (~1-1.5 GB peak RAM at load). For memory-constrained boxes try `mixedbread-ai/mxbai-rerank-base-v1` (~50-70 MB) or `mixedbread-ai/mxbai-rerank-xsmall-v1` (smaller still).
+- `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
 
 **Optional (enables Neo4j neural graph):**
 - `NEO4J_URI` — e.g., `bolt://localhost:7687`
@@ -129,6 +135,25 @@ High-level summary of what Engram knows, organized by knowledge clusters (commun
 ```
 
 Returns community labels, member counts, top topics, entities, people, and dominant tone.
+
+### memory_consolidation_status
+
+Reports when each consolidation cycle (light / deep / dream / decay) last ran and its result. Reads from the `memory_consolidation_runs` table — no compute, just lookups. Useful for verifying that auto-consolidation is healthy or diagnosing why `memory_overview` returns no clusters.
+
+No parameters.
+
+**Example response:**
+```
+## Engram — Consolidation Status
+
+- **light**: completed at 2026-05-25T03:34:33Z in 80943ms
+  - digests=3
+- **deep**: completed at 2026-05-25T03:19:01Z in 52225ms
+  - promoted=0
+- **dream**: completed at 2026-05-24T14:13:01Z in 184438ms
+  - associations=0, communities=11525, summaries=52, llmCalls=52, ~$0.0053, episodeCount=4733
+- **decay**: completed at 2026-05-24T14:19:18Z in 5456ms
+```
 
 ### memory_bridges
 
@@ -243,7 +268,7 @@ A: Use `tokenBudget` option to limit results. Memories are ranked by relevance, 
 
 **Q: "Missing required environment variable"**
 
-A: Ensure `SUPABASE_URL`, `SUPABASE_KEY`, and `OPENAI_API_KEY` are set in your Claude config.
+A: Ensure `SUPABASE_URL` (any PostgREST endpoint), `SUPABASE_KEY` (service-role JWT), and `OPENAI_API_KEY` are set in your Claude config.
 
 ## Learn More
 

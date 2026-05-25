@@ -7,7 +7,7 @@ OpenAI embeddings and summarization for Engram. Adds semantic vector search and 
 ```bash
 npm install @engram-mem/openai
 npm install @engram-mem/core
-npm install @engram-mem/sqlite  # or @engram-mem/supabase
+npm install @engram-mem/sqlite  # or @engram-mem/postgrest
 ```
 
 Set your API key:
@@ -234,13 +234,13 @@ createMemory({
 
 // Level 2: Add cloud storage
 createMemory({
-  storage: supabaseAdapter({ url: '...', key: '...' }),
+  storage: new PostgRestStorageAdapter({ url: '...', key: '...' }),
   intelligence: openaiIntelligence({ apiKey: '...' })
 })
 
 // Level 3: Add auto-consolidation (future)
 createMemory({
-  storage: supabaseAdapter({ url: '...', key: '...' }),
+  storage: new PostgRestStorageAdapter({ url: '...', key: '...' }),
   intelligence: openaiIntelligence({
     apiKey: '...',
     intentAnalysis: true,

@@ -37,7 +37,7 @@ Same `SUPABASE_URL` / `SUPABASE_KEY` env vars continue to work — they're just 
 
 Full migration runbook including how to switch from hosted Supabase to self-hosted Postgres + PostgREST:
 
-- [`docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md`](https://github.com/muhammadkh4n/engram/blob/main/docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md)
+- See the [v0.4.0 rebrand commit](https://github.com/muhammadkh4n/engram/commit/46b7b74) and the [v0.4.4 schema consolidation commit](https://github.com/muhammadkh4n/engram/commit/70c70b2) for the full rationale; the runbook itself was retired with the rest of `docs/` in the v0.4.4 cleanup. Self-host bootstrap: apply `packages/postgrest/schema.sql` via `psql -f`.
 
 ## v0.5.0
 

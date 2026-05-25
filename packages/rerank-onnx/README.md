@@ -76,3 +76,6 @@ createOnnxReranker({
 | mxbai-rerank-large-v1 (**default**)| 435M   | ~113MB  | Best          | Slower |
 | mxbai-rerank-base-v1               | 184M   | ~47MB   | Good          | 3x faster |
 | mxbai-rerank-xsmall-v1             | 70M    | ~17MB   | Decent        | Fastest |
+
+> **In the MCP server (`@engram-mem/mcp`):** just set `ENGRAM_RERANK_LOCAL=true` in the server's env — the MCP startup will dynamically import this package and spread its `rerank` over the openaiIntelligence adapter automatically. Pick the model variant via `ENGRAM_RERANK_LOCAL_MODEL` (default: `mixedbread-ai/mxbai-rerank-large-v1`).
+

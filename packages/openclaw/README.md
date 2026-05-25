@@ -348,17 +348,17 @@ Useful for agents with specific storage requirements.
 To use Supabase instead of SQLite:
 
 1. Create a Supabase project
-2. Run migrations (see @engram-mem/supabase README)
+2. Apply the schema once via `psql -U postgres -d engram -f node_modules/@engram-mem/postgrest/schema.sql`
 3. Modify plugin to use supabaseAdapter:
 
 Edit the plugin source (advanced):
 
 ```typescript
 // packages/openclaw/src/openclaw-plugin.ts
-import { supabaseAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 
 // In register():
-const storage = supabaseAdapter({
+const storage = new PostgRestStorageAdapter({
   url: process.env.SUPABASE_URL,
   key: process.env.SUPABASE_KEY
 })
