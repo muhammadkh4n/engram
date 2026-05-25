@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { SupabaseStorageAdapter } from '../src/adapter.js'
-import { SupabaseEpisodeStorage } from '../src/episodes.js'
-import { SupabaseDigestStorage } from '../src/digests.js'
-import { SupabaseSemanticStorage } from '../src/semantic.js'
-import { SupabaseProceduralStorage } from '../src/procedural.js'
-import { SupabaseAssociationStorage } from '../src/associations.js'
+import { PostgRestStorageAdapter } from '../src/adapter.js'
+import { PostgRestEpisodeStorage } from '../src/episodes.js'
+import { PostgRestDigestStorage } from '../src/digests.js'
+import { PostgRestSemanticStorage } from '../src/semantic.js'
+import { PostgRestProceduralStorage } from '../src/procedural.js'
+import { PostgRestAssociationStorage } from '../src/associations.js'
 import { getMigrationSQL } from '../src/migrations.js'
 
 // =============================================================================
@@ -67,20 +67,20 @@ async function buildAdapter(overrides?: {
     createClient: vi.fn().mockReturnValue(mock),
   }))
 
-  return { adapter: null as unknown as SupabaseStorageAdapter, mock }
+  return { adapter: null as unknown as PostgRestStorageAdapter, mock }
 }
 
 // =============================================================================
 // Unit tests — each sub-store tested in isolation with a mock client
 // =============================================================================
 
-describe('SupabaseEpisodeStorage', () => {
+describe('PostgRestEpisodeStorage', () => {
   let mock: ReturnType<typeof makeMockClient>
-  let store: SupabaseEpisodeStorage
+  let store: PostgRestEpisodeStorage
 
   beforeEach(() => {
     mock = makeMockClient()
-    store = new SupabaseEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    store = new PostgRestEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
   })
 
   it('insert calls memories table then memory_episodes table', async () => {
@@ -230,13 +230,13 @@ describe('SupabaseEpisodeStorage', () => {
   })
 })
 
-describe('SupabaseDigestStorage', () => {
+describe('PostgRestDigestStorage', () => {
   let mock: ReturnType<typeof makeMockClient>
-  let store: SupabaseDigestStorage
+  let store: PostgRestDigestStorage
 
   beforeEach(() => {
     mock = makeMockClient()
-    store = new SupabaseDigestStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    store = new PostgRestDigestStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
   })
 
   it('insert calls memories then memory_digests', async () => {
@@ -314,13 +314,13 @@ describe('SupabaseDigestStorage', () => {
   })
 })
 
-describe('SupabaseSemanticStorage', () => {
+describe('PostgRestSemanticStorage', () => {
   let mock: ReturnType<typeof makeMockClient>
-  let store: SupabaseSemanticStorage
+  let store: PostgRestSemanticStorage
 
   beforeEach(() => {
     mock = makeMockClient()
-    store = new SupabaseSemanticStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    store = new PostgRestSemanticStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
   })
 
   it('insert calls memories then memory_semantic', async () => {
@@ -437,13 +437,13 @@ describe('SupabaseSemanticStorage', () => {
   })
 })
 
-describe('SupabaseProceduralStorage', () => {
+describe('PostgRestProceduralStorage', () => {
   let mock: ReturnType<typeof makeMockClient>
-  let store: SupabaseProceduralStorage
+  let store: PostgRestProceduralStorage
 
   beforeEach(() => {
     mock = makeMockClient()
-    store = new SupabaseProceduralStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    store = new PostgRestProceduralStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
   })
 
   it('insert calls memories then memory_procedural', async () => {
@@ -546,13 +546,13 @@ describe('SupabaseProceduralStorage', () => {
   })
 })
 
-describe('SupabaseAssociationStorage', () => {
+describe('PostgRestAssociationStorage', () => {
   let mock: ReturnType<typeof makeMockClient>
-  let store: SupabaseAssociationStorage
+  let store: PostgRestAssociationStorage
 
   beforeEach(() => {
     mock = makeMockClient()
-    store = new SupabaseAssociationStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    store = new PostgRestAssociationStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
   })
 
   it('insert calls memory_associations table', async () => {
@@ -696,7 +696,7 @@ describe('SupabaseAssociationStorage', () => {
   })
 })
 
-describe('SupabaseStorageAdapter', () => {
+describe('PostgRestStorageAdapter', () => {
   it('exposes getMigrationSQL that returns a non-empty SQL string', () => {
     const sql = getMigrationSQL()
     expect(typeof sql).toBe('string')
@@ -713,8 +713,8 @@ describe('SupabaseStorageAdapter', () => {
   })
 
   it('throws before initialize() is called', () => {
-    // SupabaseStorageAdapter with a fake URL won't actually call Supabase in constructor
-    const adapter = new SupabaseStorageAdapter({ url: 'https://fake.supabase.co', key: 'fake-key' })
+    // PostgRestStorageAdapter with a fake URL won't actually call Supabase in constructor
+    const adapter = new PostgRestStorageAdapter({ url: 'https://fake.supabase.co', key: 'fake-key' })
     expect(() => adapter.episodes).toThrow(/not initialized/)
     expect(() => adapter.digests).toThrow(/not initialized/)
     expect(() => adapter.semantic).toThrow(/not initialized/)
@@ -745,9 +745,9 @@ describe('SupabaseStorageAdapter', () => {
     mock.from.mockReturnValue(epChain)
 
     // Manually create a "pre-initialized" adapter by setting private fields
-    const adapter = new SupabaseStorageAdapter({ url: 'https://fake.supabase.co', key: 'k' })
+    const adapter = new PostgRestStorageAdapter({ url: 'https://fake.supabase.co', key: 'k' })
     // Inject mock client via the episodes store
-    const episodeStore = new SupabaseEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    const episodeStore = new PostgRestEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(adapter as any)._episodes = episodeStore
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -782,8 +782,8 @@ describe('SupabaseStorageAdapter', () => {
     const semChain = createChainable({ data: semRow, error: null })
     mock.from.mockReturnValue(semChain)
 
-    const adapter = new SupabaseStorageAdapter({ url: 'https://fake.supabase.co', key: 'k' })
-    const episodeStore = new SupabaseEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
+    const adapter = new PostgRestStorageAdapter({ url: 'https://fake.supabase.co', key: 'k' })
+    const episodeStore = new PostgRestEpisodeStorage(mock as unknown as import('@supabase/supabase-js').SupabaseClient)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(adapter as any)._episodes = episodeStore
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

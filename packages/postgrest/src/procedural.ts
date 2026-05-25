@@ -4,7 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
-export class SupabaseProceduralStorage implements ProceduralStorage {
+export class PostgRestProceduralStorage implements ProceduralStorage {
   constructor(private readonly client: SupabaseClient) {}
 
   async insert(

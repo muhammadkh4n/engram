@@ -8,7 +8,7 @@
  * Usage: source ~/.engram/env && npx tsx packages/mcp/src/test-wave3-consolidation.ts
  */
 
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { createMemory } from '@engram-mem/core'
 import { NeuralGraph } from '@engram-mem/graph'
@@ -29,7 +29,7 @@ async function main() {
   console.log('=== Wave 3 Consolidation Integration Test ===\n')
 
   // Setup
-  const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   await storage.initialize()
   console.log('[ok] Supabase connected')
 

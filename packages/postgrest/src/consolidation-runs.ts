@@ -1,5 +1,5 @@
 /**
- * SupabaseConsolidationRunStorage — persists auto-consolidation run
+ * PostgRestConsolidationRunStorage — persists auto-consolidation run
  * history to the memory_consolidation_runs table.
  *
  * Mirrors the sqlite adapter's class. Stores cycle metadata + result as
@@ -31,7 +31,7 @@ interface RunRow {
   }
 }
 
-export class SupabaseConsolidationRunStorage implements ConsolidationRunStorage {
+export class PostgRestConsolidationRunStorage implements ConsolidationRunStorage {
   constructor(private client: SupabaseClient) {}
 
   async recordStart(cycle: Cycle): Promise<string> {

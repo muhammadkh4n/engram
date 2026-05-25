@@ -5,6 +5,7 @@ export default defineWorkspace([
   'packages/sqlite',
   'packages/openai',
   'packages/openclaw',
+  'packages/postgrest',
   'packages/supabase',
   'packages/graph',
 ])

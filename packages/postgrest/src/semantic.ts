@@ -4,7 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
-export class SupabaseSemanticStorage implements SemanticStorage {
+export class PostgRestSemanticStorage implements SemanticStorage {
   constructor(private readonly client: SupabaseClient) {}
 
   async insert(

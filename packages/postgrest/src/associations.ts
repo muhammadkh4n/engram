@@ -9,7 +9,7 @@ import type {
 import { generateId } from '@engram-mem/core'
 import type { AssociationStorage } from '@engram-mem/core'
 
-export class SupabaseAssociationStorage implements AssociationStorage {
+export class PostgRestAssociationStorage implements AssociationStorage {
   constructor(private readonly client: SupabaseClient) {}
 
   async insert(association: Omit<Association, 'id' | 'createdAt'>): Promise<Association> {

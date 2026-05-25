@@ -1,30 +1,30 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 import type { StorageAdapter } from '@engram-mem/core'
-import { SupabaseEpisodeStorage } from './episodes.js'
-import { SupabaseDigestStorage } from './digests.js'
-import { SupabaseSemanticStorage } from './semantic.js'
-import { SupabaseProceduralStorage } from './procedural.js'
-import { SupabaseAssociationStorage } from './associations.js'
-import { SupabaseConsolidationRunStorage } from './consolidation-runs.js'
+import { PostgRestEpisodeStorage } from './episodes.js'
+import { PostgRestDigestStorage } from './digests.js'
+import { PostgRestSemanticStorage } from './semantic.js'
+import { PostgRestProceduralStorage } from './procedural.js'
+import { PostgRestAssociationStorage } from './associations.js'
+import { PostgRestConsolidationRunStorage } from './consolidation-runs.js'
 
-export interface SupabaseAdapterOptions {
+export interface PostgRestAdapterOptions {
   url: string
   key: string
   embeddingDimensions?: number
 }
 
-export class SupabaseStorageAdapter implements StorageAdapter {
+export class PostgRestStorageAdapter implements StorageAdapter {
   private client: SupabaseClient
   private _isLegacy: boolean = false
-  private _episodes: SupabaseEpisodeStorage | null = null
-  private _digests: SupabaseDigestStorage | null = null
-  private _semantic: SupabaseSemanticStorage | null = null
-  private _procedural: SupabaseProceduralStorage | null = null
-  private _associations: SupabaseAssociationStorage | null = null
-  private _consolidationRuns: SupabaseConsolidationRunStorage | null = null
+  private _episodes: PostgRestEpisodeStorage | null = null
+  private _digests: PostgRestDigestStorage | null = null
+  private _semantic: PostgRestSemanticStorage | null = null
+  private _procedural: PostgRestProceduralStorage | null = null
+  private _associations: PostgRestAssociationStorage | null = null
+  private _consolidationRuns: PostgRestConsolidationRunStorage | null = null
 
-  constructor(opts: SupabaseAdapterOptions) {
+  constructor(opts: PostgRestAdapterOptions) {
     this.client = createClient(opts.url, opts.key)
   }
 
@@ -52,12 +52,12 @@ export class SupabaseStorageAdapter implements StorageAdapter {
       this._isLegacy = false
     }
 
-    this._episodes = new SupabaseEpisodeStorage(this.client, this._isLegacy)
-    this._digests = new SupabaseDigestStorage(this.client)
-    this._semantic = new SupabaseSemanticStorage(this.client)
-    this._procedural = new SupabaseProceduralStorage(this.client)
-    this._associations = new SupabaseAssociationStorage(this.client)
-    this._consolidationRuns = new SupabaseConsolidationRunStorage(this.client)
+    this._episodes = new PostgRestEpisodeStorage(this.client, this._isLegacy)
+    this._digests = new PostgRestDigestStorage(this.client)
+    this._semantic = new PostgRestSemanticStorage(this.client)
+    this._procedural = new PostgRestProceduralStorage(this.client)
+    this._associations = new PostgRestAssociationStorage(this.client)
+    this._consolidationRuns = new PostgRestConsolidationRunStorage(this.client)
   }
 
   async dispose(): Promise<void> {
@@ -70,37 +70,37 @@ export class SupabaseStorageAdapter implements StorageAdapter {
     this._consolidationRuns = null
   }
 
-  get episodes(): SupabaseEpisodeStorage {
+  get episodes(): PostgRestEpisodeStorage {
     if (!this._episodes) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
     return this._episodes
   }
 
-  get digests(): SupabaseDigestStorage {
+  get digests(): PostgRestDigestStorage {
     if (!this._digests) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
     return this._digests
   }
 
-  get semantic(): SupabaseSemanticStorage {
+  get semantic(): PostgRestSemanticStorage {
     if (!this._semantic) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
     return this._semantic
   }
 
-  get procedural(): SupabaseProceduralStorage {
+  get procedural(): PostgRestProceduralStorage {
     if (!this._procedural) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
     return this._procedural
   }
 
-  get associations(): SupabaseAssociationStorage {
+  get associations(): PostgRestAssociationStorage {
     if (!this._associations) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
     return this._associations
   }
@@ -112,7 +112,7 @@ export class SupabaseStorageAdapter implements StorageAdapter {
    * Reads/writes hit memory_consolidation_runs — see the
    * 20260524000001_consolidation_runs.sql migration.
    */
-  get consolidationRuns(): SupabaseConsolidationRunStorage | undefined {
+  get consolidationRuns(): PostgRestConsolidationRunStorage | undefined {
     return this._consolidationRuns ?? undefined
   }
 
@@ -298,7 +298,7 @@ export class SupabaseStorageAdapter implements StorageAdapter {
 
   private assertInitialized(): void {
     if (!this._episodes) {
-      throw new Error('SupabaseStorageAdapter not initialized. Call initialize() first.')
+      throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
   }
 }

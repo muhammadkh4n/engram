@@ -1,7 +1,7 @@
 {
-  "name": "@engram-mem/openai",
+  "name": "@engram-mem/postgrest",
   "version": "0.4.0",
-  "description": "OpenAI intelligence adapter for Engram \u2014 embeddings, summarization, entity extraction, cross-encoder reranking",
+  "description": "PostgREST storage adapter for Engram — works against Supabase, self-hosted Postgres + PostgREST, or any PostgREST-compatible deployment. pgvector + full-text search.",
   "keywords": [
     "memory",
     "ai",
@@ -9,9 +9,10 @@
     "cognitive",
     "embeddings",
     "recall",
-    "openai",
-    "reranking",
-    "summarization"
+    "postgrest",
+    "postgres",
+    "pgvector",
+    "supabase"
   ],
   "license": "Apache-2.0",
   "type": "module",
@@ -36,7 +37,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
-    "openai": "^6.35.0"
+    "@supabase/supabase-js": "^2.105.1"
   },
   "devDependencies": {
     "typescript": "^6.0.2",

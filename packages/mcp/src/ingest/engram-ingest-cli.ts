@@ -47,7 +47,7 @@
 import { readFileSync } from 'node:fs'
 import { createMemory } from '@engram-mem/core'
 import type { SalienceClassification } from '@engram-mem/core'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
 import { resolveProject } from './project-detect.js'
@@ -358,7 +358,7 @@ async function main(): Promise<void> {
   const supabaseKey = requireEnv('SUPABASE_KEY')
   const openaiKey = requireEnv('OPENAI_API_KEY')
 
-  const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence = openaiIntelligence({ apiKey: openaiKey })
 
   // --- Dedup gate ---
@@ -395,7 +395,7 @@ async function main(): Promise<void> {
 
   // --- Full Memory construction + ingest ---
   // Use a fresh storage instance because we disposed the dedup-check one.
-  const ingestStorage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const ingestStorage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const graph = await tryCreateGraph('[engram-ingest]')
 
   const memory = createMemory({
