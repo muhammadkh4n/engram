@@ -67,7 +67,6 @@ engram/
 │   └── claude-code-memory.mjs   # Persistent memory across Claude Code sessions
 │
 ├── results/                     # Bench artifacts (longmemeval baselines, forensics)
-├── docker/                      # docker-compose.neo4j.yml (dev Neo4j container)
 ├── .github/                     # CI workflows + dependabot
 ├── README.md
 ├── CHANGELOG.md
