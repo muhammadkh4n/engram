@@ -6,7 +6,8 @@ Security updates are provided for the latest minor version of Engram. When a new
 
 | Version | Status |
 |---------|--------|
-| 0.3.x   | Supported |
+| 0.4.x   | Supported |
+| 0.3.x   | Not supported (please upgrade — `@engram-mem/postgrest` rebrand in v0.4.0; clean `npm install` in v0.4.2 drops `@supabase/supabase-js` and resolves 9 transitive vulns) |
 | 0.2.x   | Not supported |
 | 0.1.x   | Not supported |
 
@@ -40,7 +41,9 @@ We will:
 Engram never stores API keys or secrets in code. All credentials must be provided via:
 - Environment variables
 - Configuration files outside version control
-- Secret management services (Supabase, etc.)
+- A secret manager appropriate to your deployment (cloud KMS, HashiCorp Vault, Doppler, Supabase Vault if you use hosted Supabase, etc.)
+
+Engram itself is BYO infrastructure as of v0.4.0 — there is no built-in coupling to any single vendor's secret store.
 
 If you discover hardcoded secrets, report them immediately to **muhammad@aithentic.com**.
 

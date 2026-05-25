@@ -43,31 +43,30 @@ console.log(memories[0]?.content)
 
 No API keys required. SQLite + BM25 out of the box. Upgrade to embeddings, cloud storage, or Neo4j graph when ready.
 
-## What's New in v0.3.0
+## What's New in v0.4.x
 
-**Retrieval overhaul — 3.4x recall improvement.**
+**Self-host story complete — bring your own infra, zero marginal cost.**
 
-| Change | Impact |
-|--------|--------|
-| Cross-encoder reranking | LLM pointwise scoring for precise semantic ordering |
-| Wide vector scan pool | Scan 500 candidates instead of 90, no recency bias |
-| BM25 as independent candidates | Keyword matches enter the pipeline even with weak embeddings |
-| Contextual embedding | Preceding turns prepended at ingest for richer vectors |
+| Release | Highlight |
+|---------|-----------|
+| v0.4.0 | `@engram-mem/supabase` rebranded to `@engram-mem/postgrest`. Works against Supabase, self-hosted Postgres + PostgREST, or any PostgREST-compatible endpoint. |
+| v0.4.1 | Swapped underlying client from `supabase-js` to bare `postgrest-js` so the BYO-infra path actually works (supabase-js prepended `/rest/v1/`; bare PostgREST doesn't). |
+| v0.4.2 | npm audit clean (0 vulnerabilities). `@supabase/supabase-js` dropped from the install tree entirely. |
+| v0.4.3 | `ENGRAM_RERANK_LOCAL=true` opt-in: swap the LLM-pointwise reranker for **mxbai-rerank-large-v1** via ONNX Runtime ($0 per query). `ENGRAM_INGEST_CONTEXTUAL=true` enables Anthropic-style Contextual Retrieval at ingest. |
+| v0.4.4 | Single idempotent `packages/postgrest/schema.sql` replaces the dual-track migration scheme — `psql -f schema.sql` bootstraps any database state. `ENGRAM_RERANK_LOCAL_MODEL` env var selects the mxbai variant (large / base / xsmall) for memory-constrained boxes. |
 
-**LoCoMo Benchmark — full 10-conversation evaluation** (1,986 questions across all 10 LoCoMo conversations):
+**LongMemEval-S benchmark (v0.3.15, May 2026)** — full 500-question, single-session evaluation:
 
-| Category | R@K |
-|----------|-----|
-| Single-hop | 45.4% |
-| Multi-hop | 57.6% |
-| Temporal | 30.2% |
-| Commonsense | 59.6% |
-| Adversarial | 67.0% |
-| **Overall** | **57.5%** |
+| Metric | Score |
+|---|---|
+| **R@5** (correct evidence in top-5 retrieved) | **98.8%** |
+| R@10 | **99.6%** |
 
-> **Baseline before v0.3.0 retrieval overhaul:** 19.6% R@K. Today: **57.5%** — roughly 3× improvement. Per-conversation R@K ranges from 47.7% (conv-42) to 69.5% (conv-30); temporal queries are the current weak spot. See [packages/bench/README.md](packages/bench/README.md) for methodology and [CHANGELOG.md](CHANGELOG.md) for the four retrieval changes (cross-encoder reranking, wide scan pool, BM25 as independent candidates, contextual embedding).
->
-> **Metric note:** R@K (Recall at K) measures whether the evidence turn is present in the top-K retrieved memories. It is **not directly comparable** to published LoCoMo leaderboard scores, which use answer-level F1 or accuracy after an LLM generates a response. Engram's internal optimization target is retrieval quality; we'll add F1 numbers in a future release for leaderboard-style comparison.
+> Beats the published Zep/Graphiti baseline (63.8%) on the same benchmark by ~35pp. The single miss across 500 questions was a visual-content query; all non-visual categories at 100%. Methodology in [packages/bench/README.md](packages/bench/README.md).
+
+**LoCoMo retrieval baseline** (legacy benchmark, 1,986 questions across 10 conversations) — 85% R@K after the v0.3.6 correction. Engram's design isn't optimized for LoCoMo's compressed-fact recall shape; LongMemEval-S is the more meaningful target.
+
+> **Metric note:** R@K measures retrieval recall (gold evidence present in the top-K candidates), not judge-graded answer correctness. The two are different — see [CHANGELOG.md](CHANGELOG.md) for full release context.
 
 ## Why Engram
 
@@ -129,11 +128,13 @@ node examples/demo.mjs
 |---------|---------|--------------|
 | `@engram-mem/core` | Memory engine | 5 memory systems, 4-stage recall, consolidation cycles, intent analysis, salience detection |
 | `@engram-mem/sqlite` | Local storage | Zero-config SQLite + BM25 full-text search, zero dependencies |
-| `@engram-mem/openai` | Intelligence | OpenAI embeddings, vector search, LLM-based summarization |
-| `@engram-mem/supabase` | Cloud storage | PostgreSQL + pgvector, distributed agents, scalable |
+| `@engram-mem/postgrest` | PostgREST storage | PostgreSQL + pgvector via any PostgREST endpoint (Supabase, self-hosted, EnterpriseDB cloud) — uses bare `@supabase/postgrest-js` |
+| `@engram-mem/supabase` | _Deprecated shim_ | Re-exports `@engram-mem/postgrest` for backward compat (will be removed in v0.5.0) |
+| `@engram-mem/openai` | Intelligence | OpenAI embeddings, summarization, reranking, contextualization |
+| `@engram-mem/rerank-onnx` | Local reranker | mxbai-rerank-large/base/xsmall-v1 via ONNX Runtime — zero per-query cost, opt-in via `ENGRAM_RERANK_LOCAL=true` |
 | `@engram-mem/graph` | Neural graph | Neo4j spreading activation, community detection, pattern completion |
 | `@engram-mem/openclaw` | Framework integration | OpenClaw ContextEngine plugin, 4 memory tools, auto-consolidation |
-| `@engram-mem/mcp` | Claude integration | MCP server for Claude Code, memory tools for AI assistants |
+| `@engram-mem/mcp` | Claude integration | MCP server (stdio + Streamable HTTP), 13 bin CLIs, Claude Code hooks |
 | `@engram-mem/bench` | Benchmarks | LoCoMo + LongMemEval evaluation, comparison mode, CLI runner |
 
 ## Core Concepts
@@ -162,8 +163,8 @@ Run automatically or manually:
 |-------|---------|---------------|---------------|----------|
 | 0 | SQLite + BM25 | Heuristic | Manual | Fast, local, zero-cost. Good for testing. |
 | 1 | SQLite | OpenAI embeddings | Manual | Add vector search. Still fully local DB. |
-| 2 | Supabase (cloud) | OpenAI embeddings | Manual | Share memory between agents. |
-| 3 | Supabase (cloud) | OpenAI (embeddings + intent + summarization) | Auto | Full cognitive engine. LLM-powered everything. |
+| 2 | PostgREST (Supabase or self-hosted) | OpenAI embeddings | Manual | Share memory between agents over HTTP. |
+| 3 | PostgREST + Neo4j graph | OpenAI + local mxbai-rerank | Auto | Full cognitive engine with $0 marginal rerank. |
 
 Pick a level. Start at 0. Upgrade anytime.
 
@@ -176,21 +177,28 @@ const memory = createMemory({
   intelligence: openaiIntelligence({ apiKey: process.env.OPENAI_API_KEY })
 })
 
-// Level 2: Add cloud storage
-import { supabaseAdapter } from '@engram-mem/supabase'
+// Level 2: PostgREST storage (Supabase OR self-hosted)
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 const memory = createMemory({
-  storage: supabaseAdapter({ url: '...', key: '...' }),
+  storage: new PostgRestStorageAdapter({
+    url: process.env.POSTGREST_URL,    // https://*.supabase.co  OR  http://127.0.0.1:3001
+    key: process.env.POSTGREST_KEY,    // service-role JWT (or any JWT signed with your PGRST_JWT_SECRET)
+  }),
   intelligence: openaiIntelligence({ apiKey: '...' })
 })
 
-// Level 3: Full cognitive engine
+// Level 3: Full cognitive engine with graph + local rerank
+import { NeuralGraph } from '@engram-mem/graph'
+import { createOnnxReranker } from '@engram-mem/rerank-onnx'
+
+const onnx = createOnnxReranker()  // mxbai-rerank-large-v1 by default
 const memory = createMemory({
-  storage: supabaseAdapter({ url: '...', key: '...' }),
-  intelligence: openaiIntelligence({
-    apiKey: '...',
-    intentAnalysis: true,
-    summarization: true
-  }),
+  storage: new PostgRestStorageAdapter({ url: '...', key: '...' }),
+  intelligence: {
+    ...openaiIntelligence({ apiKey: '...', intentAnalysis: true }),
+    rerank: onnx.rerank.bind(onnx),  // swap LLM rerank for $0 local cross-encoder
+  },
+  graph: new NeuralGraph({ uri: 'bolt://localhost:7687', user: 'neo4j', password: '...' }),
   consolidation: { schedule: 'auto' }
 })
 ```
@@ -277,7 +285,7 @@ Add to your `~/.claude/settings.json`:
       "command": "engram-mcp",
       "env": {
         "SUPABASE_URL": "https://your-project.supabase.co",
-        "SUPABASE_KEY": "your-anon-or-service-key",
+        "SUPABASE_KEY": "<service-role JWT — needs RLS bypass for writes>",
         "OPENAI_API_KEY": "sk-..."
       }
     }
@@ -285,17 +293,24 @@ Add to your `~/.claude/settings.json`:
 }
 ```
 
-Optional — enable Neo4j graph for spreading activation recall:
+> The env keys are still named `SUPABASE_URL` / `SUPABASE_KEY` for backward compatibility — but as of v0.4.0 they accept any PostgREST endpoint URL + any JWT signed with your `PGRST_JWT_SECRET`. Point them at hosted Supabase, self-hosted Postgres + PostgREST, or any PostgREST-compatible deployment.
+
+**Optional v0.4.x env flags** for the full self-host story:
 
 ```json
 "env": {
-  "NEO4J_URI": "bolt://localhost:7687",
+  "NEO4J_URI": "bolt://localhost:7687",        // enables graph spreading-activation recall
   "NEO4J_USER": "neo4j",
-  "NEO4J_PASSWORD": "engram-dev"
+  "NEO4J_PASSWORD": "...",
+
+  "ENGRAM_RERANK_LOCAL": "true",                // swap LLM rerank for local ONNX cross-encoder
+  "ENGRAM_RERANK_LOCAL_MODEL": "mixedbread-ai/mxbai-rerank-base-v1",   // optional: pick variant (default: large-v1, ~1-1.5GB RAM)
+
+  "ENGRAM_INGEST_CONTEXTUAL": "true"            // Anthropic-style contextual preamble per turn
 }
 ```
 
-Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`.
+Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`, `memory_consolidation_status`.
 
 See [`packages/mcp/README.md`](packages/mcp/README.md) for full tool schemas and troubleshooting.
 
@@ -314,19 +329,21 @@ const memory = createMemory({
 
 Best for: Development, single-agent, no infrastructure.
 
-### Supabase (Cloud, Distributed)
+### PostgREST (Supabase OR Self-hosted)
 ```javascript
-import { supabaseAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 
 const memory = createMemory({
-  storage: supabaseAdapter({
-    url: process.env.SUPABASE_URL,
-    key: process.env.SUPABASE_ANON_KEY
+  storage: new PostgRestStorageAdapter({
+    url: process.env.POSTGREST_URL,   // hosted Supabase URL OR self-hosted PostgREST endpoint
+    key: process.env.POSTGREST_KEY    // service-role JWT (not the anon key — needs RLS bypass)
   })
 })
 ```
 
-Best for: Multi-agent systems, persistent storage, scaling.
+Best for: Multi-agent systems, persistent storage, scaling. Works against hosted Supabase, self-hosted Postgres + PostgREST in Docker, or any PostgREST-compatible endpoint.
+
+**Self-host bootstrap**: apply `packages/postgrest/schema.sql` once with `psql -U postgres -d engram -f schema.sql` — idempotent, re-runnable, creates all tables + functions + RLS policies from scratch.
 
 ## OpenClaw Plugin
 

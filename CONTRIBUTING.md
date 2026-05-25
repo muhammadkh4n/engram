@@ -23,13 +23,13 @@ npm install
 npm test
 
 # Build all packages
-npm build
+npm run build
 
 # Type check
-npm typecheck
+npm run typecheck
 
 # Clean build artifacts
-npm clean
+npm run clean
 ```
 
 ## Monorepo Structure
@@ -38,51 +38,42 @@ Engram is a Turborepo-based monorepo. Each package is independent but shares typ
 
 ```
 engram/
-├── packages/
-│   ├── core/              # @engram-mem/core — Memory engine
+├── packages/                    # 10 workspaces, lockstep-versioned
+│   ├── core/                    # @engram-mem/core — Memory engine
 │   │   ├── src/
-│   │   │   ├── memory.ts  # Memory class and createMemory() factory
-│   │   │   ├── systems/   # 5 memory systems (sensory, episodic, semantic, procedural, associations)
-│   │   │   ├── intent/    # Intent analyzer and salience detector
-│   │   │   ├── retrieval/ # 4-stage recall engine
-│   │   │   ├── consolidation/  # Sleep cycles (light, deep, dream, decay)
-│   │   │   ├── adapters/  # Storage and Intelligence adapter interfaces
-│   │   │   └── types.ts   # Type definitions
-│   │   ├── test/          # Vitest test files
-│   │   └── package.json
-│   │
-│   ├── sqlite/            # @engram-mem/sqlite — Local storage
-│   │   ├── src/
-│   │   │   ├── adapter.ts       # StorageAdapter implementation
-│   │   │   ├── migrations.ts    # SQLite schema
-│   │   │   └── search.ts        # BM25 via FTS5
+│   │   │   ├── memory.ts        # Memory class + createMemory() factory (~929 LOC orchestrator)
+│   │   │   ├── systems/         # 5 memory systems (sensory, episodic, semantic, procedural, associations)
+│   │   │   ├── intent/          # Intent analyzer + salience detector
+│   │   │   ├── retrieval/       # Multi-stage recall engine
+│   │   │   ├── consolidation/   # Sleep cycles (light, deep, dream, decay)
+│   │   │   ├── adapters/        # Storage, Intelligence, Graph adapter port interfaces
+│   │   │   └── types.ts
 │   │   └── test/
 │   │
-│   ├── openai/            # @engram-mem/openai — Embeddings + summarization
-│   │   ├── src/
-│   │   │   ├── embeddings.ts    # OpenAI embedding service
-│   │   │   ├── summarizer.ts    # LLM-based summarization
-│   │   │   └── index.ts         # Intelligence adapter factory
-│   │   └── test/
-│   │
-│   ├── supabase/          # @engram-mem/supabase — Cloud storage
-│   │   ├── src/
-│   │   │   ├── adapter.ts
-│   │   │   └── migrations/
-│   │   └── test/
-│   │
-│   └── openclaw/          # @engram-mem/openclaw — OpenClaw plugin
-│       ├── src/
-│       │   └── openclaw-plugin.ts
-│       └── package.json
+│   ├── sqlite/                  # @engram-mem/sqlite — Local SQLite + FTS5 BM25 storage adapter
+│   ├── postgrest/               # @engram-mem/postgrest — PostgREST storage adapter (Supabase / self-host)
+│   │   ├── schema.sql           # Idempotent self-host bootstrap (psql -f schema.sql)
+│   │   └── src/                 # adapter + per-tier substores + migrations.ts (exposes getSchemaSQL)
+│   ├── supabase/                # @engram-mem/supabase — Deprecated shim re-exporting postgrest
+│   ├── openai/                  # @engram-mem/openai — Embeddings + summarizer + reranker + contextualizer
+│   ├── rerank-onnx/             # @engram-mem/rerank-onnx — Local mxbai-rerank cross-encoder via ONNX
+│   ├── graph/                   # @engram-mem/graph — Neo4j NeuralGraph + spreading activation
+│   ├── mcp/                     # @engram-mem/mcp — MCP server (stdio + HTTP) + 13 bin CLIs + Claude Code hooks
+│   ├── bench/                   # @engram-mem/bench — LoCoMo + LongMemEval harness + forensics
+│   └── openclaw/                # @engram-mem/openclaw — OpenClaw ContextEngine plugin
 │
-├── docs/
-│   └── engram-design.md   # Full design specification
 ├── examples/
-│   └── demo.mjs           # Standalone demo script
+│   ├── demo.mjs                 # Standalone SQLite demo (no API keys)
+│   └── claude-code-memory.mjs   # Persistent memory across Claude Code sessions
+│
+├── results/                     # Bench artifacts (longmemeval baselines, forensics)
+├── docker/                      # docker-compose.neo4j.yml (dev Neo4j container)
+├── .github/                     # CI workflows + dependabot
 ├── README.md
 ├── CHANGELOG.md
-└── package.json (root)
+├── CONTRIBUTING.md
+├── SECURITY.md
+└── package.json (root, Turborepo)
 ```
 
 ## Making Changes
@@ -282,7 +273,7 @@ Each package should have a README covering:
 
 ### Design Specification
 
-If you're making architectural changes, update `docs/engram-design.md`.
+If you're making architectural changes, document them in the PR description and (if a long-form design is warranted) propose where it should live — `docs/` no longer ships in the repo as of v0.4.4. Per-package READMEs hold the canonical surface-level architecture.
 
 ## Commit Guidelines
 
@@ -339,9 +330,9 @@ Fixes #123
 ## Getting Help
 
 - Check existing GitHub Issues and Discussions
-- Read the design spec: `docs/engram-design.md`
-- Review demo script: `examples/demo.mjs`
-- Examine test files for usage examples
+- Review the demo script: `examples/demo.mjs`
+- Review per-package READMEs in `packages/*/README.md`
+- Examine test files in `packages/*/test/` for usage examples
 
 ## License
 
