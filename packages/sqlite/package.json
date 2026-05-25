@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "@engram-mem/core": "*",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "^12.10.0",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
