@@ -31,7 +31,7 @@
  * regex heuristic extractor in @engram-mem/graph.
  */
 
-import { createClient } from '@supabase/supabase-js'
+import { PostgrestClient } from '@supabase/postgrest-js'
 import { NeuralGraph } from '@engram-mem/graph'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { IntelligenceAdapter } from '@engram-mem/core'
@@ -107,7 +107,9 @@ async function main(): Promise<void> {
   log(`llm ner:     ${llmEnabled ? 'gpt-4o-mini' : 'off (regex fallback)'}`)
   log(`concurrency: ${args.concurrency}`)
 
-  const supabase = createClient(supabaseUrl, supabaseKey)
+  const supabase = new PostgrestClient(supabaseUrl, {
+    headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey },
+  })
 
   const intelligence: IntelligenceAdapter | null = llmEnabled
     ? openaiIntelligence({ apiKey: openaiKey! })

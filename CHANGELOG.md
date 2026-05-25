@@ -4,6 +4,24 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-05-25
+
+All 10 `@engram-mem/*` packages bumped to 0.4.2 (lockstep). Pure dependency-hygiene release — zero behavioral change, no public API change. Safe drop-in for 0.4.1.
+
+### Fixed
+
+- **Security: 9 vulnerabilities resolved (2 HIGH, 7 moderate).** `npm audit fix` ran cleanly with non-breaking transitive bumps; no lockfile force-resolutions required:
+  - `fast-uri` 3.1.0 → 3.1.2 (HIGH — path traversal, host confusion)
+  - `protobufjs` 7.5.5 → 7.6.1 (HIGH — code injection, prototype injection, DoS)
+  - `hono` 4.12.14 → 4.12.23 (moderate — JWT bypass, cache leakage, etc.)
+  - `ip-address` 10.1.0 → 10.2.0 (moderate — XSS in Address6)
+  - `express-rate-limit` 8.3.2 → 8.5.2 (moderate)
+  - `qs` (moderate — DoS), `ws` (moderate — memory disclosure), `turbo` (moderate dev dep)
+
+### Changed
+
+- **`@engram-mem/mcp` drops its direct dependency on `@supabase/supabase-js`** and swaps to bare `@supabase/postgrest-js`, mirroring what v0.4.1 did for `@engram-mem/postgrest`. Two CLI bins were the only callers of `createClient`: `engram-backfill-graph` (one-shot Neo4j backfill) and `engram-test-wave2-e2e` (Wave-2 validation). Same `.from()` / `.select()` query API works against any PostgREST endpoint (Supabase-hosted or self-hosted) without the `/rest/v1/` prefix mismatch. Net effect: `@supabase/supabase-js` + its 8-package transitive subtree (realtime-js, auth-js, storage-js, etc.) removed from the installed tree entirely.
+
 ## [0.4.1] - 2026-05-25
 
 All 10 `@engram-mem/*` packages bumped to 0.4.1 to keep the version line coherent (matches the v0.4.0 lockstep pattern). The only behavioral change is in `@engram-mem/postgrest` and the `@engram-mem/supabase` shim that re-exports it; the other 8 packages (`core`, `graph`, `openai`, `sqlite`, `rerank-onnx`, `mcp`, `bench`, `openclaw`) are unchanged content-wise from 0.4.0 and republished only to keep the release-line aligned.

@@ -29,7 +29,7 @@
  *               NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
  */
 
-import { createClient } from '@supabase/supabase-js'
+import { PostgrestClient } from '@supabase/postgrest-js'
 import neo4j, { type Driver, type Session as Neo4jSession } from 'neo4j-driver'
 import { createMemory } from '@engram-mem/core'
 import type { Memory } from '@engram-mem/core'
@@ -192,7 +192,9 @@ async function main(): Promise<void> {
   const neo4jUser = process.env['NEO4J_USER'] ?? 'neo4j'
   const neo4jPassword = requireEnv('NEO4J_PASSWORD')
 
-  const supabase = createClient(supabaseUrl, supabaseKey)
+  const supabase = new PostgrestClient(supabaseUrl, {
+    headers: { Authorization: `Bearer ${supabaseKey}`, apikey: supabaseKey },
+  })
 
   // -------------------------------------------------------------------------
   // Stage 1: Cleanup prior test data (idempotent re-run support)

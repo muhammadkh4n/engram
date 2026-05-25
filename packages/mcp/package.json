@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/mcp",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "MCP server for Engram memory \u2014 recall, ingest, forget, timeline, overview tools for Claude Code and any MCP client",
   "keywords": [
     "memory",
@@ -55,7 +55,7 @@
     "@engram-mem/openai": "*",
     "@engram-mem/postgrest": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@supabase/supabase-js": "^2.105.1",
+    "@supabase/postgrest-js": "^2.105.1",
     "openai": "^6.35.0"
   },
   "devDependencies": {
