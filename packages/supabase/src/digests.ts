@@ -129,6 +129,21 @@ export class SupabaseDigestStorage implements DigestStorage {
     }
     return counts
   }
+
+  /**
+   * Total digest count. Optional in DigestStorage; implementing here so the
+   * v0.3.14 deep-sleep delta gate (isDeepSleepDue) can skip no-op runs by
+   * comparing count() against the snapshot stored at the previous run.
+   * Without this, deep sleep keeps re-processing the same 7-day digest
+   * window every 60s — the production IO bug from v0.3.13.
+   */
+  async count(): Promise<number> {
+    const { count, error } = await this.client
+      .from('memory_digests')
+      .select('id', { count: 'exact', head: true })
+    if (error) throw error
+    return count ?? 0
+  }
 }
 
 // ---------------------------------------------------------------------------

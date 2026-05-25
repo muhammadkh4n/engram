@@ -279,6 +279,12 @@ export interface ConsolidateResult {
   /** Total episode count snapshotted at the end of this run. Used by the
    *  delta gate in isDreamCycleDue() to skip runs when ingest has been quiet. */
   episodeCount?: number
+  /** Total digest count snapshotted at the end of this run. Used by the
+   *  delta gate in isDeepSleepDue() (v0.3.14) to skip runs when no new
+   *  digests have accumulated since the last completed deep sleep —
+   *  prevents the runaway-loop pattern where deep sleep re-processes the
+   *  same 7-day digest window every 60s. */
+  digestCount?: number
   /** Number of LLM summary calls actually issued during this run. */
   llmCallsCount?: number
   /** Best-effort USD estimate of LLM cost (input + output tokens × per-call pricing). */

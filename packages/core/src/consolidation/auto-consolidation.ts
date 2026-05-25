@@ -39,6 +39,16 @@ export type ConsolidationCycle = 'light' | 'deep' | 'dream' | 'decay'
 export interface AutoConsolidationOpts {
   lightSleepThreshold?: number
   deepSleepThreshold?: number
+  /**
+   * Delta gate: minimum new digests since the last completed deep sleep
+   * required to consider deep cycle due. Without this gate, isDeepSleepDue
+   * keeps returning true as long as 5+ digests exist in the last 7 days —
+   * deep sleep doesn't mark digests as processed, so it runs every tick
+   * forever (Supabase IO budget killer, observed in v0.3.13 prod). With
+   * the delta gate, deep sleep only fires when ingest has produced enough
+   * new digests to be worth re-processing. Default 5. Set to 0 to disable.
+   */
+  deepSleepMinNewDigests?: number
   dreamCycleIntervalHours?: number
   dreamCycleMinEpisodes?: number
   /**
@@ -60,6 +70,7 @@ export interface AutoConsolidationOpts {
 const DEFAULTS: Required<Omit<AutoConsolidationOpts, 'cycles'>> = {
   lightSleepThreshold: 20,
   deepSleepThreshold: 5,
+  deepSleepMinNewDigests: 5,
   dreamCycleIntervalHours: 24,
   dreamCycleMinEpisodes: 50,
   dreamCycleMinNewEpisodes: 100,
@@ -94,9 +105,25 @@ export async function runAutoConsolidation(
         lightSleep(storage, intelligence, undefined, graph)))
     }
 
-    if (enabledCycles.has('deep') && await isDeepSleepDue(storage, config.deepSleepThreshold)) {
-      results.push(await runTracked('deep', tracker, () =>
-        deepSleep(storage, intelligence, undefined, graph)))
+    if (enabledCycles.has('deep') && await isDeepSleepDue(
+      storage,
+      tracker,
+      config.deepSleepThreshold,
+      config.deepSleepMinNewDigests,
+    )) {
+      results.push(await runTracked('deep', tracker, async () => {
+        const result = await deepSleep(storage, intelligence, undefined, graph)
+        // v0.3.14: snapshot digest count for the next run's delta gate.
+        // Without this, the next isDeepSleepDue() call has no prior count
+        // to diff against and falls back to the old "any 5+ digests in last
+        // 7 days" check — which fires every tick.
+        if (storage.digests.count) {
+          try {
+            result.digestCount = await storage.digests.count()
+          } catch { /* non-fatal — gate falls back to threshold check */ }
+        }
+        return result
+      }))
     }
 
     if (enabledCycles.has('dream') && await isDreamCycleDue(
@@ -222,10 +249,35 @@ async function isLightSleepDue(storage: StorageAdapter, threshold: number): Prom
   } catch { return false }
 }
 
-async function isDeepSleepDue(storage: StorageAdapter, threshold: number): Promise<boolean> {
+async function isDeepSleepDue(
+  storage: StorageAdapter,
+  tracker: StorageAdapter['consolidationRuns'],
+  threshold: number,
+  minNewDigests: number,
+): Promise<boolean> {
   try {
+    // Bootstrap check: do we have enough digests in the last 7 days to be
+    // worth running deep sleep at all?
     const digests = await storage.digests.getRecent(7)
-    return digests.length >= threshold
+    if (digests.length < threshold) return false
+
+    // v0.3.14 delta gate — skip when no new digests have arrived since
+    // the last completed deep run. Without this, deep sleep loops forever
+    // (it doesn't mark digests as processed; isDeepSleepDue keeps firing).
+    // Falls back to "always fire when threshold met" if either count()
+    // isn't implemented or there's no prior run to compare against.
+    if (minNewDigests > 0 && tracker && storage.digests.count) {
+      try {
+        const lastRun = await tracker.getLastRun('deep')
+        if (lastRun?.result?.digestCount !== undefined) {
+          const currentCount = await storage.digests.count()
+          const delta = currentCount - lastRun.result.digestCount
+          if (delta < minNewDigests) return false
+        }
+      } catch { /* fall through to threshold-only check */ }
+    }
+
+    return true
   } catch { return false }
 }
 
