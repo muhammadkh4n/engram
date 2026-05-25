@@ -34,7 +34,7 @@
 
 import { createMemory, dreamCycle } from '@engram-mem/core'
 import type { StorageAdapter } from '@engram-mem/core'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from './graph-helper.js'
 
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   // are visible — Supabase doesn't implement consolidation_runs persistence
   // yet (v0.3.13 work), but the interface guard `if (storage.consolidationRuns)`
   // must compile against the StorageAdapter shape.
-  const storage: StorageAdapter = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storage: StorageAdapter = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence = openaiIntelligence({ apiKey: openaiApiKey })
 
   const graph = await tryCreateGraph('[engram-dream-cycle]')

@@ -33,7 +33,7 @@ import { createClient } from '@supabase/supabase-js'
 import neo4j, { type Driver, type Session as Neo4jSession } from 'neo4j-driver'
 import { createMemory } from '@engram-mem/core'
 import type { Memory } from '@engram-mem/core'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { NeuralGraph } from '@engram-mem/graph'
 
@@ -236,7 +236,7 @@ async function main(): Promise<void> {
   // -------------------------------------------------------------------------
   section('Stage 2: Ingest fixtures (real Memory.ingest path)')
 
-  const storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence = openaiIntelligence({ apiKey: openaiKey })
   const graph = new NeuralGraph({
     neo4jUri,
@@ -432,7 +432,7 @@ async function main(): Promise<void> {
   // Construct a parallel Memory instance with graph disabled so we can
   // compare results on the same queries. Uses its own storage instance
   // to avoid double-dispose on shutdown.
-  const storageNoGraph = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storageNoGraph = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const memoryNoGraph: Memory = createMemory({
     storage: storageNoGraph,
     intelligence,

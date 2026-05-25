@@ -16,7 +16,7 @@ import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
 import { Memory } from '@engram-mem/core'
 import { SqliteStorageAdapter } from '@engram-mem/sqlite'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import * as fs from 'node:fs'
@@ -278,7 +278,7 @@ export default definePluginEntry({
     const supabaseKey = (cfg.supabaseKey as string | undefined) ?? process.env.SUPABASE_SERVICE_KEY
 
     if (supabaseUrl && supabaseKey) {
-      storage = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+      storage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
       console.log('[engram] Using Supabase storage (pgvector + cosine similarity)')
     } else {
       const storagePath = expandHome(

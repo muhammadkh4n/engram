@@ -4,7 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
-export class SupabaseDigestStorage implements DigestStorage {
+export class PostgRestDigestStorage implements DigestStorage {
   constructor(private readonly client: SupabaseClient) {}
 
   async insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest> {

@@ -18,7 +18,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { createMemory, startConsolidationWorker } from '@engram-mem/core'
 import type { StorageAdapter, IntelligenceAdapter, GraphPort } from '@engram-mem/core'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
@@ -62,7 +62,7 @@ export async function getMemory(): Promise<Memory> {
   const supabaseKey = requireEnv('SUPABASE_KEY')
   const openaiApiKey = requireEnv('OPENAI_API_KEY')
 
-  const storage: StorageAdapter = new SupabaseStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const storage: StorageAdapter = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const intelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
   const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 

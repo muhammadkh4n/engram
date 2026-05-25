@@ -4,7 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { EpisodeStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 
-export class SupabaseEpisodeStorage implements EpisodeStorage {
+export class PostgRestEpisodeStorage implements EpisodeStorage {
   /**
    * @param legacyMode When true, skip the memories pool table insert and
    *   omit columns that don't exist in the legacy schema (salience, entities,

@@ -4,6 +4,54 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-05-25
+
+### BREAKING (with shim)
+
+- **`@engram-mem/supabase` has been renamed to `@engram-mem/postgrest`.** The adapter was always PostgREST under the hood — engram only ever used the `.from(table)` / `.rpc(fn)` query-builder methods of `supabase-js`, which are themselves a wrapper around `postgrest-js`. The same code worked against any PostgREST endpoint (Supabase, self-hosted Postgres + PostgREST, anywhere) but the old name made vendor lock-in look mandatory. The rename makes the contract honest and unlocks the BYO-infra story.
+
+  **No code changes required in v0.4.x — the old package is a thin re-export shim.** Existing imports keep working:
+
+  ```typescript
+  import { SupabaseStorageAdapter } from '@engram-mem/supabase'  // still works
+  ```
+
+  TSDoc warnings will surface in your IDE; `npm install` will print a deprecation notice from `npm deprecate`. To take the rename:
+
+  ```diff
+  - npm install @engram-mem/supabase
+  + npm install @engram-mem/postgrest
+
+  - import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+  + import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
+
+    // constructor + options unchanged
+    new PostgRestStorageAdapter({ url, key })
+  ```
+
+  Both the new `PostgRestStorageAdapter` and the legacy `SupabaseStorageAdapter` alias are available from `@engram-mem/postgrest` so you can rename the package without renaming the class first.
+
+  `SUPABASE_URL` / `SUPABASE_KEY` env vars continue to work — they're just strings passed to `url` / `key`. The values can point at any PostgREST endpoint (Supabase project URL, your own Docker-hosted PostgREST, etc.).
+
+  Full migration runbook including how to switch from hosted Supabase to self-hosted Postgres + PostgREST on the same adapter: [`docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md`](docs/migrations/2026-05-25-supabase-to-postgrest-rebrand.md).
+
+  **`@engram-mem/supabase` will be removed entirely in v0.5.0** (no date set — gated on no consumers complaining).
+
+### Catch-up notes for 0.3.6 → 0.3.15
+
+CHANGELOG fell behind during the v0.3.x churn. Highlights:
+
+- **v0.3.15** — `Memory.ingestBatch` actually batches now via `intelligence.embedBatch` (was a stub that looped `ingest` sequentially). Measured 8.6× wall-time speedup on LongMemEval-S ingest. Side effect: full LongMemEval-S baseline finally feasible — engram landed 98.8% R@5 / 99.6% R@10 (beating published SOTA baselines), 53% strict / 63.4% lenient end-to-end judge accuracy (tied with Zep, beats Mem0 by 4pp on cheaper gpt-4o-mini).
+- **v0.3.14** — deep-sleep delta gate (urgent IO fix). Deep sleep had no delta tracking; `isDeepSleepDue` kept firing every 60s, deep sleep kept re-processing the same 7-day digest window. Triggered a production Supabase Disk IO Budget warning. Same delta-gate pattern as v0.3.13's dream-cycle fix.
+- **v0.3.13** — adaptive GDS projection in dream-cycle (`gds.graph.project` is strict on missing rel types; we hard-coded the full historical taxonomy but ingest writes only a subset). LIMIT-as-Float64 bug in hippocampal replay. `SupabaseConsolidationRunStorage` added so the delta gate works against the production backend.
+- **v0.3.12** — auto-consolidation Phase 2 worker actually wired up. `cycles?` filter on `AutoConsolidationOpts`. New `engram-dream-cycle` CLI for systemd-timer invocation. `memory_consolidation_status` MCP tool.
+- **v0.3.11** — MCP server reported the wrong version (hardcoded literal). Now reads from `package.json` at module load.
+- **v0.3.10** — MCP Streamable HTTP transport (alongside existing stdio). Bearer-auth, DNS-rebind guard.
+- **v0.3.9** — MMR pre-rerank diversification, default ON. Lemma-Jaccard similarity (no extra embeddings). Validated +3.02pp r@30 on LoCoMo conv-26 sweep.
+- **v0.3.6–v0.3.8** — Option Z (recall maxResults bump 8/15→30, +3.6pp on judge bench), forensics scaffolding for Phase 5 negative-result HQ experiments, CI/test fixes.
+
+`git log --oneline v0.3.5..v0.4.0` for the full commit sequence with detailed messages.
+
 ## [0.3.5] - 2026-04-17
 
 ### Fixed

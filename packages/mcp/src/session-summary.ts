@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { createMemory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
-import { SupabaseStorageAdapter } from '@engram-mem/supabase'
+import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import OpenAI from 'openai'
 
@@ -162,7 +162,7 @@ async function main(): Promise<void> {
   }
 
   // Ingest into Engram
-  const storage = new SupabaseStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
+  const storage = new PostgRestStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
   const intelligence = openaiIntelligence({ apiKey: OPENAI_API_KEY! })
   const graph = await tryCreateGraph('[engram-summary]')
   const memory = createMemory({
