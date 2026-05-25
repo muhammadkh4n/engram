@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { unifiedSearch } from '../../src/retrieval/search.js'
+import { unifiedSearch, isRecallFailureNoise } from '../../src/retrieval/search.js'
 import { createMockStorage } from './mock-storage.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
 import type { RecallStrategy } from '../../src/types.js'
@@ -153,5 +153,71 @@ describe('unifiedSearch', () => {
       expect(r.source).toBe('recall')
       expect(['episode', 'digest', 'semantic', 'procedural']).toContain(r.type)
     }
+  })
+})
+
+describe('isRecallFailureNoise', () => {
+  it('flags pure assistant failure messages (penalized)', () => {
+    expect(isRecallFailureNoise('assistant', "I can't find anything about that.")).toBe(true)
+    expect(isRecallFailureNoise('assistant', 'No record of that decision in my notes.')).toBe(true)
+    expect(isRecallFailureNoise('assistant', 'Nothing stored about that topic.')).toBe(true)
+    expect(isRecallFailureNoise('assistant', "Genuinely can't recall.")).toBe(true)
+    expect(isRecallFailureNoise('assistant', 'Searched everything, nothing relevant.')).toBe(true)
+    expect(isRecallFailureNoise('assistant', "I don't have any details on that.")).toBe(true)
+  })
+
+  it('does NOT flag hedged-confident answers with continuation', () => {
+    expect(
+      isRecallFailureNoise('assistant', "I can't find the exact date, but it was around March."),
+    ).toBe(false)
+    expect(
+      isRecallFailureNoise(
+        'assistant',
+        "I don't have full details on that, though the project shipped in Q3.",
+      ),
+    ).toBe(false)
+    expect(
+      isRecallFailureNoise(
+        'assistant',
+        'No mention of that in the logs, however the build did fail at noon.',
+      ),
+    ).toBe(false)
+    expect(
+      isRecallFailureNoise(
+        'assistant',
+        'No record of the meeting, although the calendar shows a 3pm slot was booked.',
+      ),
+    ).toBe(false)
+  })
+
+  it('only applies to assistant role (user/system messages pass through)', () => {
+    expect(isRecallFailureNoise('user', "I can't find the docs anywhere.")).toBe(false)
+    expect(isRecallFailureNoise('system', 'No record of that event.')).toBe(false)
+    expect(isRecallFailureNoise(undefined, 'no record of that.')).toBe(false)
+  })
+
+  it('does NOT flag messages without any failure phrase', () => {
+    expect(isRecallFailureNoise('assistant', 'The deployment happened on Tuesday.')).toBe(false)
+    expect(isRecallFailureNoise('assistant', 'We decided to use Postgres for the cutover.')).toBe(
+      false,
+    )
+    expect(isRecallFailureNoise('assistant', '')).toBe(false)
+  })
+
+  it('does not rescue when hedge marker is far past the failure phrase', () => {
+    // Hedge appears > 80 chars after the failure phrase — too distant to count
+    // as a same-clause qualifier. Treat as pure failure.
+    const longTail =
+      "I can't find that record. " +
+      'The system was running normally and the deployment proceeded as planned without errors or warnings whatsoever. ' +
+      'But the audit flagged one entry.'
+    expect(isRecallFailureNoise('assistant', longTail)).toBe(true)
+  })
+
+  it('rescues when hedge marker appears within the 80-char window', () => {
+    // Hedge appears immediately after the failure phrase.
+    expect(isRecallFailureNoise('assistant', "I can't find that, but it shipped on May 12.")).toBe(
+      false,
+    )
   })
 })

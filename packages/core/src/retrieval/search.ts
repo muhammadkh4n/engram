@@ -83,13 +83,37 @@ interface ScoringInput {
  * Detect assistant messages that are self-referential recall failures —
  * "I can't find X", "no record of X", "nothing stored about X".
  * These have high similarity to the query because they parrot the search
- * terms, but carry zero information. Heavy penalty pushes them below
- * the actual content.
+ * terms, but carry zero information.
  */
 const RECALL_FAILURE_PATTERNS = /\b(can'?t find|no record of|nothing stored|not finding|no luck|no mention|don'?t have.{0,20}(details|context|record)|genuinely (can'?t|don'?t)|searched.{0,30}(no|nothing|zero)|dug through everything)\b/i
 
-function isRecallFailureNoise(role: string | undefined, content: string): boolean {
-  return role === 'assistant' && RECALL_FAILURE_PATTERNS.test(content)
+/**
+ * Hedging conjunctions that introduce a real answer after an admitted gap.
+ * Used to rescue "I can't find X, but Y" from the recall-failure penalty.
+ * Conservative list — only words that reliably introduce a contrastive or
+ * qualifying clause.
+ */
+const HEDGE_CONTINUATION_PATTERNS = /\b(but|however|though|although|except|still|yet)\b/i
+
+/**
+ * @internal — exported for unit tests; not part of the public API.
+ *
+ * An assistant message is "recall-failure noise" only if it admits a gap
+ * AND does not follow that admission with substantive information. The
+ * regex match alone is insufficient: "I can't find the exact date, but it
+ * was March" carries real information past the hedge and must NOT be
+ * penalized. The continuation check rescues those cases.
+ */
+export function isRecallFailureNoise(role: string | undefined, content: string): boolean {
+  if (role !== 'assistant') return false
+  const match = RECALL_FAILURE_PATTERNS.exec(content)
+  if (!match) return false
+  // A hedging conjunction within ~80 chars after the failure phrase means
+  // the assistant is qualifying a real answer, not parroting the topic.
+  // Treat those as signal-bearing and skip the penalty.
+  const tailStart = match.index + match[0].length
+  const tail = content.slice(tailStart, tailStart + 80)
+  return !HEDGE_CONTINUATION_PATTERNS.test(tail)
 }
 
 function computeScore(input: ScoringInput): number {
