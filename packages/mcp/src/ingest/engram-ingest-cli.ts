@@ -401,6 +401,11 @@ async function main(): Promise<void> {
   const memory = createMemory({
     storage: ingestStorage,
     intelligence,
+    // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true → Memory.ingest generates a
+    // contextual preamble via intelligence.contextualizeChunk and uses it
+    // to enrich the embedding (Anthropic-style Contextual Retrieval).
+    // Content stays pristine for FTS. ~$0.0001 per turn with gpt-4o-mini.
+    contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()

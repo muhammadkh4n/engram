@@ -4,6 +4,24 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-05-25
+
+All 10 `@engram-mem/*` packages bumped to 0.4.3 (lockstep). Adds two opt-in retrieval improvements + a backfill CLI. Safe drop-in for 0.4.2 — both new flags default OFF.
+
+### Added
+
+- **`ENGRAM_RERANK_LOCAL=true`** — when set, `engram-mcp-http` and `engram-mcp` (stdio) swap the LLM-pointwise reranker (gpt-4o-mini, ~$0.0001/query) for a local mxbai-rerank-large-v1 cross-encoder via ONNX Runtime ($0/query). Per the public Mixedbread benchmarks the local cross-encoder matches Cohere rerank-3 within noise and the literature converges on specialized cross-encoders over LLM-pointwise rerank (RankGPT 2023-24). The package `@engram-mem/rerank-onnx` is dynamically imported only when the flag is set; cold-start downloads ~113MB of ONNX weights to the HF cache, then loads from disk on subsequent invocations. Falls back gracefully to OpenAI rerank if the package fails to load.
+
+- **`ENGRAM_INGEST_CONTEXTUAL=true`** — when set, `Memory.ingest` generates a 50-100 token contextual preamble per turn via `intelligence.contextualizeChunk` (gpt-4o-mini, ~$0.0001/turn) and uses it to enrich the embedding (Anthropic-style Contextual Retrieval). The preamble is stored in `metadata.contextualPreamble` for inspection; the `content` column stays pristine so FTS/BM25 keeps lexical precision for dates, proper nouns, and literal tokens. Wave 2 bench confirmed: preamble-in-FTS hurt temporal queries by promoting "about Jon's banking job" over the literal "Jan 19, 2023".
+
+- **`engram-contextual-backfill` CLI** — one-shot ETL for existing episodes. Scans `memory_episodes` for rows missing `metadata.contextualPreamble`, generates the preamble via `contextualizeChunk`, re-embeds with the preamble, and `UPDATE`s. Idempotent + resumable. Dry-run by default; pass `--apply` to persist. ~$0.50 to backfill ~5000 episodes with gpt-4o-mini.
+
+### Notes
+
+- Recall engine code unchanged. Both flags affect only ingest path (contextual) and intelligence-adapter composition at startup (rerank-onnx).
+- Existing rows ingested before the flags were enabled are unaffected by retrieval changes until they're backfilled. The `engram-contextual-backfill` CLI handles this; the rerank-onnx swap takes effect on the next recall regardless of when the row was ingested.
+- No bench validation has been run against the 0.4.2 baseline (LongMemEval-S 98.8% R@5). Both improvements ship opt-in so the production default behavior is unchanged.
+
 ## [0.4.2] - 2026-05-25
 
 All 10 `@engram-mem/*` packages bumped to 0.4.2 (lockstep). Pure dependency-hygiene release — zero behavioral change, no public API change. Safe drop-in for 0.4.1.

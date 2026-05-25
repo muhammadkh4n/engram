@@ -53,6 +53,48 @@ function requireEnv(name: string): string {
   return val
 }
 
+
+/**
+ * Optionally swap the rerank stage to a local ONNX cross-encoder.
+ *
+ * When `ENGRAM_RERANK_LOCAL=true`, dynamically loads `@engram-mem/rerank-onnx`
+ * (mxbai-rerank-large-v1 by default) and spreads its `rerank` over the
+ * provided intelligence adapter. The 113MB ONNX weights are downloaded on
+ * first use and cached under the HF cache dir; `.load()` is fired
+ * fire-and-forget at startup so the cache warm-up overlaps the first user
+ * request rather than blocking it.
+ *
+ * Falls back to the input adapter unchanged if the env flag is off or the
+ * package fails to load (e.g. not installed). Errors during load are logged
+ * but do not abort server startup.
+ */
+async function maybeWithLocalRerank(
+  intelligence: IntelligenceAdapter,
+): Promise<IntelligenceAdapter> {
+  if (process.env.ENGRAM_RERANK_LOCAL !== 'true') return intelligence
+  try {
+    const mod = await import('@engram-mem/rerank-onnx')
+    const onnx = mod.createOnnxReranker()
+    // Fire-and-forget warm-up. First real query waits at most until model is
+    // resident; subsequent queries are zero-latency setup.
+    onnx.load().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[engram-mcp] rerank-onnx warmup failed (will retry on first call): ${msg}`)
+    })
+    console.log('[engram-mcp] ENGRAM_RERANK_LOCAL=true — using local mxbai-rerank cross-encoder')
+    return {
+      ...intelligence,
+      rerank: (query, documents) => onnx.rerank(query, documents),
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(
+      `[engram-mcp] ENGRAM_RERANK_LOCAL=true but @engram-mem/rerank-onnx could not be loaded — falling back to OpenAI rerank: ${msg}`,
+    )
+    return intelligence
+  }
+}
+
 let memory: Memory | null = null
 
 export async function getMemory(): Promise<Memory> {
@@ -63,13 +105,26 @@ export async function getMemory(): Promise<Memory> {
   const openaiApiKey = requireEnv('OPENAI_API_KEY')
 
   const storage: StorageAdapter = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
-  const intelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
+  const baseIntelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
+  // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
+  // cross-encoder over the openaiIntelligence adapter so the rerank stage
+  // uses ONNX CPU inference (~$0 per query) instead of gpt-4o-mini pointwise.
+  // Dynamic import keeps the 113MB ONNX dep out of the cold-start path for
+  // users who don't opt in. Failure to load logs a warning and falls back
+  // to the OpenAI reranker.
+  const intelligence: IntelligenceAdapter = await maybeWithLocalRerank(baseIntelligence)
   const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 
   memory = createMemory({
     storage,
     intelligence,
     autoConsolidate: true,
+    // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true enables Anthropic-style
+    // Contextual Retrieval. Memory.ingest will call
+    // intelligence.contextualizeChunk to generate a short preamble per
+    // turn and use it to enrich the EMBEDDING only. Content stays
+    // pristine for FTS lexical precision (Wave 2 bench finding).
+    contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()

@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/supabase",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "DEPRECATED — renamed to @engram-mem/postgrest. This package is a thin re-export shim and will be removed in v0.5.0. See README.",
   "keywords": [
     "memory",
@@ -30,7 +30,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram-mem/postgrest": "0.4.2"
+    "@engram-mem/postgrest": "0.4.3"
   },
   "devDependencies": {
     "typescript": "^6.0.2",
