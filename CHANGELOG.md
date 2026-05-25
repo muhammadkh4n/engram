@@ -4,6 +4,19 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-05-25
+
+All 10 `@engram-mem/*` packages bumped to 0.4.5 (lockstep). **Docs-only release.** No source, schema, or behavior changes from v0.4.4 — the bump exists solely to ship the corrected README content into the npm tarballs.
+
+### Changed
+
+- **All 10 package READMEs fact-checked for v0.4.x reality.** The v0.4.4 tarballs had READMEs still mentioning the legacy `supabaseAdapter()` helper, dead `docs/migrations/...` links (the `docs/` directory was deleted in v0.4.4), Supabase-only env framing (`SUPABASE_KEY` is now described as a service-role JWT against any PostgREST endpoint), and the pre-v0.3.6 LoCoMo 57.5% R@K headline number (now showing the LongMemEval-S 98.8% R@5 baseline that beats Zep by ~35pp).
+- **`packages/mcp/README.md`** now documents the v0.4.x env flags: `ENGRAM_RERANK_LOCAL`, `ENGRAM_RERANK_LOCAL_MODEL`, `ENGRAM_INGEST_CONTEXTUAL`. Also documents the 7th MCP tool — `memory_consolidation_status` — which has shipped since v0.3.13 but was missing from the README.
+- **Root `README.md`, `SECURITY.md`, `CONTRIBUTING.md`** all swept for the same stale patterns and refreshed to the v0.4.x story (BYO-PostgREST, single idempotent `schema.sql`, 10-package layout).
+- **`packages/rerank-onnx/README.md`** now has a top-of-file callout explaining the `ENGRAM_RERANK_LOCAL=true` composition pattern in `@engram-mem/mcp` — pick the variant via `ENGRAM_RERANK_LOCAL_MODEL`.
+
+If you're already on v0.4.4 with no consumer-facing problems, this upgrade is purely cosmetic — the code is byte-for-byte identical.
+
 ## [0.4.4] - 2026-05-25
 
 All 10 `@engram-mem/*` packages bumped to 0.4.4 (lockstep). Repo cleanup + schema consolidation + rerank model flag. No public API breakage on the recall/ingest paths; `getMigrationSQL()` is kept as a deprecated alias for one minor cycle.

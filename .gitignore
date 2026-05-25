@@ -6,6 +6,22 @@ dist/
 .env.*
 test-connection.mjs
 
+# Serena
+.serena
+
+# claude
+.claude
+
+# Supabase CLI runtime cache
+supabase/.temp/
+
+# Understand-Anything knowledge graph (regenerated per session)
+.understand-anything/
+
+# Bench / forensics output (locally generated, not committed)
+results/
+data/
+
 # Build artifacts (prevent leaking compiled files into src/)
 packages/*/src/**/*.js
 packages/*/src/**/*.js.map
