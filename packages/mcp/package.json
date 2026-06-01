@@ -57,8 +57,8 @@
     "@engram-mem/postgrest": "0.4.5",
     "@engram-mem/rerank-onnx": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@supabase/postgrest-js": "^2.105.1",
-    "openai": "^6.35.0"
+    "@supabase/postgrest-js": "^2.106.2",
+    "openai": "^6.39.1"
   },
   "devDependencies": {
     "typescript": "^6.0.2"
