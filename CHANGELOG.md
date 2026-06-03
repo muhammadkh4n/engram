@@ -4,6 +4,26 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-06-04
+
+All 10 `@engram-mem/*` packages bumped to 0.5.0 (lockstep). **Project isolation (Wave 5).** Recall and ingest can now be scoped to a project so one project's memories never leak into another's. Backward compatible: with no scope configured, behavior is unchanged and all existing (untagged) memories stay shared.
+
+### Added
+
+- **Hard project namespace isolation across the whole pipeline.** A recall scoped to project X returns only X's memories plus shared (`project_id IS NULL`) rows; every other project is invisible. Enforced at three layers so there is no leak path:
+  - **SQL** — `engram_vector_search`, `engram_recall`, `engram_hybrid_recall`, and `engram_text_boost` gain a `p_project_id` parameter and filter every table branch (`project_id = p_project_id OR project_id IS NULL`). A null parameter disables the filter (unscoped).
+  - **Graph** — spreading activation will not bridge through or surface a foreign project's Memory node via shared entity/person nodes; the guard allows traversal through global context nodes and always allows shared memories.
+  - **Application** — the MCP server, both hooks (pre-compact, session-summary), and the ingest CLI resolve one project scope and apply it to both ingest tags and recall filters.
+- **`ENGRAM_PROJECT_ID` env var.** Scopes the MCP server. When unset, the project is auto-detected from the working directory's git repo basename, so per-repo Claude Code sessions isolate automatically. `global`/`none` force the shared bucket. The resolved scope is logged at startup so it is never silent.
+- **Per-call `projectId` on `Memory.recall`** — overrides the instance default for a single call, so one shared instance (e.g. an HTTP server) can serve multiple projects per request.
+
+### Notes
+
+- **Migration:** the four SQL functions changed signatures (a new defaulted parameter). `schema.sql` now `DROP FUNCTION IF EXISTS` the old signature before each `CREATE`, so re-applying it on an existing database is clean and idempotent. Apply with `psql -f schema.sql` (or apply just the four function blocks).
+- **Existing data stays shared.** Memories ingested before this release have `project_id = NULL` and remain visible to every project. Only memories ingested after a scope is configured are isolated. A retroactive backfill (tagging history from the existing `metadata.project` soft tag) is possible but not performed automatically — it needs a per-project normalization decision.
+- The `memory_recall` MCP tool deliberately does **not** expose a project argument: the model cannot opt into cross-project recall. Switch projects by changing directory or `ENGRAM_PROJECT_ID`.
+- Verified against the live production database (50k+ rows) across all four SQL functions, plus unit, end-to-end (SQLite), and graph wiring/integration tests.
+
 ## [0.4.5] - 2026-05-25
 
 All 10 `@engram-mem/*` packages bumped to 0.4.5 (lockstep). **Docs-only release.** No source, schema, or behavior changes from v0.4.4 — the bump exists solely to ship the corrected README content into the npm tarballs.
