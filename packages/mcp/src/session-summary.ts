@@ -18,6 +18,7 @@ import { createMemory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
+import { resolveProjectScope } from './ingest/project-detect.js'
 import OpenAI from 'openai'
 
 // ---------------------------------------------------------------------------
@@ -165,9 +166,13 @@ async function main(): Promise<void> {
   const storage = new PostgRestStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
   const intelligence = openaiIntelligence({ apiKey: OPENAI_API_KEY! })
   const graph = await tryCreateGraph('[engram-summary]')
+  // Wave 5: scope the session summary to the same project the MCP server
+  // recalls under (env-first → cwd basename), so it isn't visible to others.
+  const scope = resolveProjectScope()
   const memory = createMemory({
     storage,
     intelligence,
+    ...(scope.id ? { projectId: scope.id } : {}),
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()

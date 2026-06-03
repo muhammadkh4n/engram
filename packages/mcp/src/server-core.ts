@@ -22,6 +22,7 @@ import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
+import { resolveProjectScope, formatScopeLog } from './ingest/project-detect.js'
 
 /**
  * Read the package version once at module load from the colocated package.json.
@@ -125,6 +126,15 @@ export async function getMemory(): Promise<Memory> {
   const intelligence: IntelligenceAdapter = await maybeWithLocalRerank(baseIntelligence)
   const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 
+  // Wave 5: resolve the project scope for this server instance. On the stdio
+  // path the server runs in the project's cwd, so detectProject picks it up;
+  // ENGRAM_PROJECT_ID overrides (required for the remote HTTP server). Both
+  // ingest (autoConsolidate) and recall are scoped to this project; a null
+  // scope means the shared bucket (no isolation — backward compatible).
+  // Logged so scoping is never silent.
+  const scope = resolveProjectScope()
+  console.error(`[engram-mcp] ${formatScopeLog(scope)}`)
+
   memory = createMemory({
     storage,
     intelligence,
@@ -135,6 +145,7 @@ export async function getMemory(): Promise<Memory> {
     // turn and use it to enrich the EMBEDDING only. Content stays
     // pristine for FTS lexical precision (Wave 2 bench finding).
     contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
+    ...(scope.id ? { projectId: scope.id } : {}),
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()

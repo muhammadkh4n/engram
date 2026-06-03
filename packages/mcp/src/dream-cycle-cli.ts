@@ -82,6 +82,12 @@ async function main(): Promise<void> {
   // Initialize a Memory just to run storage.initialize() — dreamCycle()
   // operates on storage + graph directly, so we don't actually need the
   // Memory instance itself afterwards.
+  //
+  // Wave 5: dream-cycle is intentionally GLOBAL — it runs on a systemd timer
+  // and consolidates communities across every project. No projectId is set
+  // here on purpose. If per-project dream cycles are ever needed, add a
+  // --project flag and resolve it via resolveProjectScope(), then thread the
+  // scope into dreamCycle()'s graph queries.
   const memory = createMemory({ storage, intelligence, graph })
   await memory.initialize()
 

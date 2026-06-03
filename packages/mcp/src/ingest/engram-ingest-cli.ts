@@ -50,7 +50,7 @@ import type { SalienceClassification } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
-import { resolveProject } from './project-detect.js'
+import { resolveProject, resolveProjectScope } from './project-detect.js'
 import { findDuplicate, boostDuplicate } from './dedup.js'
 import { logRejection } from './rejection-log.js'
 
@@ -398,6 +398,11 @@ async function main(): Promise<void> {
   const ingestStorage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const graph = await tryCreateGraph('[engram-ingest]')
 
+  // Wave 5: the hard project_id column uses the same env-first → cwd-basename
+  // resolution as the MCP server's recall path, so what we write here matches
+  // what recall filters on. (The soft `project` above feeds metadata + the
+  // classifier and stays as-is.)
+  const scope = resolveProjectScope()
   const memory = createMemory({
     storage: ingestStorage,
     intelligence,
@@ -406,6 +411,7 @@ async function main(): Promise<void> {
     // to enrich the embedding (Anthropic-style Contextual Retrieval).
     // Content stays pristine for FTS. ~$0.0001 per turn with gpt-4o-mini.
     contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
+    ...(scope.id ? { projectId: scope.id } : {}),
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
