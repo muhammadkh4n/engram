@@ -55,6 +55,12 @@ export interface GraphSpreadActivationOpts {
   threshold?: number
   budget?: number
   edgeFilter?: string[]
+  /**
+   * Wave 5 hard project scope. Activation will not bridge through or surface
+   * Memory nodes from a different project. Shared (NULL) memories are always
+   * reachable; null/undefined disables the filter (unscoped recall).
+   */
+  projectId?: string | null
 }
 
 export interface GraphActivatedNode {

@@ -154,6 +154,7 @@ export async function stageActivate(
   strategy: RecallStrategy,
   storage: StorageAdapter,
   project?: string,
+  projectId?: string,
 ): Promise<ActivationResultSet | null> {
   const params = getActivationParams(strategy)
 
@@ -203,6 +204,9 @@ export async function stageActivate(
       threshold: params.faintThreshold,
       budget: params.budget,
       edgeFilter: params.preferredEdges,
+      // Wave 5: hard project scope — activation must not bridge into or
+      // surface another project's memories via shared entity/person nodes.
+      ...(projectId !== undefined ? { projectId } : {}),
     })
   } catch (err) {
     console.warn('[engram] spreadActivation failed:', err)

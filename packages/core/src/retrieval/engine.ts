@@ -621,7 +621,7 @@ export async function recall(
   let compositeContext: CompositeMemory | null = null
 
   if (strategy.associations && graph !== null) {
-    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project)
+    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId)
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
       const legacyStrategy = toRetrievalStrategy(strategy)

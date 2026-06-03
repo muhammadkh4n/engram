@@ -278,10 +278,11 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     const limit = strategy.maxResults * 2
     const searchQuery = terms.join(' ')
 
+    const searchOpts = projectId !== undefined ? { limit, projectId } : { limit }
     const [episodeHits, digestHits, semanticHits] = await Promise.all([
-      storage.episodes.search(searchQuery, { limit }),
-      storage.digests.search(searchQuery, { limit }),
-      storage.semantic.search(searchQuery, { limit }),
+      storage.episodes.search(searchQuery, searchOpts),
+      storage.digests.search(searchQuery, searchOpts),
+      storage.semantic.search(searchQuery, searchOpts),
     ])
 
     const textHits: Array<{ typed: TypedMemory; similarity: number }> = []

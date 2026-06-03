@@ -547,9 +547,14 @@ export class Memory {
    *  use it to vary maxResults / association hops without re-classifying. */
   async recall(
     query: string,
-    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date; strategyOverride?: Partial<RecallStrategy> }
+    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date; strategyOverride?: Partial<RecallStrategy>; projectId?: string }
   ): Promise<RecallResult> {
     this.assertInitialized()
+
+    // Per-call project scope overrides the instance default. Lets one Memory
+    // instance (e.g. a shared HTTP server) serve recalls for different
+    // projects per request without constructing a new instance each time.
+    const effectiveProjectId = opts?.projectId ?? this._projectId
 
     // Classify intent using new 3-mode system
     const mode = classifyMode(query)
@@ -579,7 +584,7 @@ export class Memory {
       graph: this._graph,
       asOf: opts?.asOf,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
-      ...(this._projectId ? { projectId: this._projectId } : {}),
+      ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn
@@ -910,7 +915,7 @@ export class Memory {
       ingest: (message: Omit<Message, 'sessionId'>) => {
         return this.ingest({ ...message, sessionId: sid })
       },
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy> }) => {
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string }) => {
         return this.recall(query, opts)
       },
     }
