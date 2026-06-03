@@ -81,6 +81,12 @@ export interface SpreadActivationOpts {
   threshold?: number
   budget?: number
   edgeFilter?: string[]
+  /**
+   * Wave 5 project isolation. When set, activation will not bridge through
+   * or surface Memory nodes from a different project. Shared (NULL-project)
+   * memories are always reachable; null/undefined disables the filter.
+   */
+  projectId?: string | null
 }
 
 /** Wave 2 ActivatedNode — matches ActivationResult with stable field names */
@@ -920,6 +926,7 @@ export class NeuralGraph {
       minActivation: threshold,
       maxNodes: opts.budget ?? 100,
       edgeTypeFilter: (opts.edgeFilter ?? []) as ActivationParams['edgeTypeFilter'],
+      projectId: opts.projectId ?? null,
     }
     const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params)
     const activated: ActivatedNode[] = results.map((r) => ({

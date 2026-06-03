@@ -153,4 +153,40 @@ describe.skipIf(!neo4jReady)('SpreadingActivation (integration)', () => {
       expect(results[0].activation).toBeGreaterThanOrEqual(results[1].activation)
     }
   })
+
+  // Wave 5 — behavioral project isolation. Two memories in different projects
+  // both connect to a shared global entity; activation from one project must
+  // not bridge through that entity into the other project's memory.
+  it('does not bridge into another project via a shared entity', async () => {
+    await graph.addMemoryNode({ id: 'ep-alpha', memoryType: 'episode', label: 'Alpha', projectId: 'alpha' })
+    await graph.addMemoryNode({ id: 'ep-alpha2', memoryType: 'episode', label: 'Alpha 2', projectId: 'alpha' })
+    await graph.addMemoryNode({ id: 'ep-beta', memoryType: 'episode', label: 'Beta', projectId: 'beta' })
+    await graph.addMemoryNode({ id: 'ep-shared', memoryType: 'episode', label: 'Shared', projectId: null })
+    await graph.addEntityNode({ name: 'TypeScript', entityType: 'tech' })
+    await graph.addEdge('ep-alpha', 'entity:typescript', 'CONTEXTUAL', 0.9)
+    await graph.addEdge('ep-alpha2', 'entity:typescript', 'CONTEXTUAL', 0.9)
+    await graph.addEdge('ep-beta', 'entity:typescript', 'CONTEXTUAL', 0.9)
+    await graph.addEdge('ep-shared', 'entity:typescript', 'CONTEXTUAL', 0.9)
+
+    const scoped = await activation.activate(['ep-alpha'], {
+      maxHops: 2,
+      decayPerHop: 0.8,
+      minActivation: 0.001,
+      maxNodes: 50,
+      projectId: 'alpha',
+    })
+    const scopedIds = scoped.map((r) => r.nodeId)
+    expect(scopedIds).toContain('ep-alpha2') // same project — reachable
+    expect(scopedIds).toContain('ep-shared') // shared (NULL project) — reachable
+    expect(scopedIds).not.toContain('ep-beta') // other project — excluded
+
+    // Unscoped activation (no projectId) still reaches beta — backward compatible.
+    const unscoped = await activation.activate(['ep-alpha'], {
+      maxHops: 2,
+      decayPerHop: 0.8,
+      minActivation: 0.001,
+      maxNodes: 50,
+    })
+    expect(unscoped.map((r) => r.nodeId)).toContain('ep-beta')
+  })
 })

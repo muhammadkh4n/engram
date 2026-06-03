@@ -8,6 +8,7 @@ const DEFAULT_PARAMS: Required<ActivationParams> = {
   maxNodes: 100,
   minWeight: 0.01,
   edgeTypeFilter: [],
+  projectId: null,
 }
 
 export class SpreadingActivation {
@@ -37,6 +38,11 @@ export class SpreadingActivation {
         MATCH path = (seed)-[rels${relFilter}*1..${p.maxHops}]-(neighbor)
         WHERE neighbor <> seed
           AND ALL(r IN rels WHERE r.weight >= $minWeight)
+          AND ALL(n IN nodes(path) WHERE
+                $projectId IS NULL
+                OR NOT n:Memory
+                OR n.projectId = $projectId
+                OR n.projectId IS NULL)
         WITH neighbor,
              reduce(
                activation = 1.0,
@@ -66,6 +72,7 @@ export class SpreadingActivation {
           decayPerHop: p.decayPerHop,
           minActivation: p.minActivation,
           maxNodes: neo4j.int(p.maxNodes),
+          projectId: p.projectId ?? null,
         })
       })
 

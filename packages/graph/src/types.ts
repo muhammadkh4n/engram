@@ -214,6 +214,13 @@ export interface ActivationParams {
   maxNodes?: number
   minWeight?: number
   edgeTypeFilter?: RelationType[]
+  /**
+   * Wave 5 project isolation. When set, activation paths may not pass
+   * through (or land on) Memory nodes belonging to a different project.
+   * Shared memories (projectId IS NULL) are always allowed, and a null
+   * value here disables the filter entirely (unscoped recall).
+   */
+  projectId?: string | null
 }
 
 export interface ActivationResult {
