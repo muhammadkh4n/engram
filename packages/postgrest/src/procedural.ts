@@ -56,6 +56,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
           p_include_digests: false,
           p_include_semantic: false,
           p_include_procedural: true,
+          p_project_id: opts?.projectId ?? null,
         })
         if (error) throw new Error(`Procedural search (hybrid) failed: ${error.message}`)
 
@@ -77,6 +78,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
         p_include_digests: false,
         p_include_semantic: false,
         p_include_procedural: true,
+        p_project_id: opts?.projectId ?? null,
       })
       if (error) throw new Error(`Procedural search (vector) failed: ${error.message}`)
 

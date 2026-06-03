@@ -51,6 +51,7 @@ export class PostgRestDigestStorage implements DigestStorage {
           p_include_digests: true,
           p_include_semantic: false,
           p_include_procedural: false,
+          p_project_id: opts?.projectId ?? null,
         })
         if (error) throw new Error(`Digest search (hybrid) failed: ${error.message}`)
 
@@ -72,6 +73,7 @@ export class PostgRestDigestStorage implements DigestStorage {
         p_include_digests: true,
         p_include_semantic: false,
         p_include_procedural: false,
+        p_project_id: opts?.projectId ?? null,
       })
       if (error) throw new Error(`Digest search (vector) failed: ${error.message}`)
 

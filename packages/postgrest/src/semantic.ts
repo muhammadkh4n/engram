@@ -55,6 +55,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
           p_include_digests: false,
           p_include_semantic: true,
           p_include_procedural: false,
+          p_project_id: opts?.projectId ?? null,
         })
         if (error) throw new Error(`Semantic search (hybrid) failed: ${error.message}`)
 
@@ -76,6 +77,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
         p_include_digests: false,
         p_include_semantic: true,
         p_include_procedural: false,
+        p_project_id: opts?.projectId ?? null,
       })
       if (error) throw new Error(`Semantic search (vector) failed: ${error.message}`)
 

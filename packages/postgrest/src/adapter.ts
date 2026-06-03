@@ -255,12 +255,14 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     limit?: number
     sessionId?: string
     tiers?: MemoryType[]
+    projectId?: string
   }): Promise<SearchResult<TypedMemory>[]> {
     this.assertInitialized()
     const { data, error } = await this.client.rpc('engram_vector_search', {
       p_query_embedding: JSON.stringify(embedding),
       p_match_count: opts?.limit ?? 15,
       p_session_id: opts?.sessionId ?? null,
+      p_project_id: opts?.projectId ?? null,
     })
     if (error) throw new Error(`vectorSearch failed: ${error.message}`)
 
@@ -278,6 +280,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
   async textBoost(terms: string[], opts?: {
     limit?: number
     sessionId?: string
+    projectId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     this.assertInitialized()
     if (terms.length === 0) return []
@@ -292,6 +295,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       p_query_terms: queryTerms,
       p_match_count: opts?.limit ?? 30,
       p_session_id: opts?.sessionId ?? null,
+      p_project_id: opts?.projectId ?? null,
     })
     if (error) throw new Error(`textBoost failed: ${error.message}`)
 

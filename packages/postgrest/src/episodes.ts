@@ -94,6 +94,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
           p_include_digests: false,
           p_include_semantic: false,
           p_include_procedural: false,
+          p_project_id: opts?.projectId ?? null,
         })
         if (error) throw new Error(`Episode search (hybrid) failed: ${error.message}`)
 
@@ -118,6 +119,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
         p_include_digests: false,
         p_include_semantic: false,
         p_include_procedural: false,
+        p_project_id: opts?.projectId ?? null,
       })
       if (error) throw new Error(`Episode search (vector) failed: ${error.message}`)
 
