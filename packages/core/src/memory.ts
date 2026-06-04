@@ -261,9 +261,18 @@ export class Memory {
        * the embedding normally inside ingest()".
        */
       precomputedEmbedding?: number[] | null
+      /**
+       * Per-call project scope for the hard `project_id` namespace. Overrides
+       * the instance default (this._projectId). The MCP memory_ingest tool
+       * passes this from its declarative project_id param so a stateless
+       * server can tag each ingest with the caller's project.
+       */
+      projectId?: string
     },
   ): Promise<void> {
     this.assertInitialized()
+
+    const effectiveProjectId = opts?.projectId ?? this._projectId
 
     const sessionId = message.sessionId ?? DEFAULT_SESSION_ID
 
@@ -359,7 +368,7 @@ export class Memory {
       embedding,
       entities,
       metadata,
-      projectId: this._projectId ?? null,
+      projectId: effectiveProjectId ?? null,
     })
 
     // Temporal edges linking this episode to recent session episodes.
@@ -423,6 +432,10 @@ export class Memory {
           ...(previousEpisodeId ? { previousEpisodeId } : {}),
           ...(llmEntities.length > 0 ? { llmEntities } : {}),
           ...(projectFromMeta ? { project: projectFromMeta } : {}),
+          // Wave 5 hard scope: tag the graph Memory node's projectId so the
+          // spreading-activation guard can actually exclude foreign projects.
+          // Distinct from `project` (soft cluster tag) above.
+          ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
         }
         return graph.ingestEpisode(input)
       }).catch((err: unknown) => {

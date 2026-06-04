@@ -62,6 +62,13 @@ export interface SimpleEpisodeInput {
    * cluster same-project memories together via spreading activation.
    */
   project?: string
+  /**
+   * Wave 5 hard project scope written to the Memory node's `projectId`
+   * property. This is what the spreading-activation isolation guard filters
+   * on — distinct from `project` (the soft cluster tag above). When unset,
+   * the node is shared (projectId NULL) and visible to every project.
+   */
+  projectId?: string | null
 }
 
 /** Result of looking up a query entity name in Neo4j */
@@ -1090,6 +1097,7 @@ export class NeuralGraph {
       entities: typedEntities,
       emotion,
       intent: null,
+      projectId: input.projectId ?? undefined,
     })
 
     // PROJECT edge: tag this memory with its project scope.

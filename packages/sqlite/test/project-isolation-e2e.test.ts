@@ -124,6 +124,23 @@ describe('project isolation — end-to-end through Memory', () => {
     expect(contents.some((c) => c.includes('shared principle'))).toBe(true)
   })
 
+  it('per-call projectId on ingest tags the memory (stateless-server model)', async () => {
+    // `shared` is an UNSCOPED instance — exactly how the MCP server runs:
+    // project is supplied per call by the agent, not baked into the instance.
+    await shared.ingest(
+      { role: 'user', content: 'gamma secret: rotate the tokens nightly' },
+      { projectId: 'gamma' },
+    )
+    await shared.flushPendingWrites?.()
+
+    // A gamma-scoped recall sees it; an alpha-scoped recall never does.
+    const gamma = await shared.recall('what secret did we store earlier?', { projectId: 'gamma' })
+    expect(contentsOf(gamma.memories).some((c) => c.includes('gamma secret'))).toBe(true)
+
+    const fromAlpha = await alpha.recall('what secret did we store earlier?')
+    expect(contentsOf(fromAlpha.memories).some((c) => c.includes('gamma secret'))).toBe(false)
+  })
+
   it('per-call projectId overrides the instance default scope', async () => {
     // The `shared` instance has no default scope. A per-call projectId='beta'
     // must scope this single recall to beta + shared, excluding alpha —

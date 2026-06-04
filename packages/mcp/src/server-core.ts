@@ -22,7 +22,6 @@ import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
-import { resolveProjectScope, formatScopeLog } from './ingest/project-detect.js'
 
 /**
  * Read the package version once at module load from the colocated package.json.
@@ -126,15 +125,12 @@ export async function getMemory(): Promise<Memory> {
   const intelligence: IntelligenceAdapter = await maybeWithLocalRerank(baseIntelligence)
   const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 
-  // Wave 5: resolve the project scope for this server instance. On the stdio
-  // path the server runs in the project's cwd, so detectProject picks it up;
-  // ENGRAM_PROJECT_ID overrides (required for the remote HTTP server). Both
-  // ingest (autoConsolidate) and recall are scoped to this project; a null
-  // scope means the shared bucket (no isolation — backward compatible).
-  // Logged so scoping is never silent.
-  const scope = resolveProjectScope()
-  console.error(`[engram-mcp] ${formatScopeLog(scope)}`)
-
+  // Wave 5: the server is intentionally UNSCOPED. A single server (especially
+  // the shared HTTP transport) has no project context of its own, so it must
+  // not guess one from its cwd. Project scope is supplied per call by the
+  // agent via the declarative `project_id` param on memory_recall /
+  // memory_ingest. Omitting it means unscoped (all projects), which is the
+  // backward-compatible default.
   memory = createMemory({
     storage,
     intelligence,
@@ -145,7 +141,6 @@ export async function getMemory(): Promise<Memory> {
     // turn and use it to enrich the EMBEDDING only. Content stays
     // pristine for FTS lexical precision (Wave 2 bench finding).
     contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
-    ...(scope.id ? { projectId: scope.id } : {}),
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
@@ -199,6 +194,11 @@ const TOOLS = [
           description:
             'Optional session ID to scope the search to a specific conversation.',
         },
+        project_id: {
+          type: 'string',
+          description:
+            'Optional project namespace. Pass the current working project (typically the git repository name, e.g. "engram") to scope recall to that project plus shared memories — another project\'s memories are excluded. Omit to search across all projects.',
+        },
       },
       required: ['query'],
     },
@@ -222,6 +222,11 @@ const TOOLS = [
         session_id: {
           type: 'string',
           description: 'Optional session ID to associate this message with.',
+        },
+        project_id: {
+          type: 'string',
+          description:
+            'Optional project namespace. Pass the current working project (typically the git repository name, e.g. "engram") to tag this memory so it is only recalled within that project. Omit to store as shared (visible to all projects).',
         },
       },
       required: ['content', 'role'],
@@ -350,7 +355,8 @@ export function createEngramServer(): Server {
           }
         }
 
-        const result = await mem.recall(query.trim())
+        const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
+        const result = await mem.recall(query.trim(), projectId ? { projectId } : undefined)
 
         if (!result.formatted || result.memories.length === 0) {
           return {
@@ -367,6 +373,7 @@ export function createEngramServer(): Server {
         const content = args['content']
         const role = args['role']
         const sessionId = args['session_id']
+        const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
 
         if (typeof content !== 'string' || content.trim().length === 0) {
           return {
@@ -387,11 +394,14 @@ export function createEngramServer(): Server {
           }
         }
 
-        await mem.ingest({
-          content: content.trim(),
-          role,
-          sessionId: typeof sessionId === 'string' ? sessionId : undefined,
-        })
+        await mem.ingest(
+          {
+            content: content.trim(),
+            role,
+            sessionId: typeof sessionId === 'string' ? sessionId : undefined,
+          },
+          projectId ? { projectId } : undefined,
+        )
 
         return {
           content: [{ type: 'text' as const, text: 'Memory stored.' }],

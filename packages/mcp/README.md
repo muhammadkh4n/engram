@@ -43,7 +43,7 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for the local mxbai-rerank cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
 - `ENGRAM_RERANK_LOCAL_MODEL` — pick the mxbai variant. Default: `mixedbread-ai/mxbai-rerank-large-v1` (~1-1.5 GB peak RAM at load). For memory-constrained boxes try `mixedbread-ai/mxbai-rerank-base-v1` (~50-70 MB) or `mixedbread-ai/mxbai-rerank-xsmall-v1` (smaller still).
 - `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
-- `ENGRAM_PROJECT_ID` — **project isolation (Wave 5).** Scopes every ingest and recall to one project: memories tagged with another project are invisible to this instance; memories with no project (`NULL`) stay shared across all projects. When unset, the server auto-detects the project from the working directory's git repo basename — so per-repo Claude Code sessions isolate automatically. Set it explicitly when the server has no project cwd (e.g. a shared HTTP server), or to override the detected name. Set it to `global`/`none` to force the shared bucket. The resolved scope is logged to stderr at startup so it is never silent. Cross-project recall is intentionally NOT exposed to the model — switch projects by running in that project's directory or changing this var.
+- `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project isolation below). `global`/`none` map to the shared bucket.
 
 **Optional (enables Neo4j neural graph):**
 - `NEO4J_URI` — e.g., `bolt://localhost:7687`
@@ -55,6 +55,17 @@ When `NEO4J_URI` is set and reachable, Engram runs in full "graph mode" with spr
 ### 3. Start Using
 
 Claude Code now has access to Engram's memory tools. The server auto-includes instructions telling Claude when and how to use them.
+
+### Project isolation (Wave 5)
+
+Recall and ingest can be scoped to a project so one project's memories never leak into another's. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
+
+- `memory_recall` and `memory_ingest` accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name) to scope the call; omitting it means unscoped (all projects).
+- A recall scoped to project X returns only X's memories plus shared ones (`project_id IS NULL`); every other project is excluded — enforced in SQL and in the graph spreading-activation traversal.
+- Ingest with `project_id` tags the stored memory; without it the memory is shared.
+- The git/hook ingest CLIs auto-detect the project from their working directory (see `ENGRAM_PROJECT_ID` above to override).
+
+Because the parameter is optional and agent-driven, cross-project recall is possible when the agent intends it — it simply passes a different `project_id` (or none).
 
 ## MCP Tools
 

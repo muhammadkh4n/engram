@@ -306,13 +306,11 @@ Add to your `~/.claude/settings.json`:
   "ENGRAM_RERANK_LOCAL": "true",                // swap LLM rerank for local ONNX cross-encoder
   "ENGRAM_RERANK_LOCAL_MODEL": "mixedbread-ai/mxbai-rerank-base-v1",   // optional: pick variant (default: large-v1, ~1-1.5GB RAM)
 
-  "ENGRAM_INGEST_CONTEXTUAL": "true",           // Anthropic-style contextual preamble per turn
-
-  "ENGRAM_PROJECT_ID": "my-project"             // Wave 5: isolate recall/ingest to one project (auto-detects from git repo basename if unset; NULL-tagged memories stay shared)
+  "ENGRAM_INGEST_CONTEXTUAL": "true"            // Anthropic-style contextual preamble per turn
 }
 ```
 
-> **Project isolation (Wave 5).** With `ENGRAM_PROJECT_ID` set (or auto-detected from the working directory's git repo), recall and ingest are scoped to that project — another project's memories never leak in, while memories with no project tag stay shared across all. Set it to `global`/`none` for the shared bucket. Scope is logged at startup.
+> **Project isolation (Wave 5).** `memory_recall` and `memory_ingest` take an optional declarative `project_id` parameter — the agent passes the current project (e.g. the git repo name) to scope the call. A scoped recall returns only that project's memories plus shared (`NULL`) ones; every other project is excluded, enforced in both SQL and the graph traversal. Omit it for unscoped (all projects). The server itself holds no project state, so one shared HTTP server isolates correctly per request. The git/hook ingest CLIs auto-detect the project from their working directory (`ENGRAM_PROJECT_ID` overrides).
 
 Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`, `memory_consolidation_status`.
 
