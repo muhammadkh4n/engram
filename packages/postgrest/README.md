@@ -2,7 +2,7 @@
 
 PostgREST storage adapter for [Engram](https://github.com/muhammadkh4n/engram) — works against **Supabase**, **self-hosted Postgres + PostgREST**, or any other PostgREST-compatible deployment. Backed by pgvector for vector search and Postgres FTS for BM25.
 
-> **Renamed from `@engram-mem/supabase` in v0.4.0.** The adapter was always PostgREST under the hood; the old name made vendor lock-in look mandatory when it isn't. The old package still works as a deprecated re-export shim until v0.5.0 — see [migration notes](#migrating-from-engram-memsupabase) below.
+> **Renamed from `@engram-mem/supabase` in v0.4.0.** The adapter was always PostgREST under the hood; the old name made vendor lock-in look mandatory when it isn't. The old package still publishes as a deprecated re-export shim — see [migration notes](#migrating-from-engram-memsupabase) below.
 
 ## Installation
 
@@ -20,8 +20,8 @@ The original target. Zero infrastructure to manage; pay for compute add-ons as y
 ```bash
 # 1. Create a project at https://supabase.com
 # 2. Enable pgvector (already on by default in current Supabase)
-# 3. Apply migrations:
-supabase db push   # or `psql $DATABASE_URL < supabase/migrations/*.sql`
+# 3. Apply the schema (single idempotent file, bundled in this package):
+psql "$DATABASE_URL" -f node_modules/@engram-mem/postgrest/schema.sql
 ```
 
 ```typescript
@@ -52,10 +52,10 @@ docker run -d --name engram-postgres \
   -p 127.0.0.1:5432:5432 \
   pgvector/pgvector:pg16
 
-# Apply migrations (after creating service_role per the runbook)
-for f in supabase/migrations/*.sql; do
-  docker exec -i engram-postgres psql -U postgres -d engram < "$f"
-done
+# Apply the schema — one idempotent file, ships in the package
+# (create the service_role / authenticator roles first, per the runbook)
+docker exec -i engram-postgres psql -U postgres -d engram \
+  < node_modules/@engram-mem/postgrest/schema.sql
 
 # PostgREST
 docker run -d --name engram-postgrest \
@@ -94,7 +94,9 @@ interface PostgRestAdapterOptions {
 
 ## Schema
 
-Engram ships seven SQL migrations under `supabase/migrations/` in the repo. They apply identically to Supabase-hosted and self-hosted Postgres. The only Supabase-ism is `service_role` GRANTs and RLS policies — for self-hosted, the runbook bootstraps that role in a 7-line SQL block before the migrations run.
+Engram ships a single idempotent `schema.sql` — bundled in this npm package and also at `packages/postgrest/schema.sql` in the repo. It applies identically to Supabase-hosted and self-hosted Postgres and is safe to re-run (`CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, `DROP POLICY … ; CREATE POLICY …`). The only Supabase-ism is `service_role` GRANTs and RLS policies — for self-hosted, create that role once before applying.
+
+> **Upgrading an existing deployment:** `schema.sql` changes recall-function signatures across versions (e.g. v0.5.0 added `p_project_id` for project isolation). After re-applying it, **reload PostgREST's schema cache** — `psql -c "NOTIFY pgrst, 'reload schema';"` or restart the PostgREST container — otherwise the updated adapter's calls fail with *"Could not find the function … in the schema cache."* Fresh installs don't need this; PostgREST loads the schema on startup.
 
 Tables (all in `public`):
 - `memory_episodes` — raw turns with embeddings
@@ -185,7 +187,9 @@ find /backups -name 'engram-*.dump' -mtime +14 -delete
 
 **Connection refused / 401 unauthorized**: verify the JWT in `key` was signed with the secret your PostgREST is configured for (`PGRST_JWT_SECRET`). For Supabase, ensure you're using the service-role key (not anon).
 
-**"relation does not exist"**: migrations haven't been applied. Run them in order from `supabase/migrations/`.
+**"relation does not exist"**: the schema hasn't been applied. Apply `schema.sql` (bundled in this package).
+
+**"Could not find the function … in the schema cache"**: you applied an updated `schema.sql` (changed function signatures) without reloading PostgREST. Run `NOTIFY pgrst, 'reload schema';` or restart the PostgREST container.
 
 **Vector index not being used**: pgvector picks the HNSW index only above a row-count threshold. For small tables (<10k rows) sequential scan can be faster. Run `ANALYZE memory_episodes` to refresh stats; `EXPLAIN (ANALYZE)` to confirm.
 
