@@ -4,6 +4,23 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-06-04
+
+All 10 `@engram-mem/*` packages bumped to 0.5.1 (lockstep). Refines the v0.5.0 project-isolation design to be **declarative and per-call** rather than inferred by the server, and fixes a gap where graph isolation was a no-op on real data.
+
+### Changed
+
+- **Project scope is now a per-call MCP tool parameter, not server state.** `memory_recall` and `memory_ingest` expose an optional `project_id` parameter; the agent passes the current project (e.g. the repo name) to scope a call, or omits it for unscoped. The MCP server no longer auto-detects a project from its working directory — a single shared HTTP server has no project context of its own and was mis-scoping every project to the server's cwd. The server now holds no project state; isolation is driven entirely by the per-call parameter.
+- **`Memory.ingest` accepts a per-call `projectId`** (mirroring `Memory.recall`), so a stateless server can tag each ingest with the caller's project.
+
+### Fixed
+
+- **Graph isolation now actually applies to ingested memories.** `ingestEpisode` → `decomposeEpisode` previously dropped the hard `projectId`, so every Neo4j Memory node was created with `projectId = NULL` and the v0.5.0 spreading-activation guard could never exclude a foreign project. The hard scope is now threaded to the graph node (`SimpleEpisodeInput.projectId`). Verified against a live Neo4j: an episode ingested with project X yields `m.projectId = X`.
+
+### Notes
+
+- The git/hook ingest CLIs (post-commit, pre-compact, session-summary) keep auto-detecting the project from their in-project working directory — they are not the shared server. `ENGRAM_PROJECT_ID` overrides them and is no longer used to scope the server.
+
 ## [0.5.0] - 2026-06-04
 
 All 10 `@engram-mem/*` packages bumped to 0.5.0 (lockstep). **Project isolation (Wave 5).** Recall and ingest can now be scoped to a project so one project's memories never leak into another's. Backward compatible: with no scope configured, behavior is unchanged and all existing (untagged) memories stay shared.
