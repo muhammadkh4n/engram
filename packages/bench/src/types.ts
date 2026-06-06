@@ -17,6 +17,15 @@ export interface BenchmarkOpts {
    */
   mergeAssociationsIntoTopK?: boolean
   /**
+   * Phase 0: restrict LoCoMo SCORING to these QA categories
+   * (1=single_hop, 2=multi_hop, 3=temporal, 4=open_domain, 5=adversarial).
+   * The corpus is still ingested WHOLE — only the metric is filtered — so
+   * spreading activation keeps the full graph to traverse. Use [2,3]
+   * (multi-hop + temporal) for the non-saturated graph-relevant gate corpus.
+   * Undefined = score every category (current behaviour).
+   */
+  categories?: number[]
+  /**
    * Cross-encoder backend. 'openai' (default) uses LLM pointwise scoring via
    * gpt-4o-mini; 'onnx' uses a local mxbai-rerank ONNX model (no API cost,
    * lower latency, typically stronger ordering); 'none' disables rerank.

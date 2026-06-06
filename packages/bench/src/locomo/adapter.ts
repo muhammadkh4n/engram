@@ -186,7 +186,7 @@ export class LoCoMoAdapter {
   async evaluateDataset(
     conversations: LoCoMoConversationFile[],
     memory: Memory,
-    opts?: Pick<BenchmarkOpts, 'topK' | 'mergeAssociationsIntoTopK'>,
+    opts?: Pick<BenchmarkOpts, 'topK' | 'mergeAssociationsIntoTopK' | 'categories'>,
   ): Promise<LoCoMoConversationResult[]> {
     const topK = opts?.topK ?? 10
     const convResults: LoCoMoConversationResult[] = []
@@ -196,6 +196,10 @@ export class LoCoMoAdapter {
       const qaPredictions: LoCoMoQAPrediction[] = []
 
       for (const qa of conv.qa) {
+        // Gate-corpus filter: score only the requested categories (e.g. [2,3]
+        // multi-hop/temporal). The conversation was already ingested whole, so
+        // the graph the recall traverses is unaffected — only scoring narrows.
+        if (opts?.categories && !opts.categories.includes(qa.category)) continue
         const recallResult = await memory.recall(qa.question)
         const topMemories = mergeAssociationsIntoScored(
           recallResult, opts?.mergeAssociationsIntoTopK,
