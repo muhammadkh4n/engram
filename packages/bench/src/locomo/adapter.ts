@@ -8,6 +8,7 @@ import type {
 import type { LoCoMoConversationFile, LoCoMoTurn } from './types.js'
 import { computeRetrievalF1 } from '../metrics/f1.js'
 import { createBenchMemory } from '../memory-factory.js'
+import { mergeAssociationsIntoScored } from '../merge-associations.js'
 
 export class LoCoMoAdapter {
   async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
@@ -184,7 +185,7 @@ export class LoCoMoAdapter {
   async evaluateDataset(
     conversations: LoCoMoConversationFile[],
     memory: Memory,
-    opts?: Pick<BenchmarkOpts, 'topK'>,
+    opts?: Pick<BenchmarkOpts, 'topK' | 'mergeAssociationsIntoTopK'>,
   ): Promise<LoCoMoConversationResult[]> {
     const topK = opts?.topK ?? 10
     const convResults: LoCoMoConversationResult[] = []
@@ -195,7 +196,9 @@ export class LoCoMoAdapter {
 
       for (const qa of conv.qa) {
         const recallResult = await memory.recall(qa.question)
-        const topMemories = recallResult.memories.slice(0, topK)
+        const topMemories = mergeAssociationsIntoScored(
+          recallResult, opts?.mergeAssociationsIntoTopK,
+        ).slice(0, topK)
 
         const prediction = topMemories
           .map(m => m.content)

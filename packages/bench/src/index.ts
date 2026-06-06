@@ -4,6 +4,8 @@ export { compareLoCoMo, compareLongMemEval } from './runner/compare.js'
 export { computeRetrievalF1, recallAtK } from './metrics/f1.js'
 export { formatLoCoMoTable, formatLongMemEvalTable, formatComparisonTable } from './metrics/table.js'
 export { createBenchMemory } from './memory-factory.js'
+export { mergeAssociationsIntoScored } from './merge-associations.js'
+export type { BenchRecallResult, BenchScoredMemory } from './merge-associations.js'
 export type {
   BenchmarkOpts, BenchmarkMetrics,
   LoCoMoCategory, LoCoMoQAPrediction, LoCoMoCategoryMetrics,

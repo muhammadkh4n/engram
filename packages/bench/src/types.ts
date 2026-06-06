@@ -8,6 +8,15 @@ export interface BenchmarkOpts {
   limit?: number         // max conversations to evaluate (default: all)
   noRerank?: boolean     // disable cross-encoder reranking for A/B comparison
   /**
+   * Phase 0: merge the graph spreading-activation channel
+   * (`recallResult.associations`) into the scored top-K pool before recall@K
+   * is computed. Default false → byte-identical to pre-Phase-0 runs. The
+   * adapters score by gold-id set-membership (scale-independent), so unioning
+   * the graph-relevance-ranked associations after the MMR/rerank'd memories is
+   * safe. This is what makes graph:true vs graph:false able to move the metric.
+   */
+  mergeAssociationsIntoTopK?: boolean
+  /**
    * Cross-encoder backend. 'openai' (default) uses LLM pointwise scoring via
    * gpt-4o-mini; 'onnx' uses a local mxbai-rerank ONNX model (no API cost,
    * lower latency, typically stronger ordering); 'none' disables rerank.

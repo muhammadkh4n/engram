@@ -22,6 +22,7 @@ import type {
 } from '../types.js'
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
+import { mergeAssociationsIntoScored } from '../merge-associations.js'
 
 export class LongMemEvalAdapter {
   /**
@@ -145,7 +146,9 @@ export class LongMemEvalAdapter {
 
       const evalStart = Date.now()
       const recallResult = await memory.recall(question.question)
-      const topMemories = recallResult.memories.slice(0, topK)
+      const topMemories = mergeAssociationsIntoScored(
+        recallResult, opts?.mergeAssociationsIntoTopK,
+      ).slice(0, topK)
 
       // Deduplicate retrieved sessions in rank order
       const seen = new Set<string>()
