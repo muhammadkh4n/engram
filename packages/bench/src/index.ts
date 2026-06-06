@@ -6,6 +6,8 @@ export { formatLoCoMoTable, formatLongMemEvalTable, formatComparisonTable } from
 export { createBenchMemory } from './memory-factory.js'
 export { mergeAssociationsIntoScored } from './merge-associations.js'
 export type { BenchRecallResult, BenchScoredMemory } from './merge-associations.js'
+export { graphVerdict, MIN_POWER_N, DEFAULT_EPSILON } from './metrics/graph-verdict.js'
+export type { GraphVerdict, GraphVerdictInput } from './metrics/graph-verdict.js'
 export type {
   BenchmarkOpts, BenchmarkMetrics,
   LoCoMoCategory, LoCoMoQAPrediction, LoCoMoCategoryMetrics,
