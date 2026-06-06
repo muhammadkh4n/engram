@@ -42,9 +42,17 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 4 after all migrations', () => {
+  it('sets schema version to 5 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(4)
+    expect(getSchemaVersion(db)).toBe(5)
+  })
+
+  it('v5 adds forgotten_at to the recallable memory tables', () => {
+    runMigrations(db)
+    for (const table of ['episodes', 'semantic', 'procedural']) {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      expect(cols.some((c) => c.name === 'forgotten_at')).toBe(true)
+    }
   })
 
   it('creates episode_parts table (dual-storage architecture)', () => {
@@ -61,7 +69,7 @@ describe('SQLite migrations', () => {
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(4)
+    expect(getSchemaVersion(db)).toBe(5)
   })
 
   it('enforces foreign keys on memories table', () => {

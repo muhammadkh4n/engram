@@ -74,7 +74,7 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
               SELECT e.*, -episodes_fts.rank AS bm25_score
               FROM episodes_fts
               JOIN episodes e ON episodes_fts.rowid = e.rowid
-              WHERE episodes_fts MATCH ?
+              WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL
             `
             const params: unknown[] = [ftsQuery]
             if (sessionId) {
@@ -86,7 +86,7 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
           },
           recentVectorSql: `
             SELECT id, embedding FROM episodes
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL AND forgotten_at IS NULL
             ORDER BY created_at DESC
             LIMIT ?
           `,
@@ -105,7 +105,7 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       SELECT e.*, -episodes_fts.rank AS bm25_score
       FROM episodes_fts
       JOIN episodes e ON episodes_fts.rowid = e.rowid
-      WHERE episodes_fts MATCH ?
+      WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL
     `
     const params: unknown[] = [ftsQuery]
 
@@ -187,6 +187,15 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
         `UPDATE episodes SET access_count = access_count + 1, last_accessed = julianday('now') WHERE id = ?`
       )
       .run(id)
+  }
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const placeholders = ids.map(() => '?').join(',')
+    const res = this.db
+      .prepare(`UPDATE episodes SET forgotten_at = julianday('now') WHERE id IN (${placeholders}) AND forgotten_at IS NULL`)
+      .run(...ids)
+    return res.changes
   }
 
   async findEarliestInDigests(digestIds: string[]): Promise<{ createdAt: Date } | null> {

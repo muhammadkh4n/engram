@@ -206,10 +206,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
       let sql: string
       let params: unknown[]
       if (opts?.sessionId) {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND session_id = ?${projectFilter} LIMIT ?`
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL AND session_id = ?${projectFilter} LIMIT ?`
         params = [opts.sessionId, ...projectParams, scanLimit]
       } else {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
+        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
         params = [...projectParams, scanLimit]
       }
       const rows = db.prepare(sql).all(...params) as EpisodeRow[]
@@ -242,7 +242,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('semantic')) {
       const rows = db.prepare(
-        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL${projectFilter} LIMIT ?`
+        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
       ).all(...projectParams, scanLimit) as SemanticRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -256,7 +256,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     if (tiers.includes('procedural')) {
       const rows = db.prepare(
-        `SELECT * FROM procedural WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
+        `SELECT * FROM procedural WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
       ).all(...projectParams, scanLimit) as ProceduralRow[]
       for (const row of rows) {
         if (!row.embedding) continue
@@ -288,10 +288,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
     const projectId = opts?.projectId
 
     try {
-      let sql = 'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?'
+      let sql = 'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL ORDER BY rank LIMIT ?'
       const params: unknown[] = [ftsQuery, limit]
       if (projectId) {
-        sql = `SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND (e.project_id = ? OR e.project_id IS NULL) ORDER BY rank LIMIT ?`
+        sql = `SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL AND (e.project_id = ? OR e.project_id IS NULL) ORDER BY rank LIMIT ?`
         params.splice(1, 0, projectId)
       }
       const epRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
@@ -310,10 +310,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
     } catch { /* FTS5 table may not exist */ }
 
     try {
-      let sql = 'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? ORDER BY rank LIMIT ?'
+      let sql = 'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND s.superseded_by IS NULL AND s.forgotten_at IS NULL ORDER BY rank LIMIT ?'
       const params: unknown[] = [ftsQuery, limit]
       if (projectId) {
-        sql = `SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND (s.project_id = ? OR s.project_id IS NULL) ORDER BY rank LIMIT ?`
+        sql = `SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND s.superseded_by IS NULL AND s.forgotten_at IS NULL AND (s.project_id = ? OR s.project_id IS NULL) ORDER BY rank LIMIT ?`
         params.splice(1, 0, projectId)
       }
       const smRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
@@ -321,10 +321,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
     } catch { /* FTS5 table may not exist */ }
 
     try {
-      let sql = 'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? ORDER BY rank LIMIT ?'
+      let sql = 'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL ORDER BY rank LIMIT ?'
       const params: unknown[] = [ftsQuery, limit]
       if (projectId) {
-        sql = `SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND (p.project_id = ? OR p.project_id IS NULL) ORDER BY rank LIMIT ?`
+        sql = `SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL AND (p.project_id = ? OR p.project_id IS NULL) ORDER BY rank LIMIT ?`
         params.splice(1, 0, projectId)
       }
       const prRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>

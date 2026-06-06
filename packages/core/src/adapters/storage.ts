@@ -25,6 +25,13 @@ export interface EpisodeStorage {
   getUnconsolidatedSessions(): Promise<string[]>
   markConsolidated(ids: string[]): Promise<void>
   recordAccess(id: string): Promise<void>
+  /**
+   * Tombstone the given memories (sets forgotten_at). Forgotten memories are
+   * excluded from every recall path but retained for audit/undo. Distinct
+   * from recordAccess — does NOT touch access_count. Returns the number of
+   * rows newly tombstoned. Idempotent.
+   */
+  markForgotten(ids: string[]): Promise<number>
   /** Find earliest created_at across episodes referenced by the given digest IDs */
   findEarliestInDigests?(digestIds: string[]): Promise<{ createdAt: Date } | null>
   /** Fast COUNT(*) for stats(). Falls back to N-scan when not implemented. */
@@ -49,6 +56,12 @@ export interface SemanticStorage {
   getUnaccessed(days: number): Promise<SemanticMemory[]>
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
   markSuperseded(id: string, supersededBy: string): Promise<void>
+  /**
+   * Tombstone the given memories (sets forgotten_at). Forgotten memories are
+   * excluded from every recall path but retained for audit/undo. Does NOT
+   * touch confidence or access_count. Returns rows newly tombstoned. Idempotent.
+   */
+  markForgotten(ids: string[]): Promise<number>
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
   /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */
   batchDecayGradient?(updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>): Promise<number>
@@ -74,6 +87,12 @@ export interface ProceduralStorage {
   search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
   searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
   recordAccess(id: string): Promise<void>
+  /**
+   * Tombstone the given memories (sets forgotten_at). Excluded from recall,
+   * retained for audit/undo. Does NOT touch access_count. Returns rows newly
+   * tombstoned. Idempotent.
+   */
+  markForgotten(ids: string[]): Promise<number>
   incrementObservation(id: string): Promise<void>
   batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number>
   /** Per-ID gradient decay (PageRank-modulated). Falls back to batchDecay when not implemented. */

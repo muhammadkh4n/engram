@@ -69,13 +69,13 @@ export class SqliteProceduralStorage implements ProceduralStorage {
                 `SELECT p.*, -procedural_fts.rank AS bm25_score
                  FROM procedural_fts
                  JOIN procedural p ON procedural_fts.rowid = p.rowid
-                 WHERE procedural_fts MATCH ?
+                 WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL
                  ORDER BY rank LIMIT 50`
               )
               .all(ftsQuery) as Array<ProceduralRow & { bm25_score: number }>,
           recentVectorSql: `
             SELECT id, embedding FROM procedural
-            WHERE embedding IS NOT NULL
+            WHERE embedding IS NOT NULL AND forgotten_at IS NULL
             ORDER BY created_at DESC
             LIMIT ?
           `,
@@ -102,7 +102,7 @@ export class SqliteProceduralStorage implements ProceduralStorage {
         `SELECT p.*, -procedural_fts.rank AS bm25_score
          FROM procedural_fts
          JOIN procedural p ON procedural_fts.rowid = p.rowid
-         WHERE procedural_fts MATCH ?
+         WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL
          ORDER BY rank LIMIT ?`
       )
       .all(ftsQuery, limit) as (ProceduralRow & { bm25_score: number })[]
@@ -131,7 +131,7 @@ export class SqliteProceduralStorage implements ProceduralStorage {
         `SELECT p.*, -procedural_fts.rank AS bm25_score
          FROM procedural_fts
          JOIN procedural p ON procedural_fts.rowid = p.rowid
-         WHERE procedural_fts MATCH ?
+         WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL
          ORDER BY rank LIMIT ?`
       )
       .all(columnQuery, limit) as (ProceduralRow & { bm25_score: number })[]
@@ -154,6 +154,15 @@ export class SqliteProceduralStorage implements ProceduralStorage {
          WHERE id = ?`
       )
       .run(id)
+  }
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const placeholders = ids.map(() => '?').join(',')
+    const res = this.db
+      .prepare(`UPDATE procedural SET forgotten_at = julianday('now') WHERE id IN (${placeholders}) AND forgotten_at IS NULL`)
+      .run(...ids)
+    return res.changes
   }
 
   async incrementObservation(id: string): Promise<void> {

@@ -222,6 +222,19 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     if (error) throw new Error(`Episode recordAccess failed: ${error.message}`)
   }
 
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const { data, error } = await this.client
+      .from('memory_episodes')
+      .update({ forgotten_at: new Date().toISOString() })
+      .in('id', ids)
+      .is('forgotten_at', null)
+      .select('id')
+    if (error) throw new Error(`Episode markForgotten failed: ${error.message}`)
+    return (data ?? []).length
+  }
+
   async findEarliestInDigests(digestIds: string[]): Promise<{ createdAt: Date } | null> {
     if (digestIds.length === 0) return null
     const { data: digests, error: dErr } = await this.client
