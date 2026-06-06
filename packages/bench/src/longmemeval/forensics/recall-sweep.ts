@@ -86,7 +86,7 @@ async function main(): Promise<void> {
     // BUT — runQuestion currently slices to topK before computing recall@K.
     // For the sweep we want a fuller view: retrieve max(K_VALUES) once, then
     // compute recall@K from the same list. We need a slightly different path.
-    const memory = await createBenchMemory(benchOpts)
+    const { memory } = await createBenchMemory(benchOpts)
     let episodes = 0
     let ingestMs = 0
     let evalMs = 0

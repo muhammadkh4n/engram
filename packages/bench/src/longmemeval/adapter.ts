@@ -23,6 +23,7 @@ import type {
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
 import { mergeAssociationsIntoScored } from '../merge-associations.js'
+import { wipeBenchGraph } from '../bench-graph.js'
 
 export class LongMemEvalAdapter {
   /**
@@ -136,10 +137,14 @@ export class LongMemEvalAdapter {
     ingestMs: number
     evalMs: number
   }> {
-    const memory = await createBenchMemory(opts)
+    const { memory, config } = await createBenchMemory(opts)
     const topK = opts?.topK ?? 10
 
     try {
+      // Per-question graph isolation: Neo4j is a shared external process (unlike
+      // the per-call fresh :memory: SQLite), so wipe it before ingest or prior
+      // questions' nodes pollute this question's spreading activation.
+      if (config.graph) await wipeBenchGraph(config.graph)
       const ingestStart = Date.now()
       const { episodesIngested, sessionsCreated } = await this.ingestQuestion(question, memory)
       const ingestMs = Date.now() - ingestStart

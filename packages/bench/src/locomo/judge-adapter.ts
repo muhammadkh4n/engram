@@ -363,7 +363,7 @@ async function benchConversation(
   const nQs = opts.smoke ? (opts.smokeQuestions ?? 5) : qas.length
 
   console.log(`  [engram-mem] Conv ${convIdx} (${sid}): ingesting...`)
-  const memory = await createBenchMemory({
+  const { memory } = await createBenchMemory({
     graph: opts.graph ?? false,
     ...(opts.rerankerBackend ? { rerankerBackend: opts.rerankerBackend } : {}),
     ...(opts.onnxRerankerModel ? { onnxRerankerModel: opts.onnxRerankerModel } : {}),

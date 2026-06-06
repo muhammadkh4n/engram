@@ -9,6 +9,7 @@ import type { LoCoMoConversationFile, LoCoMoTurn } from './types.js'
 import { computeRetrievalF1 } from '../metrics/f1.js'
 import { createBenchMemory } from '../memory-factory.js'
 import { mergeAssociationsIntoScored } from '../merge-associations.js'
+import { wipeBenchGraph } from '../bench-graph.js'
 
 export class LoCoMoAdapter {
   async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
@@ -252,7 +253,12 @@ export class LoCoMoAdapter {
     conv: LoCoMoConversationFile,
     opts?: BenchmarkOpts,
   ): Promise<{ result: LoCoMoConversationResult; ingestMs: number; evalMs: number }> {
-    const memory = await createBenchMemory(opts)
+    const { memory, config } = await createBenchMemory(opts)
+
+    // Per-conversation graph isolation: Neo4j is shared, so wipe before ingest
+    // or the previous conversation's nodes pollute this one's spreading
+    // activation (matching the per-conv fresh :memory: SQLite invariant).
+    if (config.graph) await wipeBenchGraph(config.graph)
 
     const ingestStart = Date.now()
     const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory, {
