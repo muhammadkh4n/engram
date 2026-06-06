@@ -43,6 +43,9 @@ export class SpreadingActivation {
                 OR NOT n:Memory
                 OR n.projectId = $projectId
                 OR n.projectId IS NULL)
+          AND ALL(n IN nodes(path) WHERE
+                NOT n:Memory
+                OR coalesce(n.forgottenAt, n.deletedAt) IS NULL)
         WITH neighbor,
              reduce(
                activation = 1.0,

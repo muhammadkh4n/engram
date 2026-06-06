@@ -907,6 +907,23 @@ export class Memory {
     if (idsByType.procedural.length > 0) await this.storage.procedural.markForgotten(idsByType.procedural)
     if (idsByType.episode.length > 0) await this.storage.episodes.markForgotten(idsByType.episode)
 
+    // Also tombstone the Neo4j Memory nodes so forget cannot leak back through
+    // the graph association channel: spreading activation gates traversal on
+    // coalesce(forgottenAt, deletedAt) IS NULL. SQL remains the source of truth —
+    // a graph hiccup (or absent Neo4j) must never fail the forget. Capability-
+    // guarded because forgetMemories is optional on GraphPort.
+    const graph = this._graph
+    if (graph && typeof graph.forgetMemories === 'function') {
+      const forgottenIds = [...idsByType.episode, ...idsByType.semantic, ...idsByType.procedural]
+      if (forgottenIds.length > 0) {
+        try {
+          await graph.forgetMemories(forgottenIds)
+        } catch (err) {
+          console.warn('[engram] forget: graph tombstone failed (non-fatal):', err)
+        }
+      }
+    }
+
     return { count: filtered.length, previewed: filtered }
   }
 

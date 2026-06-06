@@ -112,6 +112,18 @@ export interface GraphPort {
   lookupEntityNodes(names: string[]): Promise<GraphEntitySeedResult[]>
   spreadActivation(opts: GraphSpreadActivationOpts): Promise<GraphActivatedNode[]>
   strengthenTraversedEdges(pairs: Array<[string, string]>): Promise<void>
+
+  /**
+   * Phase 1 (forget tombstone): stamp `forgottenAt` on the Neo4j Memory nodes
+   * with these ids, so spreading activation excludes them — its path filter
+   * gates on `coalesce(n.forgottenAt, n.deletedAt) IS NULL`. Without this,
+   * forget() hides a memory in SQL recall but it can still surface through the
+   * graph association channel. Optional (only NeuralGraph implements it); core
+   * calls it capability-guarded and treats failure as non-fatal. Returns the
+   * number of nodes newly tombstoned.
+   */
+  forgetMemories?(ids: string[]): Promise<number>
+
   // Wave 3: raw Cypher execution for consolidation operations
   // Returns the driver-native result type — consolidation code accesses
   // .records and .summary.counters via the GraphQueryResult shape, but
