@@ -154,3 +154,32 @@ export interface ComparisonDelta {
   evalTimeDeltaMs: number
   tokensDelta: number
 }
+
+// Phase 0 — 4-cell {graph}×{rerank} ablation matrix.
+export interface MatrixCell {
+  graph: boolean
+  rerank: boolean
+  result: LoCoMoResult | LongMemEvalResult
+  /** recall@K lift on the graph-relevant split vs the same-rerank graph-off cell. 0 for graph-off cells. */
+  graphEffect: number
+  /** Size of the split graphEffect was computed over (the power gate checks >=100). */
+  graphVisibleN: number
+}
+
+export interface BaselineProvenance {
+  flags: Record<string, unknown>
+  corpusPath: string
+  corpusSha256: string
+  /** git rev-parse HEAD at run time. */
+  commit: string
+  /** Whether the Neo4j forgotten/valid_until gates were active during the run. */
+  neo4jGateState: string
+  mergeAssociationsIntoTopK: boolean
+  timestamp: string
+}
+
+export interface ComparisonMatrixResult {
+  benchmark: 'locomo' | 'longmemeval'
+  cells: MatrixCell[]
+  provenance: BaselineProvenance
+}
