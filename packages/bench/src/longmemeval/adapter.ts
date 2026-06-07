@@ -147,6 +147,9 @@ export class LongMemEvalAdapter {
       if (config.graph) await wipeBenchGraph(config.graph)
       const ingestStart = Date.now()
       const { episodesIngested, sessionsCreated } = await this.ingestQuestion(question, memory)
+      // Drain fire-and-forget graph decomposition writes before recall, or the
+      // graph cell recalls against a half-built graph (spurious graphEffect=0).
+      await memory.flushPendingWrites()
       const ingestMs = Date.now() - ingestStart
 
       const evalStart = Date.now()

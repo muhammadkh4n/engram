@@ -273,6 +273,10 @@ export class LoCoMoAdapter {
       await memory.consolidate('light')
       await memory.consolidate('deep')
     }
+    // Drain fire-and-forget graph decomposition (+ consolidation) writes before
+    // eval. Without this, recall runs against a half-built graph and the graph
+    // cells produce empty associations — spuriously zeroing graphEffect.
+    await memory.flushPendingWrites()
     const ingestMs = Date.now() - ingestStart
 
     const evalStart = Date.now()
