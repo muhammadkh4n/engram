@@ -4,6 +4,25 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-06-08
+
+All 10 `@engram-mem/*` packages bumped to 0.5.2 (lockstep). **`forget()` correctness fix** — the shipped `forget()` was inverted — plus an internal bench harness that makes the graph's contribution measurable.
+
+### Fixed
+
+- **`forget()` now actually removes memories from recall.** The shipped `forget()` was inverted: the episode path incremented `access_count` (a signal recall *rewards*), so forgetting a memory **raised** its recall rank; the procedural path was a no-op; the semantic path floored a confidence value no recall path reads. `forget()` now **tombstones** — a new `markForgotten(ids)` storage method stamps a `forgotten_at` timestamp and touches neither `access_count` nor `confidence`. Every recall path gates on `forgotten_at IS NULL`: SQLite (vector + BM25 + deep recall), PostgREST (all four recall RPCs), and Neo4j spreading activation (which also prunes paths *through* forgotten nodes) — so a forgotten memory cannot resurface through any channel. The schema change is additive and backward-compatible (`forgotten_at` defaults `NULL`, so no existing row is hidden).
+
+### Added
+
+- **SQLite**: migration v5 adds `forgotten_at` columns + partial indexes on episodes/semantic/procedural.
+- **PostgREST**: `schema.sql` adds `forgotten_at` columns/indexes, an `engram_mark_forgotten` RPC, and the `forgotten_at IS NULL` gate in the four recall RPCs (signatures unchanged).
+- **Neo4j**: `NeuralGraph.forgetMemories` stamps `forgottenAt` on `:Memory` nodes; spreading activation excludes them.
+- **(bench, internal)**: a 4-cell `{graph}×{rerank}` ablation matrix, a scale-independent `graphEffect` metric on the graph-relevant split, a symmetric kill criterion, and a `requireGraph` guard — tooling to evaluate the graph's contribution to recall. Off by default (`mergeAssociationsIntoTopK` defaults `false`); no runtime behaviour change.
+
+### Notes
+
+- **Upgrading a PostgREST deployment:** re-apply `schema.sql`, then reload the schema cache — `psql -c "NOTIFY pgrst, 'reload schema';"` (or restart PostgREST) — so the new `forgotten_at` column is visible to the adapter.
+
 ## [0.5.1] - 2026-06-04
 
 All 10 `@engram-mem/*` packages bumped to 0.5.1 (lockstep). Refines the v0.5.0 project-isolation design to be **declarative and per-call** rather than inferred by the server, and fixes a gap where graph isolation was a no-op on real data.
