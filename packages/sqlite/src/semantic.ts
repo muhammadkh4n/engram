@@ -67,7 +67,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
                  FROM semantic_fts
                  JOIN semantic s ON semantic_fts.rowid = s.rowid
                  WHERE semantic_fts MATCH ?
-                   AND s.superseded_by IS NULL
+                   AND s.superseded_by IS NULL AND s.forgotten_at IS NULL
                  ORDER BY rank LIMIT 50`
               )
               .all(ftsQuery) as Array<SemanticRow & { bm25_score: number }>,
@@ -75,6 +75,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
             SELECT id, embedding FROM semantic
             WHERE embedding IS NOT NULL
               AND superseded_by IS NULL
+              AND forgotten_at IS NULL
             ORDER BY created_at DESC
             LIMIT ?
           `,
@@ -102,7 +103,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
          FROM semantic_fts
          JOIN semantic s ON semantic_fts.rowid = s.rowid
          WHERE semantic_fts MATCH ?
-           AND s.superseded_by IS NULL
+           AND s.superseded_by IS NULL AND s.forgotten_at IS NULL
          ORDER BY rank LIMIT ?`
       )
       .all(ftsQuery, limit) as (SemanticRow & { bm25_score: number })[]
@@ -145,6 +146,15 @@ export class SqliteSemanticStorage implements SemanticStorage {
       this.db.prepare('UPDATE semantic SET supersedes = ? WHERE id = ?').run(id, supersededBy)
     })
     txn()
+  }
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const placeholders = ids.map(() => '?').join(',')
+    const res = this.db
+      .prepare(`UPDATE semantic SET forgotten_at = julianday('now') WHERE id IN (${placeholders}) AND forgotten_at IS NULL`)
+      .run(...ids)
+    return res.changes
   }
 
   async batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number> {

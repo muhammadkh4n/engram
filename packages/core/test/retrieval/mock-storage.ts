@@ -198,6 +198,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     getUnconsolidatedSessions: vi.fn().mockResolvedValue([]),
     markConsolidated: vi.fn().mockResolvedValue(undefined),
     recordAccess: vi.fn().mockResolvedValue(undefined),
+    markForgotten: vi.fn().mockResolvedValue(0),
   }
 
   const digests: DigestStorage = {
@@ -214,6 +215,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     getUnaccessed: vi.fn().mockResolvedValue([]),
     recordAccessAndBoost: vi.fn().mockResolvedValue(undefined),
     markSuperseded: vi.fn().mockResolvedValue(undefined),
+    markForgotten: vi.fn().mockResolvedValue(0),
     batchDecay: vi.fn().mockResolvedValue(0),
   }
 
@@ -222,6 +224,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     search: vi.fn().mockResolvedValue(proceduralResults),
     searchByTrigger: vi.fn().mockResolvedValue([]),
     recordAccess: vi.fn().mockResolvedValue(undefined),
+    markForgotten: vi.fn().mockResolvedValue(0),
     incrementObservation: vi.fn().mockResolvedValue(undefined),
     batchDecay: vi.fn().mockResolvedValue(0),
   }

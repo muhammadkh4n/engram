@@ -19,7 +19,10 @@ supabase/.temp/
 .understand-anything/
 
 # Bench / forensics output (locally generated, not committed)
-results/
+results/*
+# …except committed Phase 0 gate baselines (results/gates/graph-eval-baseline.json).
+# Uses results/* (not results/) so this negation can re-include the subdir.
+!results/gates/
 data/
 
 # Build artifacts (prevent leaking compiled files into src/)

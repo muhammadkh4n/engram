@@ -141,6 +141,19 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     if (err2) throw new Error(`Semantic markSuperseded (new) failed: ${err2.message}`)
   }
 
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const { data, error } = await this.client
+      .from('memory_semantic')
+      .update({ forgotten_at: new Date().toISOString() })
+      .in('id', ids)
+      .is('forgotten_at', null)
+      .select('id')
+    if (error) throw new Error(`Semantic markForgotten failed: ${error.message}`)
+    return (data ?? []).length
+  }
+
   async batchDecay(opts: { daysThreshold: number; decayRate: number }): Promise<number> {
     // Call engram_decay_pass and extract semantic_decayed count
     const { data, error } = await this.client.rpc('engram_decay_pass', {

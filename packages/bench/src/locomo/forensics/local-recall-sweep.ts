@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     const convStart = Date.now()
     console.log(`[${i + 1}/${conversations.length}] ${convId} — fresh memory + ingest`)
 
-    const memory = await createBenchMemory(benchOpts)
+    const { memory } = await createBenchMemory(benchOpts)
 
     try {
       const ingestStart = Date.now()

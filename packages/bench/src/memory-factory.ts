@@ -1,10 +1,16 @@
 import { SqliteStorageAdapter } from '@engram-mem/sqlite'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { createMemory } from '@engram-mem/core'
-import type { Memory, IntelligenceAdapter } from '@engram-mem/core'
+import type { IntelligenceAdapter } from '@engram-mem/core'
 import { createOnnxReranker, type OnnxReranker } from '@engram-mem/rerank-onnx'
 import type { BenchmarkOpts } from './types.js'
 import { tryCreateBenchGraph } from './bench-graph.js'
+import type { BenchMemoryHandle } from './bench-memory-handle.js'
+
+// Re-exported so existing importers of these from memory-factory keep working;
+// the definitions live in the dependency-light bench-memory-handle module.
+export type { BenchMemoryConfig, BenchMemoryHandle } from './bench-memory-handle.js'
+export { requireGraph } from './bench-memory-handle.js'
 
 /**
  * Create an in-memory SQLite-backed Memory instance for benchmark use.
@@ -30,7 +36,7 @@ import { tryCreateBenchGraph } from './bench-graph.js'
  *     'onnx'                                    → local mxbai-rerank ONNX model
  *     'none'                                    → rerank disabled (same as noRerank)
  */
-export async function createBenchMemory(opts?: BenchmarkOpts): Promise<Memory> {
+export async function createBenchMemory(opts?: BenchmarkOpts): Promise<BenchMemoryHandle> {
   const storage = new SqliteStorageAdapter(':memory:')
 
   const apiKey = opts?.openaiApiKey ?? process.env['OPENAI_API_KEY']
@@ -51,7 +57,11 @@ export async function createBenchMemory(opts?: BenchmarkOpts): Promise<Memory> {
   })
 
   await memory.initialize()
-  return memory
+  return {
+    memory,
+    config: { graph, rerankerBackend: backend },
+    graphActuallyWired: graph !== null,
+  }
 }
 
 function resolveBackend(opts?: BenchmarkOpts): 'openai' | 'onnx' | 'none' {

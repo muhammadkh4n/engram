@@ -221,6 +221,35 @@ export class NeuralGraph {
     }
   }
 
+  /**
+   * Phase 1 (forget tombstone): stamp `forgottenAt` on the :Memory nodes with
+   * these ids so spreading activation excludes them — the path filter gates on
+   * `coalesce(n.forgottenAt, n.deletedAt) IS NULL`. Idempotent: only stamps
+   * nodes not already forgotten. Returns the number of nodes newly tombstoned.
+   * Memory nodes are uniformly `:Memory {id}` regardless of memoryType, so a
+   * single match covers episode/semantic/procedural ids.
+   */
+  async forgetMemories(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const now = new Date().toISOString()
+    const session = this.driver.session()
+    try {
+      const result = await session.executeWrite(async (tx: ManagedTransaction) => {
+        return tx.run(
+          `MATCH (m:Memory)
+           WHERE m.id IN $ids AND m.forgottenAt IS NULL
+           SET m.forgottenAt = $now
+           RETURN count(m) AS forgotten`,
+          { ids, now }
+        )
+      })
+      const raw = result.records[0]?.get('forgotten')
+      return neo4j.isInt(raw) ? (raw as { toNumber(): number }).toNumber() : Number(raw ?? 0)
+    } finally {
+      await session.close()
+    }
+  }
+
   async addPersonNode(input: PersonNodeInput): Promise<string> {
     const id = `person:${normalizeForId(input.name)}`
     const now = new Date().toISOString()

@@ -8,6 +8,24 @@ export interface BenchmarkOpts {
   limit?: number         // max conversations to evaluate (default: all)
   noRerank?: boolean     // disable cross-encoder reranking for A/B comparison
   /**
+   * Phase 0: merge the graph spreading-activation channel
+   * (`recallResult.associations`) into the scored top-K pool before recall@K
+   * is computed. Default false → byte-identical to pre-Phase-0 runs. The
+   * adapters score by gold-id set-membership (scale-independent), so unioning
+   * the graph-relevance-ranked associations after the MMR/rerank'd memories is
+   * safe. This is what makes graph:true vs graph:false able to move the metric.
+   */
+  mergeAssociationsIntoTopK?: boolean
+  /**
+   * Phase 0: restrict LoCoMo SCORING to these QA categories
+   * (1=single_hop, 2=multi_hop, 3=temporal, 4=open_domain, 5=adversarial).
+   * The corpus is still ingested WHOLE — only the metric is filtered — so
+   * spreading activation keeps the full graph to traverse. Use [2,3]
+   * (multi-hop + temporal) for the non-saturated graph-relevant gate corpus.
+   * Undefined = score every category (current behaviour).
+   */
+  categories?: number[]
+  /**
    * Cross-encoder backend. 'openai' (default) uses LLM pointwise scoring via
    * gpt-4o-mini; 'onnx' uses a local mxbai-rerank ONNX model (no API cost,
    * lower latency, typically stronger ordering); 'none' disables rerank.
@@ -135,4 +153,33 @@ export interface ComparisonDelta {
   ingestTimeDeltaMs: number
   evalTimeDeltaMs: number
   tokensDelta: number
+}
+
+// Phase 0 — 4-cell {graph}×{rerank} ablation matrix.
+export interface MatrixCell {
+  graph: boolean
+  rerank: boolean
+  result: LoCoMoResult | LongMemEvalResult
+  /** recall@K lift on the graph-relevant split vs the same-rerank graph-off cell. 0 for graph-off cells. */
+  graphEffect: number
+  /** Size of the split graphEffect was computed over (the power gate checks >=100). */
+  graphVisibleN: number
+}
+
+export interface BaselineProvenance {
+  flags: Record<string, unknown>
+  corpusPath: string
+  corpusSha256: string
+  /** git rev-parse HEAD at run time. */
+  commit: string
+  /** Whether the Neo4j forgotten/valid_until gates were active during the run. */
+  neo4jGateState: string
+  mergeAssociationsIntoTopK: boolean
+  timestamp: string
+}
+
+export interface ComparisonMatrixResult {
+  benchmark: 'locomo' | 'longmemeval'
+  cells: MatrixCell[]
+  provenance: BaselineProvenance
 }

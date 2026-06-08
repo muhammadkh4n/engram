@@ -133,6 +133,19 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
     if (error) throw new Error(`Procedural recordAccess failed: ${error.message}`)
   }
 
+
+  async markForgotten(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const { data, error } = await this.client
+      .from('memory_procedural')
+      .update({ forgotten_at: new Date().toISOString() })
+      .in('id', ids)
+      .is('forgotten_at', null)
+      .select('id')
+    if (error) throw new Error(`Procedural markForgotten failed: ${error.message}`)
+    return (data ?? []).length
+  }
+
   async incrementObservation(id: string): Promise<void> {
     const { data: current, error: fetchErr } = await this.client
       .from('memory_procedural')

@@ -93,7 +93,6 @@ export interface SessionHandle {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SESSION_ID = 'default'
-const CONFIDENCE_FLOOR = 0.05
 // Minimum relevance required for a memory to count as "affected" by forget().
 // computeScore() sums cosine similarity + bm25 boost + recency + access + role
 // bumps; a typical strong match lands around 0.6–1.1, weak semantic adjacency
@@ -836,9 +835,9 @@ export class Memory {
   // ---------------------------------------------------------------------------
 
   /**
-   * Deprioritize memories (lossless — sets confidence to 0.05, marks
-   * metadata.forgotten). Returns a preview by default; pass confirm=true
-   * to actually apply.
+   * Forget memories — tombstones them (forgotten_at) so they are excluded
+   * from every recall path while retained for audit/undo. Lossless and
+   * idempotent. Returns a preview by default; pass confirm=true to apply.
    */
   async forget(
     query: string,
@@ -890,25 +889,38 @@ export class Memory {
       return { count: filtered.length, previewed: filtered }
     }
 
-    // Apply forgetting: lossless deprioritization
+    // Apply forgetting: tombstone the matched memories (forgotten_at). They are
+    // excluded from every recall path but retained for audit/undo. Idempotent.
+    // Deliberately does NOT touch access_count or confidence: the old behavior
+    // called recordAccess/recordAccessAndBoost, which incremented access_count —
+    // a term recall ranking REWARDS — so forgetting an episode raised its recall
+    // rank, and the floored confidence was a value no recall path ever read.
+    const idsByType: Record<'episode' | 'semantic' | 'procedural', string[]> = {
+      episode: [], semantic: [], procedural: [],
+    }
     for (const memory of filtered) {
-      if (memory.type === 'semantic') {
-        await this.storage.semantic.recordAccessAndBoost(
-          memory.id,
-          CONFIDENCE_FLOOR - 1 // set to floor by applying a large negative boost
-        )
-        // Mark metadata.forgotten by re-inserting with updated metadata is
-        // not directly supported; we apply the confidence floor via available API.
-        // The storage interface supports recordAccessAndBoost but not direct update.
-        // We use a large negative boost to drive confidence toward floor.
-      } else if (memory.type === 'procedural') {
-        // No direct confidence update API for procedural; mark via the
-        // observationCount mechanism — no decay is available without batchDecay.
-        // We skip procedural direct update as the interface doesn't support it.
-      } else if (memory.type === 'episode') {
-        // Episodes are lossless; we can mark via metadata but there's no update
-        // API on EpisodeStorage. We record access to at least touch the episode.
-        await this.storage.episodes.recordAccess(memory.id)
+      if (memory.type === 'episode' || memory.type === 'semantic' || memory.type === 'procedural') {
+        idsByType[memory.type].push(memory.id)
+      }
+    }
+    if (idsByType.semantic.length > 0) await this.storage.semantic.markForgotten(idsByType.semantic)
+    if (idsByType.procedural.length > 0) await this.storage.procedural.markForgotten(idsByType.procedural)
+    if (idsByType.episode.length > 0) await this.storage.episodes.markForgotten(idsByType.episode)
+
+    // Also tombstone the Neo4j Memory nodes so forget cannot leak back through
+    // the graph association channel: spreading activation gates traversal on
+    // coalesce(forgottenAt, deletedAt) IS NULL. SQL remains the source of truth —
+    // a graph hiccup (or absent Neo4j) must never fail the forget. Capability-
+    // guarded because forgetMemories is optional on GraphPort.
+    const graph = this._graph
+    if (graph && typeof graph.forgetMemories === 'function') {
+      const forgottenIds = [...idsByType.episode, ...idsByType.semantic, ...idsByType.procedural]
+      if (forgottenIds.length > 0) {
+        try {
+          await graph.forgetMemories(forgottenIds)
+        } catch (err) {
+          console.warn('[engram] forget: graph tombstone failed (non-fatal):', err)
+        }
       }
     }
 

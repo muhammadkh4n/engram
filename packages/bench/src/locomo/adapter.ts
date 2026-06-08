@@ -8,6 +8,8 @@ import type {
 import type { LoCoMoConversationFile, LoCoMoTurn } from './types.js'
 import { computeRetrievalF1 } from '../metrics/f1.js'
 import { createBenchMemory } from '../memory-factory.js'
+import { mergeAssociationsIntoScored } from '../merge-associations.js'
+import { wipeBenchGraph } from '../bench-graph.js'
 
 export class LoCoMoAdapter {
   async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
@@ -184,7 +186,7 @@ export class LoCoMoAdapter {
   async evaluateDataset(
     conversations: LoCoMoConversationFile[],
     memory: Memory,
-    opts?: Pick<BenchmarkOpts, 'topK'>,
+    opts?: Pick<BenchmarkOpts, 'topK' | 'mergeAssociationsIntoTopK' | 'categories'>,
   ): Promise<LoCoMoConversationResult[]> {
     const topK = opts?.topK ?? 10
     const convResults: LoCoMoConversationResult[] = []
@@ -194,8 +196,14 @@ export class LoCoMoAdapter {
       const qaPredictions: LoCoMoQAPrediction[] = []
 
       for (const qa of conv.qa) {
+        // Gate-corpus filter: score only the requested categories (e.g. [2,3]
+        // multi-hop/temporal). The conversation was already ingested whole, so
+        // the graph the recall traverses is unaffected — only scoring narrows.
+        if (opts?.categories && !opts.categories.includes(qa.category)) continue
         const recallResult = await memory.recall(qa.question)
-        const topMemories = recallResult.memories.slice(0, topK)
+        const topMemories = mergeAssociationsIntoScored(
+          recallResult, opts?.mergeAssociationsIntoTopK,
+        ).slice(0, topK)
 
         const prediction = topMemories
           .map(m => m.content)
@@ -249,7 +257,12 @@ export class LoCoMoAdapter {
     conv: LoCoMoConversationFile,
     opts?: BenchmarkOpts,
   ): Promise<{ result: LoCoMoConversationResult; ingestMs: number; evalMs: number }> {
-    const memory = await createBenchMemory(opts)
+    const { memory, config } = await createBenchMemory(opts)
+
+    // Per-conversation graph isolation: Neo4j is shared, so wipe before ingest
+    // or the previous conversation's nodes pollute this one's spreading
+    // activation (matching the per-conv fresh :memory: SQLite invariant).
+    if (config.graph) await wipeBenchGraph(config.graph)
 
     const ingestStart = Date.now()
     const { episodesIngested, sessionsCreated } = await this.ingestConversation(conv, memory, {
@@ -260,6 +273,10 @@ export class LoCoMoAdapter {
       await memory.consolidate('light')
       await memory.consolidate('deep')
     }
+    // Drain fire-and-forget graph decomposition (+ consolidation) writes before
+    // eval. Without this, recall runs against a half-built graph and the graph
+    // cells produce empty associations — spuriously zeroing graphEffect.
+    await memory.flushPendingWrites()
     const ingestMs = Date.now() - ingestStart
 
     const evalStart = Date.now()

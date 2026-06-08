@@ -22,6 +22,8 @@ import type {
 } from '../types.js'
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
+import { mergeAssociationsIntoScored } from '../merge-associations.js'
+import { wipeBenchGraph } from '../bench-graph.js'
 
 export class LongMemEvalAdapter {
   /**
@@ -135,17 +137,26 @@ export class LongMemEvalAdapter {
     ingestMs: number
     evalMs: number
   }> {
-    const memory = await createBenchMemory(opts)
+    const { memory, config } = await createBenchMemory(opts)
     const topK = opts?.topK ?? 10
 
     try {
+      // Per-question graph isolation: Neo4j is a shared external process (unlike
+      // the per-call fresh :memory: SQLite), so wipe it before ingest or prior
+      // questions' nodes pollute this question's spreading activation.
+      if (config.graph) await wipeBenchGraph(config.graph)
       const ingestStart = Date.now()
       const { episodesIngested, sessionsCreated } = await this.ingestQuestion(question, memory)
+      // Drain fire-and-forget graph decomposition writes before recall, or the
+      // graph cell recalls against a half-built graph (spurious graphEffect=0).
+      await memory.flushPendingWrites()
       const ingestMs = Date.now() - ingestStart
 
       const evalStart = Date.now()
       const recallResult = await memory.recall(question.question)
-      const topMemories = recallResult.memories.slice(0, topK)
+      const topMemories = mergeAssociationsIntoScored(
+        recallResult, opts?.mergeAssociationsIntoTopK,
+      ).slice(0, topK)
 
       // Deduplicate retrieved sessions in rank order
       const seen = new Set<string>()

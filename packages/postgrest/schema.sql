@@ -49,6 +49,27 @@ SET row_security = off;
 -- pgvector extension required for vector(1536) columns
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- =============================================================================
+-- forget() tombstone — within-file ordering note
+-- -----------------------------------------------------------------------------
+-- Phase 1 adds a `forgotten_at timestamptz` tombstone to memory_episodes /
+-- memory_semantic / memory_procedural. forget() stamps it; every recall RPC
+-- below gates on `forgotten_at IS NULL` (a 1:1 clone of the proven
+-- `superseded_by IS NULL` gate). It is intentionally NOT added to
+-- memory_digests (consolidation artifacts are not directly forgettable).
+--
+-- This file is a pg_dump: functions are emitted ABOVE the tables they read,
+-- which is only valid because `SET check_function_bodies = false` (above)
+-- defers body validation to call time. The forgotten_at columns are therefore
+-- added in the TABLE section (CREATE TABLE bodies + an idempotent
+-- `ADD COLUMN IF NOT EXISTS` block for already-provisioned DBs, since
+-- CREATE TABLE IF NOT EXISTS is a no-op there) and the partial indexes in the
+-- INDEX section — both physically before the only call sites in this file: the
+-- post-apply smoke at EOF, which EXECUTES every recall RPC so a missing column
+-- or broken gate fails LOUDLY at apply time. There is no migration runner; the
+-- single sequential `psql -f schema.sql` apply is the ordering guarantee.
+-- =============================================================================
+
 --
 -- Name: public; Type: SCHEMA; Schema: -; Owner: -
 --
@@ -130,6 +151,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
       SELECT me.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(me.fts, websearch_to_tsquery('english', p_query_text)) DESC) AS rank_ix
       FROM memory_episodes me
       WHERE p_include_episodes AND me.fts @@ websearch_to_tsquery('english', p_query_text)
+        AND me.forgotten_at IS NULL
         AND (p_session_id IS NULL OR me.session_id = p_session_id)
         AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
       LIMIT p_match_count * 2
@@ -138,6 +160,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
       SELECT me.id, ROW_NUMBER() OVER (ORDER BY me.embedding <=> p_query_embedding) AS rank_ix
       FROM memory_episodes me
       WHERE p_include_episodes AND me.embedding IS NOT NULL
+        AND me.forgotten_at IS NULL
         AND (p_session_id IS NULL OR me.session_id = p_session_id)
         AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
       ORDER BY me.embedding <=> p_query_embedding LIMIT p_match_count * 2
@@ -178,12 +201,12 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
   SELECT * FROM (
     WITH ft AS (
       SELECT ms.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(ms.fts, websearch_to_tsquery('english', p_query_text)) DESC) AS rank_ix
-      FROM memory_semantic ms WHERE p_include_semantic AND ms.fts @@ websearch_to_tsquery('english', p_query_text) AND ms.superseded_by IS NULL
+      FROM memory_semantic ms WHERE p_include_semantic AND ms.fts @@ websearch_to_tsquery('english', p_query_text) AND ms.superseded_by IS NULL AND ms.forgotten_at IS NULL
         AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL) LIMIT p_match_count * 2
     ),
     vs AS (
       SELECT ms.id, ROW_NUMBER() OVER (ORDER BY ms.embedding <=> p_query_embedding) AS rank_ix
-      FROM memory_semantic ms WHERE p_include_semantic AND ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
+      FROM memory_semantic ms WHERE p_include_semantic AND ms.embedding IS NOT NULL AND ms.superseded_by IS NULL AND ms.forgotten_at IS NULL
         AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
       ORDER BY ms.embedding <=> p_query_embedding LIMIT p_match_count * 2
     )
@@ -200,12 +223,12 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
   SELECT * FROM (
     WITH ft AS (
       SELECT mp.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(mp.fts, websearch_to_tsquery('english', p_query_text)) DESC) AS rank_ix
-      FROM memory_procedural mp WHERE p_include_procedural AND mp.fts @@ websearch_to_tsquery('english', p_query_text)
+      FROM memory_procedural mp WHERE p_include_procedural AND mp.fts @@ websearch_to_tsquery('english', p_query_text) AND mp.forgotten_at IS NULL
         AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL) LIMIT p_match_count * 2
     ),
     vs AS (
       SELECT mp.id, ROW_NUMBER() OVER (ORDER BY mp.embedding <=> p_query_embedding) AS rank_ix
-      FROM memory_procedural mp WHERE p_include_procedural AND mp.embedding IS NOT NULL
+      FROM memory_procedural mp WHERE p_include_procedural AND mp.embedding IS NOT NULL AND mp.forgotten_at IS NULL
         AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
       ORDER BY mp.embedding <=> p_query_embedding LIMIT p_match_count * 2
     )
@@ -236,6 +259,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
            (1-(embedding<=>p_query_embedding))::float AS similarity, entities
     FROM memory_episodes
     WHERE p_include_episodes AND embedding IS NOT NULL
+      AND forgotten_at IS NULL
       AND (p_session_id IS NULL OR session_id = p_session_id)
       AND (p_project_id IS NULL OR project_id = p_project_id OR project_id IS NULL)
       AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
@@ -257,6 +281,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
            (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[]
     FROM memory_semantic
     WHERE p_include_semantic AND embedding IS NOT NULL AND superseded_by IS NULL
+      AND forgotten_at IS NULL
       AND (p_project_id IS NULL OR project_id = p_project_id OR project_id IS NULL)
       AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
@@ -267,6 +292,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
            (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[]
     FROM memory_procedural
     WHERE p_include_procedural AND embedding IS NOT NULL
+      AND forgotten_at IS NULL
       AND (p_project_id IS NULL OR project_id = p_project_id OR project_id IS NULL)
       AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
@@ -296,6 +322,38 @@ END; $$;
 
 
 --
+-- Name: engram_mark_forgotten(text, uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Tombstone primitive for forget(). Sets forgotten_at and touches NOTHING else
+-- (deliberately no access_count / confidence write — that was the inverted-
+-- forget() bug). Idempotent: the `forgotten_at IS NULL` guard makes a repeat
+-- forget a no-op (returns 0). Mirrors the per-store markForgotten storage
+-- contract (returns the number of rows newly tombstoned).
+CREATE OR REPLACE FUNCTION public.engram_mark_forgotten(p_memory_type text, p_ids uuid[]) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE v_count integer;
+BEGIN
+  IF p_memory_type = 'episode' THEN
+    UPDATE memory_episodes SET forgotten_at = now()
+      WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
+  ELSIF p_memory_type = 'semantic' THEN
+    UPDATE memory_semantic SET forgotten_at = now()
+      WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
+  ELSIF p_memory_type = 'procedural' THEN
+    UPDATE memory_procedural SET forgotten_at = now()
+      WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
+  ELSE
+    RAISE EXCEPTION 'engram_mark_forgotten: unknown memory_type %', p_memory_type;
+  END IF;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END; $$;
+
+
+--
 -- Name: engram_text_boost(text, integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -312,6 +370,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
       ts_rank_cd(me.fts, to_tsquery('english', p_query_terms))::float AS rank_score
     FROM memory_episodes me
     WHERE me.fts @@ to_tsquery('english', p_query_terms)
+      AND me.forgotten_at IS NULL
       AND (p_session_id IS NULL OR me.session_id = p_session_id)
       AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
 
@@ -330,6 +389,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
     FROM memory_semantic ms
     WHERE ms.fts @@ to_tsquery('english', p_query_terms)
       AND ms.superseded_by IS NULL
+      AND ms.forgotten_at IS NULL
       AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
 
     UNION ALL
@@ -338,6 +398,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
       ts_rank_cd(mp.fts, to_tsquery('english', p_query_terms))::float
     FROM memory_procedural mp
     WHERE mp.fts @@ to_tsquery('english', p_query_terms)
+      AND mp.forgotten_at IS NULL
       AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
   ) combined
   ORDER BY rank_score DESC
@@ -380,6 +441,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
     me.entities, me.metadata
   FROM memory_episodes me
   WHERE me.embedding IS NOT NULL
+    AND me.forgotten_at IS NULL
     AND (p_session_id IS NULL OR me.session_id = p_session_id)
     AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
 
@@ -405,6 +467,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
     ARRAY[]::text[], ms.metadata
   FROM memory_semantic ms
   WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
+    AND ms.forgotten_at IS NULL
     AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
 
   UNION ALL
@@ -417,6 +480,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
     ARRAY[]::text[], mp.metadata
   FROM memory_procedural mp
   WHERE mp.embedding IS NOT NULL
+    AND mp.forgotten_at IS NULL
     AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
 
   ORDER BY similarity DESC
@@ -633,6 +697,7 @@ CREATE TABLE IF NOT EXISTS public.memory_episodes (
     searchable_content text,
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, content)) STORED,
     project_id text,
+    forgotten_at timestamp with time zone,
     CONSTRAINT memory_episodes_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
 );
 
@@ -678,6 +743,7 @@ CREATE TABLE IF NOT EXISTS public.memory_procedural (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((trigger_text || ' '::text) || procedure))) STORED,
     project_id text,
+    forgotten_at timestamp with time zone,
     CONSTRAINT memory_procedural_category_check CHECK ((category = ANY (ARRAY['workflow'::text, 'preference'::text, 'habit'::text, 'pattern'::text, 'convention'::text]))),
     CONSTRAINT memory_procedural_confidence_check CHECK (((confidence >= (0.0)::double precision) AND (confidence <= (1.0)::double precision))),
     CONSTRAINT memory_procedural_decay_rate_check CHECK (((decay_rate > (0.0)::double precision) AND (decay_rate <= (1.0)::double precision)))
@@ -708,6 +774,7 @@ CREATE TABLE IF NOT EXISTS public.memory_semantic (
     valid_from timestamp with time zone,
     valid_until timestamp with time zone,
     project_id text,
+    forgotten_at timestamp with time zone,
     CONSTRAINT memory_knowledge_confidence_check CHECK (((confidence >= (0)::double precision) AND (confidence <= (1)::double precision)))
 );
 
@@ -748,6 +815,18 @@ CREATE TABLE IF NOT EXISTS public.sensory_snapshots (
     snapshot jsonb DEFAULT '{}'::jsonb NOT NULL,
     saved_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- forget() tombstone columns — idempotent ADD COLUMN for already-provisioned
+-- DBs (CREATE TABLE IF NOT EXISTS above is a no-op there, so the column in the
+-- table body never lands on an existing DB). Placed after the CREATE TABLEs and
+-- before the partial indexes / post-apply smoke that read it. See the ordering
+-- note at the top of this file. NOT added to memory_digests by design.
+--
+ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 
 
 --
@@ -1116,6 +1195,19 @@ CREATE INDEX IF NOT EXISTS idx_write_buffer_status ON public.memory_write_buffer
 
 
 --
+-- forget() tombstone partial indexes: index only the (rare) tombstoned rows so
+-- forgotten-row enumeration (Phase 2 reclamation / audit) is cheap. The hot
+-- `forgotten_at IS NULL` recall predicate matches the majority of rows and is
+-- driven by the vector/fts indexes; it needs no index of its own. Mirrors the
+-- SQLite v5 `WHERE forgotten_at IS NOT NULL` partial indexes (lockstep).
+--
+
+CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON public.memory_episodes USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_semantic_forgotten ON public.memory_semantic USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
+
+
+--
 -- Name: episode_parts episode_parts_episode_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1281,6 +1373,33 @@ CREATE POLICY service_role_all ON public.memory_write_buffer TO service_role USI
 
 DROP POLICY IF EXISTS service_role_all ON public.sensory_snapshots;
 CREATE POLICY service_role_all ON public.sensory_snapshots TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Post-apply smoke (no migration runner exists to enforce column-before-function
+-- ordering). Executes every recall RPC + the forget primitive against the just-
+-- applied schema so a missing forgotten_at column or a broken gate fails HERE: it
+-- aborts the apply under `psql -v ON_ERROR_STOP=1`, and otherwise surfaces as a
+-- loud ERROR line in the apply log. Read-only except engram_mark_forgotten on the
+-- nil UUID (matches nothing -> returns 0). Idempotent and safe to re-run. All
+-- names schema-qualified because the dump sets search_path = ''.
+--
+
+DO $smoke$
+DECLARE
+  v_unit public.vector := ('[1' || repeat(',0', 1535) || ']')::public.vector;
+  v_n integer;
+BEGIN
+  PERFORM public.engram_recall(v_unit, NULL, 1);
+  PERFORM public.engram_hybrid_recall('smoke', v_unit, 1);
+  PERFORM public.engram_text_boost('smoke', 1);
+  PERFORM public.engram_vector_search(v_unit, 1);
+  v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  RAISE NOTICE 'engram schema smoke OK: 4 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live';
+END;
+$smoke$;
 
 
 --

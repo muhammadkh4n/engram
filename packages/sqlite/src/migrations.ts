@@ -348,4 +348,20 @@ export function runMigrations(db: Database.Database): void {
 
     db.pragma('user_version = 4')
   }
+
+  if (currentVersion < 5) {
+    // V5: forgotten_at tombstone on the three recallable memory tables.
+    // forget() stamps forgotten_at; every recall path filters forgotten_at IS NULL.
+    // Distinct from superseded_by (supersession lineage) — this is explicit user/GC
+    // forgetting. Rows are retained for audit/undo, never destroyed here.
+    const tables = ['episodes', 'semantic', 'procedural'] as const
+    for (const table of tables) {
+      const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      if (!cols.some(c => c.name === 'forgotten_at')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN forgotten_at REAL`)
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_forgotten ON ${table}(forgotten_at) WHERE forgotten_at IS NOT NULL`)
+      }
+    }
+    db.pragma('user_version = 5')
+  }
 }
