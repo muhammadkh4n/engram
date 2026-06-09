@@ -97,7 +97,7 @@ export class AssociationManager {
    * Returns the number of upserts attempted (edges actually written).
    */
   async createCoRecalledEdges(
-    memories: Array<{ id: string; type: MemoryType }>
+    memories: Array<{ id: string; type: MemoryType; salience?: number }>
   ): Promise<number> {
     const top = memories.slice(0, MAX_CO_RECALLED)
     let created = 0
@@ -120,6 +120,16 @@ export class AssociationManager {
 
     for (let i = 0; i < top.length; i++) {
       for (let j = i + 1; j < top.length; j++) {
+        // Salience-gated plasticity: do not wire (or strengthen) a co-recall
+        // edge whose least-salient endpoint is noise (heartbeat, acknowledgment).
+        // This is the move-zero fix — the poisoned Hebbian layer where boilerplate
+        // co-recalled repeatedly and accumulated high strength. Unknown salience
+        // (e.g. curated semantic/procedural memories) defaults to ordinary (0.5),
+        // so they are never gated out and legacy callers are unaffected.
+        const sourceSalience = top[i].salience ?? 0.5
+        const targetSalience = top[j].salience ?? 0.5
+        if (salienceGate(1, sourceSalience, targetSalience) <= 0) continue
+
         const sourceCount = await getCount(top[i].id)
         if (sourceCount > MAX_EDGES_PER_MEMORY) continue
 
