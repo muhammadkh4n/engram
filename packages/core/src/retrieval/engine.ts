@@ -621,7 +621,11 @@ export async function recall(
   let compositeContext: CompositeMemory | null = null
 
   if (strategy.associations && graph !== null) {
-    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId)
+    // Context reinstatement (Gap 4): the topics currently primed in the sensory
+    // buffer (set by recent turns) are folded into the spreading-activation
+    // seeds so recall is sensitive to the active conversational context.
+    const contextTopics = sensory.getPrimed().map((p) => p.topic)
+    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId, contextTopics)
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
       const legacyStrategy = toRetrievalStrategy(strategy)

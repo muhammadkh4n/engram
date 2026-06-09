@@ -147,6 +147,16 @@ export interface ActivationResultSet {
  * Returning null (not empty results) signals "graph could not help" vs
  * "graph ran and found nothing". These have different implications.
  */
+// Context reinstatement (Gap 4): seed weight for primed-topic context nodes.
+// Below entity (0.5) / project (0.6) seeds — context nudges recall toward what
+// is currently in focus; query relevance still dominates.
+const CONTEXT_SEED_WEIGHT = 0.45
+
+// Lateral inhibition (Gap 5): activation multiplier for high-betweenness hub
+// nodes (flagged isBridge by the dream-cycle betweenness pass). < 1 suppresses
+// generic connectors that would otherwise flood recall (the fan effect).
+const HUB_INHIBITION_FACTOR = 0.5
+
 export async function stageActivate(
   recalled: RetrievedMemory[],
   query: string,
@@ -155,6 +165,7 @@ export async function stageActivate(
   storage: StorageAdapter,
   project?: string,
   projectId?: string,
+  contextTopics?: string[],
 ): Promise<ActivationResultSet | null> {
   const params = getActivationParams(strategy)
 
@@ -186,6 +197,24 @@ export async function stageActivate(
     }
   }
 
+  // --- Context reinstatement (Gap 4) ---
+  // Seed from the active conversational context — topics primed by recent turns
+  // (sensory buffer) — so the SAME query completes to different associations
+  // depending on what is currently in focus (encoding specificity). Best-effort
+  // and soft-weighted: query relevance dominates, context only nudges.
+  if (contextTopics && contextTopics.length > 0) {
+    try {
+      const contextNodes = await graph.lookupEntityNodes(contextTopics)
+      for (const node of contextNodes) {
+        if (!seedActivations.has(node.nodeId)) {
+          seedActivations.set(node.nodeId, CONTEXT_SEED_WEIGHT)
+        }
+      }
+    } catch {
+      // context reinstatement is enrichment only; never block recall
+    }
+  }
+
   if (seedActivations.size === 0) {
     // No seeds at all — nothing to activate from
     return null
@@ -212,6 +241,17 @@ export async function stageActivate(
     console.warn('[engram] spreadActivation failed:', err)
     return null
   }
+
+  // --- Lateral inhibition / fan effect (Gap 5) ---
+  // Down-weight high-betweenness hub nodes (flagged isBridge by the dream-cycle
+  // betweenness pass) so generic connectors don't dominate recall. Applied here,
+  // before the threshold split, so a suppressed hub can fall out of the primary
+  // set entirely. No-op when betweenness was never computed (no isBridge prop).
+  activatedNodes = activatedNodes.map((n) =>
+    n.properties?.['isBridge'] === true
+      ? { ...n, activation: n.activation * HUB_INHIBITION_FACTOR }
+      : n,
+  )
 
   // --- Mixed population check ---
   // If activatedNodes only contains context nodes (Person, Topic, etc.) but
