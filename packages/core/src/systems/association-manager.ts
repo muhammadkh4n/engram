@@ -1,5 +1,6 @@
 import type { MemoryType } from '../types.js'
 import type { AssociationStorage } from '../adapters/storage.js'
+import { salienceGate } from '../ingestion/plasticity.js'
 
 const MAX_EDGES_PER_MEMORY = 100
 const MAX_CO_RECALLED = 5
@@ -15,22 +16,40 @@ export class AssociationManager {
    */
   async createTemporalEdges(
     episodeIds: string[],
-    opts?: { maxDistance?: number }
+    opts?: { maxDistance?: number; salienceById?: ReadonlyMap<string, number> }
   ): Promise<number> {
     const maxDistance = opts?.maxDistance ?? 5
+    const salienceById = opts?.salienceById
     let created = 0
 
     for (let i = 0; i < episodeIds.length; i++) {
       for (let j = i + 1; j < episodeIds.length; j++) {
         if (j - i > maxDistance) break
 
+        const sourceId = episodeIds[i]
+        const targetId = episodeIds[j]
+
+        // Salience-gated plasticity: a temporal edge touching a noise turn
+        // (heartbeat, acknowledgment) forms weakly or not at all. Unknown
+        // salience defaults to ordinary (0.3) so callers that pass no map are
+        // byte-identical to the legacy flat-0.3 behavior.
+        let strength = 0.3
+        if (salienceById) {
+          strength = salienceGate(
+            0.3,
+            salienceById.get(sourceId) ?? 0.3,
+            salienceById.get(targetId) ?? 0.3,
+          )
+          if (strength <= 0) continue
+        }
+
         await this.storage.insert({
-          sourceId: episodeIds[i],
+          sourceId,
           sourceType: 'episode',
-          targetId: episodeIds[j],
+          targetId,
           targetType: 'episode',
           edgeType: 'temporal',
-          strength: 0.3,
+          strength,
           lastActivated: null,
           metadata: {},
         })

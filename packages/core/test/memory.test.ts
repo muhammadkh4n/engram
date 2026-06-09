@@ -279,8 +279,15 @@ describe('Memory — ingest() with intelligence adapter', () => {
 
   it('embeds all messages in ingestBatch', async () => {
     const storage = makeStorage()
+    // Distinct per-message embeddings: the orthogonal 2nd/3rd components keep
+    // the two turns well below the near-duplicate merge threshold so this test
+    // exercises batch embedding, not pattern separation.
     const embedFn = vi.fn().mockImplementation((text: string) =>
-      Promise.resolve([text.length * 0.01, 0.5, 0.3])
+      Promise.resolve([
+        text.length * 0.01,
+        text.startsWith('first') ? 1 : 0,
+        text.startsWith('second') ? 1 : 0,
+      ])
     )
     const intelligence: IntelligenceAdapter = { embed: embedFn }
     const memory = createMemory({ storage, intelligence })
@@ -300,6 +307,53 @@ describe('Memory — ingest() with intelligence adapter', () => {
       expect(ep.embedding).not.toBeNull()
       expect(Array.isArray(ep.embedding)).toBe(true)
     }
+
+    await memory.dispose()
+  })
+
+  it('merges a near-duplicate turn and reinforces the original (pattern separation)', async () => {
+    const storage = makeStorage()
+    // Embedding by semantic group: 'alpha' turns are identical in vector space,
+    // 'beta' is orthogonal. Mimics real near-duplicates vs distinct content.
+    const embedFn = vi.fn().mockImplementation((text: string) => {
+      if (text.includes('alpha')) return Promise.resolve([1, 0, 0])
+      if (text.includes('beta')) return Promise.resolve([0, 1, 0])
+      return Promise.resolve([0, 0, 1])
+    })
+    const intelligence: IntelligenceAdapter = { embed: embedFn }
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    await memory.ingest({ role: 'user', content: 'alpha one', sessionId: 'sep' })
+    await memory.ingest({ role: 'user', content: 'alpha two', sessionId: 'sep' })
+
+    // The near-identical second turn is merged, not stored again.
+    let episodes = await storage.episodes.getBySession('sep')
+    expect(episodes).toHaveLength(1)
+    // ...and the surviving original is reinforced (recordAccess bumped it once).
+    expect(episodes[0].accessCount).toBe(1)
+
+    // A distinct turn is kept separate.
+    await memory.ingest({ role: 'user', content: 'beta note', sessionId: 'sep' })
+    episodes = await storage.episodes.getBySession('sep')
+    expect(episodes).toHaveLength(2)
+
+    await memory.dispose()
+  })
+
+  it('keeps near-duplicates when dedupeThreshold is disabled', async () => {
+    const storage = makeStorage()
+    const intelligence: IntelligenceAdapter = {
+      embed: vi.fn().mockResolvedValue([1, 0, 0]),
+    }
+    const memory = createMemory({ storage, intelligence, dedupeThreshold: 0 })
+    await memory.initialize()
+
+    await memory.ingest({ role: 'user', content: 'identical turn one', sessionId: 'nodedup' })
+    await memory.ingest({ role: 'user', content: 'identical turn two', sessionId: 'nodedup' })
+
+    const episodes = await storage.episodes.getBySession('nodedup')
+    expect(episodes).toHaveLength(2)
 
     await memory.dispose()
   })
