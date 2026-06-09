@@ -21,6 +21,7 @@ export class SpreadingActivation {
   async activate(
     seedIds: string[],
     params?: ActivationParams,
+    seedActivations?: Map<string, number>,
   ): Promise<ActivationResult[]> {
     if (seedIds.length === 0) return []
 
@@ -30,11 +31,20 @@ export class SpreadingActivation {
       ? `:${p.edgeTypeFilter.join('|')}`
       : ''
 
+    // Personalized seeding (PPR): each walk starts at its seed's relevance
+    // weight — the personalization vector — instead of a uniform 1.0, so a
+    // node reached from a highly relevant seed accrues more activation than one
+    // reached from a weak seed. Seeds with no explicit weight fall back to 1.0,
+    // which reproduces the prior unweighted-walk behavior exactly.
+    const seedWeights: Record<string, number> = seedActivations
+      ? Object.fromEntries(seedActivations)
+      : {}
+
     const cypher = `
       UNWIND $seedIds AS seedId
       MATCH (seed) WHERE seed.id = seedId
       CALL {
-        WITH seed
+        WITH seed, seedId
         MATCH path = (seed)-[rels${relFilter}*1..${p.maxHops}]-(neighbor)
         WHERE neighbor <> seed
           AND ALL(r IN rels WHERE r.weight >= $minWeight)
@@ -48,7 +58,7 @@ export class SpreadingActivation {
                 OR coalesce(n.forgottenAt, n.deletedAt) IS NULL)
         WITH neighbor,
              reduce(
-               activation = 1.0,
+               activation = coalesce($seedWeights[seedId], 1.0),
                r IN rels | activation * r.weight * $decayPerHop
              ) AS activation,
              length(path) AS hops
@@ -71,6 +81,7 @@ export class SpreadingActivation {
       const result = await session.executeRead(async (tx) => {
         return tx.run(cypher, {
           seedIds,
+          seedWeights,
           minWeight: p.minWeight,
           decayPerHop: p.decayPerHop,
           minActivation: p.minActivation,
