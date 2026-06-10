@@ -81,7 +81,7 @@ export interface EntitySeedResult {
 /** Wave 2 spreadActivation options (wraps SpreadingActivation.activate) */
 export interface SpreadActivationOpts {
   seedNodeIds: string[]
-  /** Optional per-seed initial activation (currently unused by the Cypher query) */
+  /** Optional per-seed initial activation — the PPR personalization vector. Seeds with no entry default to 1.0. */
   seedActivations?: Map<string, number>
   maxHops?: number
   decay?: number
@@ -949,9 +949,9 @@ export class NeuralGraph {
    * Wave 2 spreading activation facade. Wraps the standalone
    * SpreadingActivation class with the option shape Wave 2 uses.
    *
-   * Note: seedActivations is accepted for forward compatibility but the
-   * underlying Cypher query uses uniform activation (1.0) per seed.
-   * Per-seed initial weights are a Wave 3 enhancement.
+   * Personalized seeding: when `opts.seedActivations` is supplied, each seed's
+   * walk starts at its given weight (the PPR personalization vector) rather than
+   * a uniform 1.0; seeds absent from the map default to 1.0.
    */
   async spreadActivation(opts: SpreadActivationOpts): Promise<ActivatedNode[]> {
     const sa = new SpreadingActivation(this.driver)
@@ -964,7 +964,7 @@ export class NeuralGraph {
       edgeTypeFilter: (opts.edgeFilter ?? []) as ActivationParams['edgeTypeFilter'],
       projectId: opts.projectId ?? null,
     }
-    const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params)
+    const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params, opts.seedActivations)
     const activated: ActivatedNode[] = results.map((r) => ({
       nodeId: r.nodeId,
       nodeType: r.nodeType as string,

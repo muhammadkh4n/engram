@@ -18,6 +18,7 @@ import { decayPass } from './consolidation/decay-pass.js'
 import { runAutoConsolidation } from './consolidation/auto-consolidation.js'
 import type { AutoConsolidationOpts } from './consolidation/auto-consolidation.js'
 import { scoreSalience } from './ingestion/salience.js'
+import { findNearDuplicate } from './ingestion/near-duplicate.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
 import { generateId } from './utils/id.js'
@@ -80,6 +81,17 @@ export interface MemoryOptions {
    * latency, and the lift is workload-dependent.
    */
   contextualRetrieval?: boolean
+  /**
+   * Pattern separation (Gap 1): near-duplicate merge at ingest. When an
+   * incoming episode's embedding is ≥ this cosine threshold to a recent
+   * same-session episode, the existing memory is reinforced (recordAccess)
+   * instead of storing a redundant copy — mimicking dentate-gyrus separation,
+   * where redundant encodings collapse and distinct ones stay separate.
+   * Range (0, 1]; a value ≤ 0 disables the merge. Defaults to OFF (0) — the
+   * recall benefit is not yet validated, so this is opt-in; ~0.95 is the
+   * recommended value when enabling (only near-identical turns collapse).
+   */
+  dedupeThreshold?: number
 }
 
 export interface SessionHandle {
@@ -340,6 +352,26 @@ export class Memory {
       }
     }
 
+    // Pattern separation (Gap 1): collapse a near-identical recent turn into the
+    // existing memory instead of storing a redundant copy. Scoped to recent
+    // same-session episodes (the heartbeat / re-emitted-output case), so distinct
+    // cross-session events are never merged. recordAccess reinforces the prior
+    // memory so the signal is kept, not lost.
+    const dedupeThreshold = this.opts.dedupeThreshold ?? 0
+    if (embedding && dedupeThreshold > 0) {
+      const dup = findNearDuplicate(
+        embedding,
+        recentEpisodes.map((e) => ({ id: e.id, embedding: e.embedding })),
+        dedupeThreshold,
+      )
+      if (dup) {
+        await this.storage.episodes.recordAccess(dup.id).catch(() => {
+          // reinforcement is best-effort; never block ingest
+        })
+        return
+      }
+    }
+
     const metadata: Record<string, unknown> = {
       ...message.metadata,
       role: message.role,
@@ -379,7 +411,13 @@ export class Memory {
       .map(e => e.id)
 
     if (recentIds.length > 0) {
-      this.associations.createTemporalEdges([...recentIds, episode.id]).catch(() => {
+      // Salience-gated plasticity (Gap 3): temporal edges touching a noise turn
+      // (heartbeat, acknowledgment) form weakly or not at all, rather than all
+      // at a flat 0.3 — the fix for the frequency-poisoned associative layer.
+      const salienceById = new Map<string, number>()
+      for (const e of recentEpisodes) salienceById.set(e.id, e.salience)
+      salienceById.set(episode.id, salience)
+      this.associations.createTemporalEdges([...recentIds, episode.id], { salienceById }).catch(() => {
         // non-fatal: temporal edges are enrichment only
       })
     }

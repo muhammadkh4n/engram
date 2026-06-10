@@ -1,5 +1,6 @@
 import type { MemoryType } from '../types.js'
 import type { AssociationStorage } from '../adapters/storage.js'
+import { salienceGate } from '../ingestion/plasticity.js'
 
 const MAX_EDGES_PER_MEMORY = 100
 const MAX_CO_RECALLED = 5
@@ -15,22 +16,40 @@ export class AssociationManager {
    */
   async createTemporalEdges(
     episodeIds: string[],
-    opts?: { maxDistance?: number }
+    opts?: { maxDistance?: number; salienceById?: ReadonlyMap<string, number> }
   ): Promise<number> {
     const maxDistance = opts?.maxDistance ?? 5
+    const salienceById = opts?.salienceById
     let created = 0
 
     for (let i = 0; i < episodeIds.length; i++) {
       for (let j = i + 1; j < episodeIds.length; j++) {
         if (j - i > maxDistance) break
 
+        const sourceId = episodeIds[i]
+        const targetId = episodeIds[j]
+
+        // Salience-gated plasticity: a temporal edge touching a noise turn
+        // (heartbeat, acknowledgment) forms weakly or not at all. Unknown
+        // salience defaults to ordinary (0.3) so callers that pass no map are
+        // byte-identical to the legacy flat-0.3 behavior.
+        let strength = 0.3
+        if (salienceById) {
+          strength = salienceGate(
+            0.3,
+            salienceById.get(sourceId) ?? 0.3,
+            salienceById.get(targetId) ?? 0.3,
+          )
+          if (strength <= 0) continue
+        }
+
         await this.storage.insert({
-          sourceId: episodeIds[i],
+          sourceId,
           sourceType: 'episode',
-          targetId: episodeIds[j],
+          targetId,
           targetType: 'episode',
           edgeType: 'temporal',
-          strength: 0.3,
+          strength,
           lastActivated: null,
           metadata: {},
         })
@@ -78,7 +97,7 @@ export class AssociationManager {
    * Returns the number of upserts attempted (edges actually written).
    */
   async createCoRecalledEdges(
-    memories: Array<{ id: string; type: MemoryType }>
+    memories: Array<{ id: string; type: MemoryType; salience?: number }>
   ): Promise<number> {
     const top = memories.slice(0, MAX_CO_RECALLED)
     let created = 0
@@ -101,6 +120,16 @@ export class AssociationManager {
 
     for (let i = 0; i < top.length; i++) {
       for (let j = i + 1; j < top.length; j++) {
+        // Salience-gated plasticity: do not wire (or strengthen) a co-recall
+        // edge whose least-salient endpoint is noise (heartbeat, acknowledgment).
+        // This is the move-zero fix — the poisoned Hebbian layer where boilerplate
+        // co-recalled repeatedly and accumulated high strength. Unknown salience
+        // (e.g. curated semantic/procedural memories) defaults to ordinary (0.5),
+        // so they are never gated out and legacy callers are unaffected.
+        const sourceSalience = top[i].salience ?? 0.5
+        const targetSalience = top[j].salience ?? 0.5
+        if (salienceGate(1, sourceSalience, targetSalience) <= 0) continue
+
         const sourceCount = await getCount(top[i].id)
         if (sourceCount > MAX_EDGES_PER_MEMORY) continue
 

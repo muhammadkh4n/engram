@@ -284,3 +284,71 @@ describe('AssociationManager.createSupportEdge', () => {
     expect(arg.lastActivated).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Salience-gated plasticity (Gap 3)
+// ---------------------------------------------------------------------------
+
+describe('AssociationManager — salience-gated plasticity', () => {
+  it('co_recalled: skips a pair whose endpoint is noise', async () => {
+    const storage = makeMockStorage()
+    const manager = new AssociationManager(storage)
+    // `noise` is a heartbeat (0.10): pairs touching it must not wire, no matter
+    // how salient the partner is (weakest-link).
+    const memories = [
+      { id: 'real1', type: 'episode' as MemoryType, salience: 0.9 },
+      { id: 'noise', type: 'episode' as MemoryType, salience: 0.1 },
+      { id: 'real2', type: 'episode' as MemoryType, salience: 0.8 },
+    ]
+    const count = await manager.createCoRecalledEdges(memories)
+    expect(count).toBe(1) // only (real1, real2) survives
+    expect(storage.upsertCoRecalled).toHaveBeenCalledTimes(1)
+    const call = vi.mocked(storage.upsertCoRecalled).mock.calls[0]
+    expect([call[0], call[2]].sort()).toEqual(['real1', 'real2'])
+  })
+
+  it('co_recalled: wires every pair when all memories are salient', async () => {
+    const storage = makeMockStorage()
+    const manager = new AssociationManager(storage)
+    const count = await manager.createCoRecalledEdges([
+      { id: 'a', type: 'episode', salience: 0.9 },
+      { id: 'b', type: 'episode', salience: 0.8 },
+      { id: 'c', type: 'episode', salience: 0.7 },
+    ])
+    expect(count).toBe(3)
+  })
+
+  it('co_recalled: leaves pairs ungated when salience is absent (backward compatible)', async () => {
+    const storage = makeMockStorage()
+    const manager = new AssociationManager(storage)
+    const count = await manager.createCoRecalledEdges([
+      { id: 'a', type: 'episode' },
+      { id: 'b', type: 'episode' },
+    ])
+    expect(count).toBe(1) // undefined salience → 0.5 → not gated
+  })
+
+  it('temporal: drops a noise edge and attenuates an ordinary one', async () => {
+    const storage = makeMockStorage()
+    const manager = new AssociationManager(storage)
+    const salienceById = new Map<string, number>([
+      ['hi', 0.9],
+      ['noise', 0.1],
+      ['lo', 0.3],
+    ])
+    // pairs within distance: (hi,noise) drop, (hi,lo) keep, (noise,lo) drop
+    const count = await manager.createTemporalEdges(['hi', 'noise', 'lo'], { salienceById })
+    expect(count).toBe(1)
+    const [arg] = vi.mocked(storage.insert).mock.calls[0]
+    expect(arg.strength).toBeGreaterThan(0)
+    expect(arg.strength).toBeLessThan(0.3) // ordinary 0.3 endpoint attenuates the edge
+  })
+
+  it('temporal: keeps the flat 0.3 strength when no salience map is provided', async () => {
+    const storage = makeMockStorage()
+    const manager = new AssociationManager(storage)
+    await manager.createTemporalEdges(['a', 'b'])
+    const [arg] = vi.mocked(storage.insert).mock.calls[0]
+    expect(arg.strength).toBe(0.3)
+  })
+})

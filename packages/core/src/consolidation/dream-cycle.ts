@@ -2,6 +2,7 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { ConsolidateResult } from '../types.js'
+import { salienceGate } from '../ingestion/plasticity.js'
 
 export interface DreamCycleOptions {
   daysLookback?: number
@@ -464,13 +465,18 @@ export async function dreamCycle(
         WHERE m.createdAt IS NOT NULL
         ORDER BY m.createdAt DESC
         LIMIT ${seedLimit}
-        RETURN m.id AS memoryId
+        RETURN m.id AS memoryId, m.salience AS salience
       `)
 
-      const seeds = seedResult.records.map((r: { get(key: string): unknown }) => ({ memoryId: r.get('memoryId') as string }))
+      const seeds = seedResult.records.map((r: { get(key: string): unknown }) => ({
+        memoryId: r.get('memoryId') as string,
+        // Unknown/missing salience defaults to ordinary (0.5) so a seed is never
+        // gated out for lack of the property.
+        salience: typeof r.get('salience') === 'number' ? (r.get('salience') as number) : 0.5,
+      }))
 
       // Run spreading activation from each seed
-      const activationResults: Array<{ seedId: string; activatedMemoryIds: Set<string> }> = []
+      const activationResults: Array<{ seedId: string; salience: number; activatedMemoryIds: Set<string> }> = []
       for (const seed of seeds) {
         const activated = await graph.spreadActivation({
           seedNodeIds: [seed.memoryId],
@@ -484,7 +490,7 @@ export async function dreamCycle(
             .filter(n => n.nodeType === 'Memory')
             .map(n => n.nodeId),
         )
-        activationResults.push({ seedId: seed.memoryId, activatedMemoryIds })
+        activationResults.push({ seedId: seed.memoryId, salience: seed.salience, activatedMemoryIds })
       }
 
       // Create TOPICAL edges for pairs with >= 3 Memory overlap
@@ -496,7 +502,12 @@ export async function dreamCycle(
           const overlap = new Set([...a.activatedMemoryIds].filter(id => b.activatedMemoryIds.has(id)))
           if (overlap.size < 3) continue
 
-          const edgeWeight = Math.min(0.9, 0.3 + 0.1 * Math.min(overlap.size, 6))
+          // Salience-gated plasticity: a replay edge between noise seeds (low
+          // encoding salience) forms weakly or not at all, instead of purely on
+          // co-activation overlap. Drops to 0 when either seed is noise.
+          const baseWeight = Math.min(0.9, 0.3 + 0.1 * Math.min(overlap.size, 6))
+          const edgeWeight = salienceGate(baseWeight, a.salience, b.salience)
+          if (edgeWeight <= 0) continue
           const now = new Date().toISOString()
 
           await graph.runCypherWrite!(`

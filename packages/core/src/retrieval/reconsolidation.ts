@@ -39,10 +39,21 @@ export function stageReconsolidate(
   })
 
   // Create co_recalled edges through AssociationManager so the 100-edge-per-memory
-  // cap is enforced (audit finding L5).
-  const coRecalledUpdate = manager.createCoRecalledEdges(
-    recalled.slice(0, 5).map((m) => ({ id: m.id, type: m.type })),
-  )
+  // cap is enforced (audit finding L5). Encoding salience is looked up for the
+  // co-recalled episodes so noise turns do not wire (or strengthen) Hebbian
+  // edges; non-episode memories (curated semantic/procedural) are left ungated.
+  const coRecalledUpdate = (async () => {
+    const top5 = recalled.slice(0, 5)
+    const episodeIds = top5.filter((m) => m.type === 'episode').map((m) => m.id)
+    const salienceById = new Map<string, number>()
+    if (episodeIds.length > 0) {
+      const eps = await storage.episodes.getByIds(episodeIds)
+      for (const e of eps) salienceById.set(e.id, e.salience)
+    }
+    return manager.createCoRecalledEdges(
+      top5.map((m) => ({ id: m.id, type: m.type, salience: salienceById.get(m.id) })),
+    )
+  })()
 
   // Wave 2: Neo4j edge strengthening.
   // Each traversed edge gets weight += 0.02 (capped at 1.0). This is the
