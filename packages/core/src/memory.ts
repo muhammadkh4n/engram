@@ -87,7 +87,9 @@ export interface MemoryOptions {
    * same-session episode, the existing memory is reinforced (recordAccess)
    * instead of storing a redundant copy — mimicking dentate-gyrus separation,
    * where redundant encodings collapse and distinct ones stay separate.
-   * Range (0, 1]; a value ≤ 0 disables the merge. Defaults to 0.95.
+   * Range (0, 1]; a value ≤ 0 disables the merge. Defaults to OFF (0) — the
+   * recall benefit is not yet validated, so this is opt-in; ~0.95 is the
+   * recommended value when enabling (only near-identical turns collapse).
    */
   dedupeThreshold?: number
 }
@@ -109,12 +111,6 @@ const DEFAULT_SESSION_ID = 'default'
 // around 0.25–0.45, and pure gibberish rarely clears 0.35. 0.5 keeps the
 // targeted-prune ergonomic without false-positives on unrelated content.
 const DEFAULT_FORGET_MIN_RELEVANCE = 0.5
-// Pattern separation (Gap 1): cosine threshold at/above which an incoming turn
-// is treated as a near-duplicate of a recent same-session episode and merged
-// (reinforce the existing memory) rather than stored again. 0.95 is deliberately
-// conservative — only near-identical turns (heartbeats, re-emitted output, the
-// same statement twice) collapse; rephrasings score lower and are kept distinct.
-const DEFAULT_DEDUPE_THRESHOLD = 0.95
 
 /**
  * Build the contextual text the embedding model sees for a single message.
@@ -361,7 +357,7 @@ export class Memory {
     // same-session episodes (the heartbeat / re-emitted-output case), so distinct
     // cross-session events are never merged. recordAccess reinforces the prior
     // memory so the signal is kept, not lost.
-    const dedupeThreshold = this.opts.dedupeThreshold ?? DEFAULT_DEDUPE_THRESHOLD
+    const dedupeThreshold = this.opts.dedupeThreshold ?? 0
     if (embedding && dedupeThreshold > 0) {
       const dup = findNearDuplicate(
         embedding,

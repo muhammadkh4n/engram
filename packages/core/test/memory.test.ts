@@ -321,7 +321,8 @@ describe('Memory — ingest() with intelligence adapter', () => {
       return Promise.resolve([0, 0, 1])
     })
     const intelligence: IntelligenceAdapter = { embed: embedFn }
-    const memory = createMemory({ storage, intelligence })
+    // dedup is opt-in (default off); enable it for this test.
+    const memory = createMemory({ storage, intelligence, dedupeThreshold: 0.95 })
     await memory.initialize()
 
     await memory.ingest({ role: 'user', content: 'alpha one', sessionId: 'sep' })
