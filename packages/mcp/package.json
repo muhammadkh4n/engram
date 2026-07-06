@@ -27,6 +27,7 @@
     "engram-test-wave2-e2e": "dist/test-wave2-e2e.js",
     "engram-ingest": "dist/ingest/engram-ingest-cli.js",
     "engram-contextual-backfill": "dist/ingest/engram-contextual-backfill-cli.js",
+    "engram-embed-backfill": "dist/ingest/engram-embed-backfill-cli.js",
     "engram-hook-user-prompt-submit": "dist/hooks/user-prompt-submit.js",
     "engram-hook-stop": "dist/hooks/stop.js",
     "engram-salience-stats": "dist/ingest/engram-salience-stats-cli.js",
