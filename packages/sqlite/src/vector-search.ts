@@ -34,6 +34,23 @@ export function blobToVector(buf: Buffer): number[] {
   )
 }
 
+/** Decode a SQLite BLOB to a Float32Array VIEW — no per-element boxing. */
+export function blobToF32(buf: Buffer): Float32Array {
+  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+}
+
+/** Cosine over a (possibly boxed) query and an unboxed stored vector. */
+export function cosineF32(a: number[] | Float32Array, b: Float32Array): number {
+  if (a.length !== b.length || a.length === 0) return 0
+  let dot = 0, na = 0, nb = 0
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    dot += x * y; na += x * x; nb += y * y
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return denom === 0 ? 0 : dot / denom
+}
+
 // ---------------------------------------------------------------------------
 // Generic hybrid-search rows
 // ---------------------------------------------------------------------------
