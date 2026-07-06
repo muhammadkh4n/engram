@@ -26,13 +26,14 @@ const TOMBSTONE_FLAG = 1
 /** Fraction of dead (tombstoned) slots among used slots that triggers an automatic compaction. */
 const COMPACTION_DEAD_FRACTION = 0.25
 
-const MEMORY_TYPE_CODES: Record<MemoryType, number> = {
+/** Exported for `snapshot.ts` — the .eq1 file stores the same u8 type codes, so the writer/reader reuse this single mapping instead of redefining it. */
+export const MEMORY_TYPE_CODES: Record<MemoryType, number> = {
   episode: 0,
   digest: 1,
   semantic: 2,
   procedural: 3,
 }
-const MEMORY_TYPE_BY_CODE: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
+export const MEMORY_TYPE_BY_CODE: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
 
 export interface SlotFilter {
   /** Restrict to these memory types, or `null` for no tier filter (match any type). */
@@ -61,13 +62,34 @@ export interface SlotMeta {
   createdAt: number
 }
 
+/**
+ * Serialization view of one live slot's full data — everything `snapshot.ts`
+ * needs to write a row into the .eq1 warm-start file. Plane fields
+ * (`sign`/`mag0`/`mag1`/`qjl`) are zero-copy subarray views into this
+ * store's planes, so — same rule as returned slot indices (see class doc)
+ * — a caller must finish reading them before this store is next mutated.
+ */
+export interface LiveEntryView {
+  id: string
+  type: MemoryType
+  createdAt: number
+  projectId: string | null
+  sessionId: string | null
+  norm: number
+  gamma: number
+  sign: Uint32Array
+  mag0: Uint32Array
+  mag1: Uint32Array
+  qjl: Uint32Array
+}
+
 export interface CodeStoreOpts {
   /** Initial slot capacity before the first grow. Default 1024; tests may pass a small value to exercise growth cheaply. */
   initialCapacity?: number
 }
 
 /** Derives the (mag0Words, mag1Words) per-slot word counts for a given codec `bits`, mirroring codec.ts's private `magPlaneWords(bm)` (bm = bits - 1). Kept in sync manually since that mapping is a fixed layout choice, not something that varies at runtime. */
-function magPlaneWordsForBits(bits: number, words: number): { mag0Words: number; mag1Words: number } {
+export function magPlaneWordsForBits(bits: number, words: number): { mag0Words: number; mag1Words: number } {
   const bm = bits - 1
   if (bm === 1) return { mag0Words: 0, mag1Words: 0 }
   if (bm === 2) return { mag0Words: words, mag1Words: 0 }
@@ -274,6 +296,33 @@ export class CodeStore {
    */
   watermark(): number {
     return this.watermarkMs
+  }
+
+  /**
+   * Serialization accessor for the warm-start snapshot writer
+   * (`snapshot.ts`'s `writeSnapshot`). Yields every LIVE (non-tombstoned)
+   * slot in ascending slot order; tombstoned slots are skipped entirely —
+   * snapshots hold live rows only (compaction-on-write). Slot indices are
+   * NOT part of the yielded data and are never persisted: on reload, ids
+   * are the only identity that survives the round trip.
+   */
+  *liveEntries(): IterableIterator<LiveEntryView> {
+    for (let slot = 0; slot < this.usedSlots; slot++) {
+      if (this.flagsArr[slot] & TOMBSTONE_FLAG) continue
+      yield {
+        id: this.slotId(slot),
+        type: MEMORY_TYPE_BY_CODE[this.typeArr[slot]],
+        createdAt: this.createdAtArr[slot],
+        projectId: this.resolveRef(this.projectRefArr[slot]),
+        sessionId: this.resolveRef(this.sessionRefArr[slot]),
+        norm: this.normArr[slot],
+        gamma: this.gammaArr[slot],
+        sign: this.signPlane.subarray(slot * this.words, (slot + 1) * this.words),
+        mag0: this.mag0Plane.subarray(slot * this.mag0Words, (slot + 1) * this.mag0Words),
+        mag1: this.mag1Plane.subarray(slot * this.mag1Words, (slot + 1) * this.mag1Words),
+        qjl: this.qjlPlane.subarray(slot * this.words, (slot + 1) * this.words),
+      }
+    }
   }
 
   private assertMatchesBits(enc: EncodedVector): void {
