@@ -21,7 +21,7 @@ function label(item: TypedMemory): string {
 }
 
 describe('SqliteStorageAdapter.vectorSearch — exhaustive scan', () => {
-  it('finds the best match even when the tier exceeds the old 1200-row cap', async () => {
+  it('finds the best match even when the tier exceeds the old scan cap', async () => {
     const adapter = new SqliteStorageAdapter(':memory:')
     await adapter.initialize()
     const dims = 32

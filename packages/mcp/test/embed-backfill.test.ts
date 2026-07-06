@@ -7,8 +7,7 @@
  * each table's generated `fts` tsvector already indexes (packages/postgrest/
  * schema.sql:761 `trigger_text || ' ' || procedure`, :790 `topic || ' ' ||
  * content`, :692 `summary`), so the vector channel and the lexical channel
- * of engram_hybrid_recall agree on what a memory "is about". See git commit
- * for the schema line citations backing this decision.
+ * of engram_hybrid_recall agree on what a memory "is about".
  */
 import { describe, it, expect } from 'vitest'
 import {
@@ -23,6 +22,10 @@ import {
   nextCursor,
   buildKeysetFilter,
   applyBatch,
+  filterEmptyRows,
+  truncateRows,
+  embedBatchWithFallback,
+  MAX_EMBED_CHARS,
   type SemanticEmbedRow,
   type DigestEmbedRow,
   type ProceduralEmbedRow,
@@ -225,5 +228,209 @@ describe('applyBatch', () => {
     }
     const result = await applyBatch([] as FakeRow[], [], updateRow)
     expect(result).toEqual({ updated: 0, errors: 0 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Poison-text guards: OpenAI 400s on an empty string and on inputs beyond
+// its token limit. These pure functions keep poison rows from ever reaching
+// embedBatch/embed, and the shared retry+circuit-breaker they'd otherwise
+// exhaust on a 400.
+// ---------------------------------------------------------------------------
+
+describe('filterEmptyRows', () => {
+  interface FakeRow {
+    id: string
+    text: string
+  }
+
+  it('drops rows whose text is empty', () => {
+    const rows: FakeRow[] = [
+      { id: 'a', text: 'hello' },
+      { id: 'b', text: '' },
+      { id: 'c', text: 'world' },
+    ]
+    const result = filterEmptyRows(rows)
+    expect(result.rows).toEqual([{ id: 'a', text: 'hello' }, { id: 'c', text: 'world' }])
+    expect(result.skippedEmpty).toBe(1)
+  })
+
+  it('drops rows whose text is all-whitespace', () => {
+    const rows: FakeRow[] = [
+      { id: 'a', text: '   ' },
+      { id: 'b', text: '\n\t  ' },
+      { id: 'c', text: 'content' },
+    ]
+    const result = filterEmptyRows(rows)
+    expect(result.rows).toEqual([{ id: 'c', text: 'content' }])
+    expect(result.skippedEmpty).toBe(2)
+  })
+
+  it('keeps rows with surrounding whitespace but real content', () => {
+    const rows: FakeRow[] = [{ id: 'a', text: '  real content  ' }]
+    const result = filterEmptyRows(rows)
+    expect(result.rows).toEqual(rows)
+    expect(result.skippedEmpty).toBe(0)
+  })
+
+  it('returns all-zero for an empty input', () => {
+    const result = filterEmptyRows([] as FakeRow[])
+    expect(result).toEqual({ rows: [], skippedEmpty: 0 })
+  })
+})
+
+describe('truncateRows', () => {
+  interface FakeRow {
+    id: string
+    text: string
+  }
+
+  it('leaves rows at or under the limit untouched', () => {
+    const rows: FakeRow[] = [{ id: 'a', text: 'short' }]
+    const result = truncateRows(rows, 10)
+    expect(result.rows).toEqual(rows)
+    expect(result.truncated).toBe(0)
+  })
+
+  it('truncates rows over the limit and counts them', () => {
+    const rows: FakeRow[] = [{ id: 'a', text: 'x'.repeat(20) }, { id: 'b', text: 'short' }]
+    const result = truncateRows(rows, 10)
+    expect(result.rows).toEqual([{ id: 'a', text: 'x'.repeat(10) }, { id: 'b', text: 'short' }])
+    expect(result.truncated).toBe(1)
+  })
+
+  it('does not mutate the input rows (immutability)', () => {
+    const original: FakeRow = { id: 'a', text: 'x'.repeat(20) }
+    const rows: FakeRow[] = [original]
+    truncateRows(rows, 10)
+    expect(original.text).toBe('x'.repeat(20))
+  })
+
+  it('defaults to MAX_EMBED_CHARS when no limit is given', () => {
+    const rows: FakeRow[] = [{ id: 'a', text: 'x'.repeat(MAX_EMBED_CHARS + 500) }]
+    const result = truncateRows(rows)
+    expect(result.rows[0]!.text.length).toBe(MAX_EMBED_CHARS)
+    expect(result.truncated).toBe(1)
+  })
+
+  it('returns all-zero for an empty input', () => {
+    const result = truncateRows([] as FakeRow[])
+    expect(result).toEqual({ rows: [], truncated: 0 })
+  })
+})
+
+describe('embedBatchWithFallback', () => {
+  interface FakeRow {
+    id: string
+    text: string
+  }
+
+  it('returns all rows as succeeded when embedBatch succeeds outright, without touching embedOne', async () => {
+    const batch: FakeRow[] = [{ id: 'a', text: 'aa' }, { id: 'b', text: 'bb' }]
+    const embedBatchCalls: string[][] = []
+    const embedOneCalls: string[] = []
+    const fakeEmbedBatch = async (texts: string[]): Promise<number[][]> => {
+      embedBatchCalls.push(texts)
+      return texts.map((t) => [t.length])
+    }
+    const fakeEmbedOne = async (text: string): Promise<number[]> => {
+      embedOneCalls.push(text)
+      return [text.length]
+    }
+
+    const result = await embedBatchWithFallback(batch, fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result.usedFallback).toBe(false)
+    expect(result.failed).toEqual([])
+    expect(result.succeeded).toEqual([
+      { row: batch[0], embedding: [2] },
+      { row: batch[1], embedding: [2] },
+    ])
+    expect(embedBatchCalls).toEqual([['aa', 'bb']])
+    expect(embedOneCalls).toEqual([])
+  })
+
+  it('falls back to one-row-at-a-time when embedBatch throws, isolating a single poison row', async () => {
+    const batch: FakeRow[] = [{ id: 'a', text: 'good' }, { id: 'b', text: 'POISON' }, { id: 'c', text: 'fine' }]
+    const fakeEmbedBatch = async (): Promise<number[][]> => {
+      throw new Error('OpenAI 400: invalid input')
+    }
+    const fakeEmbedOne = async (text: string): Promise<number[]> => {
+      if (text === 'POISON') throw new Error('OpenAI 400: invalid input (single row)')
+      return [text.length]
+    }
+
+    const result = await embedBatchWithFallback(batch, fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result.usedFallback).toBe(true)
+    expect(result.succeeded).toEqual([
+      { row: batch[0], embedding: [4] },
+      { row: batch[2], embedding: [4] },
+    ])
+    expect(result.failed).toHaveLength(1)
+    expect(result.failed[0]!.row).toEqual(batch[1])
+    expect(result.failed[0]!.error).toBeInstanceOf(Error)
+  })
+
+  it('falls back when embedBatch returns a mismatched embeddings length', async () => {
+    const batch: FakeRow[] = [{ id: 'a', text: 'aa' }, { id: 'b', text: 'bb' }]
+    const fakeEmbedBatch = async (): Promise<number[][]> => [[1]] // one short
+    const fakeEmbedOne = async (text: string): Promise<number[]> => [text.length]
+
+    const result = await embedBatchWithFallback(batch, fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result.usedFallback).toBe(true)
+    expect(result.succeeded).toHaveLength(2)
+    expect(result.failed).toEqual([])
+  })
+
+  it('reports every row as failed when embedOne also fails for all of them', async () => {
+    const batch: FakeRow[] = [{ id: 'a', text: 'aa' }, { id: 'b', text: 'bb' }]
+    const fakeEmbedBatch = async (): Promise<number[][]> => {
+      throw new Error('network down')
+    }
+    const fakeEmbedOne = async (): Promise<number[]> => {
+      throw new Error('still down')
+    }
+
+    const result = await embedBatchWithFallback(batch, fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result.usedFallback).toBe(true)
+    expect(result.succeeded).toEqual([])
+    expect(result.failed).toHaveLength(2)
+  })
+
+  it('keeps updated + errors + skipped accounting consistent for a mixed batch (fallback path)', async () => {
+    // Simulates the CLI's invariant: every row in the batch ends up in
+    // exactly one of succeeded/failed — nothing is silently dropped.
+    const batch: FakeRow[] = [{ id: 'a', text: 'x' }, { id: 'b', text: 'y' }, { id: 'c', text: 'z' }]
+    const fakeEmbedBatch = async (): Promise<number[][]> => {
+      throw new Error('batch failed')
+    }
+    const fakeEmbedOne = async (text: string): Promise<number[]> => {
+      if (text === 'y') throw new Error('poison')
+      return [1]
+    }
+
+    const result = await embedBatchWithFallback(batch, fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result.succeeded.length + result.failed.length).toBe(batch.length)
+  })
+
+  it('returns all-empty, without calling either embed function, for an empty batch', async () => {
+    let called = false
+    const fakeEmbedBatch = async (): Promise<number[][]> => {
+      called = true
+      return []
+    }
+    const fakeEmbedOne = async (): Promise<number[]> => {
+      called = true
+      return []
+    }
+
+    const result = await embedBatchWithFallback([] as FakeRow[], fakeEmbedBatch, fakeEmbedOne)
+
+    expect(result).toEqual({ succeeded: [], failed: [], usedFallback: false })
+    expect(called).toBe(false)
   })
 })

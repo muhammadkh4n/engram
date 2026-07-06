@@ -24,13 +24,48 @@
 -- Sibling function engram_recall (schema.sql) already uses this per-tier
 -- subquery shape; this migration brings engram_vector_search in line with it.
 --
--- Idempotent: CREATE OR REPLACE FUNCTION on the unchanged signature. Safe to
--- re-run.
+-- Exact-vs-approximate tradeoff: the old function body above (flat UNION ALL
+-- + outer ORDER BY) always executed as an exact sequential scan. The new
+-- per-tier shape lets the planner drive each tier from its HNSW index
+-- instead — an approximate nearest neighbor (ANN) plan. Recall is now
+-- governed by `hnsw.ef_search` (the number of candidates HNSW examines per
+-- index scan) rather than by touching every row, so a true top-k match can
+-- be missed if it falls outside the ef_search candidate window. The
+-- `p_session_id` / `p_project_id` / `forgotten_at` / `superseded_by`
+-- predicates are post-filters applied to that candidate stream, not filters
+-- that widen it — a narrow filter combined with a low ef_search compounds
+-- the truncation risk.
+--
+-- `SET hnsw.ef_search TO '150'`: callers pass p_match_count up to 120 (core
+-- recall's vector-search leg requests strategy.maxResults * 4, and
+-- maxResults tops out at 30 for the deep-sleep/light-sleep intents — see
+-- packages/core/src/retrieval/search.ts and packages/core/src/intent/
+-- intents.ts). pgvector's HNSW returns at most ef_search candidates per
+-- index scan (default 40) regardless of the query's LIMIT, so without an
+-- explicit floor a deep recall call silently truncates below what it asked
+-- for. 150 covers the 120 ceiling with headroom.
+--
+-- Redundant ivfflat indexes dropped: memory_digests, memory_episodes, and
+-- memory_semantic each carried both an ivfflat index (idx_digests_embedding,
+-- idx_episodes_embedding, idx_knowledge_embedding — probes=1 by default) and
+-- an HNSW index on `embedding`. The ivfflat indexes were abandoned early for
+-- poor recall; now that this function's shape lets the planner choose either
+-- index by cost, leaving ivfflat in place risked it winning on cost despite
+-- worse recall than HNSW. Dropped below — memory_procedural never had an
+-- ivfflat index, so there is nothing to drop for that table.
+--
+-- Idempotent: CREATE OR REPLACE FUNCTION on the unchanged signature, and
+-- DROP INDEX IF EXISTS for the ivfflat indexes. Safe to re-run.
 -- =============================================================================
+
+DROP INDEX IF EXISTS public.idx_digests_embedding;
+DROP INDEX IF EXISTS public.idx_episodes_embedding;
+DROP INDEX IF EXISTS public.idx_knowledge_embedding;
 
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.ef_search TO '150'
     AS $$
   SELECT * FROM (
     SELECT * FROM (

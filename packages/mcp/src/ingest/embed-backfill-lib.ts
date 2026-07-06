@@ -204,3 +204,135 @@ export async function applyBatch<T extends { id: string }>(
 
   return { updated, errors }
 }
+
+// ---------------------------------------------------------------------------
+// Poison-text guards: OpenAI's embeddings endpoint 400s on an empty string
+// and on inputs beyond its ~8191-token limit. The shared OpenAIEmbeddingService
+// retry wrapper (packages/openai/src/embeddings.ts) retries 400s the same as
+// any other failure, and its CircuitBreaker counts every exhausted retry
+// toward its trip threshold — so a handful of poison rows in a 64-row batch
+// not only fail that batch, they can trip the breaker for unrelated, healthy
+// batches queued behind it. Filtering and truncating before the embed call
+// keeps poison rows from ever reaching OpenAI.
+// ---------------------------------------------------------------------------
+
+/** OpenAI's embedding input limit is ~8191 tokens; 24000 chars is a
+ * conservative char-based proxy (see CHARS_PER_TOKEN_ESTIMATE — 24000 / 4 =
+ * 6000 tokens, comfortably under the limit even for dense/non-English text
+ * where the chars-per-token ratio is lower). */
+export const MAX_EMBED_CHARS = 24000
+
+export interface FilterEmptyResult<T> {
+  rows: T[]
+  skippedEmpty: number
+}
+
+/**
+ * Drops rows whose text is empty or all-whitespace. OpenAI 400s on an empty
+ * string input, so these must never reach embedBatch/embed. Not an error —
+ * an empty-text row (e.g. a digest with an empty summary) has nothing to
+ * embed; it is counted separately from `errors` so a healthy backfill run
+ * isn't reported as having failures it didn't have.
+ */
+export function filterEmptyRows<T extends { text: string }>(rows: readonly T[]): FilterEmptyResult<T> {
+  const kept: T[] = []
+  let skippedEmpty = 0
+  for (const row of rows) {
+    if (row.text.trim().length === 0) {
+      skippedEmpty++
+    } else {
+      kept.push(row)
+    }
+  }
+  return { rows: kept, skippedEmpty }
+}
+
+export interface TruncateResult<T> {
+  rows: T[]
+  truncated: number
+}
+
+/**
+ * Truncates each row's text to at most `maxChars` (default MAX_EMBED_CHARS).
+ * Returns new row objects (immutable — never mutates the input rows) and a
+ * count of how many rows were actually shortened, so callers can log/report
+ * it without a second pass.
+ */
+export function truncateRows<T extends { text: string }>(
+  rows: readonly T[],
+  maxChars: number = MAX_EMBED_CHARS,
+): TruncateResult<T> {
+  let truncated = 0
+  const out = rows.map((row) => {
+    if (row.text.length <= maxChars) return row
+    truncated++
+    return { ...row, text: row.text.slice(0, maxChars) }
+  })
+  return { rows: out, truncated }
+}
+
+// ---------------------------------------------------------------------------
+// Batch-level fallback: a single poison row that slips past the filter/
+// truncate guards above (or any other batch-level embedBatch failure, e.g. a
+// transient network error that exhausts retries) currently fails every row
+// in the batch. Falling back to embedding one row at a time isolates the
+// failure to the actual offending row(s) instead of discarding otherwise-
+// healthy rows' progress.
+// ---------------------------------------------------------------------------
+
+export interface EmbedFallbackResult<T> {
+  /** Rows that got an embedding, paired with it, in original order. */
+  succeeded: Array<{ row: T; embedding: number[] }>
+  /** Rows whose embed call failed even in the one-at-a-time fallback. */
+  failed: Array<{ row: T; error: unknown }>
+  /** True if the initial whole-batch embedBatch call failed and the
+   * one-at-a-time fallback ran; false if the batch call succeeded outright. */
+  usedFallback: boolean
+}
+
+/**
+ * Embeds `batch` via a single `embedBatch` call. If that call throws (or
+ * returns a mismatched number of embeddings — treated the same as a throw,
+ * since it means the response cannot be trusted to zip 1:1 with the batch),
+ * falls back to calling `embedOne` for each row individually so one poison
+ * row fails alone while the rest of the batch's rows still get embedded.
+ *
+ * Pure aside from calling the injected `embedBatch`/`embedOne` — no network/
+ * DB access here, which is what makes this unit-testable with a fake
+ * embedBatch that throws on demand.
+ */
+export async function embedBatchWithFallback<T extends { text: string }>(
+  batch: readonly T[],
+  embedBatch: (texts: string[]) => Promise<number[][]>,
+  embedOne: (text: string) => Promise<number[]>,
+): Promise<EmbedFallbackResult<T>> {
+  if (batch.length === 0) {
+    return { succeeded: [], failed: [], usedFallback: false }
+  }
+
+  try {
+    const embeddings = await embedBatch(batch.map((row) => row.text))
+    if (embeddings.length !== batch.length) {
+      throw new Error(
+        `embedBatch returned ${embeddings.length} embeddings for a batch of ${batch.length}`,
+      )
+    }
+    return {
+      succeeded: batch.map((row, i) => ({ row, embedding: embeddings[i]! })),
+      failed: [],
+      usedFallback: false,
+    }
+  } catch {
+    const succeeded: Array<{ row: T; embedding: number[] }> = []
+    const failed: Array<{ row: T; error: unknown }> = []
+    for (const row of batch) {
+      try {
+        const embedding = await embedOne(row.text)
+        succeeded.push({ row, embedding })
+      } catch (err) {
+        failed.push({ row, error: err })
+      }
+    }
+    return { succeeded, failed, usedFallback: true }
+  }
+}
