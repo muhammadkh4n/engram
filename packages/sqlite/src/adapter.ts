@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 import type { StorageAdapter } from '@engram-mem/core'
-import { cosineSimilarity, blobToVector } from './vector-search.js'
+import { cosineF32, blobToF32 } from './vector-search.js'
 import { runMigrations } from './migrations.js'
 import { SqliteEpisodeStorage } from './episodes.js'
 import { SqliteDigestStorage } from './digests.js'
@@ -194,10 +194,13 @@ export class SqliteStorageAdapter implements StorageAdapter {
     const db = this.assertDb()
     const limit = opts?.limit ?? 15
     const tiers = opts?.tiers ?? ['episode', 'digest', 'semantic', 'procedural']
-    // Scan a wide pool — evidence may be anywhere, not just recent rows.
-    // Brute-force cosine over 500 × 1536-dim vectors is ~5ms.
-    const scanLimit = Math.max(limit * 10, 500)
-    const results: Array<SearchResult<TypedMemory>> = []
+    // Exhaustive scan — every row with an embedding in each tier is scored.
+    // No ORDER BY/LIMIT candidate pool to hide a better match outside it.
+    // The scoring pass reads only (id, embedding) and decodes via a zero-copy
+    // Float32Array view (blobToF32/cosineF32), so per-row cost is ~2.5-6us
+    // regardless of table size; only the post-sort candidate set is hydrated
+    // to full rows.
+    const candidates: Array<{ id: string; type: MemoryType; sim: number }> = []
     // Parameterized project filter — SQL clause + params to append to each query
     const projectFilter = opts?.projectId ? ' AND (project_id = ? OR project_id IS NULL)' : ''
     const projectParams: unknown[] = opts?.projectId ? [opts.projectId] : []
@@ -206,66 +209,105 @@ export class SqliteStorageAdapter implements StorageAdapter {
       let sql: string
       let params: unknown[]
       if (opts?.sessionId) {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL AND session_id = ?${projectFilter} LIMIT ?`
-        params = [opts.sessionId, ...projectParams, scanLimit]
+        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL AND session_id = ?${projectFilter}`
+        params = [opts.sessionId, ...projectParams]
       } else {
-        sql = `SELECT * FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
-        params = [...projectParams, scanLimit]
+        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}`
+        params = [...projectParams]
       }
-      const rows = db.prepare(sql).all(...params) as EpisodeRow[]
+      const rows = db.prepare(sql).all(...params) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
-        const stored = blobToVector(row.embedding)
-        const sim = cosineSimilarity(embedding, stored)
-        if (sim > 0) {
-          const episodes = await this._episodes!.getByIds([row.id])
-          if (episodes.length > 0) {
-            results.push({ item: { type: 'episode', data: episodes[0] }, similarity: sim })
-          }
-        }
+        const sim = cosineF32(embedding, blobToF32(row.embedding))
+        if (sim > 0) candidates.push({ id: row.id, type: 'episode', sim })
       }
     }
 
     if (tiers.includes('digest')) {
       const rows = db.prepare(
-        `SELECT * FROM digests WHERE embedding IS NOT NULL${projectFilter} LIMIT ?`
-      ).all(...projectParams, scanLimit) as DigestRow[]
+        `SELECT id, embedding FROM digests WHERE embedding IS NOT NULL${projectFilter}`
+      ).all(...projectParams) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
-        const stored = blobToVector(row.embedding)
-        const sim = cosineSimilarity(embedding, stored)
-        if (sim > 0) {
-          results.push({ item: { type: 'digest', data: rowToDigest(row) }, similarity: sim })
-        }
+        const sim = cosineF32(embedding, blobToF32(row.embedding))
+        if (sim > 0) candidates.push({ id: row.id, type: 'digest', sim })
       }
     }
 
     if (tiers.includes('semantic')) {
       const rows = db.prepare(
-        `SELECT * FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
-      ).all(...projectParams, scanLimit) as SemanticRow[]
+        `SELECT id, embedding FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL${projectFilter}`
+      ).all(...projectParams) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
-        const stored = blobToVector(row.embedding)
-        const sim = cosineSimilarity(embedding, stored)
-        if (sim > 0) {
-          results.push({ item: { type: 'semantic', data: rowToSemanticMemory(row) }, similarity: sim })
-        }
+        const sim = cosineF32(embedding, blobToF32(row.embedding))
+        if (sim > 0) candidates.push({ id: row.id, type: 'semantic', sim })
       }
     }
 
     if (tiers.includes('procedural')) {
       const rows = db.prepare(
-        `SELECT * FROM procedural WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter} LIMIT ?`
-      ).all(...projectParams, scanLimit) as ProceduralRow[]
+        `SELECT id, embedding FROM procedural WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}`
+      ).all(...projectParams) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
-        const stored = blobToVector(row.embedding)
-        const sim = cosineSimilarity(embedding, stored)
-        if (sim > 0) {
-          results.push({ item: { type: 'procedural', data: rowToProceduralMemory(row) }, similarity: sim })
-        }
+        const sim = cosineF32(embedding, blobToF32(row.embedding))
+        if (sim > 0) candidates.push({ id: row.id, type: 'procedural', sim })
       }
+    }
+
+    // Global top candidates BEFORE hydration — hydration (full row + JSON
+    // parse) is the expensive part; scoring above is not.
+    const top = candidates
+      .sort((a, b) => b.sim - a.sim)
+      .slice(0, limit * 4)
+
+    const idsByType = new Map<MemoryType, string[]>()
+    for (const c of top) {
+      const list = idsByType.get(c.type) ?? []
+      list.push(c.id)
+      idsByType.set(c.type, list)
+    }
+
+    const hydrated = new Map<string, TypedMemory>()
+
+    const episodeIds = idsByType.get('episode')
+    if (episodeIds && episodeIds.length > 0) {
+      const episodes = await this._episodes!.getByIds(episodeIds)
+      for (const ep of episodes) hydrated.set(`episode:${ep.id}`, { type: 'episode', data: ep })
+    }
+
+    const digestIds = idsByType.get('digest')
+    if (digestIds && digestIds.length > 0) {
+      const placeholders = digestIds.map(() => '?').join(',')
+      const rows = db
+        .prepare(`SELECT * FROM digests WHERE id IN (${placeholders})`)
+        .all(...digestIds) as DigestRow[]
+      for (const row of rows) hydrated.set(`digest:${row.id}`, { type: 'digest', data: rowToDigest(row) })
+    }
+
+    const semanticIds = idsByType.get('semantic')
+    if (semanticIds && semanticIds.length > 0) {
+      const placeholders = semanticIds.map(() => '?').join(',')
+      const rows = db
+        .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})`)
+        .all(...semanticIds) as SemanticRow[]
+      for (const row of rows) hydrated.set(`semantic:${row.id}`, { type: 'semantic', data: rowToSemanticMemory(row) })
+    }
+
+    const proceduralIds = idsByType.get('procedural')
+    if (proceduralIds && proceduralIds.length > 0) {
+      const placeholders = proceduralIds.map(() => '?').join(',')
+      const rows = db
+        .prepare(`SELECT * FROM procedural WHERE id IN (${placeholders})`)
+        .all(...proceduralIds) as ProceduralRow[]
+      for (const row of rows) hydrated.set(`procedural:${row.id}`, { type: 'procedural', data: rowToProceduralMemory(row) })
+    }
+
+    const results: Array<SearchResult<TypedMemory>> = []
+    for (const c of top) {
+      const item = hydrated.get(`${c.type}:${c.id}`)
+      if (item) results.push({ item, similarity: c.sim })
     }
 
     return results
@@ -426,6 +468,12 @@ export class SqliteStorageAdapter implements StorageAdapter {
 // scoped to the adapter so we can reconstruct TypedMemory without exposing
 // internal sub-store methods.
 // ---------------------------------------------------------------------------
+
+/** Minimal projection used by vectorSearch's scoring pass — id + embedding only. */
+interface ScoreRow {
+  id: string
+  embedding: Buffer | null
+}
 
 interface EpisodeRow {
   id: string
