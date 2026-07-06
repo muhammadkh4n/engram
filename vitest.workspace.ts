@@ -8,4 +8,5 @@ export default defineWorkspace([
   'packages/postgrest',
   'packages/supabase',
   'packages/graph',
+  'packages/recall-engine',
 ])
