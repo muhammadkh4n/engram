@@ -196,7 +196,17 @@ export function createCodec(opts: CreateCodecOpts = {}): TurboQuantCodec {
       throw new Error(`encode: expected length ${dims}, got ${vec.length}`)
     }
     let sumSq = 0
-    for (let i = 0; i < dims; i++) sumSq += vec[i] * vec[i]
+    for (let i = 0; i < dims; i++) {
+      const vi = vec[i]
+      // Caller-supplied embeddings (opts.embedding / precomputedEmbedding) are
+      // unvalidated upstream; a NaN/Infinity coordinate would silently poison
+      // the rotation and every downstream bit-plane, so reject it here in the
+      // same pass that already visits every coordinate for the norm.
+      if (!Number.isFinite(vi)) {
+        throw new Error(`encode: input contains a non-finite value (NaN/Infinity) at index ${i}`)
+      }
+      sumSq += vi * vi
+    }
     const vnorm = Math.sqrt(sumSq)
 
     const x = new Float32Array(D)
@@ -270,6 +280,16 @@ export function createCodec(opts: CreateCodecOpts = {}): TurboQuantCodec {
   }
 
   function estimateIP(q: RotatedQuery, v: EncodedVector): number {
+    // A RotatedQuery built by a codec with a different `bits` (hence a
+    // different centroid count) has a differently-shaped lut; reading it
+    // with this codec's `nCentroids` stride would silently index into the
+    // wrong coordinate's slice instead of throwing. Cheap guard: the lut is
+    // always exactly paddedDims * nCentroids for a matching codec.
+    if (q.lut.length !== D * nCentroids) {
+      throw new Error(
+        `estimateIP: q.lut length ${q.lut.length} does not match expected ${D * nCentroids} for bits=${bits} (cross-codec/bits mismatch)`,
+      )
+    }
     if (v.norm === 0) return 0
 
     let mse = 0

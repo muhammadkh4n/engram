@@ -50,8 +50,15 @@ function dot(a: Float32Array, b: Float32Array): number {
 
 // D_prod * d_padded theory constants from the paper (Algorithm 2 guarantee),
 // at the padded dimension D=2048 the codec actually operates in.
-const THEORY_DPROD_D: Record<2 | 3 | 4, number> = { 2: 0.56, 3: 0.18, 4: 0.047 }
+const THEORY_DPROD_D: Record<2 | 3 | 4 | 5, number> = { 2: 0.56, 3: 0.18, 4: 0.047, 5: 0.012 }
 const MARGIN = 1.5
+// The correlated-pair construction (correlate(x, yBase) = normalize(0.7x +
+// 0.72y)) targets a true inner product in this band regardless of bits —
+// it's a property of the sampling, not the quantizer. If it ever drifted to
+// ~0, every "unbiased" assertion above would pass vacuously (bias of an
+// estimator that's ~0 either way tells you nothing).
+const TRUE_IP_MIN = 0.6
+const TRUE_IP_MAX = 0.8
 
 describe('createCodec: determinism', () => {
   it('two independent codecs produce byte-identical EncodedVector planes for the same input', () => {
@@ -122,11 +129,12 @@ describe('createCodec: sign-plane property (b=4 default)', () => {
 describe('createCodec: unbiasedness + distortion (b=2,3,4)', () => {
   const trials = 400
 
-  function runTrials(bits: 2 | 3 | 4, seed: bigint) {
+  function runTrials(bits: 2 | 3 | 4 | 5, seed: bigint) {
     const codec = createCodec({ bits })
     const rng = splitmix64(seed)
     let sumErr = 0
     let sumErr2 = 0
+    let sumTrue = 0
     for (let t = 0; t < trials; t++) {
       const x = randUnit(rng, DIMS)
       const yBase = randUnit(rng, DIMS)
@@ -139,13 +147,17 @@ describe('createCodec: unbiasedness + distortion (b=2,3,4)', () => {
 
       sumErr += est - trueIp
       sumErr2 += (est - trueIp) ** 2
+      sumTrue += trueIp
     }
-    return { bias: sumErr / trials, meanSqErr: sumErr2 / trials }
+    return { bias: sumErr / trials, meanSqErr: sumErr2 / trials, trueMean: sumTrue / trials }
   }
 
   it('b=4 (default): |mean(est - true)| < 5e-4', () => {
-    const { bias } = runTrials(4, 10n)
+    const { bias, trueMean } = runTrials(4, 10n)
     expect(Math.abs(bias)).toBeLessThan(5e-4)
+    // Guards against a vacuous pass if the correlated-pair construction regresses.
+    expect(trueMean).toBeGreaterThanOrEqual(TRUE_IP_MIN)
+    expect(trueMean).toBeLessThanOrEqual(TRUE_IP_MAX)
   })
 
   it('b=4 (default): mean((est-true)^2) * 2048 < 0.047 * 1.5', () => {
@@ -154,15 +166,31 @@ describe('createCodec: unbiasedness + distortion (b=2,3,4)', () => {
   })
 
   it('b=2: unbiased and within the (looser) distortion bound', () => {
-    const { bias, meanSqErr } = runTrials(2, 11n)
+    const { bias, meanSqErr, trueMean } = runTrials(2, 11n)
     expect(Math.abs(bias)).toBeLessThan(3e-3)
     expect(meanSqErr * D_PADDED).toBeLessThan(THEORY_DPROD_D[2] * MARGIN)
+    expect(trueMean).toBeGreaterThanOrEqual(TRUE_IP_MIN)
+    expect(trueMean).toBeLessThanOrEqual(TRUE_IP_MAX)
   })
 
   it('b=3: unbiased and within the (looser) distortion bound', () => {
-    const { bias, meanSqErr } = runTrials(3, 12n)
+    const { bias, meanSqErr, trueMean } = runTrials(3, 12n)
     expect(Math.abs(bias)).toBeLessThan(1.5e-3)
     expect(meanSqErr * D_PADDED).toBeLessThan(THEORY_DPROD_D[3] * MARGIN)
+    expect(trueMean).toBeGreaterThanOrEqual(TRUE_IP_MIN)
+    expect(trueMean).toBeLessThanOrEqual(TRUE_IP_MAX)
+  })
+
+  it('b=5: |mean(est - true)| < 5e-4', () => {
+    const { bias, trueMean } = runTrials(5, 13n)
+    expect(Math.abs(bias)).toBeLessThan(5e-4)
+    expect(trueMean).toBeGreaterThanOrEqual(TRUE_IP_MIN)
+    expect(trueMean).toBeLessThanOrEqual(TRUE_IP_MAX)
+  })
+
+  it('b=5: mean((est-true)^2) * 2048 < 0.012 * 1.5 (measured ~0.0059)', () => {
+    const { meanSqErr } = runTrials(5, 13n)
+    expect(meanSqErr * D_PADDED).toBeLessThan(THEORY_DPROD_D[5] * MARGIN)
   })
 })
 
@@ -226,6 +254,34 @@ describe('createCodec: input validation', () => {
 
   it('createCodec throws when dims exceeds the padded dimension', () => {
     expect(() => createCodec({ dims: 4096 })).toThrow()
+  })
+
+  it('encode throws on a NaN input coordinate', () => {
+    const codec = createCodec()
+    const rng = splitmix64(40n)
+    const x = randUnit(rng, DIMS)
+    x[100] = NaN
+    expect(() => codec.encode(x)).toThrow(/non-finite/)
+  })
+
+  it('encode throws on an Infinity input coordinate', () => {
+    const codec = createCodec()
+    const rng = splitmix64(41n)
+    const x = randUnit(rng, DIMS)
+    x[200] = Infinity
+    expect(() => codec.encode(x)).toThrow(/non-finite/)
+  })
+
+  it('estimateIP throws when q.lut length does not match this codec (cross-codec/bits mismatch)', () => {
+    const codec4 = createCodec({ bits: 4 })
+    const codec2 = createCodec({ bits: 2 })
+    const rng = splitmix64(42n)
+    const x = randUnit(rng, DIMS)
+    const q = randUnit(rng, DIMS)
+
+    const enc = codec4.encode(x)
+    const rqFromCodec2 = codec2.rotateQuery(q) // different bits -> different nCentroids -> different lut width
+    expect(() => codec4.estimateIP(rqFromCodec2, enc)).toThrow(/lut length/)
   })
 })
 
