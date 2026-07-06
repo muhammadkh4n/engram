@@ -43,6 +43,7 @@ import {
   estimateTokens,
   nextCursor,
   buildKeysetFilter,
+  applyBatch,
   type Tier,
   type PageCursor,
   type SemanticEmbedRow,
@@ -66,6 +67,27 @@ function isTier(value: string): value is Tier {
   return (ALL_TIERS as readonly string[]).includes(value)
 }
 
+/**
+ * Parses a `--flag N` value as a positive integer. Exits 1 with a clear
+ * message for missing/malformed/non-positive input (e.g. `--limit` with no
+ * following value, `--batch-size abc`, or `--page-size 0`) instead of
+ * silently coercing to NaN, which previously made the flag a silent no-op
+ * (`stats.processed < NaN` is always false, so processTier's loop condition
+ * would never run, or `chunk(rows, NaN)` would behave unpredictably).
+ */
+function parsePositiveInt(raw: string | undefined, flagName: string): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    console.error(
+      `[engram-embed-backfill] --${flagName} requires a positive integer, got ${
+        raw === undefined ? '(missing value)' : `"${raw}"`
+      }`,
+    )
+    process.exit(1)
+  }
+  return n
+}
+
 function parseArgs(argv: string[]): Args {
   const tiers: Tier[] = []
   const args: Args = {
@@ -85,9 +107,9 @@ function parseArgs(argv: string[]): Args {
         process.exit(1)
       }
       tiers.push(t)
-    } else if (a === '--limit') args.limit = Number(argv[++i])
-    else if (a === '--batch-size') args.batchSize = Number(argv[++i])
-    else if (a === '--page-size') args.pageSize = Number(argv[++i])
+    } else if (a === '--limit') args.limit = parsePositiveInt(argv[++i], 'limit')
+    else if (a === '--batch-size') args.batchSize = parsePositiveInt(argv[++i], 'batch-size')
+    else if (a === '--page-size') args.pageSize = parsePositiveInt(argv[++i], 'page-size')
     else if (a === '--help' || a === '-h') {
       console.log(
         'engram-embed-backfill — embed NULL-embedding digests/semantic/procedural rows\n' +
@@ -202,14 +224,25 @@ async function processTier(
         try {
           if (!intelligence.embedBatch) throw new Error('intelligence adapter is missing embedBatch()')
           const embeddings = await intelligence.embedBatch(batch.map((r) => r.text))
-          for (let i = 0; i < batch.length; i++) {
-            const row = batch[i]!
-            const embedding = embeddings[i]!
-            const { error } = await client.from(cfg.table).update({ embedding }).eq('id', row.id)
-            if (error) throw new Error(`PATCH ${cfg.table} id=${row.id} failed: ${error.message}`)
-            stats.updated++
-          }
+          const { updated, errors } = await applyBatch(
+            batch,
+            embeddings,
+            async (id, embedding) => {
+              const { error } = await client.from(cfg.table).update({ embedding }).eq('id', id)
+              if (error) throw new Error(`PATCH ${cfg.table} id=${id} failed: ${error.message}`)
+            },
+            (id, err) => {
+              console.error(`[engram-embed-backfill] ${tier} row id=${id} failed: ${String(err)}`)
+            },
+          )
+          stats.updated += updated
+          stats.errors += errors
         } catch (err) {
+          // Reaches here only for a whole-batch failure that never attempted any
+          // row write (embedBatch() itself throwing, or an embeddings/batch length
+          // mismatch caught by applyBatch before it writes anything) — every row
+          // in `batch` is genuinely unattempted, so counting all of them as errors
+          // here doesn't double-count rows applyBatch already reported as updated.
           stats.errors += batch.length
           console.error(`[engram-embed-backfill] ${tier} batch failed: ${String(err)}`)
         }

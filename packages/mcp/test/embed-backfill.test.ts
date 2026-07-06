@@ -22,6 +22,7 @@ import {
   estimateCostUsd,
   nextCursor,
   buildKeysetFilter,
+  applyBatch,
   type SemanticEmbedRow,
   type DigestEmbedRow,
   type ProceduralEmbedRow,
@@ -144,5 +145,85 @@ describe('buildKeysetFilter', () => {
     expect(filter).toBe(
       'created_at.gt.2026-01-02T00:00:00Z,and(created_at.eq.2026-01-02T00:00:00Z,id.gt.b)',
     )
+  })
+})
+
+describe('applyBatch', () => {
+  interface FakeRow {
+    id: string
+  }
+
+  it('writes each embedding to its matching row by index and reports full success', async () => {
+    const batch: FakeRow[] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const embeddings = [[0.1], [0.2], [0.3]]
+    const calls: Array<{ id: string; embedding: number[] }> = []
+    const updateRow = async (id: string, embedding: number[]): Promise<void> => {
+      calls.push({ id, embedding })
+    }
+
+    const result = await applyBatch(batch, embeddings, updateRow)
+
+    expect(result).toEqual({ updated: 3, errors: 0 })
+    expect(calls).toEqual([
+      { id: 'a', embedding: [0.1] },
+      { id: 'b', embedding: [0.2] },
+      { id: 'c', embedding: [0.3] },
+    ])
+  })
+
+  it('throws on a batch/embeddings length mismatch without writing any row', async () => {
+    const batch: FakeRow[] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const embeddings = [[0.1], [0.2]] // one short of batch.length
+    const calls: string[] = []
+    const updateRow = async (id: string): Promise<void> => {
+      calls.push(id)
+    }
+
+    await expect(applyBatch(batch, embeddings, updateRow)).rejects.toThrow(/length/i)
+    expect(calls).toEqual([])
+  })
+
+  it('keeps attempting remaining rows after a mid-batch update failure, counting only the failed row as an error', async () => {
+    const batch: FakeRow[] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const embeddings = [[0.1], [0.2], [0.3]]
+    const calls: string[] = []
+    const updateRow = async (id: string): Promise<void> => {
+      calls.push(id)
+      if (id === 'b') throw new Error('PATCH failed for b')
+    }
+
+    const result = await applyBatch(batch, embeddings, updateRow)
+
+    // a and c must still be attempted (and counted as updated) even though b failed —
+    // an already-paid embedding for a later row must not be discarded by an earlier
+    // or later row's independent write failure. updated + errors === batch.length,
+    // never double-counting the two rows that actually succeeded as errors too.
+    expect(calls).toEqual(['a', 'b', 'c'])
+    expect(result).toEqual({ updated: 2, errors: 1 })
+  })
+
+  it('invokes onRowError with the failing id and the thrown error, without affecting other rows', async () => {
+    const batch: FakeRow[] = [{ id: 'a' }, { id: 'b' }]
+    const embeddings = [[0.1], [0.2]]
+    const failure = new Error('boom')
+    const updateRow = async (id: string): Promise<void> => {
+      if (id === 'a') throw failure
+    }
+    const seenErrors: Array<{ id: string; err: unknown }> = []
+
+    const result = await applyBatch(batch, embeddings, updateRow, (id, err) => {
+      seenErrors.push({ id, err })
+    })
+
+    expect(result).toEqual({ updated: 1, errors: 1 })
+    expect(seenErrors).toEqual([{ id: 'a', err: failure }])
+  })
+
+  it('returns all-zero for an empty batch', async () => {
+    const updateRow = async (): Promise<void> => {
+      throw new Error('should never be called')
+    }
+    const result = await applyBatch([] as FakeRow[], [], updateRow)
+    expect(result).toEqual({ updated: 0, errors: 0 })
   })
 })

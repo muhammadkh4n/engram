@@ -145,3 +145,62 @@ export function buildKeysetFilter(cursor: PageCursor | null): string | null {
   if (!cursor) return null
   return `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`
 }
+
+// ---------------------------------------------------------------------------
+// Batch apply: zip a batch of rows with their embeddings and write each row
+// independently via the caller-supplied `updateRow`. Pure aside from calling
+// the injected `updateRow`/`onRowError` callbacks — no direct network/DB
+// access here, which is what makes the zip/accounting logic unit-testable
+// with a fake `updateRow`.
+// ---------------------------------------------------------------------------
+
+export interface ApplyBatchResult {
+  updated: number
+  errors: number
+}
+
+/**
+ * Applies `embeddings[i]` to `batch[i]` for every row, one row at a time.
+ *
+ * Throws synchronously — before writing anything — if `embeddings.length !==
+ * batch.length`. A shape mismatch there means the embed call's response
+ * doesn't correspond to the batch it was requested for; zipping mismatched
+ * pairs would silently write the wrong embedding to the wrong row, so this
+ * is treated as a batch-level failure, not a per-row one.
+ *
+ * Each row's write is independent: if `updateRow` rejects for one row, the
+ * remaining rows are still attempted (an already-computed embedding for row
+ * N+1 must not be discarded just because row N's PATCH failed). Only rows
+ * whose `updateRow` call actually rejected count as `errors`, so
+ * `updated + errors` always equals `batch.length` on return — never double-
+ * counting an earlier success as a later error.
+ */
+export async function applyBatch<T extends { id: string }>(
+  batch: readonly T[],
+  embeddings: readonly number[][],
+  updateRow: (id: string, embedding: number[]) => Promise<void>,
+  onRowError?: (id: string, err: unknown) => void,
+): Promise<ApplyBatchResult> {
+  if (embeddings.length !== batch.length) {
+    throw new Error(
+      `applyBatch: embeddings length (${embeddings.length}) does not match batch length (${batch.length})`,
+    )
+  }
+
+  let updated = 0
+  let errors = 0
+
+  for (let i = 0; i < batch.length; i++) {
+    const row = batch[i]!
+    const embedding = embeddings[i]!
+    try {
+      await updateRow(row.id, embedding)
+      updated++
+    } catch (err) {
+      errors++
+      onRowError?.(row.id, err)
+    }
+  }
+
+  return { updated, errors }
+}
