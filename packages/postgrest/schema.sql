@@ -433,56 +433,73 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     AS $$
-  -- Episodes
-  SELECT
-    me.id, 'episode'::text, me.content, me.role,
-    me.salience::float, me.access_count, me.created_at,
-    (1 - (me.embedding <=> p_query_embedding))::float AS similarity,
-    me.entities, me.metadata
-  FROM memory_episodes me
-  WHERE me.embedding IS NOT NULL
-    AND me.forgotten_at IS NULL
-    AND (p_session_id IS NULL OR me.session_id = p_session_id)
-    AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
+  SELECT * FROM (
+    SELECT * FROM (
+      -- Episodes
+      SELECT
+        me.id, 'episode'::text, me.content, me.role,
+        me.salience::float, me.access_count, me.created_at,
+        (1 - (me.embedding <=> p_query_embedding))::float AS similarity,
+        me.entities, me.metadata
+      FROM memory_episodes me
+      WHERE me.embedding IS NOT NULL
+        AND me.forgotten_at IS NULL
+        AND (p_session_id IS NULL OR me.session_id = p_session_id)
+        AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
+      ORDER BY me.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) ep
 
-  UNION ALL
+    UNION ALL
 
-  -- Digests
-  SELECT
-    md.id, 'digest'::text, md.summary, NULL,
-    0.5::float, 0, md.created_at,
-    (1 - (md.embedding <=> p_query_embedding))::float,
-    md.key_topics, md.metadata
-  FROM memory_digests md
-  WHERE md.embedding IS NOT NULL
-    AND (p_project_id IS NULL OR md.project_id = p_project_id OR md.project_id IS NULL)
+    SELECT * FROM (
+      -- Digests
+      SELECT
+        md.id, 'digest'::text, md.summary, NULL::text,
+        0.5::float, 0, md.created_at,
+        (1 - (md.embedding <=> p_query_embedding))::float,
+        md.key_topics, md.metadata
+      FROM memory_digests md
+      WHERE md.embedding IS NOT NULL
+        AND (p_project_id IS NULL OR md.project_id = p_project_id OR md.project_id IS NULL)
+      ORDER BY md.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) dg
 
-  UNION ALL
+    UNION ALL
 
-  -- Semantic
-  SELECT
-    ms.id, 'semantic'::text, ms.content, NULL,
-    ms.confidence::float, ms.access_count, ms.created_at,
-    (1 - (ms.embedding <=> p_query_embedding))::float,
-    ARRAY[]::text[], ms.metadata
-  FROM memory_semantic ms
-  WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
-    AND ms.forgotten_at IS NULL
-    AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
+    SELECT * FROM (
+      -- Semantic
+      SELECT
+        ms.id, 'semantic'::text, ms.content, NULL::text,
+        ms.confidence::float, ms.access_count, ms.created_at,
+        (1 - (ms.embedding <=> p_query_embedding))::float,
+        ARRAY[]::text[], ms.metadata
+      FROM memory_semantic ms
+      WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
+        AND ms.forgotten_at IS NULL
+        AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
+      ORDER BY ms.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) sm
 
-  UNION ALL
+    UNION ALL
 
-  -- Procedural
-  SELECT
-    mp.id, 'procedural'::text, mp.procedure, NULL,
-    mp.confidence::float, mp.access_count, mp.created_at,
-    (1 - (mp.embedding <=> p_query_embedding))::float,
-    ARRAY[]::text[], mp.metadata
-  FROM memory_procedural mp
-  WHERE mp.embedding IS NOT NULL
-    AND mp.forgotten_at IS NULL
-    AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
-
+    SELECT * FROM (
+      -- Procedural
+      SELECT
+        mp.id, 'procedural'::text, mp.procedure, NULL::text,
+        mp.confidence::float, mp.access_count, mp.created_at,
+        (1 - (mp.embedding <=> p_query_embedding))::float,
+        ARRAY[]::text[], mp.metadata
+      FROM memory_procedural mp
+      WHERE mp.embedding IS NOT NULL
+        AND mp.forgotten_at IS NULL
+        AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
+      ORDER BY mp.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) pr
+  ) all_tiers
   ORDER BY similarity DESC
   LIMIT p_match_count
 $$;
