@@ -42,7 +42,7 @@ describe('SqliteStorageAdapter.vectorSearch — exhaustive scan', () => {
 
     const res = await adapter.vectorSearch(target, { limit: 5, tiers: ['episode'] })
 
-    expect(res[0]!.item.data.content).toBe('NEEDLE')
+    expect(label(res[0]!.item)).toBe('NEEDLE')
     await adapter.dispose()
   })
 
