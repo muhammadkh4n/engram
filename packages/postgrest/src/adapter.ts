@@ -7,6 +7,7 @@ import { PostgRestSemanticStorage } from './semantic.js'
 import { PostgRestProceduralStorage } from './procedural.js'
 import { PostgRestAssociationStorage } from './associations.js'
 import { PostgRestConsolidationRunStorage } from './consolidation-runs.js'
+import { parseVector } from './parse-vector.js'
 
 export interface PostgRestAdapterOptions {
   url: string
@@ -327,7 +328,7 @@ interface DigestRow {
   source_episode_ids: string[]
   source_digest_ids: string[]
   level: number
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
 }
@@ -344,7 +345,7 @@ interface SemanticRow {
   decay_rate: number
   supersedes: string | null
   superseded_by: string | null
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -363,7 +364,7 @@ interface ProceduralRow {
   last_accessed: string | null
   decay_rate: number
   source_episode_ids: string[]
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -380,7 +381,7 @@ function rowToDigest(row: DigestRow): Digest {
     sourceEpisodeIds: row.source_episode_ids ?? [],
     sourceDigestIds: row.source_digest_ids ?? [],
     level: row.level,
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     projectId: null,
@@ -400,7 +401,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     decayRate: row.decay_rate,
     supersedes: row.supersedes ?? null,
     supersededBy: row.superseded_by ?? null,
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
@@ -422,7 +423,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
     decayRate: row.decay_rate,
     sourceEpisodeIds: row.source_episode_ids ?? [],
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),

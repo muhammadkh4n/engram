@@ -3,6 +3,7 @@ import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/co
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
+import { parseVector } from './parse-vector.js'
 
 export class PostgRestSemanticStorage implements SemanticStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -253,7 +254,7 @@ interface SemanticRow {
   decay_rate: number
   supersedes: string | null
   superseded_by: string | null
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -283,7 +284,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     decayRate: row.decay_rate,
     supersedes: row.supersedes ?? null,
     supersededBy: row.superseded_by ?? null,
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),

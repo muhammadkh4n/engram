@@ -3,6 +3,7 @@ import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/
 import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
+import { parseVector } from './parse-vector.js'
 
 export class PostgRestProceduralStorage implements ProceduralStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -197,7 +198,7 @@ interface ProceduralRow {
   last_accessed: string | null
   decay_rate: number
   source_episode_ids: string[]
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -228,7 +229,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
     decayRate: row.decay_rate,
     sourceEpisodeIds: row.source_episode_ids ?? [],
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
