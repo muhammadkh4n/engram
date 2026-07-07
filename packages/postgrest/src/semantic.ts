@@ -127,10 +127,14 @@ export class PostgRestSemanticStorage implements SemanticStorage {
   }
 
   async markSuperseded(id: string, supersededBy: string): Promise<void> {
-    // Update the old memory to point to its replacement
+    // Update the old memory to point to its replacement.
+    // updated_at must be bumped here: listTombstonesSince detects supersessions
+    // via `updated_at >= since AND superseded_by IS NOT NULL`, and sqlite's
+    // trigger bumps updated_at on every semantic UPDATE — this keeps the two
+    // backends' tombstone-detection semantics in parity.
     const { error: err1 } = await this.client
       .from('memory_semantic')
-      .update({ superseded_by: supersededBy })
+      .update({ superseded_by: supersededBy, updated_at: new Date().toISOString() })
       .eq('id', id)
     if (err1) throw new Error(`Semantic markSuperseded (old) failed: ${err1.message}`)
 

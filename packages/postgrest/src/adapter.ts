@@ -309,11 +309,176 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }))
   }
 
+  // ---------------------------------------------------------------------------
+  // Recall-engine feed: scanEmbeddings / listTombstonesSince
+  // ---------------------------------------------------------------------------
+
+  async *scanEmbeddings(opts: {
+    tier: MemoryType
+    afterCreatedAt?: Date
+    batchSize?: number
+  }): AsyncIterable<Array<{
+    id: string
+    type: MemoryType
+    createdAt: Date
+    projectId: string | null
+    sessionId: string | null
+    embedding: number[] | Float32Array
+  }>> {
+    this.assertInitialized()
+    const config = PG_SCAN_TIER_CONFIG[opts.tier]
+    const batchSize = opts.batchSize ?? 1000
+    // `.select('*')` (not a narrow column list) — postgrest-js's select
+    // string is parsed at the type level against the schema-less `any`
+    // client, and a bare comma-separated column list produces a
+    // ParserError type on the result; `*` is the one string every other
+    // method in this file already relies on, cast below via PgScanRow.
+    // First page bounds on created_at alone (the caller only has a Date to
+    // resume from); every subsequent internal page bounds on the tie-safe
+    // (created_at, id) cursor — the same idiom as the embed-backfill CLI's
+    // buildKeysetFilter, so many rows sharing one created_at never straddle
+    // a page boundary and get skipped or repeated.
+    const firstBound = opts.afterCreatedAt ? opts.afterCreatedAt.toISOString() : null
+    let cursor: { createdAt: string; id: string } | null = null
+
+    while (true) {
+      let query = this.client
+        .from(config.table)
+        .select('*')
+        .not('embedding', 'is', null)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(batchSize)
+
+      if (config.hasForgottenAt) query = query.is('forgotten_at', null)
+      if (config.hasSupersededBy) query = query.is('superseded_by', null)
+
+      if (cursor) {
+        query = query.or(
+          `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`
+        )
+      } else if (firstBound) {
+        query = query.gt('created_at', firstBound)
+      }
+
+      const { data, error } = await query
+      if (error) throw new Error(`scanEmbeddings(${opts.tier}) failed: ${error.message}`)
+
+      const rows = (data ?? []) as PgScanRow[]
+      if (rows.length === 0) break
+
+      const batch: Array<{
+        id: string
+        type: MemoryType
+        createdAt: Date
+        projectId: string | null
+        sessionId: string | null
+        embedding: number[] | Float32Array
+      }> = []
+
+      for (const row of rows) {
+        // pgvector text-representation parse — a row that fails to parse
+        // has no usable embedding and is skipped, never yielded.
+        const embedding = parseVector(row.embedding)
+        if (!embedding) continue
+        batch.push({
+          id: row.id,
+          type: opts.tier,
+          createdAt: new Date(row.created_at),
+          projectId: row.project_id ?? null,
+          sessionId: config.hasSessionId ? (row.session_id ?? null) : null,
+          embedding,
+        })
+      }
+
+      if (batch.length > 0) yield batch
+
+      const last = rows[rows.length - 1]!
+      cursor = { createdAt: last.created_at, id: last.id }
+
+      if (rows.length < batchSize) break
+    }
+  }
+
+  async listTombstonesSince(since: Date): Promise<Array<{ id: string; type: MemoryType }>> {
+    this.assertInitialized()
+    const sinceIso = since.toISOString()
+    const seen = new Set<string>()
+    const results: Array<{ id: string; type: MemoryType }> = []
+
+    const collect = (rows: Array<{ id: string }> | null, type: MemoryType): void => {
+      for (const row of rows ?? []) {
+        const key = `${type}:${row.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        results.push({ id: row.id, type })
+      }
+    }
+
+    const forgottenTables: Array<[MemoryType, string]> = [
+      ['episode', 'memory_episodes'],
+      ['semantic', 'memory_semantic'],
+      ['procedural', 'memory_procedural'],
+    ]
+    // memory_digests: no forgotten_at column, never superseded — intentionally omitted.
+
+    for (const [type, table] of forgottenTables) {
+      const { data, error } = await this.client
+        .from(table)
+        .select('id')
+        .gte('forgotten_at', sinceIso)
+      if (error) throw new Error(`listTombstonesSince(${type}) failed: ${error.message}`)
+      collect(data as Array<{ id: string }> | null, type)
+    }
+
+    // Semantic supersession is a distinct tombstone reason from forget() —
+    // `collect`'s seen-set dedupes a row that happens to be both.
+    const { data: supersededData, error: supersededError } = await this.client
+      .from('memory_semantic')
+      .select('id')
+      .gte('updated_at', sinceIso)
+      .not('superseded_by', 'is', null)
+    if (supersededError) {
+      throw new Error(`listTombstonesSince(semantic superseded) failed: ${supersededError.message}`)
+    }
+    collect(supersededData as Array<{ id: string }> | null, 'semantic')
+
+    return results
+  }
+
   private assertInitialized(): void {
     if (!this._episodes) {
       throw new Error('PostgRestStorageAdapter not initialized. Call initialize() first.')
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// scanEmbeddings per-tier table config
+// ---------------------------------------------------------------------------
+
+interface PgScanTierConfig {
+  table: string
+  hasForgottenAt: boolean
+  hasSupersededBy: boolean
+  hasSessionId: boolean
+}
+
+const PG_SCAN_TIER_CONFIG: Record<MemoryType, PgScanTierConfig> = {
+  episode: { table: 'memory_episodes', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: true },
+  digest: { table: 'memory_digests', hasForgottenAt: false, hasSupersededBy: false, hasSessionId: true },
+  semantic: { table: 'memory_semantic', hasForgottenAt: true, hasSupersededBy: true, hasSessionId: false },
+  procedural: { table: 'memory_procedural', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: false },
+}
+
+/** Minimal projection used by scanEmbeddings — column set varies with
+ *  hasSessionId (semantic/procedural have no session_id column at all). */
+interface PgScanRow {
+  id: string
+  created_at: string
+  project_id: string | null
+  session_id?: string | null
+  embedding: number[] | string | null
 }
 
 // ---------------------------------------------------------------------------

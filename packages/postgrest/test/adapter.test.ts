@@ -418,18 +418,33 @@ describe('PostgRestSemanticStorage', () => {
     expect(count).toBe(7)
   })
 
-  it('markSuperseded updates both old and new memory records', async () => {
+  it('markSuperseded updates both old and new memory records, bumping updated_at on the superseded row', async () => {
     const chain1 = createChainable({ data: null, error: null })
     const chain2 = createChainable({ data: null, error: null })
     mock.from
       .mockReturnValueOnce(chain1)
       .mockReturnValueOnce(chain2)
 
+    const before = Date.now()
     await store.markSuperseded('old-id', 'new-id')
+    const after = Date.now()
 
     expect(mock.from).toHaveBeenNthCalledWith(1, 'memory_semantic')
-    expect(chain1.update).toHaveBeenCalledWith({ superseded_by: 'new-id' })
+    expect(chain1.update).toHaveBeenCalledWith({
+      superseded_by: 'new-id',
+      updated_at: expect.any(String),
+    })
     expect(chain1.eq).toHaveBeenCalledWith('id', 'old-id')
+
+    // listTombstonesSince detects supersessions via `updated_at >= since`, so the
+    // superseded row's updated_at must be a fresh ISO timestamp — mirroring
+    // sqlite's trigger-driven bump on every semantic UPDATE.
+    const updatePayload = (chain1.update as unknown as { mock: { calls: Array<[{ updated_at: string }]> } })
+      .mock.calls[0][0]
+    const updatedAtMs = new Date(updatePayload.updated_at).getTime()
+    expect(updatePayload.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(updatedAtMs).toBeGreaterThanOrEqual(before)
+    expect(updatedAtMs).toBeLessThanOrEqual(after)
 
     expect(mock.from).toHaveBeenNthCalledWith(2, 'memory_semantic')
     expect(chain2.update).toHaveBeenCalledWith({ supersedes: 'old-id' })

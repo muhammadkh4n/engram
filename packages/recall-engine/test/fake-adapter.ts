@@ -1,0 +1,527 @@
+/**
+ * In-memory fake `StorageAdapter` + deterministic fixture corpus for the
+ * RecallEngine tests.
+ *
+ * The fake mirrors the SQLITE adapter's observable semantics precisely,
+ * because those are the semantics the engine must reproduce:
+ *   - `vectorSearch`: exhaustive exact-cosine scan; forgotten rows and
+ *     superseded semantic rows excluded; `sessionId` constrains ONLY the
+ *     episode tier; `projectId` matches `(project = X OR project IS NULL)`;
+ *     candidates with sim <= 0 dropped; sort desc; slice(limit).
+ *   - `getByIds`: returns rows found by id regardless of forgotten status
+ *     (the sqlite implementation has no forgotten_at predicate there).
+ *   - `scanEmbeddings`: live embedded rows only, (createdAt, id) ascending,
+ *     strict `> afterCreatedAt`, batched.
+ *   - `listTombstonesSince`: forget/supersede events with atMs >= since.
+ *
+ * `vectorSearch` doubles as the REFERENCE exact scan the engine's results
+ * are compared against bit-for-bit — it scores with `referenceCosineF32`, a
+ * transcription of the sqlite adapter's own `cosineF32` (an INDEPENDENT
+ * implementation from the engine's `exactCosine`), so any score the engine
+ * returns for a hydratable row must be float-identical to what the real
+ * sqlite backend would have computed, not merely to the engine's own math.
+ */
+import type {
+  Digest,
+  Episode,
+  MemoryType,
+  ProceduralMemory,
+  SearchResult,
+  SemanticMemory,
+  StorageAdapter,
+  TypedMemory,
+} from '@engram-mem/core'
+import { splitmix64 } from '../src/codec/rng.js'
+
+/**
+ * Verbatim transcription of `cosineF32` from `packages/sqlite/src/vector-search.ts`
+ * (lines 43-52 at the time of writing) — the sqlite adapter's OWN cosine
+ * implementation, not the engine's `exactCosine`. Transcribed (rather than
+ * imported) so this test helper pins bit-for-bit parity with the sqlite
+ * backend without adding a cross-package dependency from `@engram-mem/recall-engine`
+ * to `@engram-mem/sqlite`. Using the engine's own `exactCosine` here instead
+ * would make the "parity" tests circular: the engine would only ever be
+ * checked against itself, never against an independent reference.
+ */
+export function referenceCosineF32(a: number[] | Float32Array, b: number[] | Float32Array): number {
+  if (a.length !== b.length || a.length === 0) return 0
+  let dot = 0, na = 0, nb = 0
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    dot += x * y; na += x * x; nb += y * y
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return denom === 0 ? 0 : dot / denom
+}
+
+const ALL_TIERS: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
+
+export interface FixtureRow {
+  id: string
+  type: MemoryType
+  createdAtMs: number
+  projectId: string | null
+  sessionId: string | null
+  embedding: number[] | null
+  forgottenAtMs: number | null
+  supersededBy: string | null
+}
+
+export interface FakeAdapterOpts {
+  batchSize?: number
+  /** false omits scanEmbeddings/listTombstonesSince entirely (a legacy adapter without the optional port methods). */
+  supportsScan?: boolean
+  /**
+   * true wires REAL `insert`/`markForgotten`/`markSuperseded` on the four
+   * tier stores (backed by this fake's own `rows` array, so an insert is
+   * immediately visible to `vectorSearch`/`scanEmbeddings`), for the
+   * decorator's write-through tests. Every other tier-store member still
+   * throws via `notUsed`. Defaults to false — `RecallEngine` itself never
+   * calls these, and existing engine tests rely on that being loudly
+   * enforced.
+   */
+  withTierStores?: boolean
+}
+
+/**
+ * Loud stub for the StorageAdapter members the engine never touches,
+ * optionally seeded with a handful of REAL implementations (`impl`) for the
+ * members a caller does need — e.g. the decorator tests' working
+ * insert/markForgotten/markSuperseded. Anything not present in `impl` still
+ * throws on first access.
+ */
+function notUsed<T extends object>(name: string, impl: Partial<T> = {}): T {
+  return new Proxy(impl as T, {
+    get(target, prop) {
+      if (Object.hasOwn(target, prop)) return (target as Record<PropertyKey, unknown>)[prop as string]
+      return () => {
+        throw new Error(`FakeStorageAdapter: ${name}.${String(prop)} is not implemented (RecallEngine must not call it)`)
+      }
+    },
+  })
+}
+
+export class FakeStorageAdapter implements StorageAdapter {
+  rows: FixtureRow[]
+  tombstoneEvents: Array<{ id: string; type: MemoryType; atMs: number }> = []
+
+  vectorSearchCalls = 0
+  scanCalls = 0
+  getByIdsCalls = 0
+
+  /** Race-injection hook awaited inside getByIds before rows are returned. */
+  onGetByIds: ((ids: Array<{ id: string; type: MemoryType }>) => void | Promise<void>) | null = null
+  /** Per-id override of the embedding value the HYDRATED row carries (e.g. an unparseable string). */
+  hydrationEmbeddingOverride = new Map<string, unknown>()
+
+  private readonly batchSize: number
+  private nextRowSeq = 0
+
+  episodes: StorageAdapter['episodes']
+  digests: StorageAdapter['digests']
+  semantic: StorageAdapter['semantic']
+  procedural: StorageAdapter['procedural']
+  associations = notUsed<StorageAdapter['associations']>('associations')
+
+  scanEmbeddings?: StorageAdapter['scanEmbeddings']
+  listTombstonesSince?: StorageAdapter['listTombstonesSince']
+
+  constructor(rows: FixtureRow[], opts: FakeAdapterOpts = {}) {
+    this.rows = rows
+    this.batchSize = opts.batchSize ?? 100
+    const withTierStores = opts.withTierStores ?? false
+
+    this.episodes = notUsed<StorageAdapter['episodes']>(
+      'episodes',
+      withTierStores
+        ? {
+            insert: async (episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode> => {
+              const row = this.insertRow('episode', episode.projectId, episode.sessionId, episode.embedding)
+              return this.toTypedMemory(row).data as Episode
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('episode', ids),
+          }
+        : {},
+    )
+    this.digests = notUsed<StorageAdapter['digests']>(
+      'digests',
+      withTierStores
+        ? {
+            insert: async (digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest> => {
+              const row = this.insertRow('digest', digest.projectId, digest.sessionId, digest.embedding)
+              return this.toTypedMemory(row).data as Digest
+            },
+          }
+        : {},
+    )
+    this.semantic = notUsed<StorageAdapter['semantic']>(
+      'semantic',
+      withTierStores
+        ? {
+            insert: async (
+              memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>,
+            ): Promise<SemanticMemory> => {
+              const row = this.insertRow('semantic', memory.projectId, null, memory.embedding)
+              return this.toTypedMemory(row).data as SemanticMemory
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('semantic', ids),
+            markSuperseded: async (id: string, supersededBy: string): Promise<void> => {
+              this.supersede(id, supersededBy, Date.now())
+            },
+          }
+        : {},
+    )
+    this.procedural = notUsed<StorageAdapter['procedural']>(
+      'procedural',
+      withTierStores
+        ? {
+            insert: async (
+              memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>,
+            ): Promise<ProceduralMemory> => {
+              const row = this.insertRow('procedural', memory.projectId, null, memory.embedding)
+              return this.toTypedMemory(row).data as ProceduralMemory
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('procedural', ids),
+          }
+        : {},
+    )
+
+    if (opts.supportsScan !== false) {
+      this.scanEmbeddings = scanOpts => {
+        this.scanCalls++
+        return this.scanBatches(scanOpts)
+      }
+      this.listTombstonesSince = async since =>
+        this.tombstoneEvents.filter(e => e.atMs >= since.getTime()).map(({ id, type }) => ({ id, type }))
+    }
+  }
+
+  // --- test fixture mutation helpers (foreign-writer simulation) ---
+
+  addRow(row: FixtureRow): void {
+    this.rows.push(row)
+  }
+
+  forget(id: string, atMs: number): void {
+    const row = this.rows.find(r => r.id === id)
+    if (!row) throw new Error(`forget: no fixture row ${id}`)
+    row.forgottenAtMs = atMs
+    this.tombstoneEvents.push({ id, type: row.type, atMs })
+  }
+
+  supersede(id: string, by: string, atMs: number): void {
+    const row = this.rows.find(r => r.id === id)
+    if (!row || row.type !== 'semantic') throw new Error(`supersede: no semantic fixture row ${id}`)
+    row.supersededBy = by
+    this.tombstoneEvents.push({ id, type: row.type, atMs })
+  }
+
+  // --- withTierStores=true backing helpers ---
+
+  /** Appends one live row (fresh id, createdAt=now) and returns it — the backing for every tier's `insert`. */
+  private insertRow(
+    type: MemoryType,
+    projectId: string | null,
+    sessionId: string | null,
+    embedding: number[] | null,
+  ): FixtureRow {
+    const row: FixtureRow = {
+      id: `new-${type}-${this.nextRowSeq++}`,
+      type,
+      createdAtMs: Date.now(),
+      projectId,
+      sessionId,
+      embedding,
+      forgottenAtMs: null,
+      supersededBy: null,
+    }
+    this.rows.push(row)
+    return row
+  }
+
+  /** Tombstones the given ids (matching `type`, idempotent) and records tombstone events — the backing for every tier's `markForgotten`. */
+  private markForgottenRows(type: MemoryType, ids: string[]): number {
+    const now = Date.now()
+    let count = 0
+    for (const id of ids) {
+      const row = this.rows.find(r => r.id === id && r.type === type)
+      if (row && row.forgottenAtMs === null) {
+        row.forgottenAtMs = now
+        this.tombstoneEvents.push({ id, type, atMs: now })
+        count++
+      }
+    }
+    return count
+  }
+
+  // --- StorageAdapter surface used by the engine ---
+
+  async initialize(): Promise<void> {}
+  async dispose(): Promise<void> {}
+
+  async vectorSearch(
+    embedding: number[],
+    opts?: { limit?: number; sessionId?: string; tiers?: MemoryType[]; projectId?: string },
+  ): Promise<SearchResult<TypedMemory>[]> {
+    this.vectorSearchCalls++
+    return this.referenceScan(embedding, opts)
+  }
+
+  /** The exact-scan reference, without touching `vectorSearchCalls` — tests compare the engine against this. */
+  async referenceScan(
+    embedding: number[],
+    opts?: { limit?: number; sessionId?: string; tiers?: MemoryType[]; projectId?: string },
+  ): Promise<SearchResult<TypedMemory>[]> {
+    const limit = opts?.limit ?? 15
+    const tiers = opts?.tiers ?? [...ALL_TIERS]
+    const scored: Array<{ row: FixtureRow; sim: number }> = []
+    for (const row of this.rows) {
+      if (!tiers.includes(row.type)) continue
+      if (row.embedding === null || row.forgottenAtMs !== null) continue
+      if (row.type === 'semantic' && row.supersededBy !== null) continue
+      if (opts?.sessionId && row.type === 'episode' && row.sessionId !== opts.sessionId) continue
+      if (opts?.projectId && row.projectId !== null && row.projectId !== opts.projectId) continue
+      const sim = referenceCosineF32(embedding, row.embedding)
+      if (sim > 0) scored.push({ row, sim })
+    }
+    scored.sort((a, b) => b.sim - a.sim)
+    return scored.slice(0, limit).map(({ row, sim }) => ({ item: this.toTypedMemory(row), similarity: sim }))
+  }
+
+  async textBoost(): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
+    return []
+  }
+
+  async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
+    const row = this.rows.find(r => r.id === id && r.type === type)
+    return row ? this.toTypedMemory(row) : null
+  }
+
+  async getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> {
+    this.getByIdsCalls++
+    if (this.onGetByIds) await this.onGetByIds(ids)
+    const out: TypedMemory[] = []
+    for (const { id, type } of ids) {
+      // No forgotten_at predicate here — mirrors sqlite getByIds, which
+      // happily returns tombstoned rows when asked by id.
+      const row = this.rows.find(r => r.id === id && r.type === type)
+      if (row) out.push(this.toTypedMemory(row))
+    }
+    return out
+  }
+
+  async saveSensorySnapshot(): Promise<void> {
+    throw new Error('FakeStorageAdapter: saveSensorySnapshot not implemented')
+  }
+
+  async loadSensorySnapshot(): Promise<null> {
+    return null
+  }
+
+  // --- internals ---
+
+  private async *scanBatches(opts: { tier: MemoryType; afterCreatedAt?: Date; batchSize?: number }): AsyncIterable<
+    Array<{
+      id: string
+      type: MemoryType
+      createdAt: Date
+      projectId: string | null
+      sessionId: string | null
+      embedding: number[] | Float32Array
+    }>
+  > {
+    const after = opts.afterCreatedAt?.getTime() ?? Number.NEGATIVE_INFINITY
+    const batchSize = opts.batchSize ?? this.batchSize
+    const live = this.rows
+      .filter(
+        r =>
+          r.type === opts.tier &&
+          r.embedding !== null &&
+          r.forgottenAtMs === null &&
+          !(r.type === 'semantic' && r.supersededBy !== null) &&
+          r.createdAtMs > after,
+      )
+      .sort((a, b) => a.createdAtMs - b.createdAtMs || (a.id < b.id ? -1 : 1))
+    for (let i = 0; i < live.length; i += batchSize) {
+      yield live.slice(i, i + batchSize).map(r => ({
+        id: r.id,
+        type: r.type,
+        createdAt: new Date(r.createdAtMs),
+        projectId: r.projectId,
+        sessionId: r.sessionId,
+        embedding: r.embedding as number[],
+      }))
+    }
+  }
+
+  private toTypedMemory(row: FixtureRow): TypedMemory {
+    const createdAt = new Date(row.createdAtMs)
+    const embedding = (
+      this.hydrationEmbeddingOverride.has(row.id) ? this.hydrationEmbeddingOverride.get(row.id) : row.embedding
+    ) as number[] | null
+
+    switch (row.type) {
+      case 'episode': {
+        const data: Episode = {
+          id: row.id,
+          sessionId: row.sessionId ?? 'sess-none',
+          role: 'user',
+          content: `content of ${row.id}`,
+          salience: 0.5,
+          accessCount: 0,
+          lastAccessed: null,
+          consolidatedAt: null,
+          embedding,
+          entities: [],
+          metadata: {},
+          createdAt,
+          projectId: row.projectId,
+        }
+        return { type: 'episode', data }
+      }
+      case 'digest': {
+        const data: Digest = {
+          id: row.id,
+          sessionId: row.sessionId ?? 'sess-none',
+          summary: `summary of ${row.id}`,
+          keyTopics: [],
+          sourceEpisodeIds: [],
+          sourceDigestIds: [],
+          level: 1,
+          embedding,
+          metadata: {},
+          createdAt,
+          projectId: row.projectId,
+        }
+        return { type: 'digest', data }
+      }
+      case 'semantic': {
+        const data: SemanticMemory = {
+          id: row.id,
+          topic: `topic of ${row.id}`,
+          content: `content of ${row.id}`,
+          confidence: 0.9,
+          sourceDigestIds: [],
+          sourceEpisodeIds: [],
+          accessCount: 0,
+          lastAccessed: null,
+          decayRate: 0.01,
+          supersedes: null,
+          supersededBy: row.supersededBy,
+          embedding,
+          metadata: {},
+          createdAt,
+          updatedAt: createdAt,
+          projectId: row.projectId,
+        }
+        return { type: 'semantic', data }
+      }
+      case 'procedural': {
+        const data: ProceduralMemory = {
+          id: row.id,
+          category: 'workflow',
+          trigger: `trigger of ${row.id}`,
+          procedure: `procedure of ${row.id}`,
+          confidence: 0.9,
+          observationCount: 1,
+          lastObserved: createdAt,
+          firstObserved: createdAt,
+          accessCount: 0,
+          lastAccessed: null,
+          decayRate: 0.01,
+          sourceEpisodeIds: [],
+          embedding,
+          metadata: {},
+          createdAt,
+          updatedAt: createdAt,
+          projectId: row.projectId,
+        }
+        return { type: 'procedural', data }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic fixture corpus (seeded, clustered — realistic cosine
+// structure rather than uniformly-random near-orthogonal noise).
+// ---------------------------------------------------------------------------
+
+export const DIMS = 1536
+/** Fixed past epoch so foreign-writer rows added "now" always sort after the corpus. */
+export const CORPUS_BASE_MS = 1_700_000_000_000
+
+function gaussPair(rng: () => number): [number, number] {
+  const u = Math.max(rng(), 1e-12)
+  const v = rng()
+  const r = Math.sqrt(-2 * Math.log(u))
+  return [r * Math.cos(2 * Math.PI * v), r * Math.sin(2 * Math.PI * v)]
+}
+
+function randUnit(rng: () => number, len: number): number[] {
+  const v = new Array<number>(len)
+  for (let i = 0; i < len; i += 2) {
+    const [a, b] = gaussPair(rng)
+    v[i] = a
+    if (i + 1 < len) v[i + 1] = b
+  }
+  return normalize(v)
+}
+
+function normalize(v: number[]): number[] {
+  let n = 0
+  for (let i = 0; i < v.length; i++) n += v[i] * v[i]
+  n = Math.sqrt(n)
+  return v.map(x => x / n)
+}
+
+/** normalize(base + eps * noise) — a query "about" an existing row, or a cluster member. */
+export function perturb(base: number[], rng: () => number, eps: number): number[] {
+  const noise = randUnit(rng, base.length)
+  return normalize(base.map((x, i) => x + eps * noise[i]))
+}
+
+export interface Corpus {
+  rows: FixtureRow[]
+  rng: () => number
+}
+
+/**
+ * n mixed-tier rows over 12 clusters: episode-heavy tier cycle, projects
+ * cycling (null, proj-a, proj-b), episode/digest sessions cycling
+ * sess-1..3, semantic/procedural sessionless — deterministic per seed.
+ */
+export function buildCorpus(n: number, seed = 42n): Corpus {
+  const rng = splitmix64(seed)
+  const centers: number[][] = []
+  for (let c = 0; c < 12; c++) centers.push(randUnit(rng, DIMS))
+
+  const tierCycle: MemoryType[] = ['episode', 'episode', 'digest', 'semantic', 'procedural']
+  const projectCycle: Array<string | null> = [null, 'proj-a', 'proj-b']
+  // Cycle length 4 vs the project cycle's 3: coprime, so sessions and
+  // projects decorrelate and combined session+project filters stay non-empty.
+  const sessionCycle = ['sess-1', 'sess-2', 'sess-3', 'sess-4']
+
+  const rows: FixtureRow[] = []
+  for (let i = 0; i < n; i++) {
+    const type = tierCycle[i % tierCycle.length]
+    const center = centers[(rng() * centers.length) | 0]
+    rows.push({
+      id: `mem-${String(i).padStart(4, '0')}`,
+      type,
+      createdAtMs: CORPUS_BASE_MS + i * 1000,
+      projectId: projectCycle[i % projectCycle.length],
+      sessionId: type === 'episode' || type === 'digest' ? sessionCycle[i % sessionCycle.length] : null,
+      // (semantic/procedural rows are sessionless, mirroring the real schema)
+      embedding: perturb(center, rng, 0.35),
+      forgottenAtMs: null,
+      supersededBy: null,
+    })
+  }
+  return { rows, rng }
+}
+
+/** Deep-copies the fixture rows so per-test mutation (forget/supersede/add) never leaks across tests. */
+export function cloneRows(rows: FixtureRow[]): FixtureRow[] {
+  return rows.map(r => ({ ...r }))
+}

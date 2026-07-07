@@ -20,6 +20,7 @@
  *     [--limit 50]                # smoke run (default: all 500)
  *     [--max-results 30]          # passed to memory.recall
  *     [--no-consolidate] [--no-graph] [--no-rerank]
+ *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     --output ./results/longmemeval/baseline.json
  */
 import * as fs from 'node:fs'
@@ -36,6 +37,7 @@ interface SweepArgs {
   noConsolidate: boolean
   noGraph: boolean
   noRerank: boolean
+  vectorMode?: 'full' | 'engine'
   output: string
 }
 
@@ -64,7 +66,7 @@ async function main(): Promise<void> {
   const allQs = await adapter.loadDataset(args.data)
   const questions = args.limit > 0 ? allQs.slice(0, args.limit) : allQs
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
-  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}`)
+  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}, vectorMode=${args.vectorMode ?? 'full'}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
   console.log()
 
@@ -73,6 +75,7 @@ async function main(): Promise<void> {
     graph: !args.noGraph,
     topK: args.maxResults,
     noRerank: args.noRerank,
+    ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
   const rows: PerQRow[] = []
@@ -232,6 +235,11 @@ function parseArgs(argv: string[]): SweepArgs {
     return next && !next.startsWith('--') ? next : 'true'
   }
   const has = (k: string): boolean => argv.includes(`--${k}`)
+  const vectorModeRaw = get('vector-mode')
+  if (vectorModeRaw !== undefined && vectorModeRaw !== 'full' && vectorModeRaw !== 'engine') {
+    console.error(`Error: --vector-mode must be "full" or "engine", got ${JSON.stringify(vectorModeRaw)}`)
+    process.exit(1)
+  }
   return {
     data: get('data') ?? './data/longmemeval/longmemeval_s_cleaned.json',
     limit: parseInt(get('limit') ?? '0', 10),
@@ -239,6 +247,7 @@ function parseArgs(argv: string[]): SweepArgs {
     noConsolidate: has('no-consolidate'),
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
+    ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
     output: get('output') ?? './results/longmemeval/baseline.json',
   }
 }

@@ -191,4 +191,45 @@ export interface StorageAdapter {
     dominantEmotion: string | null
     generatedAt: string
   }>>
+
+  /**
+   * Stream every embedded, live row of `opts.tier` in ascending
+   * (createdAt, id) order, batched (default 1000/batch). Backing source for
+   * the RAM-resident recall engine's warm/rebuild pass: every row an
+   * adapter can produce here becomes one in-memory quantized code.
+   *
+   * "Live" excludes forgotten rows (forgotten_at IS NOT NULL, on tiers that
+   * have that column) and, for `semantic`, superseded rows (superseded_by
+   * IS NOT NULL). Rows with a NULL embedding are never yielded. A row whose
+   * embedding fails to decode/parse is skipped (never yielded) rather than
+   * throwing — one corrupt row must not abort an entire warm pass.
+   *
+   * Paging contract: pass `opts.afterCreatedAt` to resume a previous scan,
+   * strictly excluding rows with createdAt <= afterCreatedAt. Pagination
+   * across batches within a single call is internally keyset-paginated on
+   * (createdAt, id) — tie-safe even when many rows share one createdAt
+   * (e.g. bulk-imported at the same instant), unlike OFFSET/LIMIT which can
+   * skip or duplicate rows as ties straddle a page boundary.
+   */
+  scanEmbeddings?(opts: {
+    tier: MemoryType
+    afterCreatedAt?: Date
+    batchSize?: number
+  }): AsyncIterable<Array<{
+    id: string
+    type: MemoryType
+    createdAt: Date
+    projectId: string | null
+    sessionId: string | null
+    embedding: number[] | Float32Array
+  }>>
+
+  /**
+   * Return every memory forgotten or (for `semantic`) superseded at or
+   * after `since`. Feeds the recall engine's reconcile pass so its
+   * in-memory tier caches drop rows the backing store no longer serves.
+   * `digests` never appear here — that tier has no forgotten_at column and
+   * is never superseded.
+   */
+  listTombstonesSince?(since: Date): Promise<Array<{ id: string; type: MemoryType }>>
 }

@@ -9,7 +9,7 @@ import { SqliteSemanticStorage } from './semantic.js'
 import { SqliteProceduralStorage } from './procedural.js'
 import { SqliteAssociationStorage } from './associations.js'
 import { SqliteConsolidationRunStorage } from './consolidation-runs.js'
-import { julianToDate } from './search.js'
+import { julianToDate, dateToJulian } from './search.js'
 
 export class SqliteStorageAdapter implements StorageAdapter {
   private db: Database.Database | null = null
@@ -461,6 +461,142 @@ export class SqliteStorageAdapter implements StorageAdapter {
       generatedAt: String(r['generated_at']),
     }))
   }
+
+  // ---------------------------------------------------------------------------
+  // Recall-engine feed: scanEmbeddings / listTombstonesSince
+  // ---------------------------------------------------------------------------
+
+  async *scanEmbeddings(opts: {
+    tier: MemoryType
+    afterCreatedAt?: Date
+    batchSize?: number
+  }): AsyncIterable<Array<{
+    id: string
+    type: MemoryType
+    createdAt: Date
+    projectId: string | null
+    sessionId: string | null
+    embedding: number[] | Float32Array
+  }>> {
+    const db = this.assertDb()
+    const config = SCAN_TIER_CONFIG[opts.tier]
+    const batchSize = opts.batchSize ?? 1000
+    // First page bounds on createdAt alone (the caller only has a Date to
+    // resume from); every subsequent internal page bounds on the tie-safe
+    // (createdAt, id) cursor recorded from the previous page's last row.
+    const firstBound = opts.afterCreatedAt ? dateToJulian(opts.afterCreatedAt) : null
+    let cursor: { createdAt: number; id: string } | null = null
+
+    const sessionCol = config.hasSessionId ? ', session_id' : ''
+
+    while (true) {
+      let sql = `SELECT id, created_at, project_id${sessionCol}, embedding FROM ${config.table} WHERE embedding IS NOT NULL`
+      const params: unknown[] = []
+
+      if (config.hasForgottenAt) sql += ' AND forgotten_at IS NULL'
+      if (config.hasSupersededBy) sql += ' AND superseded_by IS NULL'
+
+      if (cursor) {
+        sql += ' AND (created_at, id) > (?, ?)'
+        params.push(cursor.createdAt, cursor.id)
+      } else if (firstBound !== null) {
+        sql += ' AND created_at > ?'
+        params.push(firstBound)
+      }
+
+      sql += ' ORDER BY created_at, id LIMIT ?'
+      params.push(batchSize)
+
+      const rows = db.prepare(sql).all(...params) as ScanRow[]
+      if (rows.length === 0) break
+
+      yield rows.map(row => ({
+        id: row.id,
+        type: opts.tier,
+        createdAt: julianToDate(row.created_at)!,
+        projectId: row.project_id ?? null,
+        sessionId: config.hasSessionId ? (row.session_id ?? null) : null,
+        // WHERE embedding IS NOT NULL above guarantees a Buffer here.
+        embedding: blobToF32(row.embedding as Buffer),
+      }))
+
+      const last = rows[rows.length - 1]!
+      cursor = { createdAt: last.created_at, id: last.id }
+
+      if (rows.length < batchSize) break
+    }
+  }
+
+  async listTombstonesSince(since: Date): Promise<Array<{ id: string; type: MemoryType }>> {
+    const db = this.assertDb()
+    const sinceJulian = dateToJulian(since)
+    const seen = new Set<string>()
+    const results: Array<{ id: string; type: MemoryType }> = []
+
+    const collect = (rows: Array<{ id: string }>, type: MemoryType): void => {
+      for (const row of rows) {
+        const key = `${type}:${row.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        results.push({ id: row.id, type })
+      }
+    }
+
+    collect(
+      db.prepare('SELECT id FROM episodes WHERE forgotten_at IS NOT NULL AND forgotten_at >= ?')
+        .all(sinceJulian) as Array<{ id: string }>,
+      'episode'
+    )
+    collect(
+      db.prepare('SELECT id FROM semantic WHERE forgotten_at IS NOT NULL AND forgotten_at >= ?')
+        .all(sinceJulian) as Array<{ id: string }>,
+      'semantic'
+    )
+    // Semantic supersession is a distinct tombstone reason from forget() —
+    // `collect`'s seen-set dedupes a row that happens to be both.
+    collect(
+      db.prepare('SELECT id FROM semantic WHERE superseded_by IS NOT NULL AND updated_at >= ?')
+        .all(sinceJulian) as Array<{ id: string }>,
+      'semantic'
+    )
+    collect(
+      db.prepare('SELECT id FROM procedural WHERE forgotten_at IS NOT NULL AND forgotten_at >= ?')
+        .all(sinceJulian) as Array<{ id: string }>,
+      'procedural'
+    )
+    // digests: no forgotten_at column, never superseded — intentionally omitted.
+
+    return results
+  }
+}
+
+// ---------------------------------------------------------------------------
+// scanEmbeddings per-tier table config
+// ---------------------------------------------------------------------------
+
+interface ScanTierConfig {
+  table: string
+  hasForgottenAt: boolean
+  hasSupersededBy: boolean
+  hasSessionId: boolean
+}
+
+const SCAN_TIER_CONFIG: Record<MemoryType, ScanTierConfig> = {
+  episode: { table: 'episodes', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: true },
+  digest: { table: 'digests', hasForgottenAt: false, hasSupersededBy: false, hasSessionId: true },
+  semantic: { table: 'semantic', hasForgottenAt: true, hasSupersededBy: true, hasSessionId: false },
+  procedural: { table: 'procedural', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: false },
+}
+
+/** Minimal projection used by scanEmbeddings — id/created_at/project_id/
+ *  (session_id when the tier has one)/embedding. `embedding` is always a
+ *  Buffer at runtime (the query filters embedding IS NOT NULL). */
+interface ScanRow {
+  id: string
+  created_at: number
+  project_id: string | null
+  session_id?: string | null
+  embedding: Buffer | null
 }
 
 // ---------------------------------------------------------------------------
