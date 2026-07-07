@@ -15,8 +15,15 @@
  * passthrough). Every state other than `ready` passes `vectorSearch`
  * straight through to the inner adapter, so the engine can never degrade
  * recall below the existing baseline. `warm()` never throws: any unexpected
- * failure (including an adapter without `scanEmbeddings`, or a corpus larger
- * than `maxVectors`) transitions to `disabled` with a single log line.
+ * failure (including an adapter without `scanEmbeddings`, a corpus larger
+ * than `maxVectors`, or a scan that indexed zero of the rows it saw — e.g. an
+ * embedding-dimension mismatch — while a genuinely empty, freshly-provisioned
+ * DB still goes `ready` correctly) transitions to `disabled` with a single
+ * log line. Even once `ready`, `vectorSearch` itself is wrapped so that ANY
+ * unexpected error mid-query (a corrupted slot, a codec bug, a hydration
+ * throw, ...) falls back to the inner adapter for that call instead of
+ * throwing — the never-worse-than-passthrough guarantee holds structurally,
+ * not just by construction.
  *
  * DB floats remain the source of truth throughout; the in-RAM codes and the
  * snapshot file are disposable, rebuildable caches.
@@ -93,6 +100,8 @@ export interface EngineStats {
   reconcileErrors: number
   /** Queries rejected for non-finite values or a dimension mismatch (returned [] without touching any backend). */
   invalidQueries: number
+  /** Ready-path queries that hit an unexpected internal error (corrupted slot, codec bug, hydration throw, ...) and fell back to `inner.vectorSearch` instead of throwing to the caller. */
+  queryErrors: number
   /** Tier-1 candidate count M used by the most recent engine-served query, or null before the first. */
   lastTier1M: number | null
   /** Tier-2 rescore pool size E used by the most recent engine-served query, or null before the first. */
@@ -147,6 +156,8 @@ export class RecallEngine {
   private reconcileFlight: Promise<void> | null = null
   private disableLogged = false
   private invalidQueryLogged = false
+  /** Distinct error messages already warned about from the ready-path catch below — logs each distinct failure once instead of once per query. */
+  private readonly loggedQueryErrorMessages = new Set<string>()
 
   /**
    * Reconcile ingestion cursor: max `createdAt` (ms) ever SEEN via
@@ -168,6 +179,7 @@ export class RecallEngine {
   private estimateFallbacks = 0
   private reconcileErrors = 0
   private invalidQueries = 0
+  private queryErrors = 0
   private lastReconcileAt: number | null = null
   private lastWarmMs: number | null = null
   private snapshotUsed = false
@@ -247,6 +259,22 @@ export class RecallEngine {
       // state to 'disabled'. Without this guard the unconditional promotion
       // below would resurrect a disposed/disabled engine back to 'ready'.
       if (this.isDisabled()) return
+    }
+
+    // Empty-index guard. `indexed === 0 && unindexed > 0` means the scan DID
+    // see rows but could encode NONE of them (every embedding the wrong
+    // dimension for this codec is the expected real-world cause — a
+    // corpus/config mismatch) — going 'ready' here would silently serve []
+    // forever, which is worse than passthrough: passthrough at least reaches
+    // the real data. This is deliberately NOT the same as a genuinely empty,
+    // freshly-provisioned DB (`indexed === 0 && unindexed === 0`, i.e. the
+    // scan saw no rows at all), where 'ready' is correct — write-through will
+    // populate the index as rows are inserted going forward.
+    if (this.store.size === 0 && this.unindexed > 0) {
+      this.disable(
+        `warm indexed 0 vectors out of ${this.unindexed} scanned rows (e.g. an embedding dimension mismatch) — refusing to go ready with an always-empty index; engine disabled (passthrough)`,
+      )
+      return
     }
 
     this.state = 'ready'
@@ -429,6 +457,31 @@ export class RecallEngine {
       return this.inner.vectorSearch(embedding, opts)
     }
 
+    try {
+      return await this.readyVectorSearch(embedding, opts)
+    } catch (err: unknown) {
+      // Structural guarantee, not just an argument: the engine must never be
+      // WORSE than bare storage. Every other state (cold/warming/disabled)
+      // already passes through unconditionally; an unexpected throw
+      // ANYWHERE in the ready path (a corrupted slot, a codec bug, a
+      // hydration failure, ...) must degrade to that same passthrough
+      // instead of propagating and dropping the query entirely.
+      this.queryErrors++
+      const msg = errMessage(err)
+      if (!this.loggedQueryErrorMessages.has(msg)) {
+        this.loggedQueryErrorMessages.add(msg)
+        this.logger.warn(
+          `[recall-engine] ready-path query failed, falling back to inner storage for this call: ${msg}`,
+        )
+      }
+      return this.inner.vectorSearch(embedding, opts)
+    }
+  }
+
+  private async readyVectorSearch(
+    embedding: number[],
+    opts?: VectorSearchOpts,
+  ): Promise<SearchResult<TypedMemory>[]> {
     // Fire-and-forget staleness-bounded sync with foreign writers.
     if (Date.now() - (this.lastReconcileAt ?? 0) > this.reconcileMs) void this.reconcile()
 
@@ -613,6 +666,7 @@ export class RecallEngine {
       estimateFallbacks: this.estimateFallbacks,
       reconcileErrors: this.reconcileErrors,
       invalidQueries: this.invalidQueries,
+      queryErrors: this.queryErrors,
       lastTier1M: this.lastTier1M,
       lastRescoreE: this.lastRescoreE,
     }

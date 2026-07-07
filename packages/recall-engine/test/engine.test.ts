@@ -487,6 +487,50 @@ describe('RecallEngine: tier-3 fallback and query validation', () => {
   })
 })
 
+describe('RecallEngine: ready-path error containment (never worse than passthrough)', () => {
+  it('an unexpected error mid-ready-path query falls back to inner.vectorSearch, matches its result, and counts queryErrors', async () => {
+    const fake = freshFake()
+    const logger = silentLogger()
+    const engine = await readyEngine(fake, { logger })
+    const target = CORPUS.rows[5]
+    const q = perturb(emb(target), CORPUS.rng, 0.2)
+    const expected = await fake.referenceScan(q, { limit: 7 })
+
+    // Monkeypatch the private store to simulate an unexpected internal
+    // failure (e.g. a corrupted slot) mid-query — TS `private` is a
+    // compile-time guard only, so this reaches the real runtime instance.
+    ;(engine as unknown as { store: { scanTier1: () => never } }).store.scanTier1 = () => {
+      throw new Error('simulated store corruption')
+    }
+
+    const actual = await engine.vectorSearch(q, { limit: 7 })
+
+    expectSameResults(actual, expected)
+    expect(fake.vectorSearchCalls).toBe(1) // fell back to the inner adapter exactly once
+    expect(engine.stats().queryErrors).toBe(1)
+    expect(engine.stats().state).toBe('ready') // the engine itself isn't disabled — just this call degraded
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('logs a distinct failing message only once, but still falls back and counts every occurrence', async () => {
+    const fake = freshFake()
+    const logger = silentLogger()
+    const engine = await readyEngine(fake, { logger })
+    const q = perturb(emb(CORPUS.rows[6]), CORPUS.rng, 0.2)
+
+    ;(engine as unknown as { codec: { rotateQuery: () => never } }).codec.rotateQuery = () => {
+      throw new Error('simulated codec failure')
+    }
+
+    await engine.vectorSearch(q, { limit: 5 })
+    await engine.vectorSearch(q, { limit: 5 })
+
+    expect(fake.vectorSearchCalls).toBe(2)
+    expect(engine.stats().queryErrors).toBe(2)
+    expect(logger.warn).toHaveBeenCalledTimes(1) // same message, logged once
+  })
+})
+
 describe('RecallEngine: snapshot round-trip', () => {
   it('dispose writes a snapshot; a second engine warm-starts from it and reconciles the delta', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'engram-eq1-'))
@@ -544,6 +588,60 @@ describe('RecallEngine: snapshot round-trip', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('RecallEngine: empty-index guard (corpus vs. true empty DB)', () => {
+  it('indexed=0 with unindexed>0 (e.g. every stored embedding is the wrong dimension) does NOT go ready — disables with one clear warn instead of serving an always-empty index', async () => {
+    const rows: FixtureRow[] = []
+    for (let i = 0; i < 10; i++) {
+      rows.push({
+        id: `mismatch-${i}`,
+        type: 'episode',
+        createdAtMs: CORPUS_BASE_MS + i * 1000,
+        projectId: null,
+        sessionId: 'sess-1',
+        embedding: [0.1, 0.2, 0.3, 0.4], // wrong dimension for the DIMS=1536 codec — every row unindexable
+        forgottenAtMs: null,
+        supersededBy: null,
+      })
+    }
+    const fake = new FakeStorageAdapter(rows)
+    const logger = silentLogger()
+    const engine = new RecallEngine(fake, { snapshotDir: null, logger })
+
+    await engine.warm()
+
+    expect(engine.stats().state).toBe('disabled')
+    expect(engine.stats().indexed).toBe(0)
+    expect(engine.stats().unindexed).toBe(10)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+
+    // Disabled means permanent passthrough, exactly like every other disable reason.
+    const q = perturb(emb(CORPUS.rows[0]), CORPUS.rng, 0.2)
+    await engine.vectorSearch(q, { limit: 5 })
+    expect(fake.vectorSearchCalls).toBe(1)
+    expect(engine.stats().passthroughCalls).toBe(1)
+  })
+
+  it('a genuinely empty DB (indexed=0, unindexed=0) goes ready — write-through populates it going forward', async () => {
+    const fake = new FakeStorageAdapter([])
+    const engine = new RecallEngine(fake, { snapshotDir: null, logger: silentLogger() })
+
+    await engine.warm()
+
+    expect(engine.stats().state).toBe('ready')
+    expect(engine.stats().indexed).toBe(0)
+    expect(engine.stats().unindexed).toBe(0)
+
+    const q = perturb(emb(CORPUS.rows[0]), CORPUS.rng, 0.2)
+    expect(await engine.vectorSearch(q, { limit: 5 })).toEqual([])
+    expect(fake.vectorSearchCalls).toBe(0) // ready engine never passes through
+
+    // Write-through immediately populates the previously-empty index.
+    const e = emb(CORPUS.rows[0])
+    engine.noteInsert('first-write', 'episode', CORPUS_BASE_MS, null, 'sess-1', e)
+    expect(engine.stats().indexed).toBe(1)
   })
 })
 

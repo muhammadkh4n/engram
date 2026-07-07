@@ -20,7 +20,7 @@ This package is opt-in and unset by default: existing deployments are unaffected
 
 > Full-precision embeddings in the database are the source of truth and are never dropped or replaced by quantized codes — codes are a disposable, rebuildable cache.
 
-> With exact rescore ON (the default), no quantized score ever leaves the engine; every similarity returned is true float cosine.
+> With exact rescore ON (the default), no quantized score ever leaves the engine; every similarity returned is true float cosine (sole exception: a stored embedding that fails to parse at hydration keeps its tier-2 unbiased estimate, counted in `stats().estimateFallbacks`).
 
 ## Query pipeline
 
@@ -30,4 +30,4 @@ Until `warm()` completes (snapshot fast-path or full rebuild via `scanEmbeddings
 
 ## Status
 
-Codec, code store, snapshot format, and the `RecallEngine` (warm / reconcile / vectorSearch / write-through notes / config parsing) are implemented. The `withRecallEngine` storage decorator and MCP/bench wiring land in follow-up work on this branch.
+Codec, code store, snapshot format, and the `RecallEngine` (warm / reconcile / vectorSearch / write-through notes / config parsing) are implemented, as is the wiring that turns it on: the `withRecallEngine` storage decorator, MCP wiring (`ENGRAM_RECALL_ENGINE`, with exact rescore always forced on regardless of `ENGRAM_ENGINE_EXACT`), and bench wiring (`--vector-mode engine`) have all shipped. The recall-quality gates (Gates 1–2 in `packages/bench/README.md`) have not been run yet, so the mode ships opt-in only — existing deployments are unaffected until `ENGRAM_RECALL_ENGINE` is explicitly turned on.
