@@ -18,6 +18,7 @@ describe('requireGraph', () => {
       memory: fakeMemory,
       config: { graph: null, rerankerBackend: 'none' },
       graphActuallyWired: false,
+      engineActuallyWired: false,
     }
     expect(() => requireGraph(handle)).toThrow(/Neo4j is not wired/)
   })
@@ -27,6 +28,7 @@ describe('requireGraph', () => {
       memory: fakeMemory,
       config: { graph: null, rerankerBackend: 'openai' },
       graphActuallyWired: true,
+      engineActuallyWired: false,
     }
     expect(() => requireGraph(handle)).toThrow()
   })

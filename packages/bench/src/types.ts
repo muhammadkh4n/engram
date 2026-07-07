@@ -53,6 +53,19 @@ export interface BenchmarkOpts {
   withHypotheticalQuestions?: boolean
   openaiApiKey?: string
   outputPath?: string
+  /**
+   * Vector-search backend for the bench SQLite adapter.
+   *   'full'   (default when absent) — the adapter's own SQL vector scan.
+   *   'engine' — wrap the adapter with `@engram-mem/recall-engine`'s
+   *              RAM-resident quantized `RecallEngine` (`withRecallEngine`,
+   *              exact tier-3 rescore forced on, snapshotting off — bench
+   *              corpora are ephemeral per-conversation SQLite instances, so
+   *              there is nothing worth persisting to disk). `createBenchMemory`
+   *              awaits the engine reaching `ready` before returning and
+   *              throws if it doesn't, so an A/B bench run can never silently
+   *              fall back to the legacy path and corrupt the comparison.
+   */
+  vectorMode?: 'full' | 'engine'
 }
 
 export interface BenchmarkMetrics {

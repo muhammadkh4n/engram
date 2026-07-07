@@ -205,3 +205,17 @@ export function withRecallEngine(storage: StorageAdapter, opts?: RecallEngineOpt
 export function getRecallEngineForTesting(adapter: StorageAdapter): RecallEngine | undefined {
   return engineByAdapter.get(adapter)
 }
+
+/**
+ * Public introspection helper: returns the `RecallEngine` driving a
+ * `withRecallEngine`-decorated adapter, or `undefined` if `adapter` wasn't
+ * produced by it (or isn't decorated at all). Re-exported from `index.ts`
+ * for callers that need direct access to the engine instead of going through
+ * `StorageAdapter`'s narrow surface — e.g. a benchmark harness that must
+ * AWAIT `engine.warm()` and hard-fail if the engine never reaches `ready`,
+ * rather than relying on the decorator's own fire-and-forget warm-up and
+ * silently measuring the passthrough path instead of the engine.
+ */
+export function recallEngineOf(adapter: StorageAdapter): RecallEngine | undefined {
+  return engineByAdapter.get(adapter)
+}

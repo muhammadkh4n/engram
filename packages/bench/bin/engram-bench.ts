@@ -6,6 +6,7 @@
  *   npx engram-bench --benchmark locomo --data ./data/locomo/
  *   npx engram-bench --benchmark longmemeval --data ./data/longmemeval/
  *   npx engram-bench --benchmark locomo --compare --data ./data/locomo/
+ *   npx engram-bench --benchmark locomo --data ./data/locomo/ --vector-mode engine
  */
 
 import * as fs from 'node:fs/promises'
@@ -33,6 +34,7 @@ function parseArgs(argv: string[]) {
     if (arg === '--matrix') { args['matrix'] = true; continue }
     if (arg === '--require-graph') { args['requireGraph'] = true; continue }
     if (arg === '--verbose') { args['verbose'] = true; continue }
+    if (arg === '--vector-mode') { args['vectorMode'] = argv[i + 1] ?? true; i++; continue }
     if (arg.startsWith('--')) {
       const key = arg.slice(2)
       args[key] = argv[i + 1] ?? true
@@ -47,6 +49,16 @@ function parseArgs(argv: string[]) {
   if (!args['data'] || typeof args['data'] !== 'string') {
     console.error('Error: --data is required')
     process.exit(1)
+  }
+
+  let vectorMode: 'full' | 'engine' | undefined
+  if (args['vectorMode'] !== undefined) {
+    if (args['vectorMode'] === 'full' || args['vectorMode'] === 'engine') {
+      vectorMode = args['vectorMode']
+    } else {
+      console.error(`Error: --vector-mode must be "full" or "engine", got ${JSON.stringify(args['vectorMode'])}`)
+      process.exit(1)
+    }
   }
 
   return {
@@ -65,6 +77,7 @@ function parseArgs(argv: string[]) {
     limit: parseInt(args['limit'] as string ?? '0', 10) || 0,
     noRerank: args['noRerank'] === true,
     verbose: args['verbose'] === true,
+    vectorMode,
   }
 }
 
@@ -96,6 +109,7 @@ async function main() {
     topK: args.topK,
     limit: args.limit > 0 ? args.limit : undefined,
     noRerank: args.noRerank === true,
+    ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
   await fs.mkdir(args.outputDir, { recursive: true })
@@ -104,6 +118,7 @@ async function main() {
   console.log(`Data:          ${args.dataPath}`)
   console.log(`Graph layer:   ${args.graph ? 'ON (Neo4j)' : 'OFF (SQL-only)'}`)
   console.log(`Consolidation: ${args.consolidate ? 'ON' : 'OFF'}`)
+  console.log(`Vector mode:   ${args.vectorMode === 'engine' ? 'engine (RecallEngine, quantized)' : 'full (SQL scan, default)'}`)
   console.log('')
 
   if (args.matrix) {
@@ -121,6 +136,7 @@ async function main() {
         topK: args.topK,
         limit: args.limit > 0 ? args.limit : undefined,
         ...(args.categories ? { categories: args.categories } : {}),
+        ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
       },
       { requireGraph: args.requireGraph, commit, corpusSha256 },
     )

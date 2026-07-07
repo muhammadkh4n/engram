@@ -32,6 +32,7 @@
     "@engram-mem/graph": "*",
     "@engram-mem/sqlite": "*",
     "@engram-mem/openai": "*",
+    "@engram-mem/recall-engine": "*",
     "@engram-mem/rerank-onnx": "*"
   },
   "devDependencies": {

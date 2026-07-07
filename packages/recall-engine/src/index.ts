@@ -19,6 +19,12 @@
  *     vars into the `RecallEngineOpts` `withRecallEngine` expects (or
  *     `null` when the feature is off), for callers that want env-driven
  *     wiring instead of passing opts by hand.
+ *   - `recallEngineOf` — introspection helper: given a `withRecallEngine`-
+ *     decorated `StorageAdapter`, returns the `RecallEngine` driving it (or
+ *     `undefined`). For callers that need to reach past the adapter surface
+ *     — e.g. a bench harness that must AWAIT `engine.warm()` and check
+ *     `engine.stats().state === 'ready'` before trusting a run, instead of
+ *     relying on the decorator's fire-and-forget warm-up.
  *   - `RecallEngine` + its option/state/stats types — exported for callers
  *     that need lower-level control (custom wiring, observability
  *     dashboards reading `stats()`) instead of going through the decorator.
@@ -43,7 +49,7 @@ export {
   type EngineStats,
   type VectorSearchOpts,
 } from './engine.js'
-export { withRecallEngine } from './decorator.js'
+export { withRecallEngine, recallEngineOf } from './decorator.js'
 export { configFromEnv } from './config.js'
 export { parseVector } from './parse-vector.js'
 export {

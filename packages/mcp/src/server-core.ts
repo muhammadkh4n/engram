@@ -105,6 +105,65 @@ async function maybeWithLocalRerank(
   }
 }
 
+/**
+ * Optionally wrap the storage adapter with the RAM-resident quantized
+ * `RecallEngine` (`@engram-mem/recall-engine`).
+ *
+ * Gated on `ENGRAM_RECALL_ENGINE=true` (checked directly, mirroring
+ * `maybeWithLocalRerank`'s env-first check, so the 8MB+ recall-engine
+ * dependency is never dynamically imported for the common case where the
+ * feature is off). When enabled, `configFromEnv()` supplies every other
+ * `ENGRAM_ENGINE_*` knob (bits, tier1M, snapshotDir, reconcileMs, maxN) —
+ * except `exactRescore`, which MCP ALWAYS forces to `true` regardless of
+ * `ENGRAM_ENGINE_EXACT`. This is a hard MCP-specific override, not a
+ * default: `memory_forget`'s write-suppression thresholds and any other
+ * caller comparing similarity scores against a fixed cutoff must always see
+ * true float cosine (tier 3), never the tier-2 unbiased estimate — an
+ * estimate silently changing which memories cross a threshold is a
+ * correctness bug, not a performance tradeoff, in a shared multi-agent
+ * server. If an operator explicitly set `ENGRAM_ENGINE_EXACT=false`, that is
+ * logged and refused rather than silently honored.
+ *
+ * `backendKey` is the Supabase URL (`postgrest:<url>`) — the one stable
+ * locator available at the call site — so the on-disk snapshot cache is
+ * keyed to the actual backend and never loaded against a different one.
+ *
+ * The decorated `initialize()` already fires `engine.warm()` fire-and-forget
+ * after the inner `storage.initialize()` (see `decorator.ts`), and
+ * `Memory.initialize()` calls `storage.initialize()` (`packages/core/src/memory.ts`),
+ * so no extra warm-up call is needed here — this mirrors the `onnx.load()`
+ * fire-and-forget precedent below.
+ *
+ * Dynamic import keeps the dependency out of the cold-start path for
+ * operators who don't opt in. Any load failure logs a warning and falls
+ * back to the bare storage adapter — the engine is an optional accelerator,
+ * never a startup requirement.
+ */
+export async function maybeWithRecallEngine(storage: StorageAdapter, supabaseUrl: string): Promise<StorageAdapter> {
+  if (process.env['ENGRAM_RECALL_ENGINE'] !== 'true') return storage
+  try {
+    const mod = await import('@engram-mem/recall-engine')
+    const cfg = mod.configFromEnv()
+    if (cfg === null) return storage // defensive; the env check above already gates this
+    if (cfg.exactRescore === false) {
+      console.warn(
+        '[engram-mcp] ENGRAM_ENGINE_EXACT=false is refused under MCP — forcing exactRescore=true. ' +
+          'Write-suppression thresholds (e.g. memory_forget) must always compare true float cosine, ' +
+          'never a tier-2 quantized estimate.',
+      )
+    }
+    const backendKey = `postgrest:${supabaseUrl}`
+    console.log(`[engram-mcp] ENGRAM_RECALL_ENGINE=true — wrapping storage with the quantized recall engine (backendKey=${backendKey})`)
+    return mod.withRecallEngine(storage, { ...cfg, exactRescore: true, backendKey })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(
+      `[engram-mcp] ENGRAM_RECALL_ENGINE=true but @engram-mem/recall-engine could not be loaded — falling back to bare storage: ${msg}`,
+    )
+    return storage
+  }
+}
+
 let memory: Memory | null = null
 
 export async function getMemory(): Promise<Memory> {
@@ -114,7 +173,11 @@ export async function getMemory(): Promise<Memory> {
   const supabaseKey = requireEnv('SUPABASE_KEY')
   const openaiApiKey = requireEnv('OPENAI_API_KEY')
 
-  const storage: StorageAdapter = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  const rawStorage: StorageAdapter = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
+  // When ENGRAM_RECALL_ENGINE=true, wrap storage with the RAM-resident
+  // quantized recall engine. See maybeWithRecallEngine's doc comment for why
+  // exactRescore is always forced true here regardless of ENGRAM_ENGINE_EXACT.
+  const storage: StorageAdapter = await maybeWithRecallEngine(rawStorage, supabaseUrl)
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
   // cross-encoder over the openaiIntelligence adapter so the rerank stage

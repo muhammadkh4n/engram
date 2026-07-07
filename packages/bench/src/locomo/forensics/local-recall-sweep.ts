@@ -27,6 +27,7 @@
  *     [--no-consolidate]
  *     [--no-graph]
  *     [--no-rerank]
+ *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     [--output ./results/forensics/local-recall-sweep.json]
  */
 import * as fs from 'node:fs'
@@ -43,6 +44,7 @@ interface SweepArgs {
   noGraph: boolean
   noRerank: boolean
   withHypotheticalQuestions: boolean
+  vectorMode?: 'full' | 'engine'
   output: string
 }
 
@@ -67,7 +69,7 @@ async function main(): Promise<void> {
   const data = JSON.parse(fs.readFileSync(args.data, 'utf8')) as LoCoMoConversationFile[]
   const conversations = args.limit > 0 ? data.slice(0, args.limit) : data
   console.log(`Loaded ${conversations.length} conversations from ${args.data}`)
-  console.log(`Sweep config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}`)
+  console.log(`Sweep config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}, vectorMode=${args.vectorMode ?? 'full'}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
   console.log()
 
@@ -76,6 +78,7 @@ async function main(): Promise<void> {
     graph: !args.noGraph,
     topK: args.maxResults,
     noRerank: args.noRerank,
+    ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
   const adapter = new LoCoMoAdapter()
@@ -273,6 +276,11 @@ function parseSweepArgs(argv: string[]): SweepArgs {
     return next && !next.startsWith('--') ? next : 'true'
   }
   const has = (k: string): boolean => argv.includes(`--${k}`)
+  const vectorModeRaw = get('vector-mode')
+  if (vectorModeRaw !== undefined && vectorModeRaw !== 'full' && vectorModeRaw !== 'engine') {
+    console.error(`Error: --vector-mode must be "full" or "engine", got ${JSON.stringify(vectorModeRaw)}`)
+    process.exit(1)
+  }
   return {
     data: get('data') ?? './data/locomo/data/locomo10.json',
     maxResults: parseInt(get('max-results') ?? '100', 10),
@@ -281,6 +289,7 @@ function parseSweepArgs(argv: string[]): SweepArgs {
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
     withHypotheticalQuestions: has('with-hypothetical-questions'),
+    ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
     output: get('output') ?? './results/forensics/local-recall-sweep.json',
   }
 }

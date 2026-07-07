@@ -17,6 +17,15 @@ export interface BenchMemoryHandle {
   config: BenchMemoryConfig
   /** True iff a real bench Neo4j was wired (env present AND reachable). */
   graphActuallyWired: boolean
+  /**
+   * True iff `opts.vectorMode === 'engine'` AND the RecallEngine actually
+   * reached `ready` before `createBenchMemory` returned. `createBenchMemory`
+   * throws rather than returning `false` here — this field exists for
+   * symmetry with `graphActuallyWired` and so callers have a positive
+   * assertion to check, not because a `false` value is ever expected to
+   * reach a caller. False when `vectorMode` was 'full' or absent.
+   */
+  engineActuallyWired: boolean
 }
 
 /**
