@@ -3,6 +3,7 @@ import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { EpisodeStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
+import { parseVector } from './parse-vector.js'
 
 export class PostgRestEpisodeStorage implements EpisodeStorage {
   /**
@@ -288,7 +289,7 @@ interface EpisodeRow {
   access_count: number
   last_accessed: string | null
   consolidated_at: string | null
-  embedding: number[] | null
+  embedding: number[] | string | null
   entities: string[]
   metadata: Record<string, unknown>
   created_at: string
@@ -311,7 +312,7 @@ interface LegacyMatchRow {
   session_id: string
   role: string
   content: string
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
   similarity: number
@@ -327,7 +328,7 @@ function rowToEpisode(row: EpisodeRow, legacyMode = false): Episode {
     accessCount: legacyMode ? 0 : (row.access_count ?? 0),
     lastAccessed: legacyMode ? null : (row.last_accessed ? new Date(row.last_accessed) : null),
     consolidatedAt: legacyMode ? null : (row.consolidated_at ? new Date(row.consolidated_at) : null),
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     entities: legacyMode ? [] : (row.entities ?? []),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
@@ -345,7 +346,7 @@ function legacyRowToEpisode(row: LegacyMatchRow): Episode {
     accessCount: 0,
     lastAccessed: null,
     consolidatedAt: null,
-    embedding: null,
+    embedding: parseVector(row.embedding),
     entities: [],
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),

@@ -3,6 +3,7 @@ import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { DigestStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
+import { parseVector } from './parse-vector.js'
 
 export class PostgRestDigestStorage implements DigestStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -160,7 +161,7 @@ interface DigestRow {
   episode_ids: string[]
   source_digest_ids: string[]
   level: number
-  embedding: number[] | null
+  embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
 }
@@ -185,7 +186,7 @@ function rowToDigest(row: DigestRow): Digest {
     sourceEpisodeIds: row.episode_ids ?? [],
     sourceDigestIds: row.source_digest_ids ?? [],
     level: row.level,
-    embedding: row.embedding ?? null,
+    embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     projectId: null,

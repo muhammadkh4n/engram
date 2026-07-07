@@ -429,60 +429,97 @@ $$;
 -- parameter does not create an ambiguous overload alongside the old function.
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text);
 
+-- Exact-vs-approximate tradeoff: the old function body scanned every row
+-- (exact, sequential scan); the per-tier subquery shape below lets the
+-- planner drive each tier from its HNSW index instead (approximate nearest
+-- neighbor). Recall is now governed by `hnsw.ef_search` (the number of
+-- candidates HNSW examines per index scan) rather than by touching every
+-- row, so a true top-k match can be missed if it falls outside the
+-- ef_search candidate window. The `p_session_id` / `p_project_id` /
+-- `forgotten_at` / `superseded_by` predicates are post-filters applied to
+-- that candidate stream, not filters that widen it — a narrow filter
+-- combined with a low ef_search compounds the truncation risk.
+--
+-- `SET hnsw.ef_search TO '150'`: callers pass p_match_count up to 120 (core
+-- recall's vector-search leg requests strategy.maxResults * 4, and
+-- maxResults tops out at 30 for the deep-sleep/light-sleep intents — see
+-- packages/core/src/retrieval/search.ts and packages/core/src/intent/
+-- intents.ts). Postgres's pgvector HNSW returns at most ef_search candidates
+-- per index scan (default 40) regardless of the query's LIMIT, so without an
+-- explicit floor a deep recall call silently truncates below what it asked
+-- for. 150 covers the 120 ceiling with headroom.
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.ef_search TO '150'
     AS $$
-  -- Episodes
-  SELECT
-    me.id, 'episode'::text, me.content, me.role,
-    me.salience::float, me.access_count, me.created_at,
-    (1 - (me.embedding <=> p_query_embedding))::float AS similarity,
-    me.entities, me.metadata
-  FROM memory_episodes me
-  WHERE me.embedding IS NOT NULL
-    AND me.forgotten_at IS NULL
-    AND (p_session_id IS NULL OR me.session_id = p_session_id)
-    AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
+  SELECT * FROM (
+    SELECT * FROM (
+      -- Episodes
+      SELECT
+        me.id, 'episode'::text, me.content, me.role,
+        me.salience::float, me.access_count, me.created_at,
+        (1 - (me.embedding <=> p_query_embedding))::float AS similarity,
+        me.entities, me.metadata
+      FROM memory_episodes me
+      WHERE me.embedding IS NOT NULL
+        AND me.forgotten_at IS NULL
+        AND (p_session_id IS NULL OR me.session_id = p_session_id)
+        AND (p_project_id IS NULL OR me.project_id = p_project_id OR me.project_id IS NULL)
+      ORDER BY me.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) ep
 
-  UNION ALL
+    UNION ALL
 
-  -- Digests
-  SELECT
-    md.id, 'digest'::text, md.summary, NULL,
-    0.5::float, 0, md.created_at,
-    (1 - (md.embedding <=> p_query_embedding))::float,
-    md.key_topics, md.metadata
-  FROM memory_digests md
-  WHERE md.embedding IS NOT NULL
-    AND (p_project_id IS NULL OR md.project_id = p_project_id OR md.project_id IS NULL)
+    SELECT * FROM (
+      -- Digests
+      SELECT
+        md.id, 'digest'::text, md.summary, NULL::text,
+        0.5::float, 0, md.created_at,
+        (1 - (md.embedding <=> p_query_embedding))::float,
+        md.key_topics, md.metadata
+      FROM memory_digests md
+      WHERE md.embedding IS NOT NULL
+        AND (p_project_id IS NULL OR md.project_id = p_project_id OR md.project_id IS NULL)
+      ORDER BY md.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) dg
 
-  UNION ALL
+    UNION ALL
 
-  -- Semantic
-  SELECT
-    ms.id, 'semantic'::text, ms.content, NULL,
-    ms.confidence::float, ms.access_count, ms.created_at,
-    (1 - (ms.embedding <=> p_query_embedding))::float,
-    ARRAY[]::text[], ms.metadata
-  FROM memory_semantic ms
-  WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
-    AND ms.forgotten_at IS NULL
-    AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
+    SELECT * FROM (
+      -- Semantic
+      SELECT
+        ms.id, 'semantic'::text, ms.content, NULL::text,
+        ms.confidence::float, ms.access_count, ms.created_at,
+        (1 - (ms.embedding <=> p_query_embedding))::float,
+        ARRAY[]::text[], ms.metadata
+      FROM memory_semantic ms
+      WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
+        AND ms.forgotten_at IS NULL
+        AND (p_project_id IS NULL OR ms.project_id = p_project_id OR ms.project_id IS NULL)
+      ORDER BY ms.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) sm
 
-  UNION ALL
+    UNION ALL
 
-  -- Procedural
-  SELECT
-    mp.id, 'procedural'::text, mp.procedure, NULL,
-    mp.confidence::float, mp.access_count, mp.created_at,
-    (1 - (mp.embedding <=> p_query_embedding))::float,
-    ARRAY[]::text[], mp.metadata
-  FROM memory_procedural mp
-  WHERE mp.embedding IS NOT NULL
-    AND mp.forgotten_at IS NULL
-    AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
-
+    SELECT * FROM (
+      -- Procedural
+      SELECT
+        mp.id, 'procedural'::text, mp.procedure, NULL::text,
+        mp.confidence::float, mp.access_count, mp.created_at,
+        (1 - (mp.embedding <=> p_query_embedding))::float,
+        ARRAY[]::text[], mp.metadata
+      FROM memory_procedural mp
+      WHERE mp.embedding IS NOT NULL
+        AND mp.forgotten_at IS NULL
+        AND (p_project_id IS NULL OR mp.project_id = p_project_id OR mp.project_id IS NULL)
+      ORDER BY mp.embedding <=> p_query_embedding
+      LIMIT p_match_count
+    ) pr
+  ) all_tiers
   ORDER BY similarity DESC
   LIMIT p_match_count
 $$;
@@ -985,14 +1022,14 @@ CREATE INDEX IF NOT EXISTS idx_digests_created ON public.memory_digests USING bt
 
 
 --
--- Name: idx_digests_embedding; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_digests_embedding ON public.memory_digests USING ivfflat (embedding public.vector_cosine_ops) WITH (lists='100');
-
-
---
 -- Name: idx_digests_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
+--
+-- The ivfflat sibling index (idx_digests_embedding, probes=1 by default) was
+-- dropped: it was abandoned early for poor recall, and now that
+-- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
+-- the planner is free to pick either index — leaving ivfflat in place risked
+-- it winning on cost despite worse recall than HNSW. See the migration file
+-- for the corresponding DROP INDEX.
 --
 
 CREATE INDEX IF NOT EXISTS idx_digests_embedding_hnsw ON public.memory_digests USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
@@ -1034,14 +1071,14 @@ CREATE INDEX IF NOT EXISTS idx_episodes_created ON public.memory_episodes USING 
 
 
 --
--- Name: idx_episodes_embedding; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_episodes_embedding ON public.memory_episodes USING ivfflat (embedding public.vector_cosine_ops) WITH (lists='100');
-
-
---
 -- Name: idx_episodes_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
+--
+-- The ivfflat sibling index (idx_episodes_embedding, probes=1 by default) was
+-- dropped: it was abandoned early for poor recall, and now that
+-- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
+-- the planner is free to pick either index — leaving ivfflat in place risked
+-- it winning on cost despite worse recall than HNSW. See the migration file
+-- for the corresponding DROP INDEX.
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON public.memory_episodes USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
@@ -1076,14 +1113,14 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON public.memory_semantic US
 
 
 --
--- Name: idx_knowledge_embedding; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_knowledge_embedding ON public.memory_semantic USING ivfflat (embedding public.vector_cosine_ops) WITH (lists='100');
-
-
---
 -- Name: idx_knowledge_topic; Type: INDEX; Schema: public; Owner: -
+--
+-- (idx_knowledge_embedding, the ivfflat sibling of idx_semantic_embedding_hnsw
+-- below, was dropped: it was abandoned early for poor recall, and now that
+-- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
+-- the planner is free to pick either index — leaving ivfflat in place risked
+-- it winning on cost despite worse recall than HNSW (probes=1 by default).
+-- See the migration file for the corresponding DROP INDEX.)
 --
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON public.memory_semantic USING btree (topic);
