@@ -1033,13 +1033,18 @@ CREATE INDEX IF NOT EXISTS idx_digests_created ON public.memory_digests USING bt
 --
 -- Name: idx_digests_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
 --
--- The ivfflat sibling index (idx_digests_embedding, probes=1 by default) was
--- dropped: it was abandoned early for poor recall, and now that
--- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
--- the planner is free to pick either index — leaving ivfflat in place risked
--- it winning on cost despite worse recall than HNSW. See the migration file
--- for the corresponding DROP INDEX.
+-- The legacy ivfflat indexes (probes=1 by default) were retired: ivfflat was
+-- abandoned early for poor recall, and now that engram_vector_search /
+-- engram_recall use a per-tier ORDER BY ... LIMIT shape the planner is free
+-- to pick either index — leaving ivfflat in place risked it winning on cost
+-- despite worse recall than HNSW. The drops below make re-running this file
+-- upgrade an older installation in place (idx_knowledge_embedding is the
+-- semantic tier's pre-rename ivfflat name).
 --
+
+DROP INDEX IF EXISTS public.idx_digests_embedding;
+DROP INDEX IF EXISTS public.idx_episodes_embedding;
+DROP INDEX IF EXISTS public.idx_knowledge_embedding;
 
 CREATE INDEX IF NOT EXISTS idx_digests_embedding_hnsw ON public.memory_digests USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
 
@@ -1082,12 +1087,8 @@ CREATE INDEX IF NOT EXISTS idx_episodes_created ON public.memory_episodes USING 
 --
 -- Name: idx_episodes_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
 --
--- The ivfflat sibling index (idx_episodes_embedding, probes=1 by default) was
--- dropped: it was abandoned early for poor recall, and now that
--- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
--- the planner is free to pick either index — leaving ivfflat in place risked
--- it winning on cost despite worse recall than HNSW. See the migration file
--- for the corresponding DROP INDEX.
+-- The ivfflat sibling index (idx_episodes_embedding) was retired — rationale
+-- and the upgrade DROPs live with idx_digests_embedding_hnsw above.
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON public.memory_episodes USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
@@ -1125,11 +1126,8 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON public.memory_semantic US
 -- Name: idx_knowledge_topic; Type: INDEX; Schema: public; Owner: -
 --
 -- (idx_knowledge_embedding, the ivfflat sibling of idx_semantic_embedding_hnsw
--- below, was dropped: it was abandoned early for poor recall, and now that
--- engram_vector_search/engram_recall use a per-tier ORDER BY ... LIMIT shape
--- the planner is free to pick either index — leaving ivfflat in place risked
--- it winning on cost despite worse recall than HNSW (probes=1 by default).
--- See the migration file for the corresponding DROP INDEX.)
+-- below, was retired — rationale and the upgrade DROPs live with
+-- idx_digests_embedding_hnsw above.)
 --
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON public.memory_semantic USING btree (topic);
