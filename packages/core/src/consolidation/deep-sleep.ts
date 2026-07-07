@@ -3,6 +3,7 @@ import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import { extractCounters } from './graph-counters.js'
+import { majorityProjectId } from './inherit-project.js'
 
 export interface DeepSleepOptions {
   minDigests?: number
@@ -174,6 +175,12 @@ export async function deepSleep(
     allCandidates.push(...candidates)
   }
 
+  // Promotions inherit the project of the digests they derive from, so
+  // scoped recall survives consolidation.
+  const digestProjectById = new Map(digests.map(d => [d.id, d.projectId]))
+  const candidateProjectId = (candidate: KnowledgeCandidate): string | null =>
+    majorityProjectId(candidate.sourceDigestIds.map(id => digestProjectById.get(id)))
+
   // If intelligence adapter supports extractKnowledge, use it to augment
   if (intelligence?.extractKnowledge) {
     for (const digest of digests) {
@@ -252,7 +259,7 @@ export async function deepSleep(
       supersededBy: null,
       embedding: candidateEmbedding ?? null,
       metadata: {},
-      projectId: null,
+      projectId: candidateProjectId(candidate),
     })
 
     if (supersededId) {
@@ -401,7 +408,7 @@ export async function deepSleep(
       sourceEpisodeIds: candidate.sourceEpisodeIds,
       embedding: proceduralEmbedding ?? null,
       metadata: {},
-      projectId: null,
+      projectId: candidateProjectId(candidate),
     })
 
     // --- Neo4j: Procedural Memory node ---

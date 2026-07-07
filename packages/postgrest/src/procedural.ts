@@ -34,6 +34,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
         source_episode_ids: memory.sourceEpisodeIds,
         embedding: memory.embedding ?? null,
         metadata: memory.metadata,
+        project_id: memory.projectId ?? null,
       })
       .select()
       .single()
@@ -202,6 +203,7 @@ interface ProceduralRow {
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
+  project_id?: string | null
 }
 
 interface RecallRow {
@@ -233,7 +235,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 

@@ -33,6 +33,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
         superseded_by: memory.supersededBy ?? null,
         embedding: memory.embedding ?? null,
         metadata: memory.metadata,
+        project_id: memory.projectId ?? null,
       })
       .select()
       .single()
@@ -262,6 +263,7 @@ interface SemanticRow {
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
+  project_id?: string | null
 }
 
 interface RecallRow {
@@ -292,7 +294,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 

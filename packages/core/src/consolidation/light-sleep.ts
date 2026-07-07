@@ -4,6 +4,7 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import { extractCounters } from './graph-counters.js'
 import { heuristicSummarize } from './heuristic-summarize.js'
+import { majorityProjectId } from './inherit-project.js'
 import { estimateTokens } from '../utils/tokens.js'
 
 export interface LightSleepOptions {
@@ -136,7 +137,8 @@ export async function lightSleep(
         }
       }
 
-      // Insert digest
+      // Insert digest — inherits the majority project of its source
+      // episodes so scoped recall survives consolidation.
       const digest = await storage.digests.insert({
         sessionId,
         summary: summaryText,
@@ -151,7 +153,7 @@ export async function lightSleep(
           entities,
           decisions,
         },
-        projectId: null,
+        projectId: majorityProjectId(batch.map(e => e.projectId)),
       })
 
       // Mark episodes as consolidated (lossless — they are never deleted)
