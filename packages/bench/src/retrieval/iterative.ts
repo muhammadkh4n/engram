@@ -60,6 +60,12 @@ export interface IterativeRecallTrace {
 export interface IterativeRecallResult {
   memories: BenchScoredMemory[]
   trace: IterativeRecallTrace
+  /**
+   * Each round's ranked pool before the interleave, in round order.
+   * `perRound[0]` is exactly what single-shot dense (A1) would have returned,
+   * so an A4 run yields the A1 arm's metrics for free — no second sweep.
+   */
+  perRound: BenchScoredMemory[][]
 }
 
 function dedupeByBestRelevance(
@@ -141,5 +147,6 @@ export async function iterativeRecall(
       perRoundCounts: perRound.map((r) => r.length),
       rounds: perRound.length,
     },
+    perRound,
   }
 }
