@@ -568,6 +568,106 @@ describe('deepSleep', () => {
       expect(result).toHaveProperty('superseded')
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Embeds memories at insert — a null embedding makes the row invisible to
+  // vector search AND to the embedding-based dedup on the next cycle, so
+  // every promotion must persist the embedding when an embed adapter exists.
+  // -------------------------------------------------------------------------
+
+  describe('embeds memories at insert', () => {
+    it('persists the dedup embedding on promoted semantic memories', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Some other content.' }),
+        makeDigest({ summary: 'More filler content.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+      const embed = vi.fn(async (_text: string) => [0.1, 0.2, 0.3])
+
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(result.promoted).toBeGreaterThan(0)
+      expect(storage.semantic.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: [0.1, 0.2, 0.3] })
+      )
+    })
+
+    it('inserts semantic embedding:null when embed throws', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Some other content.' }),
+        makeDigest({ summary: 'More filler content.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+      const embed = vi.fn(async (_text: string) => {
+        throw new Error('embed unavailable')
+      })
+
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(result.promoted).toBeGreaterThan(0)
+      expect(storage.semantic.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: null })
+      )
+    })
+
+    it('inserts semantic embedding:null without an intelligence adapter', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Some other content.' }),
+        makeDigest({ summary: 'More filler content.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.promoted).toBeGreaterThan(0)
+      expect(storage.semantic.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: null })
+      )
+    })
+
+    it('embeds promoted procedural memories with the trigger+procedure text', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I always run prettier before committing.' }),
+        makeDigest({ summary: 'Filler content one.' }),
+        makeDigest({ summary: 'Filler content two.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+      const embed = vi.fn(async (_text: string) => [0.4, 0.5, 0.6])
+
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(result.procedural).toBeGreaterThanOrEqual(1)
+      expect(storage.procedural.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: [0.4, 0.5, 0.6] })
+      )
+      // The embedded text must match the trigger+procedure shape used by
+      // FTS indexing and the embed-backfill CLI, so vectors stay comparable.
+      const inserted = vi.mocked(storage.procedural.insert).mock.calls[0]![0]
+      expect(embed).toHaveBeenCalledWith(`${inserted.trigger} ${inserted.procedure}`)
+    })
+
+    it('inserts procedural embedding:null when embed throws', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I always run prettier before committing.' }),
+        makeDigest({ summary: 'Filler content one.' }),
+        makeDigest({ summary: 'Filler content two.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+      const embed = vi.fn(async (_text: string) => {
+        throw new Error('embed unavailable')
+      })
+
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(result.procedural).toBeGreaterThanOrEqual(1)
+      expect(storage.procedural.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: null })
+      )
+    })
+  })
 })
 
 // Silence the TS "result is unused" warning from the supersession test

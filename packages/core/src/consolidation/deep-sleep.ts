@@ -233,6 +233,10 @@ export async function deepSleep(
       }
     }
 
+    // Persist the embedding computed for dedup above: a null embedding
+    // leaves the row invisible to vector search AND to this same
+    // embedding-based dedup on every future cycle (the duplication leak
+    // that flooded the semantic tier ran through exactly that blind spot).
     const knowledge = await storage.semantic.insert({
       topic: candidate.topic,
       content: candidate.content,
@@ -242,7 +246,7 @@ export async function deepSleep(
       decayRate: 0.02,
       supersedes: supersededId,
       supersededBy: null,
-      embedding: null,
+      embedding: candidateEmbedding ?? null,
       metadata: {},
       projectId: null,
     })
@@ -368,6 +372,19 @@ export async function deepSleep(
       continue
     }
 
+    // Embed the same trigger+procedure text that FTS indexes and the
+    // embed-backfill CLI use, so stored vectors stay comparable across
+    // write paths. Best-effort: on failure the row lands with null and
+    // stays reachable via BM25 until a backfill fills the vector.
+    let proceduralEmbedding: number[] | undefined
+    if (intelligence?.embed) {
+      try {
+        proceduralEmbedding = await intelligence.embed(searchQuery)
+      } catch {
+        // fall through — insert without embedding
+      }
+    }
+
     const proceduralRecord = await storage.procedural.insert({
       category: (candidate.trigger as 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention') ?? 'preference',
       trigger: candidate.trigger ?? candidate.topic,
@@ -378,7 +395,7 @@ export async function deepSleep(
       firstObserved: new Date(),
       decayRate: 0.01,
       sourceEpisodeIds: candidate.sourceEpisodeIds,
-      embedding: null,
+      embedding: proceduralEmbedding ?? null,
       metadata: {},
       projectId: null,
     })

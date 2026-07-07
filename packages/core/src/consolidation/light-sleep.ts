@@ -123,6 +123,19 @@ export async function lightSleep(
         decisions = h.decisions
       }
 
+      // Embed the summary at insert — the same text the embed-backfill CLI
+      // embeds for this tier — so the digest is vector-searchable
+      // immediately instead of waiting for an offline backfill. Best-effort:
+      // on failure the digest lands with null and BM25 still reaches it.
+      let summaryEmbedding: number[] | undefined
+      if (intelligence?.embed) {
+        try {
+          summaryEmbedding = await intelligence.embed(summaryText)
+        } catch {
+          // fall through — insert without embedding
+        }
+      }
+
       // Insert digest
       const digest = await storage.digests.insert({
         sessionId,
@@ -131,7 +144,7 @@ export async function lightSleep(
         sourceEpisodeIds: batch.map(e => e.id),
         sourceDigestIds: [],
         level: 0,
-        embedding: null,
+        embedding: summaryEmbedding ?? null,
         metadata: {
           source: 'light_sleep',
           avgSalience,
