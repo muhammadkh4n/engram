@@ -142,7 +142,10 @@ END; $$;
 -- parameter does not create an ambiguous overload alongside the old function.
 DROP FUNCTION IF EXISTS public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean);
 
-CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_query_embedding public.vector, p_match_count integer DEFAULT 10, p_full_text_weight double precision DEFAULT 1.0, p_semantic_weight double precision DEFAULT 1.0, p_rrf_k integer DEFAULT 60, p_session_id text DEFAULT NULL::text, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[])
+-- RETURNS TABLE gained project_id, so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
+DROP FUNCTION IF EXISTS public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text);
+
+CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_query_embedding public.vector, p_match_count integer DEFAULT 10, p_full_text_weight double precision DEFAULT 1.0, p_semantic_weight double precision DEFAULT 1.0, p_rrf_k integer DEFAULT 60, p_session_id text DEFAULT NULL::text, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     AS $$
@@ -168,7 +171,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
     SELECT me.id, 'episode'::text AS memory_type, me.content,
       me.salience::float, me.access_count, me.created_at,
       (COALESCE(1.0/(p_rrf_k + ft.rank_ix), 0.0) * p_full_text_weight + COALESCE(1.0/(p_rrf_k + vs.rank_ix), 0.0) * p_semantic_weight)::float AS sim,
-      me.entities
+      me.entities, me.project_id
     FROM ft FULL OUTER JOIN vs ON ft.id = vs.id
     JOIN memory_episodes me ON COALESCE(ft.id, vs.id) = me.id
     ORDER BY 7 DESC LIMIT p_match_count
@@ -190,7 +193,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
     )
     SELECT md.id, 'digest'::text, md.summary, 0.5::float, 0, md.created_at,
       (COALESCE(1.0/(p_rrf_k + ft.rank_ix), 0.0) * p_full_text_weight + COALESCE(1.0/(p_rrf_k + vs.rank_ix), 0.0) * p_semantic_weight)::float,
-      md.key_topics
+      md.key_topics, md.project_id
     FROM ft FULL OUTER JOIN vs ON ft.id = vs.id
     JOIN memory_digests md ON COALESCE(ft.id, vs.id) = md.id
     ORDER BY 7 DESC LIMIT p_match_count
@@ -212,7 +215,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
     )
     SELECT ms.id, 'semantic'::text, ms.content, ms.confidence::float, ms.access_count, ms.created_at,
       (COALESCE(1.0/(p_rrf_k + ft.rank_ix), 0.0) * p_full_text_weight + COALESCE(1.0/(p_rrf_k + vs.rank_ix), 0.0) * p_semantic_weight)::float,
-      ARRAY[]::text[]
+      ARRAY[]::text[], ms.project_id
     FROM ft FULL OUTER JOIN vs ON ft.id = vs.id
     JOIN memory_semantic ms ON COALESCE(ft.id, vs.id) = ms.id
     ORDER BY 7 DESC LIMIT p_match_count
@@ -234,7 +237,7 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
     )
     SELECT mp.id, 'procedural'::text, mp.procedure, mp.confidence::float, mp.access_count, mp.created_at,
       (COALESCE(1.0/(p_rrf_k + ft.rank_ix), 0.0) * p_full_text_weight + COALESCE(1.0/(p_rrf_k + vs.rank_ix), 0.0) * p_semantic_weight)::float,
-      ARRAY[]::text[]
+      ARRAY[]::text[], mp.project_id
     FROM ft FULL OUTER JOIN vs ON ft.id = vs.id
     JOIN memory_procedural mp ON COALESCE(ft.id, vs.id) = mp.id
     ORDER BY 7 DESC LIMIT p_match_count
@@ -250,13 +253,16 @@ $$;
 -- parameter does not create an ambiguous overload alongside the old function.
 DROP FUNCTION IF EXISTS public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean);
 
-CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector, p_session_id text DEFAULT NULL::text, p_match_count integer DEFAULT 10, p_min_similarity double precision DEFAULT 0.3, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[])
+-- RETURNS TABLE gained project_id, so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
+DROP FUNCTION IF EXISTS public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text);
+
+CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector, p_session_id text DEFAULT NULL::text, p_match_count integer DEFAULT 10, p_min_similarity double precision DEFAULT 0.3, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     AS $$
   SELECT * FROM (
     SELECT id, 'episode'::text, content, salience::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float AS similarity, entities
+           (1-(embedding<=>p_query_embedding))::float AS similarity, entities, project_id
     FROM memory_episodes
     WHERE p_include_episodes AND embedding IS NOT NULL
       AND forgotten_at IS NULL
@@ -268,7 +274,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
   UNION ALL
   SELECT * FROM (
     SELECT id, 'digest'::text, summary, 0.5::float, 0, created_at,
-           (1-(embedding<=>p_query_embedding))::float, key_topics
+           (1-(embedding<=>p_query_embedding))::float, key_topics, project_id
     FROM memory_digests
     WHERE p_include_digests AND embedding IS NOT NULL
       AND (p_project_id IS NULL OR project_id = p_project_id OR project_id IS NULL)
@@ -278,7 +284,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
   UNION ALL
   SELECT * FROM (
     SELECT id, 'semantic'::text, content, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[]
+           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id
     FROM memory_semantic
     WHERE p_include_semantic AND embedding IS NOT NULL AND superseded_by IS NULL
       AND forgotten_at IS NULL
@@ -289,7 +295,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
   UNION ALL
   SELECT * FROM (
     SELECT id, 'procedural'::text, procedure, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[]
+           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id
     FROM memory_procedural
     WHERE p_include_procedural AND embedding IS NOT NULL
       AND forgotten_at IS NULL
@@ -429,6 +435,9 @@ $$;
 -- parameter does not create an ambiguous overload alongside the old function.
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text);
 
+-- RETURNS TABLE gained project_id, so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
+DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text, text);
+
 -- Exact-vs-approximate tradeoff: the old function body scanned every row
 -- (exact, sequential scan); the per-tier subquery shape below lets the
 -- planner drive each tier from its HNSW index instead (approximate nearest
@@ -448,7 +457,7 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- per index scan (default 40) regardless of the query's LIMIT, so without an
 -- explicit floor a deep recall call silently truncates below what it asked
 -- for. 150 covers the 120 ceiling with headroom.
-CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb)
+CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     SET hnsw.ef_search TO '150'
@@ -460,7 +469,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         me.id, 'episode'::text, me.content, me.role,
         me.salience::float, me.access_count, me.created_at,
         (1 - (me.embedding <=> p_query_embedding))::float AS similarity,
-        me.entities, me.metadata
+        me.entities, me.metadata, me.project_id
       FROM memory_episodes me
       WHERE me.embedding IS NOT NULL
         AND me.forgotten_at IS NULL
@@ -478,7 +487,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         md.id, 'digest'::text, md.summary, NULL::text,
         0.5::float, 0, md.created_at,
         (1 - (md.embedding <=> p_query_embedding))::float,
-        md.key_topics, md.metadata
+        md.key_topics, md.metadata, md.project_id
       FROM memory_digests md
       WHERE md.embedding IS NOT NULL
         AND (p_project_id IS NULL OR md.project_id = p_project_id OR md.project_id IS NULL)
@@ -494,7 +503,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         ms.id, 'semantic'::text, ms.content, NULL::text,
         ms.confidence::float, ms.access_count, ms.created_at,
         (1 - (ms.embedding <=> p_query_embedding))::float,
-        ARRAY[]::text[], ms.metadata
+        ARRAY[]::text[], ms.metadata, ms.project_id
       FROM memory_semantic ms
       WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
         AND ms.forgotten_at IS NULL
@@ -511,7 +520,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         mp.id, 'procedural'::text, mp.procedure, NULL::text,
         mp.confidence::float, mp.access_count, mp.created_at,
         (1 - (mp.embedding <=> p_query_embedding))::float,
-        ARRAY[]::text[], mp.metadata
+        ARRAY[]::text[], mp.metadata, mp.project_id
       FROM memory_procedural mp
       WHERE mp.embedding IS NOT NULL
         AND mp.forgotten_at IS NULL

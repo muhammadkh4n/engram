@@ -231,6 +231,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         relevance: finalScore,
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
+        projectId: typed.data.projectId ?? null,
       })
       scoredIds.add(typed.data.id)
     }
@@ -268,6 +269,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         relevance: finalScore,
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
+        projectId: typed.data.projectId ?? null,
       })
       scoredIds.add(typed.data.id)
     }
@@ -332,6 +334,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         relevance: finalScore,
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
+        projectId: typed.data.projectId ?? null,
       })
     }
   }

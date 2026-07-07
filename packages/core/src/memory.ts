@@ -625,6 +625,12 @@ export class Memory {
       embedding = await this.intelligence.embed(query)
     }
 
+    // Soft project preference: an explicit default project wins, otherwise
+    // the per-call/instance project scope also activates the ranking boost
+    // (previously only the SQL-level projectId filter fired and the boost
+    // stayed dormant unless opts.project was set at construction).
+    const effectiveProject = this._defaultProject ?? effectiveProjectId
+
     // Run vector-first pipeline (text-only fallback when no embedding)
     const result = await engineRecall(query, this.storage, this.sensory, {
       strategy,
@@ -633,7 +639,7 @@ export class Memory {
       intelligence: this.intelligence,
       graph: this._graph,
       asOf: opts?.asOf,
-      ...(this._defaultProject ? { project: this._defaultProject } : {}),
+      ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
     })
 

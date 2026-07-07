@@ -306,6 +306,7 @@ interface RecallRow {
   created_at: string
   similarity: number
   entities: string[]
+  project_id?: string | null
 }
 
 // Legacy match_episodes RPC returns a subset of columns (no salience/entities/etc.)
@@ -370,6 +371,6 @@ function recallRowToEpisode(row: RecallRow): Episode {
     entities: row.entities ?? [],
     metadata: {},
     createdAt: new Date(row.created_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
