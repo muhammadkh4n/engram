@@ -131,10 +131,22 @@ describe('project soft boost via the project_id column', () => {
     )
   })
 
-  it('an explicit default project wins over the per-call projectId for the boost', async () => {
-    const episodes = [makeEpisode('ep-scoped', 'alpha'), makeEpisode('ep-default', 'delta')]
+  it('the per-call projectId wins over the default project for the boost', async () => {
+    // Mirrors the SQL filter's precedence: with a per-call scope of alpha,
+    // the filter would exclude non-alpha/non-shared rows entirely, so
+    // boosting toward the constructor default would target rows that
+    // cannot appear in the results — the boost must follow the call scope.
+    const episodes = [makeEpisode('ep-default', 'delta'), makeEpisode('ep-scoped', 'alpha')]
 
     const result = await recallOver(episodes, { projectId: 'alpha' }, { project: 'delta' })
+
+    expect(result.memories[0]!.id).toBe('ep-scoped')
+  })
+
+  it('the default project activates the boost when no per-call scope is given', async () => {
+    const episodes = [makeEpisode('ep-scoped', 'alpha'), makeEpisode('ep-default', 'delta')]
+
+    const result = await recallOver(episodes, {}, { project: 'delta' })
 
     expect(result.memories[0]!.id).toBe('ep-default')
   })
