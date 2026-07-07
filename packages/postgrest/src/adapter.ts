@@ -496,6 +496,7 @@ interface DigestRow {
   embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
+  project_id?: string | null
 }
 
 interface SemanticRow {
@@ -514,6 +515,7 @@ interface SemanticRow {
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
+  project_id?: string | null
 }
 
 interface ProceduralRow {
@@ -533,6 +535,7 @@ interface ProceduralRow {
   metadata: Record<string, unknown>
   created_at: string
   updated_at: string
+  project_id?: string | null
 }
 
 import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
@@ -549,7 +552,7 @@ function rowToDigest(row: DigestRow): Digest {
     embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 
@@ -570,7 +573,7 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 
@@ -592,7 +595,7 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 
@@ -611,6 +614,7 @@ interface VectorSearchRow {
   similarity: number
   entities: string[]
   metadata: Record<string, unknown>
+  project_id?: string | null
 }
 
 interface TextBoostRow {
@@ -637,7 +641,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           entities: row.entities ?? [],
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
-          projectId: null,
+          projectId: row.project_id ?? null,
         },
       }
     case 'digest':
@@ -654,7 +658,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           embedding: null,
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
-          projectId: null,
+          projectId: row.project_id ?? null,
         },
       }
     case 'semantic':
@@ -676,7 +680,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
           updatedAt: new Date(row.created_at),
-          projectId: null,
+          projectId: row.project_id ?? null,
         },
       }
     case 'procedural':
@@ -699,7 +703,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
           updatedAt: new Date(row.created_at),
-          projectId: null,
+          projectId: row.project_id ?? null,
         },
       }
     default:
@@ -718,7 +722,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
           entities: row.entities ?? [],
           metadata: row.metadata ?? {},
           createdAt: new Date(row.created_at),
-          projectId: null,
+          projectId: row.project_id ?? null,
         },
       }
   }

@@ -215,6 +215,7 @@ interface RecallRow {
   created_at: string
   similarity: number
   entities: string[]
+  project_id?: string | null
 }
 
 function rowToProcedural(row: ProceduralRow): ProceduralMemory {
@@ -257,6 +258,6 @@ function recallRowToProcedural(row: RecallRow): ProceduralMemory {
     metadata: {},
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.created_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }

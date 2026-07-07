@@ -1,0 +1,137 @@
+/**
+ * Project soft-preference end-to-end through Memory.recall:
+ * RetrievedMemory.projectId is threaded from the storage row (unifiedSearch
+ * reads typed.data.projectId), applyProjectPreference resolves the tag
+ * column-first (metadata.project is the legacy fallback), and a per-call or
+ * instance-level projectId activates the +0.1 boost — previously only an
+ * explicit `project` option at construction did.
+ */
+import { describe, it, expect } from 'vitest'
+import { createMemory } from '../../src/create-memory.js'
+import type { Episode, SearchResult, TypedMemory, RecallResult } from '../../src/types.js'
+import { createMockStorage } from './mock-storage.js'
+
+const DUMMY_EMBEDDING = [0.1, 0.2, 0.3]
+// Old enough that recency bias decays to near-zero, keeping base scores
+// well below the 1.0 boost cap so the +0.1 delta is fully observable.
+const SIXTY_DAYS_AGO = new Date(Date.now() - 60 * 24 * 3_600_000)
+
+function makeEpisode(
+  id: string,
+  projectId: string | null,
+  metadata: Record<string, unknown> = {},
+): Episode {
+  return {
+    id,
+    sessionId: 'sess-1',
+    role: 'user',
+    content: `Note ${id} about the deployment pipeline configuration`,
+    salience: 0.5,
+    accessCount: 0,
+    lastAccessed: null,
+    consolidatedAt: null,
+    embedding: null,
+    entities: [],
+    metadata,
+    createdAt: SIXTY_DAYS_AGO,
+    projectId,
+  }
+}
+
+function vectorResults(episodes: Episode[]): SearchResult<TypedMemory>[] {
+  // Identical similarity — only the project preference can break the tie.
+  return episodes.map((e) => ({
+    item: { type: 'episode' as const, data: e },
+    similarity: 0.5,
+  }))
+}
+
+async function recallOver(
+  episodes: Episode[],
+  recallOpts: { projectId?: string } = {},
+  memoryOpts: { projectId?: string; project?: string } = {},
+): Promise<RecallResult> {
+  const storage = createMockStorage({
+    vectorSearchResults: vectorResults(episodes),
+    textBoostResults: [],
+  })
+  const memory = createMemory({ storage, ...memoryOpts })
+  await memory.initialize()
+  // No '?' and no recall keywords → 'light' mode (no association expansion).
+  const result = await memory.recall('summarize the deployment pipeline configuration', {
+    embedding: DUMMY_EMBEDDING,
+    ...recallOpts,
+  })
+  await memory.dispose()
+  return result
+}
+
+function relevanceOf(result: RecallResult, id: string): number {
+  const m = result.memories.find((x) => x.id === id)
+  expect(m, `memory ${id} missing from results`).toBeDefined()
+  return m!.relevance
+}
+
+describe('project soft boost via the project_id column', () => {
+  it('per-call projectId boosts the same-project memory above an equal-relevance rival', async () => {
+    // Non-matching memory listed FIRST so a stable sort without the boost
+    // would keep it on top — the flip proves the boost, not input order.
+    const episodes = [makeEpisode('ep-other', 'beta'), makeEpisode('ep-mine', 'alpha')]
+
+    const result = await recallOver(episodes, { projectId: 'alpha' })
+
+    expect(result.memories[0]!.id).toBe('ep-mine')
+    expect(relevanceOf(result, 'ep-mine')).toBeCloseTo(
+      relevanceOf(result, 'ep-other') + 0.1,
+      5,
+    )
+  })
+
+  it('instance-level projectId activates the boost without per-call opts', async () => {
+    const episodes = [makeEpisode('ep-other', 'beta'), makeEpisode('ep-mine', 'alpha')]
+
+    const result = await recallOver(episodes, {}, { projectId: 'alpha' })
+
+    expect(result.memories[0]!.id).toBe('ep-mine')
+  })
+
+  it('metadata.project still works as a legacy fallback when the column is null', async () => {
+    const episodes = [
+      makeEpisode('ep-plain', null),
+      makeEpisode('ep-meta', null, { project: 'gamma' }),
+    ]
+
+    const result = await recallOver(episodes, { projectId: 'gamma' })
+
+    expect(result.memories[0]!.id).toBe('ep-meta')
+    expect(relevanceOf(result, 'ep-meta')).toBeCloseTo(
+      relevanceOf(result, 'ep-plain') + 0.1,
+      5,
+    )
+  })
+
+  it('the project_id column takes precedence over metadata.project', async () => {
+    // Decoy claims 'alpha' in metadata but its column says 'beta'. If the
+    // resolution still consulted metadata first, the decoy would also be
+    // boosted and a stable sort would keep it first.
+    const episodes = [
+      makeEpisode('ep-decoy', 'beta', { project: 'alpha' }),
+      makeEpisode('ep-true', 'alpha'),
+    ]
+
+    const result = await recallOver(episodes, { projectId: 'alpha' })
+
+    expect(result.memories[0]!.id).toBe('ep-true')
+    expect(relevanceOf(result, 'ep-true')).toBeGreaterThan(
+      relevanceOf(result, 'ep-decoy'),
+    )
+  })
+
+  it('an explicit default project wins over the per-call projectId for the boost', async () => {
+    const episodes = [makeEpisode('ep-scoped', 'alpha'), makeEpisode('ep-default', 'delta')]
+
+    const result = await recallOver(episodes, { projectId: 'alpha' }, { project: 'delta' })
+
+    expect(result.memories[0]!.id).toBe('ep-default')
+  })
+})

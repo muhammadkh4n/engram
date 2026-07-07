@@ -177,6 +177,7 @@ interface RecallRow {
   created_at: string
   similarity: number
   entities: string[]
+  project_id?: string | null
 }
 
 function rowToDigest(row: DigestRow): Digest {
@@ -207,6 +208,6 @@ function recallRowToDigest(row: RecallRow): Digest {
     embedding: null,
     metadata: {},
     createdAt: new Date(row.created_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }

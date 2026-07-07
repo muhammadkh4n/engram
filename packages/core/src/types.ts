@@ -207,6 +207,8 @@ export interface RetrievedMemory {
   relevance: number
   source: 'recall' | 'association' | 'priming'
   metadata: Record<string, unknown>
+  /** Project tag from the storage row's project_id column; takes precedence over metadata.project for project preference. */
+  projectId?: string | null
 }
 
 // === Storage Types ===

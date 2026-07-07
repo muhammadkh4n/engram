@@ -325,6 +325,8 @@ export function fuseByReciprocalRank(
  * Same-project matches get a +0.10 relevance boost. When strict is on,
  * explicit different-project matches are dropped (null project is kept
  * because historical memories predate project tagging).
+ * The memory's project tag comes from the storage row's project_id column
+ * (RetrievedMemory.projectId), with metadata.project as legacy fallback.
  */
 function applyProjectPreference(
   memories: RetrievedMemory[],
@@ -333,7 +335,7 @@ function applyProjectPreference(
 ): RetrievedMemory[] {
   return memories
     .map((m) => {
-      const memProject = (m.metadata?.['project'] as string | undefined) ?? null
+      const memProject = m.projectId ?? ((m.metadata?.['project'] as string | undefined) ?? null)
       if (memProject === project) {
         return { ...m, relevance: Math.min(1.0, m.relevance + 0.1) }
       }
@@ -341,7 +343,7 @@ function applyProjectPreference(
     })
     .filter((m) => {
       if (!strict) return true
-      const memProject = (m.metadata?.['project'] as string | undefined) ?? null
+      const memProject = m.projectId ?? ((m.metadata?.['project'] as string | undefined) ?? null)
       return memProject === project || memProject === null
     })
     .sort((a, b) => b.relevance - a.relevance)
