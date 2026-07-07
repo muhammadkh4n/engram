@@ -32,8 +32,10 @@
     "@engram-mem/graph": "*",
     "@engram-mem/sqlite": "*",
     "@engram-mem/openai": "*",
+    "@engram-mem/postgrest": "*",
     "@engram-mem/recall-engine": "*",
-    "@engram-mem/rerank-onnx": "*"
+    "@engram-mem/rerank-onnx": "*",
+    "@supabase/postgrest-js": "^2.105.1"
   },
   "devDependencies": {
     "typescript": "^6.0.2",
