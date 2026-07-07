@@ -370,4 +370,58 @@ describe('lightSleep', () => {
       expect(result.episodesProcessed).toBe(0)
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Embeds digests at insert — a null embedding makes the digest invisible
+  // to vector search until an offline backfill runs.
+  // -------------------------------------------------------------------------
+
+  describe('embeds digests at insert', () => {
+    it('persists the summary embedding on created digests', async () => {
+      const session1 = makeSession('s1', 5)
+      const episodesPerSession = new Map([['s1', session1]])
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession })
+      const embed = vi.fn(async (_text: string) => [0.7, 0.8, 0.9])
+
+      const result = await lightSleep(storage, { embed }, { minEpisodes: 5 })
+
+      expect(result.digestsCreated).toBe(1)
+      expect(storage.digests.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: [0.7, 0.8, 0.9] })
+      )
+      // The embedded text must be the digest summary itself, matching what
+      // FTS indexes and the embed-backfill CLI embed for this tier.
+      const inserted = vi.mocked(storage.digests.insert).mock.calls[0]![0]
+      expect(embed).toHaveBeenCalledWith(inserted.summary)
+    })
+
+    it('creates the digest with embedding:null when embed throws', async () => {
+      const session1 = makeSession('s1', 5)
+      const episodesPerSession = new Map([['s1', session1]])
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession })
+      const embed = vi.fn(async (_text: string) => {
+        throw new Error('embed unavailable')
+      })
+
+      const result = await lightSleep(storage, { embed }, { minEpisodes: 5 })
+
+      expect(result.digestsCreated).toBe(1)
+      expect(storage.digests.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: null })
+      )
+    })
+
+    it('creates the digest with embedding:null without an intelligence adapter', async () => {
+      const session1 = makeSession('s1', 5)
+      const episodesPerSession = new Map([['s1', session1]])
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession })
+
+      const result = await lightSleep(storage, undefined, { minEpisodes: 5 })
+
+      expect(result.digestsCreated).toBe(1)
+      expect(storage.digests.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ embedding: null })
+      )
+    })
+  })
 })
