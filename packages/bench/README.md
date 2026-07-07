@@ -258,9 +258,22 @@ Both cells read the same `--data` file and process all 500 questions in dataset 
 
 `data/` is gitignored — re-fetch the dataset before running either cell; see "Getting Benchmark Data" → LongMemEval above.
 
+**Result (2026-07-07): PASS.** Committed as `results/longmemeval/full-500-vfull.json` and `results/longmemeval/full-500-vengine.json` (identical config to the baseline run: maxResults=30, consolidation on, OpenAI rerank, no graph).
+
+| Metric | `full` | `engine` |
+|---|---|---|
+| R@5 | 0.990 (495/500) | 0.988 (494/500) |
+| R@10 | 0.996 (498/500) | 0.996 (498/500) |
+| R@30 | 0.996 (498/500) | 0.996 (498/500) |
+
+- **McNemar**: 1 discordant pair at K=5 (b=1 full-hit/engine-miss, c=0), exact two-sided p = 1.0; **zero** discordant pairs at K=10 and K=30 — the two modes' hit/miss patterns are literally identical past K=5.
+- **Floor**: engine R@5 = 0.988 ≥ 0.984 (and equals the committed baseline exactly).
+- The single discordant question (`60bf93ed_abs`, multi-session) is rank jitter, not a retrieval loss: both modes retrieve both gold sessions; they sit at session-ranks 3 and 5 in `full` vs 5 and 6 in `engine`, so the first gold crosses the K=5 boundary and is recovered by K=10.
+- The `full` cell doubles as the corrected-path baseline regeneration called for under "Standing rule" below: 0.990 vs the pre-fix 0.988, so the committed floor remains valid (and slightly conservative).
+
 ### Gate 2 — LoCoMo all-10, categories 2–3, paired
 
-Same paired methodology, on the full 10-conversation set:
+Not yet run (operator call — LongMemEval-S is the primary target; run this before any default-flip decision, alongside the multi-hop harness described under "Standing rule"). Same paired methodology, on the full 10-conversation set:
 
 ```bash
 npx tsx packages/bench/src/locomo/forensics/local-recall-sweep.ts \
@@ -299,7 +312,7 @@ npx tsx packages/bench/src/forensics/quant-containment.ts \
 
 ### Standing rule: opt-in until the multi-hop harness exists
 
-Both gates are meant to compare against **fixed baselines captured after the vector-path-correctness fixes** (exhaustive SQL scan-cap removal, HNSW-drivable per-tier ordering, pgvector text round-trip parsing) are in place — not before, because those fixes changed what `full` mode itself returns, independent of `engine` mode. The currently-committed `results/longmemeval/baseline-full-500.json` (0.988, generated 2026-05-24) predates those fixes on this branch; confirm it's still representative — or regenerate it with `--vector-mode full` on the corrected path — before treating 0.988 as a hard floor.
+Both gates are meant to compare against **fixed baselines captured after the vector-path-correctness fixes** (exhaustive SQL scan-cap removal, HNSW-drivable per-tier ordering, pgvector text round-trip parsing) are in place — not before, because those fixes changed what `full` mode itself returns, independent of `engine` mode. The currently-committed `results/longmemeval/baseline-full-500.json` (0.988, generated 2026-05-24) predates those fixes; the 2026-07-07 Gate 1 `full` cell re-measured the corrected path at 0.990 (`results/longmemeval/full-500-vfull.json`), confirming 0.988 as a valid — slightly conservative — floor.
 
 Passing Gates 1 and 2 is necessary but **not sufficient** to flip the default. Recall@K on curated single-hop/multi-hop QA benchmarks doesn't exercise the multi-hop bridge-recall path a production agent actually walks (iterative retrieval across hops, re-querying on intermediate results). That harness — a HotpotQA/A3 bridge-recall@K gate — does not exist yet. Until it does, `--vector-mode engine` / `ENGRAM_RECALL_ENGINE` ships **opt-in only**; Gates 1–2 alone never flip the default.
 
