@@ -71,12 +71,29 @@ export interface FakeAdapterOpts {
   batchSize?: number
   /** false omits scanEmbeddings/listTombstonesSince entirely (a legacy adapter without the optional port methods). */
   supportsScan?: boolean
+  /**
+   * true wires REAL `insert`/`markForgotten`/`markSuperseded` on the four
+   * tier stores (backed by this fake's own `rows` array, so an insert is
+   * immediately visible to `vectorSearch`/`scanEmbeddings`), for the
+   * decorator's write-through tests. Every other tier-store member still
+   * throws via `notUsed`. Defaults to false — `RecallEngine` itself never
+   * calls these, and existing engine tests rely on that being loudly
+   * enforced.
+   */
+  withTierStores?: boolean
 }
 
-/** Loud stub for the StorageAdapter members the engine never touches. */
-function notUsed<T extends object>(name: string): T {
-  return new Proxy({} as T, {
-    get(_t, prop) {
+/**
+ * Loud stub for the StorageAdapter members the engine never touches,
+ * optionally seeded with a handful of REAL implementations (`impl`) for the
+ * members a caller does need — e.g. the decorator tests' working
+ * insert/markForgotten/markSuperseded. Anything not present in `impl` still
+ * throws on first access.
+ */
+function notUsed<T extends object>(name: string, impl: Partial<T> = {}): T {
+  return new Proxy(impl as T, {
+    get(target, prop) {
+      if (Object.hasOwn(target, prop)) return (target as Record<PropertyKey, unknown>)[prop as string]
       return () => {
         throw new Error(`FakeStorageAdapter: ${name}.${String(prop)} is not implemented (RecallEngine must not call it)`)
       }
@@ -98,11 +115,12 @@ export class FakeStorageAdapter implements StorageAdapter {
   hydrationEmbeddingOverride = new Map<string, unknown>()
 
   private readonly batchSize: number
+  private nextRowSeq = 0
 
-  episodes = notUsed<StorageAdapter['episodes']>('episodes')
-  digests = notUsed<StorageAdapter['digests']>('digests')
-  semantic = notUsed<StorageAdapter['semantic']>('semantic')
-  procedural = notUsed<StorageAdapter['procedural']>('procedural')
+  episodes: StorageAdapter['episodes']
+  digests: StorageAdapter['digests']
+  semantic: StorageAdapter['semantic']
+  procedural: StorageAdapter['procedural']
   associations = notUsed<StorageAdapter['associations']>('associations')
 
   scanEmbeddings?: StorageAdapter['scanEmbeddings']
@@ -111,6 +129,62 @@ export class FakeStorageAdapter implements StorageAdapter {
   constructor(rows: FixtureRow[], opts: FakeAdapterOpts = {}) {
     this.rows = rows
     this.batchSize = opts.batchSize ?? 100
+    const withTierStores = opts.withTierStores ?? false
+
+    this.episodes = notUsed<StorageAdapter['episodes']>(
+      'episodes',
+      withTierStores
+        ? {
+            insert: async (episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode> => {
+              const row = this.insertRow('episode', episode.projectId, episode.sessionId, episode.embedding)
+              return this.toTypedMemory(row).data as Episode
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('episode', ids),
+          }
+        : {},
+    )
+    this.digests = notUsed<StorageAdapter['digests']>(
+      'digests',
+      withTierStores
+        ? {
+            insert: async (digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest> => {
+              const row = this.insertRow('digest', digest.projectId, digest.sessionId, digest.embedding)
+              return this.toTypedMemory(row).data as Digest
+            },
+          }
+        : {},
+    )
+    this.semantic = notUsed<StorageAdapter['semantic']>(
+      'semantic',
+      withTierStores
+        ? {
+            insert: async (
+              memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>,
+            ): Promise<SemanticMemory> => {
+              const row = this.insertRow('semantic', memory.projectId, null, memory.embedding)
+              return this.toTypedMemory(row).data as SemanticMemory
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('semantic', ids),
+            markSuperseded: async (id: string, supersededBy: string): Promise<void> => {
+              this.supersede(id, supersededBy, Date.now())
+            },
+          }
+        : {},
+    )
+    this.procedural = notUsed<StorageAdapter['procedural']>(
+      'procedural',
+      withTierStores
+        ? {
+            insert: async (
+              memory: Omit<ProceduralMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>,
+            ): Promise<ProceduralMemory> => {
+              const row = this.insertRow('procedural', memory.projectId, null, memory.embedding)
+              return this.toTypedMemory(row).data as ProceduralMemory
+            },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('procedural', ids),
+          }
+        : {},
+    )
 
     if (opts.supportsScan !== false) {
       this.scanEmbeddings = scanOpts => {
@@ -140,6 +214,44 @@ export class FakeStorageAdapter implements StorageAdapter {
     if (!row || row.type !== 'semantic') throw new Error(`supersede: no semantic fixture row ${id}`)
     row.supersededBy = by
     this.tombstoneEvents.push({ id, type: row.type, atMs })
+  }
+
+  // --- withTierStores=true backing helpers ---
+
+  /** Appends one live row (fresh id, createdAt=now) and returns it — the backing for every tier's `insert`. */
+  private insertRow(
+    type: MemoryType,
+    projectId: string | null,
+    sessionId: string | null,
+    embedding: number[] | null,
+  ): FixtureRow {
+    const row: FixtureRow = {
+      id: `new-${type}-${this.nextRowSeq++}`,
+      type,
+      createdAtMs: Date.now(),
+      projectId,
+      sessionId,
+      embedding,
+      forgottenAtMs: null,
+      supersededBy: null,
+    }
+    this.rows.push(row)
+    return row
+  }
+
+  /** Tombstones the given ids (matching `type`, idempotent) and records tombstone events — the backing for every tier's `markForgotten`. */
+  private markForgottenRows(type: MemoryType, ids: string[]): number {
+    const now = Date.now()
+    let count = 0
+    for (const id of ids) {
+      const row = this.rows.find(r => r.id === id && r.type === type)
+      if (row && row.forgottenAtMs === null) {
+        row.forgottenAtMs = now
+        this.tombstoneEvents.push({ id, type, atMs: now })
+        count++
+      }
+    }
+    return count
   }
 
   // --- StorageAdapter surface used by the engine ---
