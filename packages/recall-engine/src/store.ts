@@ -60,6 +60,13 @@ export interface SlotMeta {
   id: string
   type: MemoryType
   createdAt: number
+  /**
+   * Stored L2 norm of the original embedding. `estimateIP` returns an
+   * estimate of the raw inner product `<q, x>`; converting that into a
+   * cosine-comparable score (the tier-3 fallback when a hydrated row's
+   * embedding can't be parsed) requires dividing by `norm * qnorm`.
+   */
+  norm: number
 }
 
 /**
@@ -275,12 +282,13 @@ export class CodeStore {
     return id
   }
 
-  /** Hydration accessor: id/type/createdAt for a slot, for the engine's batched getByIds + tier-3 rescore step. */
+  /** Hydration accessor: id/type/createdAt/norm for a slot, for the engine's batched getByIds + tier-3 rescore step. */
   slotMeta(slot: number): SlotMeta {
     return {
       id: this.slotId(slot),
       type: MEMORY_TYPE_BY_CODE[this.typeArr[slot]],
       createdAt: this.createdAtArr[slot],
+      norm: this.normArr[slot],
     }
   }
 

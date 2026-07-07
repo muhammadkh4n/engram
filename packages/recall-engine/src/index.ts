@@ -8,11 +8,31 @@
  *   2. TurboQuant_prod b=4 unbiased rescore over the tier-1 shortlist.
  *   3. Exact float rescore from the database during hydration, so the
  *      score returned to the caller is always true float cosine.
- *
- * This module is a placeholder — later tasks in this branch fill in the
- * codec, tier orchestration, and public API. It exists now so the package
- * is wired into the workspace (build, typecheck, vitest) ahead of the
- * implementation work.
  */
-
-export {}
+export {
+  createCodec,
+  type TurboQuantCodec,
+  type EncodedVector,
+  type RotatedQuery,
+  type CreateCodecOpts,
+} from './codec/codec.js'
+export { CodeStore, type SlotFilter, type CodeStoreMeta, type SlotMeta } from './store.js'
+export {
+  RecallEngine,
+  exactCosine,
+  type RecallEngineOpts,
+  type EngineState,
+  type EngineStats,
+  type VectorSearchOpts,
+} from './engine.js'
+export { configFromEnv } from './config.js'
+export { parseVector } from './parse-vector.js'
+export {
+  readSnapshot,
+  writeSnapshot,
+  fingerprintBackend,
+  type SnapshotPayload,
+  type SnapshotEntry,
+  type SnapshotWriteMeta,
+  type SnapshotExpectedMeta,
+} from './snapshot.js'

@@ -22,6 +22,12 @@ This package is opt-in and unset by default: existing deployments are unaffected
 
 > With exact rescore ON (the default), no quantized score ever leaves the engine; every similarity returned is true float cosine.
 
+## Query pipeline
+
+`RecallEngine.vectorSearch` runs: query validation (non-finite or wrong-dimension queries return `[]`), tier-1 exhaustive sign-code scan selecting `M = min(N, max(8·limit, 512))` candidates, tier-2 unbiased rescore keeping the top `E = max(4·limit, 64)`, one batched `getByIds` hydration, tier-3 exact cosine per hydrated row (rows whose stored embedding cannot be parsed keep the tier-2 estimate and are counted in `stats().estimateFallbacks`), post-hydration filtering of rows that were forgotten or superseded while hydration was in flight, then sort/slice. `sessionId` constrains only the episode tier and `projectId` matches `(project = X OR project IS NULL)` — both mirror the SQLite adapter's semantics exactly.
+
+Until `warm()` completes (snapshot fast-path or full rebuild via `scanEmbeddings`), and permanently when the engine is disabled (no `scanEmbeddings` on the adapter, corpus above `ENGRAM_ENGINE_MAX_N`, or any warm failure), every query passes through to the inner adapter unchanged. Foreign writes become vector-visible within one reconcile interval; own writes are visible immediately via write-through `noteInsert`.
+
 ## Status
 
-Scaffold only. The codec, tier orchestration, and public API are implemented in follow-up work on this branch.
+Codec, code store, snapshot format, and the `RecallEngine` (warm / reconcile / vectorSearch / write-through notes / config parsing) are implemented. The `withRecallEngine` storage decorator and MCP/bench wiring land in follow-up work on this branch.
