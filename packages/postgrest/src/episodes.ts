@@ -49,6 +49,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       row.consolidated_at = episode.consolidatedAt?.toISOString() ?? null
       row.entities = episode.entities
       row.searchable_content = searchableContent
+      row.project_id = episode.projectId ?? null
     }
 
     const { data, error } = await this.client
@@ -293,6 +294,7 @@ interface EpisodeRow {
   entities: string[]
   metadata: Record<string, unknown>
   created_at: string
+  project_id?: string | null
 }
 
 interface RecallRow {
@@ -332,7 +334,7 @@ function rowToEpisode(row: EpisodeRow, legacyMode = false): Episode {
     entities: legacyMode ? [] : (row.entities ?? []),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
-    projectId: null,
+    projectId: legacyMode ? null : (row.project_id ?? null),
   }
 }
 

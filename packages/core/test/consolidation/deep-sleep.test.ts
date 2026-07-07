@@ -673,6 +673,61 @@ describe('deepSleep', () => {
       )
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Promotions inherit projectId from their source digests — a hardcoded
+  // null makes every promoted memory "shared" and defeats scoped recall.
+  // -------------------------------------------------------------------------
+
+  describe('promotions inherit projectId from source digests', () => {
+    it('tags promoted semantic memories with the source digest project', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.', projectId: 'engram' }),
+        makeDigest({ summary: 'Some other content.', projectId: 'engram' }),
+        makeDigest({ summary: 'More filler content.', projectId: 'engram' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.promoted).toBeGreaterThan(0)
+      expect(storage.semantic.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 'engram' })
+      )
+    })
+
+    it('keeps promoted semantic memories shared when source digests are untagged', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Some other content.' }),
+        makeDigest({ summary: 'More filler content.' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.promoted).toBeGreaterThan(0)
+      expect(storage.semantic.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: null })
+      )
+    })
+
+    it('tags promoted procedural memories with the source digest project', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I always run prettier before committing.', projectId: 'engram' }),
+        makeDigest({ summary: 'Filler content one.', projectId: 'engram' }),
+        makeDigest({ summary: 'Filler content two.', projectId: 'engram' }),
+      ]
+      const storage = makeMockStorage({ initialDigests: digests })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.procedural).toBeGreaterThanOrEqual(1)
+      expect(storage.procedural.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 'engram' })
+      )
+    })
+  })
 })
 
 // Silence the TS "result is unused" warning from the supersession test

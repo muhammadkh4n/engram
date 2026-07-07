@@ -317,6 +317,7 @@ export function makeEpisode(overrides: Partial<Episode> = {}): Episode {
     entities: [],
     metadata: {},
     createdAt: makeDate(),
+    projectId: null,
     ...overrides,
   }
 }
@@ -333,6 +334,7 @@ export function makeDigest(overrides: Partial<Digest> = {}): Digest {
     embedding: null,
     metadata: {},
     createdAt: makeDate(),
+    projectId: null,
     ...overrides,
   }
 }

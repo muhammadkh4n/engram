@@ -29,6 +29,7 @@ export class PostgRestDigestStorage implements DigestStorage {
         level: digest.level,
         embedding: digest.embedding ?? null,
         metadata: digest.metadata,
+        project_id: digest.projectId ?? null,
       })
       .select()
       .single()
@@ -164,6 +165,7 @@ interface DigestRow {
   embedding: number[] | string | null
   metadata: Record<string, unknown>
   created_at: string
+  project_id?: string | null
 }
 
 interface RecallRow {
@@ -189,7 +191,7 @@ function rowToDigest(row: DigestRow): Digest {
     embedding: parseVector(row.embedding),
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
-    projectId: null,
+    projectId: row.project_id ?? null,
   }
 }
 

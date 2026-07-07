@@ -424,4 +424,40 @@ describe('lightSleep', () => {
       )
     })
   })
+
+  // -------------------------------------------------------------------------
+  // Digest inherits projectId from its source episodes — a hardcoded null
+  // makes every digest "shared" and defeats scoped recall.
+  // -------------------------------------------------------------------------
+
+  describe('digest inherits projectId from source episodes', () => {
+    it('tags the digest with the majority project of its batch', async () => {
+      const session1 = makeSession('s1', 5).map((e, i) => ({
+        ...e,
+        projectId: i === 0 ? 'ouija' : 'engram',
+      }))
+      const episodesPerSession = new Map([['s1', session1]])
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession })
+
+      const result = await lightSleep(storage, undefined, { minEpisodes: 5 })
+
+      expect(result.digestsCreated).toBe(1)
+      expect(storage.digests.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: 'engram' })
+      )
+    })
+
+    it('keeps the digest shared (null) when all source episodes are untagged', async () => {
+      const session1 = makeSession('s1', 5)
+      const episodesPerSession = new Map([['s1', session1]])
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession })
+
+      const result = await lightSleep(storage, undefined, { minEpisodes: 5 })
+
+      expect(result.digestsCreated).toBe(1)
+      expect(storage.digests.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: null })
+      )
+    })
+  })
 })
