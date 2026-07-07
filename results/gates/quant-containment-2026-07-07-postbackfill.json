@@ -1,0 +1,170 @@
+{
+  "meta": {
+    "generatedAt": "2026-07-07T09:29:46.266Z",
+    "config": {
+      "queries": 200,
+      "tier1M": 960,
+      "tier2E": 480,
+      "exactK": 120,
+      "seed": 42,
+      "bits": 4,
+      "dims": 1536,
+      "limit": 0,
+      "output": "./results/quant/containment-2026-07-07.json"
+    },
+    "corpusSize": 10621,
+    "queriesRun": 200
+  },
+  "signalProfile": {
+    "perTier": {
+      "episode": {
+        "totalLive": 6157,
+        "scanYielded": 6146,
+        "loaded": 6146,
+        "skippedNoEmbedding": 11,
+        "skippedBadVector": 0,
+        "shareWithEmbedding": 0.9982134156244924
+      },
+      "digest": {
+        "totalLive": 503,
+        "scanYielded": 503,
+        "loaded": 503,
+        "skippedNoEmbedding": 0,
+        "skippedBadVector": 0,
+        "shareWithEmbedding": 1
+      },
+      "semantic": {
+        "totalLive": 3972,
+        "scanYielded": 3972,
+        "loaded": 3972,
+        "skippedNoEmbedding": 0,
+        "skippedBadVector": 0,
+        "shareWithEmbedding": 1
+      },
+      "procedural": {
+        "totalLive": 0,
+        "scanYielded": 0,
+        "loaded": 0,
+        "skippedNoEmbedding": 0,
+        "skippedBadVector": 0,
+        "shareWithEmbedding": null
+      }
+    },
+    "overallShareWithEmbedding": 0.9989653875094056,
+    "note": "digest/semantic/procedural rows are written with embedding: null by consolidation (light-sleep/deep-sleep) until the NULL-embedding backfill CLI has processed them — a low shareWithEmbedding on those tiers reflects that backlog, not a defect in this diagnostic."
+  },
+  "containment": {
+    "tier1@10": {
+      "n": 200,
+      "mean": 1,
+      "p50": 1,
+      "p10": 1,
+      "min": 1,
+      "max": 1
+    },
+    "tier2@10": {
+      "n": 200,
+      "mean": 1,
+      "p50": 1,
+      "p10": 1,
+      "min": 1,
+      "max": 1
+    },
+    "tier1@30": {
+      "n": 200,
+      "mean": 1,
+      "p50": 1,
+      "p10": 1,
+      "min": 1,
+      "max": 1
+    },
+    "tier2@30": {
+      "n": 200,
+      "mean": 1,
+      "p50": 1,
+      "p10": 1,
+      "min": 1,
+      "max": 1
+    },
+    "tier1@exact120": {
+      "n": 200,
+      "mean": 0.9997916666666667,
+      "p50": 1,
+      "p10": 1,
+      "min": 0.9916666666666667,
+      "max": 1
+    },
+    "tier2@exact120": {
+      "n": 200,
+      "mean": 0.9997916666666667,
+      "p50": 1,
+      "p10": 1,
+      "min": 0.9916666666666667,
+      "max": 1
+    }
+  },
+  "clusterMass": {
+    "0.95": {
+      "n": 200,
+      "mean": 0.26,
+      "p50": 0,
+      "p10": 0,
+      "min": 0,
+      "max": 6
+    },
+    "0.99": {
+      "n": 200,
+      "mean": 0.025,
+      "p50": 0,
+      "p10": 0,
+      "min": 0,
+      "max": 2
+    }
+  },
+  "clusterMassHistogram": {
+    "0.95": [
+      {
+        "label": "<1",
+        "count": 174
+      },
+      {
+        "label": "1-5",
+        "count": 24
+      },
+      {
+        "label": "5-20",
+        "count": 2
+      },
+      {
+        "label": "20-100",
+        "count": 0
+      },
+      {
+        "label": ">=100",
+        "count": 0
+      }
+    ],
+    "0.99": [
+      {
+        "label": "<1",
+        "count": 196
+      },
+      {
+        "label": "1-5",
+        "count": 4
+      },
+      {
+        "label": "5-20",
+        "count": 0
+      },
+      {
+        "label": "20-100",
+        "count": 0
+      },
+      {
+        "label": ">=100",
+        "count": 0
+      }
+    ]
+  }
+}

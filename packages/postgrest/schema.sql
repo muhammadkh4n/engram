@@ -1081,7 +1081,7 @@ CREATE INDEX IF NOT EXISTS idx_episodes_created ON public.memory_episodes USING 
 -- for the corresponding DROP INDEX.
 --
 
-CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON public.memory_episodes USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_episodes_embedding_hnsw ON public.memory_episodes USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 
 
 --
@@ -1172,7 +1172,7 @@ CREATE INDEX IF NOT EXISTS idx_procedural_confidence ON public.memory_procedural
 -- Name: idx_procedural_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX IF NOT EXISTS idx_procedural_embedding_hnsw ON public.memory_procedural USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_procedural_embedding_hnsw ON public.memory_procedural USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 
 
 --
@@ -1200,7 +1200,7 @@ CREATE INDEX IF NOT EXISTS idx_procedural_project ON public.memory_procedural US
 -- Name: idx_semantic_embedding_hnsw; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX IF NOT EXISTS idx_semantic_embedding_hnsw ON public.memory_semantic USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_semantic_embedding_hnsw ON public.memory_semantic USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 
 
 --
