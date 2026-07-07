@@ -596,13 +596,21 @@ export async function recall(
       const scoreMap = new Map(reranked.map(r => [r.id, r.score]))
       const rerankWeight = signals.multiHop || signals.temporal ? 0.85 : 0.7
       const originalWeight = 1 - rerankWeight
+      memories = memories.map(m => {
+        const rerankScore = scoreMap.get(m.id)
+        if (rerankScore === undefined) return m
+        const blended = rerankScore * rerankWeight + m.relevance * originalWeight
+        return { ...m, relevance: blended }
+      })
+      // Re-apply the project preference to the BLENDED scores before
+      // truncation: the earlier application (pre-HyDE) survives the blend
+      // only as +0.10 * originalWeight, which lets a semantically similar
+      // cross-project candidate outrank a same-project one and take its
+      // slot in the cut below.
+      if (project) {
+        memories = applyProjectPreference(memories, project, projectStrict)
+      }
       memories = memories
-        .map(m => {
-          const rerankScore = scoreMap.get(m.id)
-          if (rerankScore === undefined) return m
-          const blended = rerankScore * rerankWeight + m.relevance * originalWeight
-          return { ...m, relevance: blended }
-        })
         .sort((a, b) => b.relevance - a.relevance)
         .slice(0, strategy.maxResults)
     } catch (err) {

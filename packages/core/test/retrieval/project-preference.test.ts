@@ -49,7 +49,11 @@ function vectorResults(episodes: Episode[]): SearchResult<TypedMemory>[] {
 async function recallOver(
   episodes: Episode[],
   recallOpts: { projectId?: string } = {},
-  memoryOpts: { projectId?: string; project?: string } = {},
+  memoryOpts: {
+    projectId?: string
+    project?: string
+    intelligence?: Parameters<typeof createMemory>[0]['intelligence']
+  } = {},
 ): Promise<RecallResult> {
   const storage = createMockStorage({
     vectorSearchResults: vectorResults(episodes),
@@ -133,5 +137,37 @@ describe('project soft boost via the project_id column', () => {
     const result = await recallOver(episodes, { projectId: 'alpha' }, { project: 'delta' })
 
     expect(result.memories[0]!.id).toBe('ep-default')
+  })
+
+  it('survives the rerank blend: a slightly higher rerank score cannot outrank the boost', async () => {
+    // The reranker prefers the cross-project doc by 0.05. Blended at the
+    // single-hop weight (0.7), that gap shrinks to 0.035 — the +0.1
+    // preference applied to the blended scores must still flip the order.
+    // Before the post-rerank re-application, only +0.1 * originalWeight
+    // (= +0.03) of the early boost survived the blend and the
+    // cross-project doc won.
+    const episodes = [makeEpisode('ep-other', 'beta'), makeEpisode('ep-mine', 'alpha')]
+    const rerank = async (
+      _query: string,
+      docs: Array<{ id: string; content: string }>,
+    ) => docs.map(d => ({ id: d.id, score: d.id === 'ep-other' ? 0.6 : 0.55 }))
+
+    const result = await recallOver(episodes, { projectId: 'alpha' }, { intelligence: { rerank } })
+
+    expect(result.memories[0]!.id).toBe('ep-mine')
+  })
+
+  it('the rerank blend still outranks the boost when the semantic gap is large', async () => {
+    // A soft preference must not override a decisively better rerank score:
+    // 0.3 rerank gap * 0.7 weight = 0.21 blended, beyond the +0.1 boost.
+    const episodes = [makeEpisode('ep-other', 'beta'), makeEpisode('ep-mine', 'alpha')]
+    const rerank = async (
+      _query: string,
+      docs: Array<{ id: string; content: string }>,
+    ) => docs.map(d => ({ id: d.id, score: d.id === 'ep-other' ? 0.85 : 0.55 }))
+
+    const result = await recallOver(episodes, { projectId: 'alpha' }, { intelligence: { rerank } })
+
+    expect(result.memories[0]!.id).toBe('ep-other')
   })
 })
