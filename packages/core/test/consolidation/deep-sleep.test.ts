@@ -591,6 +591,11 @@ describe('deepSleep', () => {
       expect(storage.semantic.insert).toHaveBeenCalledWith(
         expect.objectContaining({ embedding: [0.1, 0.2, 0.3] })
       )
+      // The embedded text must match the topic+content shape used by the
+      // semantic FTS column and the embed-backfill CLI, so vectors stay
+      // comparable with the backfilled corpus.
+      const inserted = vi.mocked(storage.semantic.insert).mock.calls[0]![0]
+      expect(embed).toHaveBeenCalledWith(`${inserted.topic} ${inserted.content}`)
     })
 
     it('inserts semantic embedding:null when embed throws', async () => {

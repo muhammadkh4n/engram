@@ -199,10 +199,14 @@ export async function deepSleep(
     // BM25-only dedup misses LLM paraphrases of the same fact
     // ("X published v1.0" ↔ "MK noted X shipped 1.0") because their
     // token sets differ. Cosine similarity catches the semantic match.
+    // Embed the same topic+content text that the semantic FTS column and
+    // the embed-backfill CLI use — stored rows carry vectors of that shape,
+    // so both the dedup comparison here and the persisted embedding below
+    // must match it or cosine similarity degrades from shape drift.
     let candidateEmbedding: number[] | undefined
     if (intelligence?.embed) {
       try {
-        candidateEmbedding = await intelligence.embed(candidate.content)
+        candidateEmbedding = await intelligence.embed(`${candidate.topic} ${candidate.content}`)
       } catch {
         // ignore — fall back to BM25-only path below
       }
