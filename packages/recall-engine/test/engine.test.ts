@@ -123,7 +123,11 @@ describe('RecallEngine: warm + exact-score parity with a reference float scan', 
       { q: perturb(emb(CORPUS.rows[42]), CORPUS.rng, 0.15) },
     ]
     for (const { q, limit } of queries) {
+      const getByIdsCallsBefore = fake.getByIdsCalls
       const actual = await engine.vectorSearch(q, limit === undefined ? undefined : { limit })
+      // Hydration is exactly one inner.getByIds call per search — no retry
+      // loop, no per-candidate call, no batching across multiple round trips.
+      expect(fake.getByIdsCalls).toBe(getByIdsCallsBefore + 1)
       const expected = await fake.referenceScan(q, limit === undefined ? undefined : { limit })
       expect(actual.length).toBeGreaterThan(0)
       expectSameResults(actual, expected)
@@ -221,6 +225,16 @@ describe('RecallEngine: filter parity (sqlite semantics)', () => {
     expect(actual.length).toBeGreaterThan(0)
     expectSameResults(actual, await fake.referenceScan(q, opts))
   })
+
+  it('empty-string projectId/sessionId mean "no filter" (sqlite truthiness semantics), not "filter on \'\'"', async () => {
+    const fake = freshFake()
+    const engine = await readyEngine(fake)
+    const q = perturb(emb(CORPUS.rows[9]), CORPUS.rng, 0.25)
+
+    const withEmptyFilters = await engine.vectorSearch(q, { projectId: '', sessionId: '', limit: 10 })
+    const withNoFilters = await engine.vectorSearch(q, { limit: 10 })
+    expectSameResults(withEmptyFilters, withNoFilters)
+  })
 })
 
 describe('RecallEngine: races during hydration', () => {
@@ -307,6 +321,36 @@ describe('RecallEngine: reconcile', () => {
     )
     expect(engine.stats().indexed).toBe(indexedBefore + 1 - 2)
     expect(engine.stats().reconcileErrors).toBe(0)
+  })
+
+  it('picks up a foreign row created 30s "before" the persisted cursor (clock-skew overlap window)', async () => {
+    const fake = freshFake()
+    const engine = await readyEngine(fake)
+    const indexedBefore = engine.stats().indexed
+    // After a full-rebuild warm, cursorMs === CORPUS_MAX_MS exactly. A row
+    // whose createdAt lands 30s "before" that cursor simulates a foreign
+    // writer whose commit becomes scannable only after our cursor already
+    // advanced past its timestamp (cross-process clock skew / commit-
+    // visibility lag) — without the RECONCILE_OVERLAP_MS query-time
+    // widening, the strict `createdAt > cursor` scan filter would skip it
+    // forever, since the persisted cursor itself never moves backwards.
+    const skewedCreatedAtMs = CORPUS_MAX_MS - 30_000
+    const skewedEmb = perturb(emb(CORPUS.rows[70]), CORPUS.rng, 0.1)
+    fake.addRow({
+      id: 'clock-skew-row',
+      type: 'episode',
+      createdAtMs: skewedCreatedAtMs,
+      projectId: null,
+      sessionId: 'sess-1',
+      embedding: skewedEmb,
+      forgottenAtMs: null,
+      supersededBy: null,
+    })
+
+    await engine.reconcile()
+
+    expect(keysOf(await engine.vectorSearch(skewedEmb, { limit: 5 }))).toContain('episode:clock-skew-row')
+    expect(engine.stats().indexed).toBe(indexedBefore + 1)
   })
 
   it('concurrent reconcile calls are single-flight', async () => {

@@ -82,4 +82,20 @@ describe('configFromEnv', () => {
     expect(configFromEnv()).toEqual({})
     expect(warn).toHaveBeenCalledTimes(5)
   })
+
+  it('non-integer numeric-looking strings warn and fall back, rather than silently truncating/coercing', () => {
+    // Number.parseInt alone would accept all four of these: parseInt("4.7") ===
+    // 4, parseInt("512abc") === 512, parseInt("30000.9") === 30000, and
+    // parseInt(" 500000") === 500000 — each masking a config typo as a
+    // plausible-looking value. The strict /^\d+$/ check must reject all of them.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    process.env['ENGRAM_RECALL_ENGINE'] = 'true'
+    process.env['ENGRAM_ENGINE_BITS'] = '4.7'
+    process.env['ENGRAM_ENGINE_TIER1_M'] = '512abc'
+    process.env['ENGRAM_ENGINE_RECONCILE_MS'] = '30000.9'
+    process.env['ENGRAM_ENGINE_MAX_N'] = ' 500000'
+
+    expect(configFromEnv()).toEqual({})
+    expect(warn).toHaveBeenCalledTimes(4)
+  })
 })

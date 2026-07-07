@@ -23,6 +23,20 @@ import type { RecallEngineOpts } from './engine.js'
 
 const VALID_BITS = new Set([2, 3, 4, 5])
 
+/**
+ * Strict integer parse: only `/^\d+$/` (unsigned decimal digits, nothing
+ * else) is accepted. `Number.parseInt` alone is too lenient for env-var
+ * validation — it silently truncates "4.7" to 4 and silently accepts
+ * "512abc" as 512, both of which are almost certainly typos that should
+ * warn, not silently coerce to a plausible-looking number. Returns null for
+ * anything that isn't a bare non-negative integer (decimals, signs, leading
+ * whitespace, trailing garbage), so the caller warns and falls back to its
+ * own default.
+ */
+function parseStrictInt(raw: string): number | null {
+  return /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : null
+}
+
 export function configFromEnv(): RecallEngineOpts | null {
   if (process.env['ENGRAM_RECALL_ENGINE'] !== 'true') return null
 
@@ -30,15 +44,15 @@ export function configFromEnv(): RecallEngineOpts | null {
 
   const bitsRaw = process.env['ENGRAM_ENGINE_BITS']
   if (bitsRaw !== undefined) {
-    const bits = Number.parseInt(bitsRaw, 10)
-    if (VALID_BITS.has(bits)) opts.bits = bits
+    const bits = parseStrictInt(bitsRaw)
+    if (bits !== null && VALID_BITS.has(bits)) opts.bits = bits
     else console.warn(`[recall-engine] invalid ENGRAM_ENGINE_BITS=${bitsRaw} (want 2–5) — using default 4`)
   }
 
   const tier1MRaw = process.env['ENGRAM_ENGINE_TIER1_M']
   if (tier1MRaw !== undefined) {
-    const tier1M = Number.parseInt(tier1MRaw, 10)
-    if (Number.isFinite(tier1M) && tier1M > 0) opts.tier1M = tier1M
+    const tier1M = parseStrictInt(tier1MRaw)
+    if (tier1M !== null && tier1M > 0) opts.tier1M = tier1M
     else {
       console.warn(
         `[recall-engine] invalid ENGRAM_ENGINE_TIER1_M=${tier1MRaw} (want a positive integer) — using default max(8·limit, 512)`,
@@ -61,8 +75,8 @@ export function configFromEnv(): RecallEngineOpts | null {
 
   const reconcileRaw = process.env['ENGRAM_ENGINE_RECONCILE_MS']
   if (reconcileRaw !== undefined) {
-    const reconcileMs = Number.parseInt(reconcileRaw, 10)
-    if (Number.isFinite(reconcileMs) && reconcileMs >= 0) opts.reconcileMs = reconcileMs
+    const reconcileMs = parseStrictInt(reconcileRaw)
+    if (reconcileMs !== null && reconcileMs >= 0) opts.reconcileMs = reconcileMs
     else {
       console.warn(
         `[recall-engine] invalid ENGRAM_ENGINE_RECONCILE_MS=${reconcileRaw} (want a non-negative integer) — using default 60000`,
@@ -72,8 +86,8 @@ export function configFromEnv(): RecallEngineOpts | null {
 
   const maxNRaw = process.env['ENGRAM_ENGINE_MAX_N']
   if (maxNRaw !== undefined) {
-    const maxVectors = Number.parseInt(maxNRaw, 10)
-    if (Number.isFinite(maxVectors) && maxVectors > 0) opts.maxVectors = maxVectors
+    const maxVectors = parseStrictInt(maxNRaw)
+    if (maxVectors !== null && maxVectors > 0) opts.maxVectors = maxVectors
     else {
       console.warn(
         `[recall-engine] invalid ENGRAM_ENGINE_MAX_N=${maxNRaw} (want a positive integer) — using default 2000000`,

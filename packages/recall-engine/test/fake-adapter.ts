@@ -15,9 +15,11 @@
  *   - `listTombstonesSince`: forget/supersede events with atMs >= since.
  *
  * `vectorSearch` doubles as the REFERENCE exact scan the engine's results
- * are compared against bit-for-bit — it scores with the same exported
- * `exactCosine` the engine uses at tier 3, so any score the engine returns
- * for a hydratable row must be float-identical.
+ * are compared against bit-for-bit — it scores with `referenceCosineF32`, a
+ * transcription of the sqlite adapter's own `cosineF32` (an INDEPENDENT
+ * implementation from the engine's `exactCosine`), so any score the engine
+ * returns for a hydratable row must be float-identical to what the real
+ * sqlite backend would have computed, not merely to the engine's own math.
  */
 import type {
   Digest,
@@ -29,8 +31,28 @@ import type {
   StorageAdapter,
   TypedMemory,
 } from '@engram-mem/core'
-import { exactCosine } from '../src/engine.js'
 import { splitmix64 } from '../src/codec/rng.js'
+
+/**
+ * Verbatim transcription of `cosineF32` from `packages/sqlite/src/vector-search.ts`
+ * (lines 43-52 at the time of writing) — the sqlite adapter's OWN cosine
+ * implementation, not the engine's `exactCosine`. Transcribed (rather than
+ * imported) so this test helper pins bit-for-bit parity with the sqlite
+ * backend without adding a cross-package dependency from `@engram-mem/recall-engine`
+ * to `@engram-mem/sqlite`. Using the engine's own `exactCosine` here instead
+ * would make the "parity" tests circular: the engine would only ever be
+ * checked against itself, never against an independent reference.
+ */
+export function referenceCosineF32(a: number[] | Float32Array, b: number[] | Float32Array): number {
+  if (a.length !== b.length || a.length === 0) return 0
+  let dot = 0, na = 0, nb = 0
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i], y = b[i]
+    dot += x * y; na += x * x; nb += y * y
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return denom === 0 ? 0 : dot / denom
+}
 
 const ALL_TIERS: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
 
@@ -147,7 +169,7 @@ export class FakeStorageAdapter implements StorageAdapter {
       if (row.type === 'semantic' && row.supersededBy !== null) continue
       if (opts?.sessionId && row.type === 'episode' && row.sessionId !== opts.sessionId) continue
       if (opts?.projectId && row.projectId !== null && row.projectId !== opts.projectId) continue
-      const sim = exactCosine(embedding, row.embedding)
+      const sim = referenceCosineF32(embedding, row.embedding)
       if (sim > 0) scored.push({ row, sim })
     }
     scored.sort((a, b) => b.sim - a.sim)

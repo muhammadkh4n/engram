@@ -37,6 +37,19 @@ const DEFAULT_LIMIT = 15
 /** Minimum gap between opportunistic snapshot rewrites triggered by reconcile changes. */
 const SNAPSHOT_DEBOUNCE_MS = 60_000
 
+/**
+ * Fixed re-scan window subtracted from the reconcile cursor and the
+ * tombstone-window timestamp at QUERY time only — the persisted cursors
+ * (`cursorMs`, `tombstoneSinceMs`) themselves always stay the true max-seen.
+ * Cross-process clock skew, or a Postgres commit-visibility lag where a row
+ * is assigned a `createdAt` slightly before it actually becomes visible to a
+ * scan, can otherwise let a delta permanently disappear: by the time the row
+ * is scannable, our cursor has already advanced past its timestamp. Re-
+ * processing the overlap is safe because it's idempotent — `store.add`
+ * dedupes inserted ids by id, and a duplicate tombstone remove is a no-op.
+ */
+const RECONCILE_OVERLAP_MS = 60_000
+
 /** Matches the inner `StorageAdapter.vectorSearch` opts shape (inlined on the port). */
 export interface VectorSearchOpts {
   limit?: number
@@ -229,6 +242,11 @@ export class RecallEngine {
       await this.fullRebuild()
       if (this.isDisabled()) return
       if (this.snapshotPath) await this.writeSnapshotBestEffort()
+      // Re-check: dispose() can land while the snapshot write above is still
+      // in flight (or in the microtask gap right after it resolves) and set
+      // state to 'disabled'. Without this guard the unconditional promotion
+      // below would resurrect a disposed/disabled engine back to 'ready'.
+      if (this.isDisabled()) return
     }
 
     this.state = 'ready'
@@ -356,7 +374,9 @@ export class RecallEngine {
     const scan = this.inner.scanEmbeddings
     if (typeof scan !== 'function') return
     const startedAt = Date.now()
-    const after = new Date(this.cursorMs)
+    // Query-time only: re-scan a fixed overlap window behind the persisted
+    // cursor (see RECONCILE_OVERLAP_MS). `cursorMs` itself is untouched here.
+    const after = new Date(Math.max(0, this.cursorMs - RECONCILE_OVERLAP_MS))
     let maxSeen = this.cursorMs
     let changes = 0
 
@@ -378,7 +398,10 @@ export class RecallEngine {
     }
 
     if (typeof this.inner.listTombstonesSince === 'function') {
-      const tombs = await this.inner.listTombstonesSince(new Date(this.tombstoneSinceMs))
+      // Same query-time overlap as the scan cursor above: `tombstoneSinceMs`
+      // itself is untouched, only the value passed to the query is widened.
+      const tombstoneAfter = new Date(Math.max(0, this.tombstoneSinceMs - RECONCILE_OVERLAP_MS))
+      const tombs = await this.inner.listTombstonesSince(tombstoneAfter)
       for (const t of tombs) {
         if (this.store.remove(t.id)) changes++
       }
@@ -434,8 +457,11 @@ export class RecallEngine {
     this.lastTier1M = m
     this.lastRescoreE = e
 
-    const projectId = opts?.projectId ?? null
-    const sessionId = opts?.sessionId ?? null
+    // `||`, not `??`: an empty string means "no filter", mirroring the sqlite
+    // adapter's truthiness checks (`opts?.projectId ?`, `opts?.sessionId ?`
+    // in packages/sqlite/src/adapter.ts), not "filter on the empty string".
+    const projectId = opts?.projectId || null
+    const sessionId = opts?.sessionId || null
     const requestedTiers = opts?.tiers ?? null
 
     // sessionId constrains ONLY the episode tier — mirroring the sqlite
