@@ -291,6 +291,62 @@ Restrict the comparison to `by_category["multi_hop"]` (category 2) and `by_categ
 
 `data/locomo/` is gitignored the same way — see "Getting Benchmark Data" → LoCoMo above.
 
+### Gate 3 — multi-hop bridge-recall, MuSiQue-Ans dev, paired
+
+The gate the standing rule below was waiting for: it exercises the iterative
+multi-hop walk a production agent actually performs — retrieve, let an LLM
+name the bridge entity / next sub-question, re-retrieve, interleave-merge
+(the A4 arm in `src/retrieval/iterative.ts`) — rather than single-shot
+recall@K. Dataset of record is MuSiQue-Ans dev (the only multi-hop set here
+with hop-labeled decompositions, so bridge (hop > 1) evidence is directly
+scorable); the harness also parses HotpotQA-distractor/2Wiki (bridge metric
+reports not-applicable there).
+
+```bash
+npx tsx packages/bench/src/multihop/forensics/bridge-recall-sweep.ts \
+  --data ./data/musique/musique_ans_v1.0_dev.jsonl \
+  --dataset musique --stride 5 \
+  --vector-mode full \
+  --output ./results/multihop/musique-s5-vfull.json
+# then the same with --vector-mode engine → musique-s5-vengine.json
+```
+
+`--stride 5` is load-bearing: MuSiQue dev is **sorted by hop type** (all
+1,252 2-hop items first), so a `--limit` prefix silently becomes a 2-hop-only
+run. The stride is deterministic (every 5th item, no RNG) and keeps the hop
+mix: 484 items = 250×2-hop, 153×3-hop, 81×4-hop. Consolidation defaults OFF
+in this harness (paragraph bags aren't conversational sessions — see the
+sweep's docstring). Dataset download: `huggingface.co/datasets/dgslibisey/MuSiQue`
+(`musique_ans_v1.0_dev.jsonl`) into `data/musique/` (gitignored).
+
+**Pass criteria** (paired, same shape as Gate 1): McNemar non-significant on
+per-item `all_support_at_k[10]` AND on bridge-hit@10 (`bridge_recall_at_k[10]
+== 1`, bridge-labeled items), with no visible drop in mean bridge-recall@10.
+Each row also records `round1_*` fields — round 1 of the A4 walk **is**
+single-shot dense (A1), so every run doubles as the A1 baseline for free.
+
+**Result (2026-07-08): PASS.** Committed as
+`results/multihop/musique-s5-vfull.json` / `musique-s5-vengine.json`.
+
+| A4 metric (K=10) | `full` | `engine` | McNemar p |
+|---|---|---|---|
+| all-support | 0.831 (402/484) | 0.826 (400/484) | 0.87 (b=21, c=19) |
+| bridge-hit | 0.864 (418/484) | 0.866 (419/484) | 1.00 (b=17, c=18) |
+| mean bridge-recall | 0.921 | 0.922 | — |
+
+- Discordant pairs are near-symmetric at every K tested (K=5: 22/21 and
+  11/18-in-engine's-favor) — run-to-run noise from the LLM stages (rerank,
+  next-query planning), not directional candidate-selection loss.
+- Honest flag: the secondary A1 (round-1-only) lens at K=5 showed a
+  borderline asymmetry (full 0.564 vs engine 0.537, b=26/c=13, p = 0.053,
+  n.s.; p = 0.33 by K=10) — one borderline p among the six paired tests run,
+  consistent with multiple comparisons; the committed A4 metrics are the gate.
+- Harness sanity (does it have teeth?): A4 beats A1 exactly where a bridge
+  gate must — bridge@5 74.9% → 83.9%, all-support@10 76.0% → 82.6% (engine
+  cell; full cell equivalent) — and unlike LongMemEval-S (99% ceiling) the
+  metric has real headroom (all-support@5 ≈ 62%), so a candidate-selection
+  regression had room to show. It didn't.
+
 ### G-containment diagnostic (evidence, not a gate)
 
 `packages/bench/src/forensics/quant-containment.ts` isolates just the quantized-ANN layer (tier-1 Hamming scan + tier-2 `TurboQuant_prod` rescore) against the real production corpus and real embeddings — no curated eval questions, no end-to-end recall@K. It samples leave-one-out queries from the live corpus, computes an exhaustive float-cosine ranking as ground truth, and measures what fraction of that ranking the quantized candidate pool actually contains at each depth. It is read-only against prod — `storage.initialize()`, `scanEmbeddings()`, and count-only `head: true` selects are the only calls made; nothing in the file inserts, updates, upserts, or deletes — and it talks to `PostgRestStorageAdapter`/`CodeStore` directly rather than through `RecallEngine`, so it never triggers the engine's opportunistic snapshot write.
@@ -310,11 +366,11 @@ npx tsx packages/bench/src/forensics/quant-containment.ts \
 
 **Signal-profile caveat:** this diagnostic only describes rows that HAVE an embedding. In the same run, `overallShareWithEmbedding` was 11.2% — the `episode` tier is well covered (99.8% embedded), but `digest` is at 3.2% and `semantic` is at **0%** (48,494/48,494 semantic rows skipped, embedding IS NULL). Those rows are written with `embedding: null` by consolidation until the NULL-embedding backfill CLI processes them, and are invisible to vector search in *either* `--vector-mode` until then — the containment numbers above characterize the ANN layer's fidelity, not the corpus's overall current retrievability.
 
-### Standing rule: opt-in until the multi-hop harness exists
+### Standing rule: opt-in until the multi-hop harness exists — now satisfied
 
 Both gates are meant to compare against **fixed baselines captured after the vector-path-correctness fixes** (exhaustive SQL scan-cap removal, HNSW-drivable per-tier ordering, pgvector text round-trip parsing) are in place — not before, because those fixes changed what `full` mode itself returns, independent of `engine` mode. The currently-committed `results/longmemeval/baseline-full-500.json` (0.988, generated 2026-05-24) predates those fixes; the 2026-07-07 Gate 1 `full` cell re-measured the corrected path at 0.990 (`results/longmemeval/full-500-vfull.json`), confirming 0.988 as a valid — slightly conservative — floor.
 
-Passing Gates 1 and 2 is necessary but **not sufficient** to flip the default. Recall@K on curated single-hop/multi-hop QA benchmarks doesn't exercise the multi-hop bridge-recall path a production agent actually walks (iterative retrieval across hops, re-querying on intermediate results). That harness — a HotpotQA/A3 bridge-recall@K gate — does not exist yet. Until it does, `--vector-mode engine` / `ENGRAM_RECALL_ENGINE` ships **opt-in only**; Gates 1–2 alone never flip the default.
+Passing Gates 1 and 2 was necessary but **not sufficient** to flip the default: recall@K on curated QA benchmarks doesn't exercise the multi-hop bridge-recall path a production agent actually walks (iterative retrieval across hops, re-querying on intermediate results). That harness now exists as **Gate 3** above (MuSiQue/A4 rather than the originally-sketched HotpotQA/A3 — MuSiQue's hop labels make bridge evidence directly scorable, and A4 iterative is the walk agents actually use). Evidence status: Gate 1 passed, Gate 3 passed, Gate 2 deliberately not run. The default flip is now an **operator decision, no longer blocked on missing evidence** — note there is also no urgency: the engine's value is RAM-resident candidate generation at corpus scale, and a corpus the SQL scan already serves in sub-millisecond time gains nothing from flipping.
 
 The two invariants from `packages/recall-engine/README.md` hold regardless of gate outcome and are not up for renegotiation by a good gate result:
 - Full-precision embeddings in the database are the source of truth and are never dropped or replaced by quantized codes — codes are a disposable, rebuildable cache.
