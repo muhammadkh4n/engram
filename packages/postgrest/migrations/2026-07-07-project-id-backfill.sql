@@ -1,4 +1,5 @@
 -- Backfill project_id across all memory tiers.
+-- Run on prod: docker exec -i engram-postgres psql -U postgres -d engram < this-file
 --
 -- Until 2026-07-07 the PostgREST adapter never wrote project_id (and its row
 -- mappers never read it), so the entire corpus is untagged and scoped recall
