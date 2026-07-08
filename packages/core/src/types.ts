@@ -201,6 +201,8 @@ export interface RecallResult {
   /** Mirrors retrieval/engine.ts RecallResult.sessions (the authoritative
    *  computed source) — Memory.recall's public contract is typed here. */
   sessions?: SessionGroup[]
+  /** Mirrors retrieval/engine.ts RecallResult.synthesis. */
+  synthesis?: SynthesisBlock | null
 }
 
 export interface RetrievedMemory {
