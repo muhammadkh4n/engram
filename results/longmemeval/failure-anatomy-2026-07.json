@@ -1,0 +1,3359 @@
+{
+  "meta": {
+    "args": {
+      "judgeOutput": "./results/longmemeval/judge-full-500-2026-07.json",
+      "recallOutput": "./results/longmemeval/full-500-vfull.json",
+      "data": "./packages/bench/data/longmemeval/longmemeval_s_cleaned.json",
+      "classifyModel": "gpt-4o-mini",
+      "includePartial": true,
+      "output": "./results/longmemeval/failure-anatomy-2026-07.json"
+    },
+    "taxonomy": [
+      "temporal-arithmetic-error",
+      "temporal-not-grounded",
+      "aggregation-miscount",
+      "partial-enumeration",
+      "preference-not-applied",
+      "wrong-abstention",
+      "missed-abstention",
+      "hallucinated-fact",
+      "judge-too-strict",
+      "format-mismatch",
+      "other"
+    ],
+    "total_failures": 235,
+    "generated_at": "2026-07-08T00:44:53.343Z"
+  },
+  "matrix": {
+    "single-session-user": {
+      "wrong-abstention": 11,
+      "hallucinated-fact": 1,
+      "preference-not-applied": 2,
+      "missed-abstention": 1
+    },
+    "multi-session": {
+      "wrong-abstention": 26,
+      "aggregation-miscount": 18,
+      "hallucinated-fact": 12,
+      "judge-too-strict": 1,
+      "partial-enumeration": 12,
+      "missed-abstention": 6
+    },
+    "single-session-preference": {
+      "preference-not-applied": 23,
+      "wrong-abstention": 6
+    },
+    "temporal-reasoning": {
+      "temporal-arithmetic-error": 11,
+      "hallucinated-fact": 44,
+      "wrong-abstention": 17,
+      "temporal-not-grounded": 1,
+      "partial-enumeration": 4,
+      "missed-abstention": 2
+    },
+    "knowledge-update": {
+      "hallucinated-fact": 23,
+      "partial-enumeration": 1,
+      "wrong-abstention": 5,
+      "format-mismatch": 1,
+      "missed-abstention": 2
+    },
+    "single-session-assistant": {
+      "wrong-abstention": 2,
+      "hallucinated-fact": 2,
+      "partial-enumeration": 1
+    }
+  },
+  "rows": [
+    {
+      "question_id": "6ade9755",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refuses to provide information that is available in the GOLD answer."
+    },
+    {
+      "question_id": "58ef2f1c",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states a lack of knowledge when the correct date was provided in the context."
+    },
+    {
+      "question_id": "66f24dbb",
+      "question_type": "single-session-user",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly adds a pair of earrings that were not mentioned in the gold answer."
+    },
+    {
+      "question_id": "af8d2e46",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates a specific number of shirts packed."
+    },
+    {
+      "question_id": "dccbc061",
+      "question_type": "single-session-user",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer introduces additional information about exploring Buddhism, which diverges from the specific focus of the gold answer."
+    },
+    {
+      "question_id": "75499fd8",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the breed."
+    },
+    {
+      "question_id": "a06e4cfe",
+      "question_type": "single-session-user",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer included an additional detail about citrus bitters that may not align with the user's stated preference."
+    },
+    {
+      "question_id": "b86304ba",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the painting's worth."
+    },
+    {
+      "question_id": "60d45044",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states a specific type of rice."
+    },
+    {
+      "question_id": "ccb36322",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the correct information."
+    },
+    {
+      "question_id": "76d63226",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the size of the TV."
+    },
+    {
+      "question_id": "86f00804",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the book being read."
+    },
+    {
+      "question_id": "4100d0a0",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the user's ethnicity."
+    },
+    {
+      "question_id": "1faac195",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide information, while the GOLD answer clearly states where Emily lives."
+    },
+    {
+      "question_id": "f4f1d8a4_abs",
+      "question_type": "single-session-user",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts an answer about the sister's gift, while the GOLD indicates that the information about the dad's gift was never mentioned."
+    },
+    {
+      "question_id": "0a995998",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states uncertainty when a specific answer exists in the GOLD."
+    },
+    {
+      "question_id": "6d550036",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a number, while the GOLD answer clearly states the correct number of projects."
+    },
+    {
+      "question_id": "gpt4_59c863d7",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer miscounted the total number of model kits, stating four instead of the correct five."
+    },
+    {
+      "question_id": "b5ef892d",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific total of 15 days spent on camping trips, which is unsupported by the evidence."
+    },
+    {
+      "question_id": "e831120c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "judge-too-strict",
+      "llm_note": "The generated answer provides a correct total of 3.5 weeks, but the judge penalized it for breaking down the time instead of matching the gold answer directly."
+    },
+    {
+      "question_id": "aae3761f",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer incorrectly summed the driving times, resulting in a total of 13 hours instead of the correct 15 hours."
+    },
+    {
+      "question_id": "gpt4_f2262a51",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed two doctors instead of the three required."
+    },
+    {
+      "question_id": "c4a1ceb8",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer incorrectly counted the total number of citrus fruits used, stating four instead of the correct three."
+    },
+    {
+      "question_id": "gpt4_a56e767c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed two festivals instead of the total of four."
+    },
+    {
+      "question_id": "36b9f61e",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer miscalculated the total spent on luxury items."
+    },
+    {
+      "question_id": "28dc39ac",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer miscounted the total hours spent playing games, arriving at 110 hours instead of the correct total of 140 hours."
+    },
+    {
+      "question_id": "gpt4_2f8be40d",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the GOLD answer clearly stating the number of weddings attended."
+    },
+    {
+      "question_id": "gpt4_15e38248",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed only three activities and did not account for the fourth piece of furniture."
+    },
+    {
+      "question_id": "d23cf73b",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only lists three cuisines instead of the required four."
+    },
+    {
+      "question_id": "gpt4_7fce9456",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that only a 1-bedroom condo was viewed, contradicting the gold answer that states four properties were viewed."
+    },
+    {
+      "question_id": "d682f1a2",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the information being available in the context."
+    },
+    {
+      "question_id": "7024f17c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer specifies a concrete value."
+    },
+    {
+      "question_id": "gpt4_5501fe77",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific fact about gaining followers on Twitter instead of TikTok."
+    },
+    {
+      "question_id": "2318644b",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates that a specific value exists."
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed two events instead of the required total of four."
+    },
+    {
+      "question_id": "gpt4_31ff4165",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a specific count, while the GOLD answer indicates a concrete number exists."
+    },
+    {
+      "question_id": "2788b940",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer miscounted the total number of fitness classes attended, stating four instead of the correct five."
+    },
+    {
+      "question_id": "9d25d4e0",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a number, while the GOLD answer clearly states the information."
+    },
+    {
+      "question_id": "129d1232",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer miscounted the total amount raised across the charity events."
+    },
+    {
+      "question_id": "60472f9c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that there are three projects instead of the correct two."
+    },
+    {
+      "question_id": "gpt4_194be4b3",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refuses to provide a known quantity of musical instruments, which is explicitly stated in the GOLD answer."
+    },
+    {
+      "question_id": "a9f6b44c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a number, while the GOLD answer clearly states there is a specific number available."
+    },
+    {
+      "question_id": "d851d5ba",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer incorrectly summed the amounts raised across different charities, leading to the wrong total."
+    },
+    {
+      "question_id": "5a7937c8",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed 2 specific days of participation and did not account for the total of 3 days mentioned in the gold answer."
+    },
+    {
+      "question_id": "gpt4_ab202e7f",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed only a subset of the required items and did not provide the total count correctly."
+    },
+    {
+      "question_id": "gpt4_e05b82a6",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer incorrectly summed the total number of rollercoaster rides, stating six instead of the correct ten."
+    },
+    {
+      "question_id": "gpt4_731e37d7",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer miscounted the total by only including the known cost of one workshop and not accounting for the missing cost of the entrepreneurship workshop."
+    },
+    {
+      "question_id": "e3038f8c",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer miscounted the total number of rare items, arriving at 87 instead of the correct total of 99."
+    },
+    {
+      "question_id": "2b8f3739",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer incorrectly summed the amounts earned from the sales, leading to the wrong total."
+    },
+    {
+      "question_id": "1a8a66a6",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of magazine subscriptions as one instead of the correct two."
+    },
+    {
+      "question_id": "bf659f65",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a number, while the GOLD answer clearly states the correct amount."
+    },
+    {
+      "question_id": "gpt4_372c3eed",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer incorrectly summed the years of education, totaling 8 instead of the correct 10."
+    },
+    {
+      "question_id": "gpt4_2f91af09",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer miscounted the total pieces of writing, stating 22 instead of the correct total of 23."
+    },
+    {
+      "question_id": "81507db6",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of graduation ceremonies attended as two instead of the correct three."
+    },
+    {
+      "question_id": "80ec1f4f_abs",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": true
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer specifies that no museums were visited."
+    },
+    {
+      "question_id": "gpt4_372c3eed_abs",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a total without confirming the Master's degree duration, which was not mentioned in the provided information."
+    },
+    {
+      "question_id": "8a2466db",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer included general video editing resources and other software, ignoring the user's preference for Adobe Premiere Pro-specific resources."
+    },
+    {
+      "question_id": "06878be2",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to mention the user's preference for Sony-compatible accessories or high-quality gear."
+    },
+    {
+      "question_id": "75832dbd",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to apply the user's preference for recent publications specifically related to AI in healthcare and deep learning for medical image analysis."
+    },
+    {
+      "question_id": "0edc2aef",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a suggestion despite the GOLD answer indicating that specific hotel features were mentioned."
+    },
+    {
+      "question_id": "35a27287",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide information despite the GOLD answer indicating that relevant events exist."
+    },
+    {
+      "question_id": "32260d93",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a recommendation despite the GOLD answer indicating that specific preferences were known."
+    },
+    {
+      "question_id": "195a1a1b",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer included watching a movie or TV show, which contradicts the user's stated preference to avoid such activities."
+    },
+    {
+      "question_id": "afdc33df",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to acknowledge the user's existing efforts and specific concerns about their granite surface."
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer provides general tips but fails to tailor the advice to the user's specific experiences with beef stew and yogurt."
+    },
+    {
+      "question_id": "06f04340",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer includes additional ingredients not specified in the gold answer, failing to prioritize the user's preference for homegrown cherry tomatoes and herbs."
+    },
+    {
+      "question_id": "6b7dfb22",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer provided generic suggestions instead of building upon the user's existing sources of inspiration and recent experiences."
+    },
+    {
+      "question_id": "1a1907b4",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer suggests a basic cocktail recipe without considering the user's preference for more creative or innovative variations based on their mixology class background."
+    },
+    {
+      "question_id": "09d032c9",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to incorporate the user's preference for tips related to their portable power bank."
+    },
+    {
+      "question_id": "38146c39",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to consider the user's preference for suggestions that build upon their use of turbinado sugar."
+    },
+    {
+      "question_id": "d24813b1",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to incorporate the user's specific preference for baking suggestions related to lemon poppyseed cake."
+    },
+    {
+      "question_id": "57f827a0",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer ignored the user's specific preferences and plans regarding the dresser and mid-century modern style."
+    },
+    {
+      "question_id": "95228167",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to address the user's specific preference for a comparison between Fender Stratocaster and Gibson Les Paul guitars."
+    },
+    {
+      "question_id": "505af2f5",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer suggests a recipe that includes sweeteners, which does not align with the user's preference for reducing sugar intake."
+    },
+    {
+      "question_id": "75f70248",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite relevant information being available in the context."
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer is generic and does not incorporate the user's specific high school experiences and preferences."
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a response despite the GOLD answer indicating that relevant information was available."
+    },
+    {
+      "question_id": "fca70973",
+      "question_type": "single-session-preference",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide suggestions despite the GOLD answer containing relevant information."
+    },
+    {
+      "question_id": "b6025781",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer did not fully align with the user's stated preference for recipes that incorporate roasted vegetables and variations in protein sources."
+    },
+    {
+      "question_id": "a89d7624",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to incorporate the user's specific interest in live music and their memorable experience with Brandon Flowers."
+    },
+    {
+      "question_id": "b0479f84",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated recommendations do not cater to the user's specific preferences for documentaries similar to 'Our Planet', 'Free Solo', and 'Tiger King'."
+    },
+    {
+      "question_id": "1d4e3b97",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to specifically reference the user's previous interactions about the bike's chain and cassette replacement, which is a key detail in the gold answer."
+    },
+    {
+      "question_id": "07b6f563",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to specify that the accessories are compatible with an iPhone 13 Pro, which is a stated user preference."
+    },
+    {
+      "question_id": "1c0ddc50",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer ignored the user's preference to avoid true crime and self-improvement topics in podcast suggestions."
+    },
+    {
+      "question_id": "0a34ad58",
+      "question_type": "single-session-preference",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "preference-not-applied",
+      "llm_note": "The generated answer fails to incorporate the user's preference for tips that utilize their existing resources like the Suica card and TripIt app."
+    },
+    {
+      "question_id": "a11281a2",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a specific follower count but does not address the increase, which was the focus of the question."
+    },
+    {
+      "question_id": "4f54b7c9",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed three items instead of the required total of five."
+    },
+    {
+      "question_id": "51c32626",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts information but fails to mention the specific date of submission, which was required."
+    },
+    {
+      "question_id": "d905b33f",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a specific discount percentage despite the GOLD answer indicating a known value."
+    },
+    {
+      "question_id": "f35224e0",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a total, while the GOLD answer indicates a specific number exists."
+    },
+    {
+      "question_id": "6456829e",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer correctly totals the number of plants but does not match the gold answer directly."
+    },
+    {
+      "question_id": "3c1045c8",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a calculation despite the GOLD answer indicating a specific difference."
+    },
+    {
+      "question_id": "60036106",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The GENERATED answer incorrectly breaks down the total reach, leading to a miscount of the total number of people reached."
+    },
+    {
+      "question_id": "681a1674",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only mentions one specific movie instead of providing the total count of re-watched Marvel movies."
+    },
+    {
+      "question_id": "4adc0475",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed the individual counts of goals and assists but did not provide the total."
+    },
+    {
+      "question_id": "4bc144e2",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer provided specific amounts that summed to a total different from the gold answer."
+    },
+    {
+      "question_id": "a1cc6108",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer states uncertainty, while the GOLD answer provides a specific age that was supported by the evidence."
+    },
+    {
+      "question_id": "9ee3ecd6",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states that 300 points are needed, which is not supported by the evidence."
+    },
+    {
+      "question_id": "3fdac837",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The GENERATED answer only accounts for the days in Japan and does not provide a total for both locations."
+    },
+    {
+      "question_id": "27016adc",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a percentage despite the GOLD answer indicating a specific value."
+    },
+    {
+      "question_id": "92a0aa75",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts that the duration is unknown, but the GOLD answer provides a specific duration that was available in the context."
+    },
+    {
+      "question_id": "1192316e",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer does not provide a total time despite the GOLD answer indicating a specific total time exists."
+    },
+    {
+      "question_id": "67e0d0f2",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of completed online courses as 12 instead of the correct total of 20."
+    },
+    {
+      "question_id": "ba358f49",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates a specific age exists."
+    },
+    {
+      "question_id": "60159905",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed two dinner parties instead of the required total of three."
+    },
+    {
+      "question_id": "ef9cf60a",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a specific amount, while the GOLD answer clearly states the amount spent."
+    },
+    {
+      "question_id": "73d42213",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer asserts a specific time that is incorrect and unsupported by the evidence."
+    },
+    {
+      "question_id": "099778bb",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide a percentage, while the GOLD answer clearly states the information."
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly calculated the savings amount, asserting a value of $152 instead of the correct $50."
+    },
+    {
+      "question_id": "157a136e",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the age difference."
+    },
+    {
+      "question_id": "c18a7dc8",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates a specific value exists."
+    },
+    {
+      "question_id": "a08a253f",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of days attended as three instead of the correct four."
+    },
+    {
+      "question_id": "37f165cf",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states a lack of knowledge, while the GOLD answer provides a specific page count that was available in the context."
+    },
+    {
+      "question_id": "8e91e7d9",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of siblings as 3 instead of the correct total of 4."
+    },
+    {
+      "question_id": "21d02d0d",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "aggregation-miscount",
+      "llm_note": "The generated answer incorrectly counts the number of fun runs missed, stating one instead of the two indicated in the gold answer."
+    },
+    {
+      "question_id": "6456829e_abs",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer asserts a partial answer but fails to acknowledge that the question is unanswerable regarding chili peppers."
+    },
+    {
+      "question_id": "e5ba910e_abs",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": true
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates that the information about the iPad was not mentioned."
+    },
+    {
+      "question_id": "a96c20ee_abs",
+      "question_type": "multi-session",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a specific university, but the GOLD indicates that the information was never mentioned."
+    },
+    {
+      "question_id": "09ba9854_abs",
+      "question_type": "multi-session",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a specific savings amount despite the GOLD indicating that the necessary information was not provided."
+    },
+    {
+      "question_id": "gpt4_59149c77",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The GENERATED answer miscalculated the number of days between the two visits."
+    },
+    {
+      "question_id": "gpt4_f49edff3",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts the order of events, which contradicts the GOLD answer."
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The GENERATED answer incorrectly calculated the time elapsed since the events, stating it has been less than a month instead of the correct two months."
+    },
+    {
+      "question_id": "gpt4_fa19884c",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The GENERATED answer incorrectly calculated the number of days between the two events."
+    },
+    {
+      "question_id": "af082822",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the time since the event as one day ago instead of the correct two weeks."
+    },
+    {
+      "question_id": "9a707b81",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer incorrectly calculated the number of days since the baking class."
+    },
+    {
+      "question_id": "gpt4_1d4ab0c9",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that 0 days passed, which contradicts the gold answer."
+    },
+    {
+      "question_id": "gpt4_e072b769",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refuses to provide a specific timeframe when the GOLD answer clearly states it."
+    },
+    {
+      "question_id": "gpt4_1d80365e",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states that it doesn't know, while the GOLD answer provides a clear duration."
+    },
+    {
+      "question_id": "gpt4_7f6b06db",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts the order of the trips, placing the road trip first instead of the day hike."
+    },
+    {
+      "question_id": "gpt4_18c2b244",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-not-grounded",
+      "llm_note": "The generated answer lists the events in the wrong order without providing any temporal anchors."
+    },
+    {
+      "question_id": "gpt4_a1b77f9c",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the GOLD answer containing specific information."
+    },
+    {
+      "question_id": "gpt4_1916e0ea",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the dates and calculates the number of days, leading to an unsupported claim."
+    },
+    {
+      "question_id": "gpt4_7a0daae1",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the GOLD answer indicating a specific duration."
+    },
+    {
+      "question_id": "gpt4_7abb270c",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer includes incorrect museum names and an incorrect order."
+    },
+    {
+      "question_id": "4dfccbf7",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The GENERATED answer incorrectly calculated the number of days between the two events."
+    },
+    {
+      "question_id": "gpt4_61e13b3c",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer incorrectly calculated the duration as two weeks instead of the correct three weeks."
+    },
+    {
+      "question_id": "gpt4_45189cb4",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed only a subset of the required items, missing the NFL playoffs."
+    },
+    {
+      "question_id": "2ebe6c90",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the GOLD answer indicating a specific duration."
+    },
+    {
+      "question_id": "gpt4_e061b84f",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the order of events."
+    },
+    {
+      "question_id": "370a8ff4",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates that a specific value exists."
+    },
+    {
+      "question_id": "gpt4_d6585ce8",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed only a subset of the required items, missing the Queen + Adam Lambert concert."
+    },
+    {
+      "question_id": "gpt4_4ef30696",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer despite the GOLD answer indicating a specific value exists."
+    },
+    {
+      "question_id": "gpt4_ec93e27f",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the most recent mode of transport was a bus, contradicting the gold answer."
+    },
+    {
+      "question_id": "6e984301",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the duration as 6 weeks instead of the correct 3 weeks."
+    },
+    {
+      "question_id": "gpt4_f420262c",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only lists a subset of the required airlines and does not provide the complete order."
+    },
+    {
+      "question_id": "gpt4_8e165409",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The GENERATED answer incorrectly computes the duration between the two dates as 22 days instead of the correct 14 days."
+    },
+    {
+      "question_id": "gpt4_74aed68e",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the number of days as 10, which is not supported by the evidence."
+    },
+    {
+      "question_id": "bcbe585f",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly introduces 'a month and a half ago', which is inconsistent with the GOLD answer."
+    },
+    {
+      "question_id": "gpt4_21adecb5",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer gives a specific duration that exists."
+    },
+    {
+      "question_id": "gpt4_7ddcf75f",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly specifies a date that is not supported by the evidence."
+    },
+    {
+      "question_id": "gpt4_68e94287",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the participation in the #PlankChallenge happened first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "gpt4_7bc6cf22",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer miscalculated the number of days since reading the issue, providing an incorrect duration."
+    },
+    {
+      "question_id": "2ebe6c92",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refused to provide an answer, while the GOLD answer indicated a specific book that was finished."
+    },
+    {
+      "question_id": "gpt4_e061b84g",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific event (Midsummer 5K Run) that is not supported by the evidence."
+    },
+    {
+      "question_id": "71017277",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states a lack of knowledge when the information was available in the context."
+    },
+    {
+      "question_id": "b46e15ee",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts participation in a different charity event that is not supported by the evidence."
+    },
+    {
+      "question_id": "gpt4_d6585ce9",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates that the information was available."
+    },
+    {
+      "question_id": "gpt4_1e4a8aec",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts an unrelated activity instead of addressing the gardening-related question."
+    },
+    {
+      "question_id": "gpt4_f420262d",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific airline (Delta Airlines) that contradicts the gold answer (American Airlines)."
+    },
+    {
+      "question_id": "gpt4_59149c78",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts the location of the event as the Museum of Modern Art instead of the correct location, the Metropolitan Museum of Art."
+    },
+    {
+      "question_id": "gpt4_e414231f",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refused to provide an answer despite the information being available in the context."
+    },
+    {
+      "question_id": "gpt4_4929293b",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts participation in a baby shower instead of the wedding."
+    },
+    {
+      "question_id": "gpt4_fa19884d",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer indicates that a specific artist exists."
+    },
+    {
+      "question_id": "9a707b82",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific dish (chicken soup) that was not mentioned in the gold answer."
+    },
+    {
+      "question_id": "eac54add",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer introduces an unrelated event about collaborating with an influencer, which is not supported by the evidence."
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that the visit was with a friend, contradicting the GOLD answer."
+    },
+    {
+      "question_id": "6e984302",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states what was bought."
+    },
+    {
+      "question_id": "gpt4_8279ba03",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refuses to provide an answer, while the GOLD answer indicates that a specific appliance was purchased."
+    },
+    {
+      "question_id": "gpt4_2655b836",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer includes unsupported details about the date and repair process that are not found in the gold answer."
+    },
+    {
+      "question_id": "gpt4_2487a7cb",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the 'Effective Time Management' workshop was attended first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "gpt4_76048e76",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that the car was taken care of first, contradicting the GOLD answer."
+    },
+    {
+      "question_id": "08f4fc43",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the date of Ash Wednesday, leading to an incorrect calculation of the number of days."
+    },
+    {
+      "question_id": "2c63a862",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer incorrectly calculated the duration as 16 days instead of the correct 14 days."
+    },
+    {
+      "question_id": "gpt4_0b2f1d21",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts the order of events, contradicting the gold answer."
+    },
+    {
+      "question_id": "a3838d2b",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only mentions one event instead of providing the total number of events."
+    },
+    {
+      "question_id": "gpt4_65aabe59",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the mesh network system was set up first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "982b5123",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the booking was two months ago instead of the correct five months ago."
+    },
+    {
+      "question_id": "b9cfe692",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the total time as six and a half weeks, which is a specific fact that is wrong."
+    },
+    {
+      "question_id": "e4e14d04",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the membership duration as three weeks instead of the correct two weeks."
+    },
+    {
+      "question_id": "c9f37c46",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the duration as 3 months instead of the correct 2 months."
+    },
+    {
+      "question_id": "gpt4_2c50253f",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific wake-up time that is not supported by the evidence."
+    },
+    {
+      "question_id": "gpt4_b4a80587",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the road trip happened first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "cc6d1ec1",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly states the duration of bird watching as three months instead of the correct two months."
+    },
+    {
+      "question_id": "gpt4_8c8961ae",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the trip to Europe was taken first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "gpt4_d9af6064",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts the order of device setup, stating the smart thermostat was set up first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "d01c6aa8",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states a lack of knowledge when the GOLD answer provides a specific age."
+    },
+    {
+      "question_id": "993da5e2",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states a duration of about a month, which is unsupported by the evidence."
+    },
+    {
+      "question_id": "gpt4_cd90e484",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer incorrectly calculated the duration as three weeks instead of the correct two weeks."
+    },
+    {
+      "question_id": "gpt4_88806d6e",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that Mark and Sarah were met first, contradicting the GOLD answer."
+    },
+    {
+      "question_id": "b29f3365",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states six weeks instead of the correct four weeks."
+    },
+    {
+      "question_id": "gpt4_2f56ae70",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific streaming service (Apple TV+) instead of the correct one (Disney+)."
+    },
+    {
+      "question_id": "6613b389",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "temporal-arithmetic-error",
+      "llm_note": "The generated answer correctly identifies the engagement timing but incorrectly calculates the duration by including unnecessary detail about the days."
+    },
+    {
+      "question_id": "gpt4_0a05b494",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that the tourist from Australia was met first, which contradicts the GOLD answer."
+    },
+    {
+      "question_id": "gpt4_2f584639",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that the necklace was bought first, contradicting the GOLD answer."
+    },
+    {
+      "question_id": "gpt4_213fd887",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the charity 5K run was participated in first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "gpt4_5438fa52",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that the cultural festival happened first, contradicting the gold answer."
+    },
+    {
+      "question_id": "gpt4_fe651585",
+      "question_type": "temporal-reasoning",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that Rachel became a parent first, which contradicts the gold answer."
+    },
+    {
+      "question_id": "c8090214_abs",
+      "question_type": "temporal-reasoning",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts information about the Holiday Market but fails to acknowledge that the question is unanswerable due to the lack of information about the iPad purchase."
+    },
+    {
+      "question_id": "6a1eabeb",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific time that is not supported by the evidence."
+    },
+    {
+      "question_id": "6aeb4375",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of Korean restaurants tried, asserting a specific value that contradicts the gold answer."
+    },
+    {
+      "question_id": "89941a93",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of bikes owned as three instead of the correct four."
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer provides incorrect information about a wedding and hotel stay instead of the correct location, Paris."
+    },
+    {
+      "question_id": "031748ae",
+      "question_type": "knowledge-update",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer only listed the number of engineers led at the start and omitted the current count."
+    },
+    {
+      "question_id": "0f05491a",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states that 125 stars are needed instead of the correct 120 stars."
+    },
+    {
+      "question_id": "2698e78f",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a frequency of every two weeks instead of the correct frequency of every week."
+    },
+    {
+      "question_id": "6071bd76",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts that more water is being used per tablespoon of coffee, contradicting the gold answer."
+    },
+    {
+      "question_id": "e493bb7c",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific location for the painting that contradicts the GOLD answer."
+    },
+    {
+      "question_id": "ed4ddc30",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific quantity of eggs that is not supported by the evidence."
+    },
+    {
+      "question_id": "8fb83627",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of finished issues as three instead of the correct five."
+    },
+    {
+      "question_id": "b01defab",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer confirms that the user finished reading the book."
+    },
+    {
+      "question_id": "22d2cb42",
+      "question_type": "knowledge-update",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly introduces the name 'Rhythm Central', which is not supported by the evidence."
+    },
+    {
+      "question_id": "59524333",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states a specific time (7:00 pm) that contradicts the gold answer (6:00 pm)."
+    },
+    {
+      "question_id": "5831f84d",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of videos watched as 12 instead of the correct 15."
+    },
+    {
+      "question_id": "50635ada",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide information despite the GOLD answer being available."
+    },
+    {
+      "question_id": "e66b632c",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer asserts a specific time that is incorrect and unsupported by the evidence."
+    },
+    {
+      "question_id": "0ddfec37",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states that 20 baseballs were added, which is not supported by the evidence."
+    },
+    {
+      "question_id": "f685340e",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts that the frequency of playing tennis has not changed, contradicting the GOLD answer."
+    },
+    {
+      "question_id": "69fee5aa",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states the number of coins as 37 instead of the correct 38."
+    },
+    {
+      "question_id": "7401057b",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refuses to provide an answer, while the GOLD answer clearly states the information."
+    },
+    {
+      "question_id": "a2f3aa27",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": true,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly states a lack of knowledge when a specific answer was available."
+    },
+    {
+      "question_id": "c7dc5443",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly asserts a specific record of 3-2, which is unsupported by the evidence."
+    },
+    {
+      "question_id": "3ba21379",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific vehicle model that is not supported by the evidence."
+    },
+    {
+      "question_id": "9bbe84a2",
+      "question_type": "knowledge-update",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "format-mismatch",
+      "llm_note": "The GENERATED answer includes unnecessary detail about a deadline that is not present in the GOLD answer."
+    },
+    {
+      "question_id": "10e09553",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states that 9 largemouth bass were caught, which is a specific fact that contradicts the gold answer."
+    },
+    {
+      "question_id": "dad224aa",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a wake-up time of 8:30 am, which contradicts the GOLD answer of 7:30 am."
+    },
+    {
+      "question_id": "ba61f0b9",
+      "question_type": "knowledge-update",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": true,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The generated answer incorrectly states there are 5 women on the team, which is a specific fact that contradicts the gold answer."
+    },
+    {
+      "question_id": "0977f2af",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refuses to provide an answer, while the GOLD answer clearly states the information."
+    },
+    {
+      "question_id": "031748ae_abs",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a specific number of engineers led, while the GOLD indicates that the information was not provided."
+    },
+    {
+      "question_id": "0ddfec37_abs",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": true
+      },
+      "llm_class": "missed-abstention",
+      "llm_note": "The GENERATED answer asserts a specific value about baseballs, while the GOLD indicates that the information about footballs was never mentioned."
+    },
+    {
+      "question_id": "07741c45",
+      "question_type": "knowledge-update",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific location for the old sneakers that contradicts the GOLD answer."
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": false,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer refused to provide information, while the GOLD answer contained a specific fact."
+    },
+    {
+      "question_id": "1903aded",
+      "question_type": "single-session-assistant",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly asserts a specific job title that is not supported by the evidence."
+    },
+    {
+      "question_id": "f523d9fe",
+      "question_type": "single-session-assistant",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "hallucinated-fact",
+      "llm_note": "The GENERATED answer incorrectly adds information about the show 'Doc Martin' going down, which is not supported by the GOLD answer."
+    },
+    {
+      "question_id": "1d4da289",
+      "question_type": "single-session-assistant",
+      "verdict": "partial",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": false,
+        "gold_is_numeric": false,
+        "gen_contains_number": true,
+        "is_abstention_question": false
+      },
+      "llm_class": "partial-enumeration",
+      "llm_note": "The generated answer listed additional methods beyond the required examples, failing to focus solely on the specified items."
+    },
+    {
+      "question_id": "51b23612",
+      "question_type": "single-session-assistant",
+      "verdict": "incorrect",
+      "deterministic": {
+        "gold_fully_in_gen_context": true,
+        "gen_is_abstention": true,
+        "gold_is_numeric": false,
+        "gen_contains_number": false,
+        "is_abstention_question": false
+      },
+      "llm_class": "wrong-abstention",
+      "llm_note": "The GENERATED answer incorrectly refused to provide a known answer that was present in the context."
+    }
+  ]
+}
