@@ -68,6 +68,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     rerank(query, documents) {
       return summarizer.rerank(query, documents)
     },
+    selectEvidence(query, evidence, selOpts) {
+      return summarizer.selectEvidence(query, evidence, selOpts)
+    },
     contextualizeChunk(chunk, ctxOpts) {
       return summarizer.contextualizeChunk(chunk, ctxOpts)
     },
