@@ -29,7 +29,9 @@ const QUOTE_MAX = 80
 
 function quote(text: string): string {
   const t = text.replace(/\s+/g, ' ').trim()
-  return t.length <= QUOTE_MAX ? t : `${t.slice(0, QUOTE_MAX - 1)}…`
+  // Astral characters (emoji, etc.) are multi-byte; use codepoint-safe truncation
+  const cps = Array.from(t)
+  return cps.length <= QUOTE_MAX ? t : `${cps.slice(0, QUOTE_MAX - 1).join('')}…`
 }
 
 function sid(sessionId: string | null): string {

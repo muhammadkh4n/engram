@@ -80,6 +80,30 @@ describe('renderConstraintSection', () => {
     expect(r.text).toContain('"I\'m vegetarian so no meat dishes please"')
     expect(r.text).toContain('Apply this stated preference when answering — do not merely mention it.')
   })
+
+  it('quote truncation must be codepoint-safe (no unpaired surrogates on emoji boundary)', () => {
+    // Build exactly 78 ASCII chars + emoji to make length 80 (emoji is 2 UTF-16 units)
+    // The original quote() function slices at QUOTE_MAX - 1 = 79, which splits the emoji's surrogate pair
+    // The fixed version uses codepoint-safe truncation
+    const ascii78 = 'a'.repeat(78)
+    const contentWithEmoji = `${ascii78}😀 more text after emoji`
+    const hit: PreferenceHit = {
+      memoryId: 'm10', sessionId: 'S5', date: null,
+      content: contentWithEmoji,
+    }
+    const r = renderConstraintSection([hit])
+    const output = r.text
+
+    // Assert no unpaired surrogates in the rendered output containing the quote
+    const unpairedSurrogateRegex = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+    expect(unpairedSurrogateRegex.test(output)).toBe(false)
+
+    // Assert the quote is still under the 80-codepoint cap (with ellipsis)
+    // Use Array.from to count codepoints, not UTF-16 units
+    const quoteMatch = output.match(/"([^"]+)"/)?.[1]
+    expect(quoteMatch).toBeDefined()
+    expect(Array.from(quoteMatch!).length).toBeLessThanOrEqual(80)
+  })
 })
 
 const SESSIONS: SessionGroup[] = [
