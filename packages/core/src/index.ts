@@ -38,6 +38,8 @@ export type {
   SalienceCategory,
   SalienceClassification,
   SalienceOpts,
+  EvidenceItem,
+  EvidenceSelection,
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
