@@ -39,7 +39,8 @@ export function rankSessions(memories: readonly RetrievedMemory[]): SessionGroup
     .sort((a, b) => b.score - a.score)
 
   // Head protection: the top-ranked memory's session owns slot 1.
-  const headSessionId = memories.find((m) => m.sessionId)?.sessionId
+  // No session on the top-ranked memory → nothing to protect → pure mass order.
+  const headSessionId = memories[0]?.sessionId
   if (headSessionId) {
     const idx = ranked.findIndex((g) => g.sessionId === headSessionId)
     if (idx > 0) {

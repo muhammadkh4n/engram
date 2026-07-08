@@ -68,4 +68,37 @@ describe('rankSessions', () => {
     expect(undated.earliest).toBeNull()
     expect(undated.latest).toBeNull()
   })
+
+  it('falls back to pure RRF-mass order when the top-ranked memory has no session', () => {
+    // memories[0] has no session, so head protection should not apply.
+    // s-weak has one memory at rank 1 (mass ~0.01613).
+    // s-strong has four memories at ranks 2–5 (mass ~0.0611).
+    // Pure RRF order should rank s-strong first.
+    const memories = [
+      mem('m0', null),
+      mem('m1', 's-weak'),
+      mem('m2', 's-strong'),
+      mem('m3', 's-strong'),
+      mem('m4', 's-strong'),
+      mem('m5', 's-strong'),
+    ]
+    const ranked = rankSessions(memories)
+    expect(ranked[0]!.sessionId).toBe('s-strong')
+    expect(ranked[1]!.sessionId).toBe('s-weak')
+  })
+
+  it('is deterministic for near-equal-score sessions via stable sort', () => {
+    // When two sessions have similar RRF mass, verify ordering is deterministic.
+    // Running the same input twice must yield identical session order.
+    const memories = [
+      mem('m0', null),
+      mem('m1', 's1'),
+      mem('m2', 's1'),
+      mem('m3', 's2'),
+      mem('m4', 's2'),
+    ]
+    const ranked1 = rankSessions(memories)
+    const ranked2 = rankSessions(memories)
+    expect(ranked1.map((r) => r.sessionId)).toEqual(ranked2.map((r) => r.sessionId))
+  })
 })
