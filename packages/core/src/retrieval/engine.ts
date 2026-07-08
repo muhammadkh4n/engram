@@ -1,5 +1,5 @@
 import type { GraphPort } from '../adapters/graph.js'
-import type { RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory } from '../types.js'
+import type { RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
@@ -13,6 +13,8 @@ import { stageActivate, type CompositeMemory } from './spreading-activation.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
 import { classifyQuery } from './query-classifier.js'
 import { applyMMR, mmrConfigFromEnv } from './mmr.js'
+import { rankSessions } from './session-ordering.js'
+import { resolveEventDate, isoDate } from '../utils/event-date.js'
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -52,6 +54,10 @@ export interface RecallResult {
   primed: string[]
   estimatedTokens: number
   formatted: string
+  /** A1 session-completeness ranking over the returned memories. Additive:
+   *  `memories` order is untouched; consumers MAY use this for
+   *  session-granular selection. Absent only on skip-mode recalls. */
+  sessions?: SessionGroup[]
 }
 
 export interface RecallOpts {
@@ -132,16 +138,11 @@ function extractAttribution(m: RetrievedMemory): string {
 }
 
 function formatDate(m: RetrievedMemory): string {
-  const created = m.metadata?.createdAt as string | undefined
-  if (created) {
-    try {
-      const d = new Date(created)
-      if (!isNaN(d.getTime())) {
-        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      }
-    } catch { /* ignore */ }
-  }
-  return ''
+  // Full ISO date (YYYY-MM-DD), event-time convention occurredAt ?? createdAt.
+  // The previous "Mon D" rendering dropped the year, making cross-year
+  // memories indistinguishable to any consumer reasoning about dates.
+  const d = resolveEventDate(m.metadata)
+  return d ? isoDate(d) : ''
 }
 
 function formatTag(m: RetrievedMemory): string {
@@ -680,6 +681,9 @@ export async function recall(
     }
   }
 
+  // A1 — session-completeness ranking (additive; `memories` order untouched).
+  const sessions = rankSessions(memories)
+
   // Format results (includes Context section when graph ran successfully)
   const formatted = formatMemories(memories, associations, compositeContext, communitySummaries)
   const estimatedTokens = estimateTokens(formatted)
@@ -691,5 +695,6 @@ export async function recall(
     primed,
     estimatedTokens,
     formatted,
+    sessions,
   }
 }

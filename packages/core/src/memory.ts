@@ -654,6 +654,7 @@ export class Memory {
       primed: result.primed,
       estimatedTokens: result.estimatedTokens,
       formatted: result.formatted,
+      sessions: result.sessions ?? [],
     }
   }
 

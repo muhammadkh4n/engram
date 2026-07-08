@@ -198,6 +198,9 @@ export interface RecallResult {
   primed: string[]
   estimatedTokens: number
   formatted: string
+  /** Mirrors retrieval/engine.ts RecallResult.sessions (the authoritative
+   *  computed source) — Memory.recall's public contract is typed here. */
+  sessions?: SessionGroup[]
 }
 
 export interface RetrievedMemory {
