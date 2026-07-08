@@ -2,8 +2,8 @@
  * Deterministic aggregation over LLM-labeled evidence. Division of labor
  * (binding): the LLM labels which lines describe the same real-world
  * instance (semantic coreference — what regex cannot do); THIS code counts
- * distinct labels and merges the enumeration (what the anatomy says the
- * consumer fails at: 18 aggregation-miscounts, 12 partial-enumerations).
+ * distinct labels and merges the enumeration (see results/longmemeval/failure-anatomy-2026-07.json:
+ * the consumer fails at 18 aggregation-miscounts, 12 partial-enumerations).
  */
 
 export interface LabeledEvidence {

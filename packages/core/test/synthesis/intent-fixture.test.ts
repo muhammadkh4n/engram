@@ -1,9 +1,9 @@
 /**
  * $0 pre-validation of the synthesis intent router against all 500 REAL
  * LongMemEval questions (from the committed judged baseline). Targets are
- * PRE-REGISTERED (design-verdict.md binding correction 1); if an assertion
+ * PRE-REGISTERED: these floors/ceilings were fixed from a dry-run measurement before any judged run; if an assertion
  * fails after a regex change, repair the router — do not move the target
- * without an MK decision. Gate S judged spend is blocked on this file
+ * without an explicit maintainer decision. Judged benchmark runs are blocked on this file
  * passing.
  */
 import { describe, it, expect } from 'vitest'

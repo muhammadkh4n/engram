@@ -2,11 +2,11 @@ import type { RetrievedMemory } from '../types.js'
 import { resolveEventDate } from '../utils/event-date.js'
 
 /**
- * THE preference-content lexicon (single shared instance, per the verdict:
- * one lexicon, fixture-tested — not one in enrichment code and another in
- * gating code). Precision-first: a false-positive constraint actively
- * misleads the consumer, a false negative merely misses upside. First-person
- * guards throughout; negative lookaheads exclude reported-speech and
+ * The preference-content lexicon: this array is the single preference-content lexicon in
+ * the repo; the query-side gate lives in synthesis/intent.ts. Fixture-tested —
+ * not one in enrichment code and another in gating code. Precision-first: a false-positive
+ * constraint actively misleads the consumer, a false negative merely misses upside.
+ * First-person guards throughout; negative lookaheads exclude reported-speech and
  * opinion look-alikes ("I never said…", "I always thought…").
  */
 export const PREFERENCE_CONTENT_RES: readonly RegExp[] = [

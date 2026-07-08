@@ -281,7 +281,7 @@ export interface SynthesisBlock {
 
 export interface SynthesizeOpts {
   /** Cap synthesis evidence to memories from the first K distinct sessions
-   *  in A1 rank order (the Gate S run sets 5 so the block only cites
+   *  in A1 rank order (the benchmark judged run sets 5 so the block only cites
    *  sessions the answerer can see and verify). Default: unlimited. */
   maxEvidenceSessions?: number
 }

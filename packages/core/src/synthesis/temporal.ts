@@ -4,9 +4,8 @@
  * confident wrong grounding): the LLM selects evidence, THIS code does the
  * arithmetic, templates render it — the LLM never authors a number.
  *
- * Date-anchoring validator (design-C graft, binding per the verdict):
- * every calendar date a rendered block emits must be a member of the source
- * evidence date set (plus the question-date anchor). A derived block with an
+ * Date-anchoring validator: every rendered ISO date must be a member of the
+ * source evidence date set (plus the question-date anchor). A derived block with an
  * invented date would be strictly worse than the raw sessions — reject the
  * section instead.
  */

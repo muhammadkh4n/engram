@@ -1,10 +1,10 @@
 /**
  * Instrument pin. The baseline gen prompt (no synthesis) must be BYTE-
  * IDENTICAL to the template judge.ts has always used — this is what makes
- * the Gate S baseline cell a valid pairing partner for the archived judged
+ * the baseline cell a valid pairing partner for the archived judged
  * baseline, and Cell 1 vs Cell 2 an exact within-sweep pairing. If this test
- * ever needs its LEGACY string edited, the instrument changed: stop and
- * re-read the program plan's "measurement instrument is held fixed" clause.
+ * ever needs its LEGACY string edited, the instrument changed: stop; paired
+ * benchmark cells are only comparable while the baseline prompt is frozen — an edit here invalidates every archived judged run.
  */
 import { describe, it, expect } from 'vitest'
 import { buildGenUserPrompt } from '../src/longmemeval/forensics/gen-prompt.js'
