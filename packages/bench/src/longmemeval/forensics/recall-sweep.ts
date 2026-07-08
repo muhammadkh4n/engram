@@ -21,13 +21,16 @@
  *     [--max-results 30]          # passed to memory.recall
  *     [--no-consolidate] [--no-graph] [--no-rerank]
  *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
+ *     [--synthesize]              # record per-row RecallResult.synthesis (now = question_date, evidence capped to top-5 sessions)
  *     --output ./results/longmemeval/baseline.json
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
-import { projectSessionIds } from './project-sessions.js'
+import { projectSessionIds, stripBenchSessionNamespace } from './project-sessions.js'
+import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
+import { parseEventDate } from '@engram-mem/core'
 import type { LongMemEvalQuestionType } from '../types.js'
 import type { BenchmarkOpts } from '../../types.js'
 
@@ -39,6 +42,7 @@ interface SweepArgs {
   noGraph: boolean
   noRerank: boolean
   vectorMode?: 'full' | 'engine'
+  synthesize: boolean
   output: string
 }
 
@@ -53,6 +57,7 @@ interface PerQRow {
   ingest_ms: number
   eval_ms: number
   recall_at_k: Record<number, boolean>
+  synthesis?: SynthesisBlock | null
 }
 
 const K_VALUES = [5, 10, 20, 30]
@@ -67,7 +72,7 @@ async function main(): Promise<void> {
   const allQs = await adapter.loadDataset(args.data)
   const questions = args.limit > 0 ? allQs.slice(0, args.limit) : allQs
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
-  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}, vectorMode=${args.vectorMode ?? 'full'}`)
+  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
   console.log()
 
@@ -95,6 +100,7 @@ async function main(): Promise<void> {
     let ingestMs = 0
     let evalMs = 0
     let recalledSessionIds: string[] = []
+    let synthesisRow: SynthesisBlock | null | undefined
 
     try {
       const ingestStart = Date.now()
@@ -104,10 +110,26 @@ async function main(): Promise<void> {
 
       const evalStart = Date.now()
       const maxK = Math.max(...K_VALUES)
+      const questionNow = parseEventDate(q.question_date)
       const recallResult = await memory.recall(q.question, {
         strategyOverride: { maxResults: maxK },
+        ...(args.synthesize
+          ? {
+              synthesize: { maxEvidenceSessions: 5 },
+              ...(questionNow ? { now: questionNow } : {}),
+            }
+          : {}),
       })
       recalledSessionIds = projectSessionIds(recallResult)
+      if (args.synthesize) {
+        synthesisRow = recallResult.synthesis
+          ? {
+              intent: recallResult.synthesis.intent,
+              method: recallResult.synthesis.method,
+              text: stripBenchSessionNamespace(recallResult.synthesis.text, q.question_id),
+            }
+          : null
+      }
       evalMs = Date.now() - evalStart
     } finally {
       await memory.dispose().catch(() => {})
@@ -130,6 +152,7 @@ async function main(): Promise<void> {
       ingest_ms: ingestMs,
       eval_ms: evalMs,
       recall_at_k: recallAtK,
+      ...buildSynthesisField(args.synthesize, synthesisRow),
     })
 
     const qDur = ((Date.now() - qStart) / 1000).toFixed(1)
@@ -242,6 +265,7 @@ function parseArgs(argv: string[]): SweepArgs {
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
     ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
+    synthesize: has('synthesize'),
     output: get('output') ?? './results/longmemeval/baseline.json',
   }
 }
