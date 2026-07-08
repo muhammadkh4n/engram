@@ -57,7 +57,9 @@ export function orderChronologically(items: readonly DatedEvidence[]): DatedEvid
   return [...items].sort((a, b) => a.date.getTime() - b.date.getTime())
 }
 
-const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g
+// The date must not be followed by another digit, but T/letters/punctuation are fine —
+// the guard must see dates inside timestamps.
+const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}(?!\d)/g
 
 export function extractIsoDates(text: string): string[] {
   return text.match(ISO_DATE_RE) ?? []

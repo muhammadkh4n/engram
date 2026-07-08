@@ -70,4 +70,13 @@ describe('date-anchoring validator (hard guard)', () => {
   it('accepts date-free text', () => {
     expect(validateDatesAnchored('3 distinct instances across 2 sessions', new Set())).toBe(true)
   })
+  it('extracts the date part of a T-separated ISO timestamp', () => {
+    expect(extractIsoDates('event at 2023-05-20T10:00 happened')).toEqual(['2023-05-20'])
+  })
+  it('does not extract a partial date from a longer digit run', () => {
+    expect(extractIsoDates('code 2023-05-201 is not a date')).toEqual([])
+  })
+  it('rejects an unanchored date even in T-timestamp form', () => {
+    expect(validateDatesAnchored('done on 2023-05-21T09:00', new Set(['2023-05-20']))).toBe(false)
+  })
 })
