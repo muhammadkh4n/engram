@@ -25,6 +25,10 @@ describe('parseEventDate', () => {
     expect(parseEventDate(null)).toBeNull()
     expect(parseEventDate(42)).toBeNull()
   })
+  it('returns null for calendar-invalid dates instead of normalizing', () => {
+    expect(parseEventDate('2023-02-30')).toBeNull()
+    expect(parseEventDate('2023/02/30 (Thu) 10:00')).toBeNull()
+  })
 })
 
 describe('resolveEventDate', () => {

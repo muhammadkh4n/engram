@@ -23,12 +23,21 @@ export function parseEventDate(value: unknown): Date | null {
   // keep date-only arithmetic independent of the host timezone.
   const m = LEADING_DATE_RE.exec(s)
   if (m) {
+    const y = Number(m[1])
+    const mo = Number(m[2])
+    const da = Number(m[3])
     const d = new Date(Date.UTC(
-      Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+      y, mo - 1, da,
       m[4] !== undefined ? Number(m[4]) : 0,
       m[5] !== undefined ? Number(m[5]) : 0,
     ))
-    return isNaN(d.getTime()) ? null : d
+    if (isNaN(d.getTime())) return null
+    // Validate against calendar overflow: Date.UTC silently normalizes invalid dates
+    // (e.g., 2023-02-30 becomes 2023-03-02). Reject if round-trip differs.
+    if (d.getUTCFullYear() !== y || d.getUTCMonth() !== mo - 1 || d.getUTCDate() !== da) {
+      return null
+    }
+    return d
   }
   return null
 }
