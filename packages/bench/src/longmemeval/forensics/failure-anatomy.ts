@@ -114,7 +114,13 @@ async function main(): Promise<void> {
 
   fs.mkdirSync(path.dirname(args.output), { recursive: true })
   fs.writeFileSync(args.output, JSON.stringify({
-    meta: { args: { ...args }, taxonomy: TAXONOMY, total_failures: rows.length, generated_at: new Date().toISOString() },
+    meta: {
+      args: { ...args },
+      taxonomy: TAXONOMY,
+      total_failures: rows.length,
+      generated_at: new Date().toISOString(),
+      note: 'llm_class is conditioned on gen_is_abstention and is_abstention_question — do not use flag-vs-class agreement as validation for wrong-abstention or missed-abstention.',
+    },
     matrix,
     rows,
   }, null, 2))
@@ -137,15 +143,21 @@ async function classify(openai: OpenAI, model: string, r: any, det: Deterministi
     response_format: { type: 'json_object' },
     messages: [
       { role: 'system', content: CLASSIFY_SYSTEM },
-      { role: 'user', content: [
-        `QUESTION: ${r.question}`,
-        `GOLD: ${r.gold_answer}`,
-        `GENERATED: ${r.generated_answer}`,
-        `JUDGE REASONING: ${r.judge_reasoning}`,
-        `FULL GOLD EVIDENCE WAS IN CONTEXT: ${det.gold_fully_in_gen_context}`,
-        `GENERATED ANSWER IS REFUSAL-SHAPED: ${det.gen_is_abstention}`,
-        `QUESTION IS AN UNANSWERABLE (ABSTENTION) BENCHMARK ITEM: ${det.is_abstention_question}`,
-      ].join('\n') },
+      {
+        role: 'user',
+        content: [
+          `QUESTION: ${r.question}`,
+          `GOLD: ${r.gold_answer}`,
+          `GENERATED: ${r.generated_answer}`,
+          `JUDGE REASONING: ${r.judge_reasoning}`,
+          `FULL GOLD EVIDENCE WAS IN CONTEXT: ${det.gold_fully_in_gen_context}`,
+          // The classifier receives gen_is_abstention and is_abstention_question as input signal,
+          // so llm_class is not independent of those deterministic flags for wrong-abstention and
+          // missed-abstention — do not use flag-vs-class agreement as validation for them.
+          `GENERATED ANSWER IS REFUSAL-SHAPED: ${det.gen_is_abstention}`,
+          `QUESTION IS AN UNANSWERABLE (ABSTENTION) BENCHMARK ITEM: ${det.is_abstention_question}`,
+        ].join('\n')
+      },
     ],
   })
   try {
