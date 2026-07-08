@@ -29,12 +29,14 @@
  *     [--judge-model gpt-4o-mini] \
  *     [--top-sessions 5]         # how many retrieved sessions to feed gen
  *     [--limit 0]                # 0 = all questions in the recall output
+ *     [--include-synthesis]      # insert per-row synthesis text as the one derived-notes prompt section
  *     --output ./results/longmemeval/judge-full-500.json
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import OpenAI from 'openai'
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from '../types.js'
+import { buildGenUserPrompt } from './gen-prompt.js'
 
 interface JudgeArgs {
   recallOutput: string
@@ -43,6 +45,7 @@ interface JudgeArgs {
   judgeModel: string
   topSessions: number
   limit: number
+  includeSynthesis: boolean
   output: string
 }
 
@@ -54,6 +57,7 @@ interface RecallRow {
   retrieved_session_ids: string[]
   retrieved_count: number
   recall_at_k: Record<string, boolean>
+  synthesis?: { intent: string; method: string; text: string } | null
 }
 
 interface JudgeRow {
@@ -118,7 +122,8 @@ async function main(): Promise<void> {
     const sessionContext = buildSessionContext(q, topSessions)
 
     // Answer-gen
-    const genResult = await generateAnswer(openai, args.genModel, q.question, q.question_date, sessionContext)
+    const synthesisText = args.includeSynthesis && r.synthesis?.text ? r.synthesis.text : undefined
+    const genResult = await generateAnswer(openai, args.genModel, q.question, q.question_date, sessionContext, synthesisText)
     const generated = genResult.text
 
     // Judge
@@ -236,6 +241,7 @@ async function generateAnswer(
   question: string,
   questionDate: string,
   sessionContext: string,
+  synthesisText?: string,
 ): Promise<{ text: string; tokensIn: number; tokensOut: number }> {
   // Mirror the LongMemEval paper's recommended Chain-of-Note + structured
   // prompt format (Finding 4: "Applying Chain-of-Note and structured JSON
@@ -246,10 +252,7 @@ async function generateAnswer(
     'Use ONLY the conversation sessions provided as context. ' +
     'If the sessions do not contain enough information to answer, say "I don\'t know." ' +
     'Be concise — answer the question directly without restating it.'
-  const user =
-    `Today's date is ${questionDate}.\n\n` +
-    `## Relevant past sessions\n${sessionContext}\n\n` +
-    `## Question\n${question}\n\n## Answer`
+  const user = buildGenUserPrompt(questionDate, sessionContext, question, synthesisText)
 
   const resp = await openai.chat.completions.create({
     model,
@@ -338,6 +341,7 @@ function parseArgs(argv: string[]): JudgeArgs {
     judgeModel: get('judge-model') ?? 'gpt-4o-mini',
     topSessions: parseInt(get('top-sessions') ?? '5', 10),
     limit: parseInt(get('limit') ?? '0', 10),
+    includeSynthesis: argv.includes('--include-synthesis'),
     output: get('output') ?? './results/longmemeval/judge.json',
   }
 }
