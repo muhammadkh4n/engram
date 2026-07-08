@@ -215,6 +215,22 @@ export interface RetrievedMemory {
   sessionId?: string | null
 }
 
+/** A1 session-completeness ranking entry (additive recall enrichment).
+ *  Computed over the FINAL ranked memories; the memories array itself is
+ *  never reordered by this feature. */
+export interface SessionGroup {
+  /** Episode/Digest session provenance (storage session id). */
+  sessionId: string
+  /** Aggregate RRF mass: Σ 1/(60 + rank + 1) over member memories. */
+  score: number
+  /** Member memory ids, in relevance order. */
+  memoryIds: string[]
+  /** ISO date (YYYY-MM-DD) of the oldest member (occurredAt ?? createdAt), null when undated. */
+  earliest: string | null
+  /** ISO date of the newest member, null when undated. */
+  latest: string | null
+}
+
 // === Storage Types ===
 
 export interface SearchOptions {
