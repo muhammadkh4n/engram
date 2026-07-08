@@ -234,6 +234,56 @@ export interface SessionGroup {
   latest: string | null
 }
 
+// === Synthesis Types (opt-in `synthesize` recall mode) ===
+
+/** How a synthesis block was produced. The last two are the no-LLM
+ *  degradation tier (deterministic grounding/index over ALL evidence,
+ *  used when no selection adapter is available or the selection call
+ *  fails — never when selection explicitly returned empty). */
+export type SynthesisMethod =
+  | 'date-arithmetic'
+  | 'count-enumerate'
+  | 'constraint-surface'
+  | 'temporal-grounding'
+  | 'evidence-index'
+
+export interface SynthesisCitation {
+  memoryId: string
+  sessionId: string | null
+  /** ISO date (YYYY-MM-DD) of the cited memory's event time, null when undated. */
+  date: string | null
+}
+
+export interface SynthesisItem {
+  claim: string
+  value?: string
+  citations: SynthesisCitation[]
+}
+
+/** Derived-from-memory block returned alongside raw memories. The LLM (when
+ *  used at all) only SELECTS and LABELS evidence; every date and count in
+ *  `text` is computed deterministically and template-rendered, and every
+ *  calendar date is validated to be a member of the source evidence date set
+ *  (date-anchoring hard guard). `memories` is byte-identical whether
+ *  synthesis ran or not. */
+export interface SynthesisBlock {
+  intent: 'temporal' | 'aggregation' | 'preference'
+  method: SynthesisMethod
+  /** Rendered, citation-bearing block (also appended to `formatted`). */
+  text: string
+  /** Machine-readable derivation trace. */
+  items: SynthesisItem[]
+  evidenceCount: number
+  llmSelectionUsed: boolean
+}
+
+export interface SynthesizeOpts {
+  /** Cap synthesis evidence to memories from the first K distinct sessions
+   *  in A1 rank order (the Gate S run sets 5 so the block only cites
+   *  sessions the answerer can see and verify). Default: unlimited. */
+  maxEvidenceSessions?: number
+}
+
 // === Storage Types ===
 
 export interface SearchOptions {
