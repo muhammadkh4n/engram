@@ -209,6 +209,10 @@ export interface RetrievedMemory {
   metadata: Record<string, unknown>
   /** Project tag from the storage row's project_id column; takes precedence over metadata.project for project preference. */
   projectId?: string | null
+  /** Session provenance from the storage row (episodes/digests). null for
+   *  semantic/procedural tiers and for rows whose adapter path did not carry
+   *  a session id (legacy RPC rows map '' → null). */
+  sessionId?: string | null
 }
 
 // === Storage Types ===

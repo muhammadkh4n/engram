@@ -38,6 +38,14 @@ function extractRole(typed: TypedMemory): string | undefined {
   return typeof meta?.role === 'string' ? meta.role : undefined
 }
 
+function extractSessionId(typed: TypedMemory): string | null {
+  if (typed.type === 'episode' || typed.type === 'digest') {
+    // '' comes from RPC row mappers that predate session_id plumbing — treat as absent.
+    return typed.data.sessionId || null
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Term extraction for BM25
 // ---------------------------------------------------------------------------
@@ -232,6 +240,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
         projectId: typed.data.projectId ?? null,
+        sessionId: extractSessionId(typed),
       })
       scoredIds.add(typed.data.id)
     }
@@ -270,6 +279,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
         projectId: typed.data.projectId ?? null,
+        sessionId: extractSessionId(typed),
       })
       scoredIds.add(typed.data.id)
     }
@@ -335,6 +345,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         source: 'recall',
         metadata: { ...metadata, createdAt: createdAt.toISOString() },
         projectId: typed.data.projectId ?? null,
+        sessionId: extractSessionId(typed),
       })
     }
   }
