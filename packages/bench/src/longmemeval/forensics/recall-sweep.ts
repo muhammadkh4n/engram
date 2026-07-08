@@ -27,6 +27,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
+import { projectSessionIds } from './project-sessions.js'
 import type { LongMemEvalQuestionType } from '../types.js'
 import type { BenchmarkOpts } from '../../types.js'
 
@@ -106,14 +107,7 @@ async function main(): Promise<void> {
       const recallResult = await memory.recall(q.question, {
         strategyOverride: { maxResults: maxK },
       })
-      const seen = new Set<string>()
-      for (const mem of recallResult.memories) {
-        const sid = mem.metadata?.['lmeSessionId'] as string | undefined
-        if (sid && !seen.has(sid)) {
-          seen.add(sid)
-          recalledSessionIds.push(sid)
-        }
-      }
+      recalledSessionIds = projectSessionIds(recallResult)
       evalMs = Date.now() - evalStart
     } finally {
       await memory.dispose().catch(() => {})
