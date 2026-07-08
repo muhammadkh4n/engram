@@ -13,14 +13,17 @@
  * final synthesis cell vs the baseline):
  *   - McNemar significant improvement (p < 0.05, exact two-sided on
  *     correct/incorrect) on ≥2 of the 3 sink types
- *   - McNemar non-significant on every non-targeted type (no regression)
+ *   - non-targeted types must show no statistically significant regression
+ *     (p<0.05 with regressions exceeding improvements); significant
+ *     improvements are reported but do not fail the gate — direction
+ *     resolved and registered before any judged cell was run.
  *   - strict AND lenient reported throughout
  *   - secondary bar: overall strict ≥ +3.0pp (≥15 net conversions on 500)
  *   - guardrail: missed-abstention (newly-incorrect *_abs rows) reported
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { pairVerdicts, type JudgedRow, type PairedCell } from './mcnemar-lib.js'
+import { pairVerdicts, assertValidJudgedRows, evaluateCriteria, type JudgedRow, type PairedCell } from './mcnemar-lib.js'
 
 const SINK_TYPES = ['temporal-reasoning', 'multi-session', 'single-session-preference'] as const
 
@@ -43,18 +46,13 @@ function main(): void {
   printSummary('LENIENT', lenient)
 
   // Pre-registered evaluation, strict mode.
-  const sigSinks = SINK_TYPES.filter((t) => {
-    const c = strict.byType[t]
-    return c !== undefined && c.p < 0.05 && c.n10 > c.n01
-  })
-  const nonTargeted = Object.entries(strict.byType).filter(([t]) => !(SINK_TYPES as readonly string[]).includes(t))
-  const regressedTypes = nonTargeted.filter(([, c]) => c.p < 0.05)
-  const overallDeltaPp = ((strict.overall.treatSuccess - strict.overall.baseSuccess) / Math.max(1, strict.overall.n)) * 100
+  const criteria = evaluateCriteria(strict, SINK_TYPES)
 
   console.log('═══ Pre-registered criteria (strict) ═══')
-  console.log(`  sinks significant-improved (p<0.05, n10>n01): ${sigSinks.length}/3 [${sigSinks.join(', ') || 'none'}]  (need ≥2)`)
-  console.log(`  non-targeted types significant (must be NONE): ${regressedTypes.map(([t]) => t).join(', ') || 'none'}`)
-  console.log(`  overall strict delta: ${overallDeltaPp >= 0 ? '+' : ''}${overallDeltaPp.toFixed(2)}pp (secondary bar: ≥ +3.0pp)`)
+  console.log(`  sinks significant-improved (p<0.05, n10>n01): ${criteria.significantSinks.length}/3 [${criteria.significantSinks.join(', ') || 'none'}]  (need ≥2)`)
+  console.log(`  non-targeted types significant regression (must be NONE): ${criteria.nonTargetedSignificantRegressions.join(', ') || 'none'}`)
+  console.log(`  non-targeted types significant improvement (reported, does not fail gate): ${criteria.nonTargetedSignificantImprovements.join(', ') || 'none'}`)
+  console.log(`  overall strict delta: ${criteria.overallStrictDeltaPp >= 0 ? '+' : ''}${criteria.overallStrictDeltaPp.toFixed(2)}pp (secondary bar: ≥ +3.0pp)`)
   console.log(`  missed-abstention guardrail: base ${strict.abstention.baseIncorrect}/${strict.abstention.n} incorrect → treat ${strict.abstention.treatIncorrect}/${strict.abstention.n}; newly incorrect: ${strict.abstention.newlyIncorrect}`)
   if (strict.unpaired > 0) console.log(`  WARNING: ${strict.unpaired} unpaired rows dropped`)
 
@@ -62,12 +60,13 @@ function main(): void {
     meta: { args: { ...args }, generated_at: new Date().toISOString() },
     strict, lenient,
     criteria: {
-      significant_sinks: sigSinks,
-      non_targeted_significant: regressedTypes.map(([t]) => t),
-      overall_strict_delta_pp: overallDeltaPp,
-      secondary_bar_pass: overallDeltaPp >= 3.0,
-      sink_bar_pass: sigSinks.length >= 2,
-      no_regression_pass: regressedTypes.length === 0,
+      significant_sinks: criteria.significantSinks,
+      non_targeted_significant_regressions: criteria.nonTargetedSignificantRegressions,
+      non_targeted_significant_improvements: criteria.nonTargetedSignificantImprovements,
+      overall_strict_delta_pp: criteria.overallStrictDeltaPp,
+      secondary_bar_pass: criteria.secondaryBarPass,
+      sink_bar_pass: criteria.sinkBarPass,
+      no_regression_pass: criteria.noRegressionPass,
     },
   }
   fs.mkdirSync(path.dirname(args.output), { recursive: true })
@@ -91,6 +90,7 @@ function printSummary(label: string, s: ReturnType<typeof pairVerdicts>): void {
 function readRows(file: string): JudgedRow[] {
   const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { rows: JudgedRow[] }
   if (!Array.isArray(parsed.rows)) throw new Error(`${file}: no rows[] array`)
+  assertValidJudgedRows(parsed.rows, file)
   return parsed.rows
 }
 
