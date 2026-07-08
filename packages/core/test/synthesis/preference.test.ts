@@ -36,6 +36,16 @@ describe('PREFERENCE_CONTENT_RES — precision-first fixture', () => {
       expect(PREFERENCE_CONTENT_RES.some((re) => re.test(c))).toBe(false)
     })
   }
+  const ceasedPrefs = [
+    'I no longer prefer window seats',
+    'I used to prefer the bus, but not anymore',
+    'My favorite editor used to be Vim',
+  ]
+  for (const c of ceasedPrefs) {
+    it(`excludes ceased preferences: ${c.slice(0, 50)}`, () => {
+      expect(PREFERENCE_CONTENT_RES.some((re) => re.test(c))).toBe(false)
+    })
+  }
 })
 
 describe('scanPreferences', () => {

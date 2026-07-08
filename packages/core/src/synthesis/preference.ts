@@ -15,7 +15,7 @@ export const PREFERENCE_CONTENT_RES: readonly RegExp[] = [
   /\bI (?:don't|do not|can't|cannot) (?:like|eat|drink|stand|tolerate|use|want|do)\b/i,
   /\bI(?:'m| am) (?:allergic|vegetarian|vegan|lactose[- ]intolerant|gluten[- ]free)\b/i,
   /\bplease (?:always|don't|do not|never|make sure)\b/i,
-  /\bmy (?:favorite|favourite|preferred|go-to)\b/i,
+  /\bmy (?:favorite|favourite|preferred|go-to)\b(?! .*used to)/i,
   /\bmy budget (?:is|for|of)\b/i,
 ]
 
