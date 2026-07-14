@@ -101,6 +101,64 @@ export function majorityVerdict(votes: readonly Verdict[]): Verdict {
   return 'incorrect'
 }
 
+/** gpt-4o-mini and gpt-4o pricing per 1M tokens, May 2026 — the fallback
+ *  for legacy model names; every other endpoint carries its own pricing. */
+export const LEGACY_PRICING: Record<string, { in: number; out: number }> = {
+  'gpt-4o-mini': { in: 0.150, out: 0.600 },
+  'gpt-4o':      { in: 2.500, out: 10.000 },
+}
+
+export const MAX_ATTEMPTS = 3
+
+/** Retry transient endpoint failures with linear backoff; rethrow after the
+ *  last attempt so a dead endpoint fails the run loudly. */
+export async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt >= MAX_ATTEMPTS) throw err
+      console.warn(`  retry ${attempt} (${label}): ${err instanceof Error ? err.message : String(err)}`)
+      await new Promise((res) => setTimeout(res, attempt * 2000))
+    }
+  }
+}
+
+/**
+ * Defaults merged with extraBody, where an extraBody value of null DELETES
+ * the key — some APIs reject default params instead of ignoring them (e.g.
+ * reasoning-tier models that require max_completion_tokens and refuse
+ * max_tokens / non-default temperature).
+ */
+export function buildRequestBody(
+  defaults: Record<string, unknown>,
+  extraBody: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...defaults, ...(extraBody ?? {}) }
+  for (const [k, v] of Object.entries(body)) {
+    if (v === null) delete body[k]
+  }
+  return body
+}
+
+/** Order-preserving concurrent map; at most `limit` calls in flight. */
+export async function mapPool<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i]!, i)
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
 export function endpointCostUsd(
   spec: EndpointSpec,
   tokensIn: number,
