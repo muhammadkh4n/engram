@@ -38,6 +38,8 @@ export type {
   SalienceCategory,
   SalienceClassification,
   SalienceOpts,
+  EvidenceItem,
+  EvidenceSelection,
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
@@ -71,3 +73,6 @@ export type { UnifiedSearchOpts } from './retrieval/search.js'
 export { Memory } from './memory.js'
 export type { MemoryOptions, SessionHandle, BridgeResult } from './memory.js'
 export { createMemory } from './create-memory.js'
+export { synthesize } from './synthesis/index.js'
+export type { SynthesizeInput } from './synthesis/index.js'
+export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'

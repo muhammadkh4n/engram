@@ -1,0 +1,55 @@
+{
+  "meta": {
+    "a": "./results/longmemeval/s2-cell4-v4flash-notes-2026-07.json",
+    "b": "./results/longmemeval/s2-cellD-v4flash-repeat-2026-07.json",
+    "generated_at": "2026-07-14T23:00:07.826Z"
+  },
+  "paired": 500,
+  "unmatched_a": 0,
+  "unmatched_b": 0,
+  "answers_changed": 369,
+  "answer_change_rate": 0.738,
+  "verdicts_changed": 64,
+  "strict": {
+    "n10": 28,
+    "n01": 26,
+    "p": 0.8919231511047548
+  },
+  "lenient": {
+    "n10": 22,
+    "n01": 27,
+    "p": 0.5681724128491673
+  },
+  "by_type": {
+    "single-session-user": {
+      "paired": 70,
+      "answers_changed": 39,
+      "verdicts_changed": 3
+    },
+    "multi-session": {
+      "paired": 133,
+      "answers_changed": 116,
+      "verdicts_changed": 22
+    },
+    "single-session-preference": {
+      "paired": 30,
+      "answers_changed": 28,
+      "verdicts_changed": 7
+    },
+    "temporal-reasoning": {
+      "paired": 133,
+      "answers_changed": 94,
+      "verdicts_changed": 14
+    },
+    "knowledge-update": {
+      "paired": 78,
+      "answers_changed": 52,
+      "verdicts_changed": 18
+    },
+    "single-session-assistant": {
+      "paired": 56,
+      "answers_changed": 40,
+      "verdicts_changed": 0
+    }
+  }
+}

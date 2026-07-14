@@ -1,10 +1,11 @@
 import type { GraphPort } from '../adapters/graph.js'
-import type { RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup } from '../types.js'
+import type { RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup, SynthesisBlock, SynthesizeOpts } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
+import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
@@ -58,6 +59,10 @@ export interface RecallResult {
    *  `memories` order is untouched; consumers MAY use this for
    *  session-granular selection. Absent only on skip-mode recalls. */
   sessions?: SessionGroup[]
+  /** Opt-in synthesis block (derived timelines/counts/constraints), null when
+   *  synthesis was not requested or produced nothing. `memories` is
+   *  byte-identical whether synthesis ran or not. */
+  synthesis?: SynthesisBlock | null
 }
 
 export interface RecallOpts {
@@ -96,6 +101,13 @@ export interface RecallOpts {
    * seed. projectId is enforced at the SQL level — other projects are invisible.
    */
   projectId?: string
+  /** Opt-in synthesis: compute a derived block (timeline/count/constraints)
+   *  from the returned memories. boolean | SynthesizeOpts. Default off. */
+  synthesize?: boolean | SynthesizeOpts
+  /** Anchor for now-relative temporal arithmetic (benchmarks pass the
+   *  question date; servers may pass request time). Wall-clock is NEVER
+   *  assumed when absent — now-relative lines are simply omitted. */
+  now?: Date
 }
 
 // ---------------------------------------------------------------------------
@@ -684,8 +696,24 @@ export async function recall(
   // A1 — session-completeness ranking (additive; `memories` order untouched).
   const sessions = rankSessions(memories)
 
+  // Opt-in synthesis: strictly post-ranking; never mutates memories; error-isolated.
+  let synthesis: SynthesisBlock | null = null
+  if (opts.synthesize && memories.length > 0) {
+    synthesis = await synthesize({
+      query,
+      memories,
+      sessions,
+      ...(intelligence ? { intelligence } : {}),
+      now: opts.now ?? null,
+      ...(typeof opts.synthesize === 'object' ? { opts: opts.synthesize } : {}),
+    })
+  }
+
   // Format results (includes Context section when graph ran successfully)
-  const formatted = formatMemories(memories, associations, compositeContext, communitySummaries)
+  let formatted = formatMemories(memories, associations, compositeContext, communitySummaries)
+  if (synthesis) {
+    formatted = formatted.length > 0 ? `${formatted}\n\n${synthesis.text}` : synthesis.text
+  }
   const estimatedTokens = estimateTokens(formatted)
 
   return {
@@ -696,5 +724,6 @@ export async function recall(
     estimatedTokens,
     formatted,
     sessions,
+    synthesis,
   }
 }
