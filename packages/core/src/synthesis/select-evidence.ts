@@ -52,9 +52,15 @@ export async function runSelection(
       const instance = typeof it.instance === 'string' && it.instance.trim().length > 0
         ? it.instance.trim().toLowerCase()
         : `instance-${idx}`
-      const dateText = typeof it.dateText === 'string' && it.dateText.trim().length > 0
+      const quoted = typeof it.dateText === 'string' && it.dateText.trim().length > 0
         ? it.dateText.trim()
         : null
+      // The selection prompt shows each line with a metadata date annotation;
+      // models sometimes quote that annotation (or invent a phrase) as
+      // dateText. Only a phrase appearing verbatim in the memory content is
+      // content evidence — anything else is dropped, so a session date can
+      // never masquerade as a content-mentioned event date downstream.
+      const dateText = quoted !== null && capped[idx]!.content.includes(quoted) ? quoted : null
       items.push({ memory: capped[idx]!, instance, dateText })
     }
     // Non-empty raw items that ALL failed validation is malformed output, not

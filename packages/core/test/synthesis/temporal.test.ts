@@ -31,8 +31,9 @@ describe('humanizeDays (documented rounding: exact days always; ~ marks approxim
     expect(humanizeDays(1)).toBe('1 day')
     expect(humanizeDays(13)).toBe('13 days')
   })
-  it('14–60 days: weeks + remainder', () => {
-    expect(humanizeDays(24)).toBe('24 days (3 weeks, 3 days)')
+  it('14–60 days: colloquial weeks — ~ marks non-exact multiples', () => {
+    expect(humanizeDays(24)).toBe('24 days (~3 weeks)')
+    expect(humanizeDays(20)).toBe('20 days (~3 weeks)')
     expect(humanizeDays(14)).toBe('14 days (2 weeks)')
   })
   it('61–365 days: ~months at 30.44 days/month', () => {

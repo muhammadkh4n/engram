@@ -2,10 +2,13 @@
  * Synthesis orchestrator (opt-in `synthesize` recall mode).
  *
  * Flow: intent gate → evidence scope (maxEvidenceSessions over the A1
- * session ranking) → compute section (LLM selection when available;
- * deterministic A2/A3 degradation tier on adapter absence/failure; NOTHING
- * on an explicit empty selection) → constraint section (both-sides gate,
- * cap 3) → date-anchoring hard guard → one SynthesisBlock.
+ * session ranking) → compute section (OPT-IN via includeComputeNotes; LLM
+ * selection when available; deterministic A2/A3 degradation tier on adapter
+ * absence/failure; NOTHING on an explicit empty selection) → constraint
+ * section (both-sides gate, cap 3) → date-anchoring hard guard → one
+ * SynthesisBlock. By default only the preference constraint path renders —
+ * it is code-only (no LLM call) and the one section with a significant
+ * judged gain under current answerers (see SynthesizeOpts.includeComputeNotes).
  *
  * Error isolation: any throw anywhere returns null — recall NEVER fails
  * because of synthesis.
@@ -40,7 +43,7 @@ export interface SynthesizeInput {
 
 export async function synthesize(input: SynthesizeInput): Promise<SynthesisBlock | null> {
   try {
-    const compute = classifyComputeIntent(input.query)
+    const compute = input.opts?.includeComputeNotes === true ? classifyComputeIntent(input.query) : 'none'
     const prefRequest = isPreferenceRequest(input.query)
     if (compute === 'none' && !prefRequest) return null
     if (input.memories.length === 0) return null

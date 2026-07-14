@@ -19,7 +19,9 @@
  *   - Total ~$0.30 with gpt-4o-mini
  *   - With gpt-4o as judge (to match Mem0/Zep published numbers): ~$2.50
  *
- * Required env: OPENAI_API_KEY
+ * Required env: OPENAI_API_KEY, plus any env var named by an endpoint
+ * spec's apiKeyEnv. LME_GEN_ENDPOINT / LME_JUDGE_PANEL are fallbacks for
+ * the --gen-endpoint / --judge-panel flags.
  *
  * Usage:
  *   npx tsx packages/bench/src/longmemeval/forensics/judge.ts \
@@ -27,6 +29,9 @@
  *     --data ./data/longmemeval/longmemeval_s_cleaned.json \
  *     [--gen-model gpt-4o-mini] \
  *     [--judge-model gpt-4o-mini] \
+ *     [--gen-endpoint '<model or {"model","baseUrl","apiKeyEnv","extraBody","priceIn","priceOut"}>'] \
+ *     [--judge-panel '<model,model,… or JSON array of endpoint specs>'] \
+ *     [--concurrency 1]          # rows in flight (judge/gen calls stay per-row sequential) \
  *     [--top-sessions 5]         # how many retrieved sessions to feed gen
  *     [--limit 0]                # 0 = all questions in the recall output
  *     [--include-synthesis]      # insert per-row synthesis text as the one derived-notes prompt section
@@ -37,14 +42,23 @@ import * as path from 'node:path'
 import OpenAI from 'openai'
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from '../types.js'
 import { buildGenUserPrompt } from './gen-prompt.js'
+import {
+  parseEndpointSpec, parsePanelSpec, normalizeAnswerText, endpointCostUsd,
+  buildRequestBody, mapPool, withRetry, MAX_ATTEMPTS, LEGACY_PRICING,
+  DEFAULT_API_KEY_ENV, type EndpointSpec, type JudgeVote,
+} from './provider-lib.js'
+import { runJudgePanel, aggregateVerdicts } from './judge-call.js'
 
 interface JudgeArgs {
   recallOutput: string
   data: string
   genModel: string
   judgeModel: string
+  genEndpoint?: string
+  judgePanel?: string
   topSessions: number
   limit: number
+  concurrency: number
   includeSynthesis: boolean
   output: string
 }
@@ -68,6 +82,9 @@ interface JudgeRow {
   generated_answer: string
   judge_verdict: 'correct' | 'incorrect' | 'partial'
   judge_reasoning: string
+  judge_votes: JudgeVote[]
+  gen_model: string
+  gen_provider: string | null
   retrieved_sessions_used: number
   gen_tokens_in: number
   gen_tokens_out: number
@@ -76,19 +93,22 @@ interface JudgeRow {
   cost_usd: number
 }
 
-// gpt-4o-mini and gpt-4o pricing per 1M tokens, May 2026
-const PRICING: Record<string, { in: number; out: number }> = {
-  'gpt-4o-mini': { in: 0.150, out: 0.600 },
-  'gpt-4o':      { in: 2.500, out: 10.000 },
-}
-
 main().catch((err) => { console.error(err); process.exit(1) })
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  if (!process.env['OPENAI_API_KEY']) {
-    console.error('Missing OPENAI_API_KEY')
-    process.exit(1)
+  const genSpec: EndpointSpec = args.genEndpoint
+    ? parseEndpointSpec(args.genEndpoint)
+    : { model: args.genModel }
+  const panel: EndpointSpec[] = args.judgePanel
+    ? parsePanelSpec(args.judgePanel)
+    : [{ model: args.judgeModel }]
+  for (const spec of [genSpec, ...panel]) {
+    const keyEnv = spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV
+    if (!process.env[keyEnv]) {
+      console.error(`Missing ${keyEnv} (required by endpoint ${spec.model})`)
+      process.exit(1)
+    }
   }
 
   const recallOutput = JSON.parse(fs.readFileSync(args.recallOutput, 'utf8')) as {
@@ -101,20 +121,33 @@ async function main(): Promise<void> {
     ? recallOutput.rows.slice(0, args.limit)
     : recallOutput.rows
   console.log(`Loaded ${recallOutput.rows.length} recall rows, judging ${rows.length}`)
-  console.log(`gen=${args.genModel}, judge=${args.judgeModel}, top-sessions=${args.topSessions}`)
+  console.log(`gen=${genSpec.model}${genSpec.baseUrl ? ` @ ${genSpec.baseUrl}` : ''}, judge panel=[${panel.map((p) => p.model).join(', ')}], top-sessions=${args.topSessions}`)
   console.log()
 
-  const openai = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] })
-  const judgeRows: JudgeRow[] = []
+  // One client per distinct (baseUrl, apiKeyEnv) — endpoints may point at
+  // any OpenAI-compatible API.
+  const clients = new Map<string, OpenAI>()
+  const clientFor = (spec: EndpointSpec): OpenAI => {
+    const keyEnv = spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV
+    const cacheKey = `${spec.baseUrl ?? 'openai'}|${keyEnv}`
+    let client = clients.get(cacheKey)
+    if (!client) {
+      client = new OpenAI({ apiKey: process.env[keyEnv], ...(spec.baseUrl ? { baseURL: spec.baseUrl } : {}) })
+      clients.set(cacheKey, client)
+    }
+    return client
+  }
+  const judgeRowSlots: Array<JudgeRow | undefined> = new Array<JudgeRow | undefined>(rows.length)
   let totalCost = 0
+  let done = 0
   const start = Date.now()
 
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i]!
+  await mapPool(rows, args.concurrency, async (r, i) => {
     const q = dataById.get(r.question_id)
     if (!q) {
       console.warn(`  Q ${i + 1}: question_id ${r.question_id} not in dataset — skipping`)
-      continue
+      done++
+      return
     }
 
     // Build context: top-N retrieved sessions, full content, in rank order
@@ -123,73 +156,60 @@ async function main(): Promise<void> {
 
     // Answer-gen
     const synthesisText = args.includeSynthesis && r.synthesis?.text ? r.synthesis.text : undefined
-    const genResult = await generateAnswer(openai, args.genModel, q.question, q.question_date, sessionContext, synthesisText)
+    const genResult = await generateAnswer(clientFor(genSpec), genSpec, q.question, q.question_date, sessionContext, synthesisText)
     const generated = genResult.text
 
-    // Judge
-    const judgeResult = await judgeAnswer(openai, args.judgeModel, q.question, q.answer, generated)
+    // Judge: every panel member votes; plurality with a strict tie-break decides.
+    const panelResult = await runJudgePanel(clientFor, panel, q.question, q.answer, generated, (m) => LEGACY_PRICING[m])
 
-    // Cost accounting
-    const genPricing = PRICING[args.genModel] ?? PRICING['gpt-4o-mini']!
-    const judgePricing = PRICING[args.judgeModel] ?? PRICING['gpt-4o-mini']!
-    const cost =
-      (genResult.tokensIn * genPricing.in + genResult.tokensOut * genPricing.out) / 1_000_000 +
-      (judgeResult.tokensIn * judgePricing.in + judgeResult.tokensOut * judgePricing.out) / 1_000_000
+    // Cost accounting: spec pricing wins; the legacy table only covers old model names.
+    const cost = endpointCostUsd(genSpec, genResult.tokensIn, genResult.tokensOut, LEGACY_PRICING[genSpec.model]) + panelResult.costUsd
     totalCost += cost
 
-    judgeRows.push({
+    judgeRowSlots[i] = {
       question_id: r.question_id,
       question_type: r.question_type,
       question: q.question,
       gold_answer: q.answer,
       generated_answer: generated,
-      judge_verdict: judgeResult.verdict,
-      judge_reasoning: judgeResult.reasoning,
+      judge_verdict: panelResult.verdict,
+      judge_reasoning: panelResult.votes.map((v) => `[${v.model}] ${v.reasoning}`).join(' | '),
+      judge_votes: panelResult.votes,
+      gen_model: genSpec.model,
+      gen_provider: genResult.provider,
       retrieved_sessions_used: topSessions.length,
       gen_tokens_in: genResult.tokensIn,
       gen_tokens_out: genResult.tokensOut,
-      judge_tokens_in: judgeResult.tokensIn,
-      judge_tokens_out: judgeResult.tokensOut,
+      judge_tokens_in: panelResult.tokensIn,
+      judge_tokens_out: panelResult.tokensOut,
       cost_usd: cost,
-    })
-
-    if ((i + 1) % 10 === 0 || i + 1 === rows.length) {
-      const correct = judgeRows.filter((j) => j.judge_verdict === 'correct').length
-      const partial = judgeRows.filter((j) => j.judge_verdict === 'partial').length
-      const dur = ((Date.now() - start) / 1000).toFixed(0)
-      console.log(`  Q ${i + 1}/${rows.length}  correct=${correct}  partial=${partial}  ~$${totalCost.toFixed(3)} (${dur}s)`)
     }
-  }
+
+    done++
+    if (done % 10 === 0 || done === rows.length) {
+      const judged = judgeRowSlots.filter((row): row is JudgeRow => row !== undefined)
+      const correct = judged.filter((j) => j.judge_verdict === 'correct').length
+      const partial = judged.filter((j) => j.judge_verdict === 'partial').length
+      const dur = ((Date.now() - start) / 1000).toFixed(0)
+      console.log(`  Q ${done}/${rows.length}  correct=${correct}  partial=${partial}  ~$${totalCost.toFixed(3)} (${dur}s)`)
+    }
+  })
+  const judgeRows = judgeRowSlots.filter((row): row is JudgeRow => row !== undefined)
 
   // Aggregate
-  const total = judgeRows.length
-  const correct = judgeRows.filter((j) => j.judge_verdict === 'correct').length
-  const partial = judgeRows.filter((j) => j.judge_verdict === 'partial').length
-  const accuracy = total > 0 ? correct / total : 0
-  const accuracyLenient = total > 0 ? (correct + partial) / total : 0
-
-  const byType: Record<string, { correct: number; partial: number; total: number; accuracy: number }> = {}
-  const buckets = new Map<string, JudgeRow[]>()
-  for (const r of judgeRows) {
-    const b = buckets.get(r.question_type) ?? []
-    b.push(r)
-    buckets.set(r.question_type, b)
-  }
-  for (const [t, b] of buckets) {
-    const c = b.filter((r) => r.judge_verdict === 'correct').length
-    const p = b.filter((r) => r.judge_verdict === 'partial').length
-    byType[t] = { correct: c, partial: p, total: b.length, accuracy: c / b.length }
-  }
+  const { accuracy: acc, by_question_type: byType } = aggregateVerdicts(judgeRows)
 
   const output = {
     meta: {
       args: args as unknown as Record<string, unknown>,
-      total_questions: total,
+      gen_endpoint: genSpec as unknown as Record<string, unknown>,
+      judge_panel: panel as unknown as Array<Record<string, unknown>>,
+      total_questions: acc.total,
       total_cost_usd: totalCost,
       total_seconds: (Date.now() - start) / 1000,
       generated_at: new Date().toISOString(),
     },
-    accuracy: { correct, partial, total, accuracy, accuracy_lenient: accuracyLenient },
+    accuracy: acc,
     by_question_type: byType,
     rows: judgeRows,
   }
@@ -200,15 +220,15 @@ async function main(): Promise<void> {
 
   console.log()
   console.log('═══ Accuracy ═══')
-  console.log(`  correct:           ${correct}/${total} (${(accuracy * 100).toFixed(1)}%)`)
-  console.log(`  partial:           ${partial}/${total} (${(partial / total * 100).toFixed(1)}%)`)
-  console.log(`  correct+partial:   ${(accuracyLenient * 100).toFixed(1)}%`)
+  console.log(`  correct:           ${acc.correct}/${acc.total} (${(acc.accuracy * 100).toFixed(1)}%)`)
+  console.log(`  partial:           ${acc.partial}/${acc.total} (${(acc.partial / acc.total * 100).toFixed(1)}%)`)
+  console.log(`  correct+partial:   ${(acc.accuracy_lenient * 100).toFixed(1)}%`)
   console.log(`  total LLM cost:    $${totalCost.toFixed(3)}`)
   console.log()
   console.log('═══ Per question type ═══')
   console.log(`| ${'type'.padEnd(28)} | ${'n'.padStart(4)} | ${'correct'.padStart(7)} | ${'partial'.padStart(7)} | ${'accuracy'.padStart(8)} |`)
   console.log('|' + '-'.repeat(72) + '|')
-  for (const t of [...buckets.keys()].sort()) {
+  for (const t of Object.keys(byType).sort()) {
     const r = byType[t]!
     console.log(
       `| ${t.padEnd(28)} | ${String(r.total).padStart(4)} | ${String(r.correct).padStart(7)} | ${String(r.partial).padStart(7)} | ${(r.accuracy * 100).toFixed(1).padStart(7)}% |`,
@@ -237,12 +257,12 @@ function buildSessionContext(q: LongMemEvalQuestion, topSessionIds: readonly str
 
 async function generateAnswer(
   openai: OpenAI,
-  model: string,
+  spec: EndpointSpec,
   question: string,
   questionDate: string,
   sessionContext: string,
   synthesisText?: string,
-): Promise<{ text: string; tokensIn: number; tokensOut: number }> {
+): Promise<{ text: string; tokensIn: number; tokensOut: number; provider: string | null }> {
   // Mirror the LongMemEval paper's recommended Chain-of-Note + structured
   // prompt format (Finding 4: "Applying Chain-of-Note and structured JSON
   // prompt format improves the reading accuracy by as much as 10 absolute
@@ -254,78 +274,34 @@ async function generateAnswer(
     'Be concise — answer the question directly without restating it.'
   const user = buildGenUserPrompt(questionDate, sessionContext, question, synthesisText)
 
-  const resp = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: 250,
-    temperature: 0,
-  })
-  return {
-    text: resp.choices[0]?.message?.content?.trim() ?? '',
-    tokensIn: resp.usage?.prompt_tokens ?? 0,
-    tokensOut: resp.usage?.completion_tokens ?? 0,
+  let tokensIn = 0
+  let tokensOut = 0
+  let provider: string | null = null
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const resp = await withRetry(`gen ${spec.model}`, () => openai.chat.completions.create(buildRequestBody({
+      model: spec.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      max_tokens: 250,
+      temperature: 0,
+      // extraBody merges LAST: raise max_tokens for thinking models (their
+      // reasoning bills as completion tokens), null-out params a reasoning
+      // API refuses, or pin a serving provider.
+    }, spec.extraBody) as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming))
+    tokensIn += resp.usage?.prompt_tokens ?? 0
+    tokensOut += resp.usage?.completion_tokens ?? 0
+    provider = (resp as unknown as { provider?: string }).provider ?? provider
+    const text = normalizeAnswerText(resp.choices[0]?.message?.content)
+    if (text.length > 0) return { text, tokensIn, tokensOut, provider }
+    // Empty content with the budget spent on reasoning happens
+    // intermittently on thinking-mode servers — retry; tokens stay counted.
+    console.warn(`  empty gen content (${spec.model}), attempt ${attempt}/${MAX_ATTEMPTS}`)
   }
+  return { text: '', tokensIn, tokensOut, provider }
 }
 
-async function judgeAnswer(
-  openai: OpenAI,
-  model: string,
-  question: string,
-  goldAnswer: string,
-  generated: string,
-): Promise<{ verdict: 'correct' | 'incorrect' | 'partial'; reasoning: string; tokensIn: number; tokensOut: number }> {
-  // Conservative judge prompt: only "correct" when the generated answer
-  // matches the gold answer semantically. "partial" when it gets some
-  // facts right but misses others. "incorrect" otherwise.
-  const system =
-    'You are grading a question-answering system\'s output. ' +
-    'Compare the generated answer to the gold answer for factual correctness. ' +
-    'Output JSON {"verdict": "correct"|"incorrect"|"partial", "reasoning": "<1 sentence>"}. ' +
-    '"correct" = matches the gold answer semantically (paraphrases are fine). ' +
-    '"partial" = some facts right, others missing or wrong. ' +
-    '"incorrect" = wrong or unsupported claim or "I don\'t know" when an answer exists.'
-  const user =
-    `Question: ${question}\n` +
-    `Gold answer: ${goldAnswer}\n` +
-    `Generated answer: ${generated}\n\n` +
-    `Output JSON verdict:`
-
-  const resp = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: 150,
-    temperature: 0,
-    response_format: { type: 'json_object' },
-  })
-
-  let verdict: 'correct' | 'incorrect' | 'partial' = 'incorrect'
-  let reasoning = '(parse error)'
-  try {
-    const parsed = JSON.parse(resp.choices[0]?.message?.content ?? '{}') as {
-      verdict?: string
-      reasoning?: string
-    }
-    if (parsed.verdict === 'correct' || parsed.verdict === 'partial' || parsed.verdict === 'incorrect') {
-      verdict = parsed.verdict
-    }
-    if (typeof parsed.reasoning === 'string') reasoning = parsed.reasoning
-  } catch {
-    // leave defaults
-  }
-
-  return {
-    verdict,
-    reasoning,
-    tokensIn: resp.usage?.prompt_tokens ?? 0,
-    tokensOut: resp.usage?.completion_tokens ?? 0,
-  }
-}
 
 function parseArgs(argv: string[]): JudgeArgs {
   const get = (k: string): string | undefined => {
@@ -339,8 +315,11 @@ function parseArgs(argv: string[]): JudgeArgs {
     data: get('data') ?? './data/longmemeval/longmemeval_s_cleaned.json',
     genModel: get('gen-model') ?? 'gpt-4o-mini',
     judgeModel: get('judge-model') ?? 'gpt-4o-mini',
+    genEndpoint: get('gen-endpoint') ?? process.env['LME_GEN_ENDPOINT'],
+    judgePanel: get('judge-panel') ?? process.env['LME_JUDGE_PANEL'],
     topSessions: parseInt(get('top-sessions') ?? '5', 10),
     limit: parseInt(get('limit') ?? '0', 10),
+    concurrency: parseInt(get('concurrency') ?? '1', 10),
     includeSynthesis: argv.includes('--include-synthesis'),
     output: get('output') ?? './results/longmemeval/judge.json',
   }

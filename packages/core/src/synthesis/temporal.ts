@@ -29,19 +29,21 @@ export function daysBetween(a: Date, b: Date): number {
 /**
  * Rounding rules (documented, deterministic):
  *   |d| < 14   → "N day(s)"
- *   |d| < 61   → "N days (W weeks[, R days])"        (exact decomposition)
+ *   |d| < 61   → "N days (W weeks)" exact multiple, else "N days (~W weeks)"  (W = round(|d| / 7))
  *   |d| < 366  → "N days (~M months)"                (M = round(|d| / 30.44))
  *   otherwise  → "N days (~Y years)"                 (Y = |d| / 365.25, 1 decimal)
  * The exact day count is ALWAYS present; '~' marks every approximation.
+ * Weeks are colloquially rounded, not decomposed: answers phrase 14–60-day
+ * spans as whole weeks, and a "2 weeks, 6 days" reading of a 20-day span
+ * contradicts the same span's "3 weeks" phrasing instead of matching it.
  */
 export function humanizeDays(days: number): string {
   const abs = Math.abs(days)
   if (abs < 14) return `${days} day${abs === 1 ? '' : 's'}`
   if (abs < 61) {
-    const weeks = Math.floor(abs / 7)
-    const rem = abs % 7
-    const tail = rem > 0 ? `, ${rem} day${rem === 1 ? '' : 's'}` : ''
-    return `${days} days (${weeks} week${weeks === 1 ? '' : 's'}${tail})`
+    const weeks = Math.round(abs / 7)
+    const approx = abs % 7 === 0 ? '' : '~'
+    return `${days} days (${approx}${weeks} week${weeks === 1 ? '' : 's'})`
   }
   if (abs < 366) {
     const months = Math.round(abs / 30.44)

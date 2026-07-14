@@ -284,6 +284,17 @@ export interface SynthesizeOpts {
    *  in A1 rank order (the benchmark judged run sets 5 so the block only cites
    *  sessions the answerer can see and verify). Default: unlimited. */
   maxEvidenceSessions?: number
+  /** Also render compute sections (temporal date-arithmetic / aggregation
+   *  counting, including their no-LLM degradation tiers). Default OFF:
+   *  current thinking-tier answerers recompute dates and counts from the
+   *  raw sessions themselves, so injected compute notes measure noise-level
+   *  to slightly negative for them while costing an LLM selection call per
+   *  recall — only preference constraint-surfacing showed a significant
+   *  judged gain (results/longmemeval/s2-mcnemar-c4-vs-c5-2026-07.json).
+   *  Opt in for weak answerers that cannot do their own date/count
+   *  arithmetic. Preference constraint sections are code-only and always
+   *  eligible regardless of this flag. */
+  includeComputeNotes?: boolean
 }
 
 // === Storage Types ===

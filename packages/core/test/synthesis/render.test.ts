@@ -31,9 +31,9 @@ describe('renderTemporalBlock', () => {
     expect(r.llmSelectionUsed).toBe(true)
     expect(r.text).toContain('2023-05-14')
     expect(r.text).toContain('S3')
-    expect(r.text).toContain('24 days (3 weeks, 3 days) before the question date') // 05-14 → 06-07
+    expect(r.text).toContain('24 days (~3 weeks) before the question date') // 05-14 → 06-07
     expect(r.text).toContain('Question anchor date: 2023-06-07')
-    expect(r.text).toContain('Elapsed from (1) to (2): 21 days (3 weeks)')          // 05-14 → 06-04
+    expect(r.text).toContain('Elapsed between conversations from (1) to (2): 21 days (3 weeks)') // 05-14 → 06-04 (no content-evidenced dates)
     expect(r.items.length).toBeGreaterThan(0)
     expect(r.items[0]!.citations[0]).toEqual({ memoryId: 'm1', sessionId: 'S3', date: '2023-05-14' })
   })
@@ -58,9 +58,9 @@ describe('renderAggregationBlock', () => {
       sel(mem('m3', 'attended a jazz festival', 'S5', '2023-02-02'), 'jazz festival'),
     ])!
     expect(r.method).toBe('count-enumerate')
-    expect(r.text).toContain('Distinct instances found: 2')
+    expect(r.text).toContain('Candidate instances found in the selected evidence: 2')
     expect(r.text).toContain('(1) concert downtown (S3, 2023-01-10)')
-    expect(r.text).toContain('Count basis: 2 distinct instances across 3 sessions, from 3 selected evidence lines.')
+    expect(r.text).toContain('Count basis: 2 candidate instances from 3 selected evidence lines across 3 sessions.')
     expect(r.items[0]!.value).toBe('2')
   })
   it('returns null on empty selection', () => {
@@ -117,7 +117,7 @@ describe('degradation tier (A2/A3) — deterministic, neutral', () => {
     expect(r.method).toBe('temporal-grounding')
     expect(r.llmSelectionUsed).toBe(false)
     expect(r.text).toContain('Session S3: 2023-05-14')
-    expect(r.text).toContain('24 days (3 weeks, 3 days) before the question date')
+    expect(r.text).toContain('24 days (~3 weeks) before the question date')
     expect(r.text).toMatch(/S3.*S9/s) // chronological: S3 (May) before S9 (June)
     expect(SUFFICIENCY_RE.test(r.text)).toBe(false)
   })
@@ -136,6 +136,6 @@ describe('degradation tier (A2/A3) — deterministic, neutral', () => {
 
 describe('header', () => {
   it('is the single shared block header', () => {
-    expect(BLOCK_HEADER).toBe('### Derived from memory (computed deterministically — verify against the memories above)')
+    expect(BLOCK_HEADER).toBe('### Derived from memory (computed deterministically — verify against the memories above; may be incomplete or irrelevant to the question)')
   })
 })

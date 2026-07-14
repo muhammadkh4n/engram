@@ -41,7 +41,7 @@ describe('recall + synthesize integration', () => {
     const onMem = await build(selectionAdapter())
     try {
       const off = await offMem.recall(QUERY)
-      const on = await onMem.recall(QUERY, { synthesize: true, now: NOW })
+      const on = await onMem.recall(QUERY, { synthesize: { includeComputeNotes: true }, now: NOW })
       expect(on.memories.map((m) => m.id).length).toBe(off.memories.map((m) => m.id).length)
       // ids differ across instances (fresh UUIDs) — compare by content order instead
       expect(on.memories.map((m) => m.content)).toEqual(off.memories.map((m) => m.content))
@@ -57,7 +57,7 @@ describe('recall + synthesize integration', () => {
     const onMem = await build(selectionAdapter())
     try {
       const off = await offMem.recall(QUERY)
-      const on = await onMem.recall(QUERY, { synthesize: true, now: NOW })
+      const on = await onMem.recall(QUERY, { synthesize: { includeComputeNotes: true }, now: NOW })
       expect(on.formatted.startsWith(off.formatted)).toBe(true)
       expect(on.formatted).toContain('### Derived from memory')
       expect(on.synthesis!.text).toContain('2023-05-14')
@@ -65,6 +65,19 @@ describe('recall + synthesize integration', () => {
       expect(on.synthesis!.method).toBe('date-arithmetic')
     } finally {
       await offMem.dispose(); await onMem.dispose()
+    }
+  })
+
+  it('compute intent without the opt-in renders nothing: pref-only default, zero LLM calls', async () => {
+    const adapter = selectionAdapter()
+    const memory = await build(adapter)
+    try {
+      const result = await memory.recall(QUERY, { synthesize: true, now: NOW })
+      expect(result.synthesis).toBeNull()
+      expect(result.formatted).not.toContain('### Derived from memory')
+      expect(adapter.selectEvidence).not.toHaveBeenCalled()
+    } finally {
+      await memory.dispose()
     }
   })
 
@@ -82,7 +95,7 @@ describe('recall + synthesize integration', () => {
   it('passes SynthesizeOpts through (maxEvidenceSessions)', async () => {
     const memory = await build(selectionAdapter())
     try {
-      const result = await memory.recall(QUERY, { synthesize: { maxEvidenceSessions: 1 }, now: NOW })
+      const result = await memory.recall(QUERY, { synthesize: { maxEvidenceSessions: 1, includeComputeNotes: true }, now: NOW })
       // only the head session may be cited
       if (result.synthesis) {
         expect(result.synthesis.text.includes('S3') && result.synthesis.text.includes('S9')).toBe(false)

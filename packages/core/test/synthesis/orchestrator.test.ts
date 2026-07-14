@@ -29,6 +29,15 @@ describe('synthesize — gating', () => {
     expect(block).toBeNull()
     expect(adapter.selectEvidence).not.toHaveBeenCalled()
   })
+  it('compute notes are OPT-IN: a temporal query renders nothing by default, zero LLM cost', async () => {
+    const adapter = selecting([{ index: 0 }, { index: 1 }])
+    const block = await synthesize({
+      query: 'How many days passed between my visit to the MoMA and the exhibit at the Met?',
+      memories: MEMS, intelligence: adapter, now: NOW,
+    })
+    expect(block).toBeNull()
+    expect(adapter.selectEvidence).not.toHaveBeenCalled()
+  })
   it('returns null on empty memories', async () => {
     expect(await synthesize({ query: 'How many days between my trips?', memories: [], now: NOW })).toBeNull()
   })
@@ -39,33 +48,34 @@ describe('synthesize — temporal selection path', () => {
   it('renders a date-arithmetic block with the shared header; all dates anchored to source ∪ now', async () => {
     const block = (await synthesize({
       query: QUERY, memories: MEMS, intelligence: selecting([{ index: 0 }, { index: 1 }]), now: NOW,
+      opts: { includeComputeNotes: true },
     }))!
     expect(block.intent).toBe('temporal')
     expect(block.method).toBe('date-arithmetic')
     expect(block.llmSelectionUsed).toBe(true)
     expect(block.text.startsWith(BLOCK_HEADER)).toBe(true)
-    expect(block.text).toContain('Elapsed from (1) to (2): 21 days (3 weeks)')
+    expect(block.text).toContain('Elapsed between conversations from (1) to (2): 21 days (3 weeks)')
     const allowed = new Set(['2023-05-14', '2023-06-04', isoDate(NOW)])
     for (const date of extractIsoDates(block.text)) expect(allowed.has(date)).toBe(true)
   })
   it('explicit empty selection → null block (abstention safety, NOT the degradation tier)', async () => {
-    expect(await synthesize({ query: QUERY, memories: MEMS, intelligence: selecting([]), now: NOW })).toBeNull()
+    expect(await synthesize({ query: QUERY, memories: MEMS, intelligence: selecting([]), now: NOW, opts: { includeComputeNotes: true } })).toBeNull()
   })
   it('selection error → degradation tier (temporal-grounding), not a crash', async () => {
     const failing = { selectEvidence: vi.fn().mockRejectedValue(new Error('down')) } as unknown as IntelligenceAdapter
-    const block = (await synthesize({ query: QUERY, memories: MEMS, intelligence: failing, now: NOW }))!
+    const block = (await synthesize({ query: QUERY, memories: MEMS, intelligence: failing, now: NOW, opts: { includeComputeNotes: true } }))!
     expect(block.method).toBe('temporal-grounding')
     expect(block.llmSelectionUsed).toBe(false)
   })
   it('no adapter at all → degradation tier', async () => {
-    const block = (await synthesize({ query: QUERY, memories: MEMS, now: NOW }))!
+    const block = (await synthesize({ query: QUERY, memories: MEMS, now: NOW, opts: { includeComputeNotes: true } }))!
     expect(block.method).toBe('temporal-grounding')
   })
 })
 
 describe('synthesize — aggregation degradation', () => {
   it('no adapter on an aggregation query → evidence-index', async () => {
-    const block = (await synthesize({ query: 'How many museums have I visited?', memories: MEMS, now: NOW }))!
+    const block = (await synthesize({ query: 'How many museums have I visited?', memories: MEMS, now: NOW, opts: { includeComputeNotes: true } }))!
     expect(block.method).toBe('evidence-index')
     expect(block.text).toContain('distinct sessions matched')
   })
@@ -77,7 +87,7 @@ describe('synthesize — evidence cap (maxEvidenceSessions)', () => {
     const block = (await synthesize({
       query: 'When did I visit the MoMA?', memories: MEMS,
       intelligence: selecting([{ index: 0 }]), now: NOW,
-      opts: { maxEvidenceSessions: 1 },
+      opts: { maxEvidenceSessions: 1, includeComputeNotes: true },
     }))!
     expect(block.text).toContain('S3')
     expect(block.text).not.toContain('S9')
@@ -100,14 +110,28 @@ describe('synthesize — preference both-sides gate', () => {
     const noPref = [mem('x1', 'we discussed restaurants downtown', 'S6', '2023-04-01')]
     expect(await synthesize({ query: 'Any suggestions for a dinner spot?', memories: noPref, now: NOW })).toBeNull()
   })
-  it('preference co-fires as an extra section alongside a compute section', async () => {
+  it('preference co-fires as an extra section alongside a compute section (opted in)', async () => {
     const both = [...MEMS, ...PREF_MEMS]
     const block = (await synthesize({
       query: 'How many days since my last museum visit? Any suggestions for the next one?',
       memories: both, intelligence: selecting([{ index: 0 }]), now: NOW,
+      opts: { includeComputeNotes: true },
     }))!
     expect(block.intent).toBe('temporal')
     expect(block.text).toContain('[constraint]')
+  })
+  it('the same co-firing query renders ONLY the constraint section by default', async () => {
+    const both = [...MEMS, ...PREF_MEMS]
+    const adapter = selecting([{ index: 0 }])
+    const block = (await synthesize({
+      query: 'How many days since my last museum visit? Any suggestions for the next one?',
+      memories: both, intelligence: adapter, now: NOW,
+    }))!
+    expect(block.intent).toBe('preference')
+    expect(block.method).toBe('constraint-surface')
+    expect(block.text).toContain('[constraint]')
+    expect(block.text).not.toContain('date-arithmetic')
+    expect(adapter.selectEvidence).not.toHaveBeenCalled()
   })
   it('caps constraints at the 3 most relevant', async () => {
     const many = [
@@ -125,7 +149,7 @@ describe('synthesize — error isolation', () => {
   it('never throws even when internals do', async () => {
     const hostile = { selectEvidence: vi.fn(() => { throw new Error('sync boom') }) } as unknown as IntelligenceAdapter
     await expect(
-      synthesize({ query: 'How long ago was my trip?', memories: MEMS, intelligence: hostile, now: NOW }),
+      synthesize({ query: 'How long ago was my trip?', memories: MEMS, intelligence: hostile, now: NOW, opts: { includeComputeNotes: true } }),
     ).resolves.not.toThrow()
   })
 })
