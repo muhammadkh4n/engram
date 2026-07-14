@@ -110,16 +110,23 @@ export const LEGACY_PRICING: Record<string, { in: number; out: number }> = {
 
 export const MAX_ATTEMPTS = 3
 
-/** Retry transient endpoint failures with linear backoff; rethrow after the
- *  last attempt so a dead endpoint fails the run loudly. */
+export const RATE_LIMIT_ATTEMPTS = 8
+
+/** Retry transient endpoint failures; rethrow after the last attempt so a
+ *  dead endpoint fails the run loudly. Rate-limit (429) errors are TPM
+ *  saturation, not transient faults — they get more attempts and an
+ *  exponential backoff capped at 30s so the token window can refill. */
 export async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await fn()
     } catch (err) {
-      if (attempt >= MAX_ATTEMPTS) throw err
-      console.warn(`  retry ${attempt} (${label}): ${err instanceof Error ? err.message : String(err)}`)
-      await new Promise((res) => setTimeout(res, attempt * 2000))
+      const msg = err instanceof Error ? err.message : String(err)
+      const isRateLimit = msg.includes('429') || /rate.?limit/i.test(msg)
+      if (attempt >= (isRateLimit ? RATE_LIMIT_ATTEMPTS : MAX_ATTEMPTS)) throw err
+      console.warn(`  retry ${attempt} (${label}): ${msg.slice(0, 160)}`)
+      const delayMs = isRateLimit ? Math.min(30_000, 2000 * 2 ** (attempt - 1)) : attempt * 2000
+      await new Promise((res) => setTimeout(res, delayMs))
     }
   }
 }

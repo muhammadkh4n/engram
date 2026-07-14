@@ -70,6 +70,35 @@ describe('buildRequestBody', () => {
   })
 })
 
+describe('withRetry', () => {
+  it('rate-limit errors get extended attempts before rethrowing', async () => {
+    const { withRetry, RATE_LIMIT_ATTEMPTS } = await import('../src/longmemeval/forensics/provider-lib.js')
+    vi.useFakeTimers()
+    const fn = vi.fn().mockRejectedValue(new Error('429 Rate limit reached on tokens per min (TPM)'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const p = withRetry('x', fn).catch((e: unknown) => e)
+    await vi.runAllTimersAsync()
+    expect(await p).toBeInstanceOf(Error)
+    expect(fn).toHaveBeenCalledTimes(RATE_LIMIT_ATTEMPTS)
+    warn.mockRestore()
+    vi.useRealTimers()
+  })
+  it('non-rate-limit errors keep the short retry budget and can recover', async () => {
+    const { withRetry, MAX_ATTEMPTS } = await import('../src/longmemeval/forensics/provider-lib.js')
+    vi.useFakeTimers()
+    const fn = vi.fn()
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValueOnce('ok')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const p = withRetry('x', fn)
+    await vi.runAllTimersAsync()
+    expect(await p).toBe('ok')
+    expect(fn.mock.calls.length).toBeLessThanOrEqual(MAX_ATTEMPTS)
+    warn.mockRestore()
+    vi.useRealTimers()
+  })
+})
+
 describe('mapPool', () => {
   it('preserves order and bounds concurrency', async () => {
     let inFlight = 0
