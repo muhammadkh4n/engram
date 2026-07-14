@@ -44,7 +44,7 @@ describe('synthesize — temporal selection path', () => {
     expect(block.method).toBe('date-arithmetic')
     expect(block.llmSelectionUsed).toBe(true)
     expect(block.text.startsWith(BLOCK_HEADER)).toBe(true)
-    expect(block.text).toContain('Elapsed from (1) to (2): 21 days (3 weeks)')
+    expect(block.text).toContain('Elapsed between conversations from (1) to (2): 21 days (3 weeks)')
     const allowed = new Set(['2023-05-14', '2023-06-04', isoDate(NOW)])
     for (const date of extractIsoDates(block.text)) expect(allowed.has(date)).toBe(true)
   })

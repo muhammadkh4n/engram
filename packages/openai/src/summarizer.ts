@@ -337,11 +337,14 @@ export class OpenAISummarizer {
       'Rules:',
       '1. Only include lines that describe the event(s) the question asks about.',
       '2. Same real-world instance → same label; distinct instances → distinct labels.',
-      '3. dateText must be copied verbatim from the line — never invented, never resolved.',
+      '3. dateText must be copied verbatim from the message text — never invented, never resolved, never taken from the "(conversation dated …)" annotation.',
       '4. If NO line matches the asked-about event, reply exactly {"items": []}.',
     ].join('\n')
+    // The date is retrieval metadata (the conversation's date), not part of
+    // the message text; rendering it as a leading "[date]" made models quote
+    // it as dateText, laundering session dates into content evidence.
     const lines = evidence
-      .map((e) => `${e.index}. ${e.date ? `[${e.date}] ` : ''}${e.text}`)
+      .map((e) => `${e.index}. ${e.text}${e.date ? ` (conversation dated ${e.date})` : ''}`)
       .join('\n')
     const user = `MODE: ${opts.mode}\nQUESTION: ${query}\nEVIDENCE:\n${lines}`
 

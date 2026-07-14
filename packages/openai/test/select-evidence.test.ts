@@ -44,7 +44,7 @@ describe('OpenAISummarizer.selectEvidence', () => {
     expect(call.temperature).toBe(0)
     expect(call.response_format).toEqual({ type: 'json_object' })
     const user = call.messages.find((m) => m.role === 'user')!.content
-    expect(user).toContain('0. [2023-05-14] visited the MoMA with my cousin')
+    expect(user).toContain('0. visited the MoMA with my cousin (conversation dated 2023-05-14)')
     expect(user).toContain('MODE: aggregation')
     const system = call.messages.find((m) => m.role === 'system')!.content
     expect(system).toContain('NEVER compute')

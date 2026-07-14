@@ -9,7 +9,7 @@ function mem(id: string, content: string, occurredAt?: string): RetrievedMemory 
     metadata: occurredAt ? { occurredAt } : {}, sessionId: 's1',
   }
 }
-const EVIDENCE = [mem('m0', 'first line', '2023-01-10'), mem('m1', 'second line'), mem('m2', 'third line', '2023-02-02')]
+const EVIDENCE = [mem('m0', 'first line from last Tuesday', '2023-01-10'), mem('m1', 'second line'), mem('m2', 'third line', '2023-02-02')]
 
 function adapterReturning(selection: unknown): IntelligenceAdapter {
   return { selectEvidence: vi.fn().mockResolvedValue(selection) } as unknown as IntelligenceAdapter
@@ -36,7 +36,7 @@ describe('runSelection', () => {
     const call = (adapter.selectEvidence as ReturnType<typeof vi.fn>).mock.calls[0]!
     expect(call[0]).toBe('q')
     expect(call[1]).toEqual([
-      { index: 0, text: 'first line', date: '2023-01-10' },
+      { index: 0, text: 'first line from last Tuesday', date: '2023-01-10' },
       { index: 1, text: 'second line' },
       { index: 2, text: 'third line', date: '2023-02-02' },
     ])
@@ -62,6 +62,17 @@ describe('runSelection', () => {
     expect((await runSelection('q', 'temporal', EVIDENCE, adapterReturning({ nope: true }))).kind).toBe('error')
     const throwing = { selectEvidence: vi.fn().mockRejectedValue(new Error('api down')) } as unknown as IntelligenceAdapter
     expect((await runSelection('q', 'temporal', EVIDENCE, throwing)).kind).toBe('error')
+  })
+
+  it('nulls dateText that is not verbatim in the memory content (annotation echo / invention)', async () => {
+    const out = await runSelection('q', 'temporal', EVIDENCE, adapterReturning({ items: [
+      { index: 0, instance: 'a', dateText: '[2023-01-10] first line from last Tuesday' },
+      { index: 2, instance: 'b', dateText: '2023-02-02' },
+    ] }))
+    expect(out.kind).toBe('selected')
+    if (out.kind !== 'selected') return
+    expect(out.items[0]!.dateText).toBeNull()
+    expect(out.items[1]!.dateText).toBeNull()
   })
 
   it('caps evidence at 30 lines of ≤120 chars', async () => {

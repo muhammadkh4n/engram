@@ -6,6 +6,14 @@
  * strictly NEUTRAL phrasing: they count and date what recall returned and
  * never assert sufficiency ("the answer", "confirms", …) — sufficiency
  * claims would poison abstention questions (missed-abstention guardrail).
+ *
+ * Provenance rule: the resolved evidence date is the CONVERSATION's date and
+ * is labeled as such ("conversation dated D"); a date is presented as the
+ * EVENT's date only when the content's own quoted date phrase parses to the
+ * same calendar date. A "derived" note is an authority signal to the
+ * answerer — when a session date is phrased as an event date, it overrides
+ * correct in-content relative-date reasoning. The same deference applies to
+ * counts: candidates, never authoritative totals.
  */
 import type { SessionGroup, SynthesisItem, SynthesisMethod } from '../types.js'
 import type { SelectedEvidence } from './select-evidence.js'
@@ -15,7 +23,7 @@ import { groupInstances, type LabeledEvidence } from './aggregate.js'
 import { resolveEventDate, isoDate, parseEventDate } from '../utils/event-date.js'
 
 export const BLOCK_HEADER =
-  '### Derived from memory (computed deterministically — verify against the memories above)'
+  '### Derived from memory (computed deterministically — verify against the memories above; may be incomplete or irrelevant to the question)'
 
 export interface RenderedSection {
   text: string
@@ -45,6 +53,13 @@ function nowDelta(date: Date, now: Date): string {
     : `${humanizeDays(-days)} after the question date`
 }
 
+/** Rendered delta clause, or '' — a same-day "0 days" clause carries no
+ *  event information and its salience displaces content-based reasoning. */
+function nowDeltaClause(date: Date, now: Date | null, separator: string): string {
+  if (!now || daysBetween(date, now) === 0) return ''
+  return `${separator}${nowDelta(date, now)}`
+}
+
 // ---------------------------------------------------------------------------
 // LLM-selected paths
 // ---------------------------------------------------------------------------
@@ -53,28 +68,35 @@ export function renderTemporalBlock(
   selected: readonly SelectedEvidence[],
   now: Date | null,
 ): RenderedSection | null {
-  const dated: Array<DatedEvidence & { dateText: string | null }> = []
+  const dated: Array<DatedEvidence & { dateText: string | null; evidenced: boolean }> = []
   for (const s of selected) {
     const d = resolveEventDate(s.memory.metadata)
     if (!d) continue // undated evidence is EXCLUDED from arithmetic — never guessed
+    // Event-evidenced only when the content's quoted date phrase parses to
+    // the same calendar date; the resolved date is otherwise just the
+    // conversation's date (see module doc).
+    const quoted = s.dateText ? parseEventDate(s.dateText) : null
     dated.push({
       memoryId: s.memory.id,
       sessionId: s.memory.sessionId ?? null,
       date: d,
       snippet: quote(s.memory.content),
       dateText: s.dateText,
+      evidenced: quoted !== null && isoDate(quoted) === isoDate(d),
     })
   }
   if (dated.length === 0) return null
 
-  const ordered = orderChronologically(dated) as Array<DatedEvidence & { dateText: string | null }>
+  const ordered = orderChronologically(dated) as Array<DatedEvidence & { dateText: string | null; evidenced: boolean }>
   const lines: string[] = []
   const items: SynthesisItem[] = []
 
   for (const e of ordered) {
     const mention = e.dateText ? ` (mentions "${e.dateText}")` : ''
-    const rel = now ? `, ${nowDelta(e.date, now)}` : ''
-    lines.push(`- "${e.snippet}" — session ${sid(e.sessionId)}, dated ${isoDate(e.date)}${rel}${mention}.`)
+    const rel = nowDeltaClause(e.date, now, ', ')
+    lines.push(e.evidenced
+      ? `- "${e.snippet}" — event dated ${isoDate(e.date)}${rel}${mention}; session ${sid(e.sessionId)}.`
+      : `- "${e.snippet}" — session ${sid(e.sessionId)}, conversation dated ${isoDate(e.date)}${rel}${mention}.`)
     items.push({
       claim: `"${e.snippet}" → ${isoDate(e.date)}`,
       ...(now ? { value: nowDelta(e.date, now) } : {}),
@@ -82,10 +104,14 @@ export function renderTemporalBlock(
     })
   }
   if (ordered.length >= 2) {
-    lines.push(`- Chronological order: ${ordered.map((e, i) => `(${i + 1}) ${isoDate(e.date)}`).join(' → ')}.`)
+    const allEvidenced = ordered.every((e) => e.evidenced)
+    const sequence = ordered.map((e, i) => `(${i + 1}) ${isoDate(e.date)}`).join(' → ')
+    lines.push(allEvidenced
+      ? `- Chronological order: ${sequence}.`
+      : `- Order by conversation date (events may be earlier than their conversations): ${sequence}.`)
     for (let i = 1; i < ordered.length; i++) {
       const days = daysBetween(ordered[i - 1]!.date, ordered[i]!.date)
-      lines.push(`- Elapsed from (${i}) to (${i + 1}): ${humanizeDays(days)}.`)
+      lines.push(`- ${allEvidenced ? 'Elapsed' : 'Elapsed between conversations'} from (${i}) to (${i + 1}): ${humanizeDays(days)}.`)
     }
   }
   if (now) lines.push(`- Question anchor date: ${isoDate(now)}.`)
@@ -120,8 +146,8 @@ export function renderAggregationBlock(selected: readonly SelectedEvidence[]): R
     .join('; ')
 
   const lines = [
-    `- [aggregation] Distinct instances found: ${groups.length} — ${enumeration}.`,
-    `- Count basis: ${groups.length} distinct instances across ${sessionCount} sessions, from ${selected.length} selected evidence lines.`,
+    `- [aggregation] Candidate instances found in the selected evidence: ${groups.length} — ${enumeration}.`,
+    `- Count basis: ${groups.length} candidate instance${groups.length === 1 ? '' : 's'} from ${selected.length} selected evidence line${selected.length === 1 ? '' : 's'} across ${sessionCount} session${sessionCount === 1 ? '' : 's'}. Candidates may be missing or duplicated — verify the final count against the memories above.`,
   ]
   const items: SynthesisItem[] = [
     {
@@ -197,7 +223,7 @@ export function renderTemporalGrounding(
   const lines = ['- Temporal grounding (computed from all retrieved evidence):']
   const items: SynthesisItem[] = []
   for (const { group, date } of dated) {
-    const rel = now ? ` — ${nowDelta(date, now)}` : ''
+    const rel = nowDeltaClause(date, now, ' — ')
     const n = group.memoryIds.length
     lines.push(
       `- Session ${group.sessionId}: ${isoDate(date)} (${WEEKDAYS[date.getUTCDay()]})${rel}; ${n} matched memor${n === 1 ? 'y' : 'ies'}.`,
