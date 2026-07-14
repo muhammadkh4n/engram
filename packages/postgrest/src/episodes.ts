@@ -307,6 +307,7 @@ interface RecallRow {
   similarity: number
   entities: string[]
   project_id?: string | null
+  session_id?: string | null
 }
 
 // Legacy match_episodes RPC returns a subset of columns (no salience/entities/etc.)
@@ -360,7 +361,7 @@ function legacyRowToEpisode(row: LegacyMatchRow): Episode {
 function recallRowToEpisode(row: RecallRow): Episode {
   return {
     id: row.id,
-    sessionId: '',
+    sessionId: row.session_id ?? '',
     role: 'user',
     content: row.content,
     salience: row.salience,

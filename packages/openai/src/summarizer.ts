@@ -8,6 +8,8 @@ import type {
   SalienceClassification,
   SalienceCategory,
   SalienceOpts,
+  EvidenceItem,
+  EvidenceSelection,
 } from '@engram-mem/core'
 
 export interface OpenAISummarizerOptions {
@@ -311,6 +313,54 @@ export class OpenAISummarizer {
       // parse failed — return empty
     }
     return []
+  }
+
+  /**
+   * Synthesis evidence selection (see IntelligenceAdapter.selectEvidence).
+   * The model only selects indices, labels instances, and quotes date
+   * phrases verbatim — deterministic core code does all arithmetic and
+   * counting. Explicit empty selection ({"items": []}) is a first-class
+   * outcome: it means "no line matches", and core renders NOTHING for it.
+   * Malformed output throws; core degrades to its deterministic tier.
+   */
+  async selectEvidence(
+    query: string,
+    evidence: ReadonlyArray<EvidenceItem>,
+    opts: { mode: 'temporal' | 'aggregation' },
+  ): Promise<EvidenceSelection> {
+    const system = [
+      'You select evidence lines relevant to a question about a user\'s past conversations.',
+      'You NEVER compute dates, durations, or counts — you only select and label.',
+      'Reply with JSON: {"items": [{"index": <number from the list>,',
+      '  "instance": "<short label; lines describing the SAME real-world event share a label>",',
+      '  "dateText": "<explicit date phrase quoted VERBATIM from the line, omit if none>"}]}',
+      'Rules:',
+      '1. Only include lines that describe the event(s) the question asks about.',
+      '2. Same real-world instance → same label; distinct instances → distinct labels.',
+      '3. dateText must be copied verbatim from the message text — never invented, never resolved, never taken from the "(conversation dated …)" annotation.',
+      '4. If NO line matches the asked-about event, reply exactly {"items": []}.',
+    ].join('\n')
+    // The date is retrieval metadata (the conversation's date), not part of
+    // the message text; rendering it as a leading "[date]" made models quote
+    // it as dateText, laundering session dates into content evidence.
+    const lines = evidence
+      .map((e) => `${e.index}. ${e.text}${e.date ? ` (conversation dated ${e.date})` : ''}`)
+      .join('\n')
+    const user = `MODE: ${opts.mode}\nQUESTION: ${query}\nEVIDENCE:\n${lines}`
+
+    const resp = await this.client.chat.completions.create({
+      model: this.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      max_tokens: 400,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    })
+    const raw = resp.choices[0]?.message?.content ?? '{}'
+    const parsed = JSON.parse(raw) as { items?: unknown }
+    return { items: Array.isArray(parsed.items) ? (parsed.items as EvidenceSelection['items']) : [] }
   }
 
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {

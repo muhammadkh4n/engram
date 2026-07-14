@@ -178,6 +178,7 @@ interface RecallRow {
   similarity: number
   entities: string[]
   project_id?: string | null
+  session_id?: string | null
 }
 
 function rowToDigest(row: DigestRow): Digest {
@@ -199,7 +200,7 @@ function rowToDigest(row: DigestRow): Digest {
 function recallRowToDigest(row: RecallRow): Digest {
   return {
     id: row.id,
-    sessionId: '',
+    sessionId: row.session_id ?? '',
     summary: row.content,
     keyTopics: row.entities ?? [],
     sourceEpisodeIds: [],

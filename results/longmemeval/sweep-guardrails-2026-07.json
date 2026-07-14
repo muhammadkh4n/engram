@@ -1,0 +1,93 @@
+{
+  "meta": {
+    "args": {
+      "baseline": "./results/longmemeval/full-500-vfull.json",
+      "treatment": "./results/longmemeval/synthesis-sweep-500.json",
+      "output": "./results/longmemeval/sweep-guardrails-2026-07.json"
+    },
+    "generated_at": "2026-07-08T14:07:36.378Z"
+  },
+  "baseline": {
+    "overall": {
+      "n": 500,
+      "anyHitAt5": 0.99,
+      "completeEvidenceAt5": 0.918
+    },
+    "byType": {
+      "single-session-user": {
+        "n": 70,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 1
+      },
+      "multi-session": {
+        "n": 133,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 0.8721804511278195
+      },
+      "single-session-preference": {
+        "n": 30,
+        "anyHitAt5": 0.9666666666666667,
+        "completeEvidenceAt5": 0.9666666666666667
+      },
+      "temporal-reasoning": {
+        "n": 133,
+        "anyHitAt5": 0.9774436090225563,
+        "completeEvidenceAt5": 0.8345864661654135
+      },
+      "knowledge-update": {
+        "n": 78,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 1
+      },
+      "single-session-assistant": {
+        "n": 56,
+        "anyHitAt5": 0.9821428571428571,
+        "completeEvidenceAt5": 0.9821428571428571
+      }
+    }
+  },
+  "treatment": {
+    "overall": {
+      "n": 500,
+      "anyHitAt5": 0.992,
+      "completeEvidenceAt5": 0.912
+    },
+    "byType": {
+      "single-session-user": {
+        "n": 70,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 1
+      },
+      "multi-session": {
+        "n": 133,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 0.8345864661654135
+      },
+      "single-session-preference": {
+        "n": 30,
+        "anyHitAt5": 0.9666666666666667,
+        "completeEvidenceAt5": 0.9666666666666667
+      },
+      "temporal-reasoning": {
+        "n": 133,
+        "anyHitAt5": 0.9774436090225563,
+        "completeEvidenceAt5": 0.8421052631578947
+      },
+      "knowledge-update": {
+        "n": 78,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 1
+      },
+      "single-session-assistant": {
+        "n": 56,
+        "anyHitAt5": 1,
+        "completeEvidenceAt5": 1
+      }
+    }
+  },
+  "guardrails": {
+    "any_hit_at5_pass": true,
+    "complete_evidence_rise_temporal": true,
+    "complete_evidence_rise_multi_session": false
+  }
+}

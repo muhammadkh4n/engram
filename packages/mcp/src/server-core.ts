@@ -244,7 +244,7 @@ const TOOLS = [
   {
     name: 'memory_recall',
     description:
-      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first.',
+      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first. Pass synthesize=true for questions needing dates/durations, counting across sessions, or recommendations: the result then includes a deterministic derived block (timelines with absolute dates, distinct-instance counts, stated user preferences). Derived dates in that block are authoritative; stated preferences must be APPLIED to your answer, not merely mentioned.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -261,6 +261,11 @@ const TOOLS = [
           type: 'string',
           description:
             'Optional project namespace. Pass the current working project (typically the git repository name, e.g. "engram") to scope recall to that project plus shared memories — another project\'s memories are excluded. Omit to search across all projects.',
+        },
+        synthesize: {
+          type: 'boolean',
+          description:
+            'Opt-in: compute a derived block (timeline with absolute dates / distinct-instance count / stated-preference constraints) from the recalled memories and append it to the formatted result. Adds one small LLM call on temporal/counting questions; no effect otherwise.',
         },
       },
       required: ['query'],
@@ -419,7 +424,11 @@ export function createEngramServer(): Server {
         }
 
         const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
-        const result = await mem.recall(query.trim(), projectId ? { projectId } : undefined)
+        const synthesize = args['synthesize'] === true
+        const result = await mem.recall(query.trim(), {
+          ...(projectId ? { projectId } : {}),
+          ...(synthesize ? { synthesize: true } : {}),
+        })
 
         if (!result.formatted || result.memories.length === 0) {
           return {
