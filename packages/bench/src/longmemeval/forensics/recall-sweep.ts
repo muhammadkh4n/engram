@@ -115,7 +115,7 @@ async function main(): Promise<void> {
         strategyOverride: { maxResults: maxK },
         ...(args.synthesize
           ? {
-              synthesize: { maxEvidenceSessions: 5 },
+              synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true },
               ...(questionNow ? { now: questionNow } : {}),
             }
           : {}),

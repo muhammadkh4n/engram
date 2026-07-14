@@ -87,7 +87,7 @@ async function main(): Promise<void> {
       sessions,
       intelligence,
       now: parseEventDate(q.question_date),
-      opts: { maxEvidenceSessions: TOP_SESSIONS },
+      opts: { maxEvidenceSessions: TOP_SESSIONS, includeComputeNotes: true },
     })
     row.synthesis = block ? { intent: block.intent, method: block.method, text: block.text } : null
     recordFire(fireStats, row.question_type, intentFired, block ? block.method : null)
