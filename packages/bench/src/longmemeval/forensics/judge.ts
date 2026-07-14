@@ -19,7 +19,9 @@
  *   - Total ~$0.30 with gpt-4o-mini
  *   - With gpt-4o as judge (to match Mem0/Zep published numbers): ~$2.50
  *
- * Required env: OPENAI_API_KEY
+ * Required env: OPENAI_API_KEY, plus any env var named by an endpoint
+ * spec's apiKeyEnv. LME_GEN_ENDPOINT / LME_JUDGE_PANEL are fallbacks for
+ * the --gen-endpoint / --judge-panel flags.
  *
  * Usage:
  *   npx tsx packages/bench/src/longmemeval/forensics/judge.ts \
@@ -27,6 +29,8 @@
  *     --data ./data/longmemeval/longmemeval_s_cleaned.json \
  *     [--gen-model gpt-4o-mini] \
  *     [--judge-model gpt-4o-mini] \
+ *     [--gen-endpoint '<model or {"model","baseUrl","apiKeyEnv","extraBody","priceIn","priceOut"}>'] \
+ *     [--judge-panel '<model,model,… or JSON array of endpoint specs>'] \
  *     [--top-sessions 5]         # how many retrieved sessions to feed gen
  *     [--limit 0]                # 0 = all questions in the recall output
  *     [--include-synthesis]      # insert per-row synthesis text as the one derived-notes prompt section
@@ -37,12 +41,18 @@ import * as path from 'node:path'
 import OpenAI from 'openai'
 import type { LongMemEvalQuestion, LongMemEvalQuestionType } from '../types.js'
 import { buildGenUserPrompt } from './gen-prompt.js'
+import {
+  parseEndpointSpec, parsePanelSpec, normalizeAnswerText, majorityVerdict,
+  endpointCostUsd, DEFAULT_API_KEY_ENV, type EndpointSpec, type JudgeVote,
+} from './provider-lib.js'
 
 interface JudgeArgs {
   recallOutput: string
   data: string
   genModel: string
   judgeModel: string
+  genEndpoint?: string
+  judgePanel?: string
   topSessions: number
   limit: number
   includeSynthesis: boolean
@@ -68,6 +78,9 @@ interface JudgeRow {
   generated_answer: string
   judge_verdict: 'correct' | 'incorrect' | 'partial'
   judge_reasoning: string
+  judge_votes: JudgeVote[]
+  gen_model: string
+  gen_provider: string | null
   retrieved_sessions_used: number
   gen_tokens_in: number
   gen_tokens_out: number
@@ -86,9 +99,18 @@ main().catch((err) => { console.error(err); process.exit(1) })
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
-  if (!process.env['OPENAI_API_KEY']) {
-    console.error('Missing OPENAI_API_KEY')
-    process.exit(1)
+  const genSpec: EndpointSpec = args.genEndpoint
+    ? parseEndpointSpec(args.genEndpoint)
+    : { model: args.genModel }
+  const panel: EndpointSpec[] = args.judgePanel
+    ? parsePanelSpec(args.judgePanel)
+    : [{ model: args.judgeModel }]
+  for (const spec of [genSpec, ...panel]) {
+    const keyEnv = spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV
+    if (!process.env[keyEnv]) {
+      console.error(`Missing ${keyEnv} (required by endpoint ${spec.model})`)
+      process.exit(1)
+    }
   }
 
   const recallOutput = JSON.parse(fs.readFileSync(args.recallOutput, 'utf8')) as {
@@ -101,10 +123,22 @@ async function main(): Promise<void> {
     ? recallOutput.rows.slice(0, args.limit)
     : recallOutput.rows
   console.log(`Loaded ${recallOutput.rows.length} recall rows, judging ${rows.length}`)
-  console.log(`gen=${args.genModel}, judge=${args.judgeModel}, top-sessions=${args.topSessions}`)
+  console.log(`gen=${genSpec.model}${genSpec.baseUrl ? ` @ ${genSpec.baseUrl}` : ''}, judge panel=[${panel.map((p) => p.model).join(', ')}], top-sessions=${args.topSessions}`)
   console.log()
 
-  const openai = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] })
+  // One client per distinct (baseUrl, apiKeyEnv) — endpoints may point at
+  // any OpenAI-compatible API.
+  const clients = new Map<string, OpenAI>()
+  const clientFor = (spec: EndpointSpec): OpenAI => {
+    const keyEnv = spec.apiKeyEnv ?? DEFAULT_API_KEY_ENV
+    const cacheKey = `${spec.baseUrl ?? 'openai'}|${keyEnv}`
+    let client = clients.get(cacheKey)
+    if (!client) {
+      client = new OpenAI({ apiKey: process.env[keyEnv], ...(spec.baseUrl ? { baseURL: spec.baseUrl } : {}) })
+      clients.set(cacheKey, client)
+    }
+    return client
+  }
   const judgeRows: JudgeRow[] = []
   let totalCost = 0
   const start = Date.now()
@@ -123,18 +157,26 @@ async function main(): Promise<void> {
 
     // Answer-gen
     const synthesisText = args.includeSynthesis && r.synthesis?.text ? r.synthesis.text : undefined
-    const genResult = await generateAnswer(openai, args.genModel, q.question, q.question_date, sessionContext, synthesisText)
+    const genResult = await generateAnswer(clientFor(genSpec), genSpec, q.question, q.question_date, sessionContext, synthesisText)
     const generated = genResult.text
 
-    // Judge
-    const judgeResult = await judgeAnswer(openai, args.judgeModel, q.question, q.answer, generated)
+    // Judge: every panel member votes; plurality with a strict tie-break
+    // decides (see majorityVerdict).
+    const votes: JudgeVote[] = []
+    let judgeTokensIn = 0
+    let judgeTokensOut = 0
+    let judgeCost = 0
+    for (const judgeSpec of panel) {
+      const vote = await judgeAnswer(clientFor(judgeSpec), judgeSpec, q.question, q.answer, generated)
+      votes.push({ model: judgeSpec.model, verdict: vote.verdict, reasoning: vote.reasoning })
+      judgeTokensIn += vote.tokensIn
+      judgeTokensOut += vote.tokensOut
+      judgeCost += endpointCostUsd(judgeSpec, vote.tokensIn, vote.tokensOut, PRICING[judgeSpec.model])
+    }
+    const verdict = majorityVerdict(votes.map((v) => v.verdict))
 
-    // Cost accounting
-    const genPricing = PRICING[args.genModel] ?? PRICING['gpt-4o-mini']!
-    const judgePricing = PRICING[args.judgeModel] ?? PRICING['gpt-4o-mini']!
-    const cost =
-      (genResult.tokensIn * genPricing.in + genResult.tokensOut * genPricing.out) / 1_000_000 +
-      (judgeResult.tokensIn * judgePricing.in + judgeResult.tokensOut * judgePricing.out) / 1_000_000
+    // Cost accounting: spec pricing wins; the local table only covers legacy models.
+    const cost = endpointCostUsd(genSpec, genResult.tokensIn, genResult.tokensOut, PRICING[genSpec.model]) + judgeCost
     totalCost += cost
 
     judgeRows.push({
@@ -143,13 +185,16 @@ async function main(): Promise<void> {
       question: q.question,
       gold_answer: q.answer,
       generated_answer: generated,
-      judge_verdict: judgeResult.verdict,
-      judge_reasoning: judgeResult.reasoning,
+      judge_verdict: verdict,
+      judge_reasoning: votes.map((v) => `[${v.model}] ${v.reasoning}`).join(' | '),
+      judge_votes: votes,
+      gen_model: genSpec.model,
+      gen_provider: genResult.provider,
       retrieved_sessions_used: topSessions.length,
       gen_tokens_in: genResult.tokensIn,
       gen_tokens_out: genResult.tokensOut,
-      judge_tokens_in: judgeResult.tokensIn,
-      judge_tokens_out: judgeResult.tokensOut,
+      judge_tokens_in: judgeTokensIn,
+      judge_tokens_out: judgeTokensOut,
       cost_usd: cost,
     })
 
@@ -184,6 +229,8 @@ async function main(): Promise<void> {
   const output = {
     meta: {
       args: args as unknown as Record<string, unknown>,
+      gen_endpoint: genSpec as unknown as Record<string, unknown>,
+      judge_panel: panel as unknown as Array<Record<string, unknown>>,
       total_questions: total,
       total_cost_usd: totalCost,
       total_seconds: (Date.now() - start) / 1000,
@@ -235,14 +282,30 @@ function buildSessionContext(q: LongMemEvalQuestion, topSessionIds: readonly str
   return parts.join('\n\n')
 }
 
+const MAX_ATTEMPTS = 3
+
+/** Retry transient endpoint failures with linear backoff; rethrow after the
+ *  last attempt so a dead endpoint fails the run loudly. */
+async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt >= MAX_ATTEMPTS) throw err
+      console.warn(`  retry ${attempt} (${label}): ${err instanceof Error ? err.message : String(err)}`)
+      await new Promise((res) => setTimeout(res, attempt * 2000))
+    }
+  }
+}
+
 async function generateAnswer(
   openai: OpenAI,
-  model: string,
+  spec: EndpointSpec,
   question: string,
   questionDate: string,
   sessionContext: string,
   synthesisText?: string,
-): Promise<{ text: string; tokensIn: number; tokensOut: number }> {
+): Promise<{ text: string; tokensIn: number; tokensOut: number; provider: string | null }> {
   // Mirror the LongMemEval paper's recommended Chain-of-Note + structured
   // prompt format (Finding 4: "Applying Chain-of-Note and structured JSON
   // prompt format improves the reading accuracy by as much as 10 absolute
@@ -254,25 +317,38 @@ async function generateAnswer(
     'Be concise — answer the question directly without restating it.'
   const user = buildGenUserPrompt(questionDate, sessionContext, question, synthesisText)
 
-  const resp = await openai.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: 250,
-    temperature: 0,
-  })
-  return {
-    text: resp.choices[0]?.message?.content?.trim() ?? '',
-    tokensIn: resp.usage?.prompt_tokens ?? 0,
-    tokensOut: resp.usage?.completion_tokens ?? 0,
+  let tokensIn = 0
+  let tokensOut = 0
+  let provider: string | null = null
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const resp = await withRetry(`gen ${spec.model}`, () => openai.chat.completions.create({
+      model: spec.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      max_tokens: 250,
+      temperature: 0,
+      // Vendor passthrough LAST so a spec can raise max_tokens for thinking
+      // models (their reasoning bills as completion tokens) or pin a
+      // serving provider.
+      ...(spec.extraBody ?? {}),
+    } as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming))
+    tokensIn += resp.usage?.prompt_tokens ?? 0
+    tokensOut += resp.usage?.completion_tokens ?? 0
+    provider = (resp as unknown as { provider?: string }).provider ?? provider
+    const text = normalizeAnswerText(resp.choices[0]?.message?.content)
+    if (text.length > 0) return { text, tokensIn, tokensOut, provider }
+    // Empty content with the budget spent on reasoning happens
+    // intermittently on thinking-mode servers — retry; tokens stay counted.
+    console.warn(`  empty gen content (${spec.model}), attempt ${attempt}/${MAX_ATTEMPTS}`)
   }
+  return { text: '', tokensIn, tokensOut, provider }
 }
 
 async function judgeAnswer(
   openai: OpenAI,
-  model: string,
+  spec: EndpointSpec,
   question: string,
   goldAnswer: string,
   generated: string,
@@ -293,8 +369,8 @@ async function judgeAnswer(
     `Generated answer: ${generated}\n\n` +
     `Output JSON verdict:`
 
-  const resp = await openai.chat.completions.create({
-    model,
+  const resp = await withRetry(`judge ${spec.model}`, () => openai.chat.completions.create({
+    model: spec.model,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
@@ -302,12 +378,13 @@ async function judgeAnswer(
     max_tokens: 150,
     temperature: 0,
     response_format: { type: 'json_object' },
-  })
+    ...(spec.extraBody ?? {}),
+  } as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming))
 
   let verdict: 'correct' | 'incorrect' | 'partial' = 'incorrect'
   let reasoning = '(parse error)'
   try {
-    const parsed = JSON.parse(resp.choices[0]?.message?.content ?? '{}') as {
+    const parsed = JSON.parse(normalizeAnswerText(resp.choices[0]?.message?.content) || '{}') as {
       verdict?: string
       reasoning?: string
     }
@@ -339,6 +416,8 @@ function parseArgs(argv: string[]): JudgeArgs {
     data: get('data') ?? './data/longmemeval/longmemeval_s_cleaned.json',
     genModel: get('gen-model') ?? 'gpt-4o-mini',
     judgeModel: get('judge-model') ?? 'gpt-4o-mini',
+    genEndpoint: get('gen-endpoint') ?? process.env['LME_GEN_ENDPOINT'],
+    judgePanel: get('judge-panel') ?? process.env['LME_JUDGE_PANEL'],
     topSessions: parseInt(get('top-sessions') ?? '5', 10),
     limit: parseInt(get('limit') ?? '0', 10),
     includeSynthesis: argv.includes('--include-synthesis'),
