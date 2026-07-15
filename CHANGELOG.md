@@ -4,6 +4,28 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-15
+
+All 10 `@engram-mem/*` packages bumped to 0.6.0 (lockstep). **Opt-in `synthesize` recall mode**, shipped preference-first after a two-gate judged benchmark program (LongMemEval-S, 500 questions, pre-registered criteria, paired McNemar statistics; artifacts under `results/longmemeval/`).
+
+### Added
+
+- **`synthesize` recall mode** (`recall(query, { synthesize: true })`): appends a deterministic, citation-anchored "Derived from memory" block to `formatted` and returns it structurally as `RecallResult.synthesis`. The default renders **preference constraint-surfacing only** — stated user preferences quoted verbatim with session/date citations plus an apply-this-preference instruction. Code-only: zero LLM calls at recall time. Judged effect on preference questions under a current answerer: 30.0% → 53.3% strict (7 improvements, 0 regressions, p = 0.016).
+- **`SynthesizeOpts.includeComputeNotes` (default `false`)**: opts in the temporal date-arithmetic and aggregation counting sections (LLM evidence selection, deterministic arithmetic and rendering, a date-anchoring hard guard that drops any block citing a date absent from the evidence, and no-LLM degradation tiers). Judged: noise-level to slightly negative for current thinking-tier answerers — they recompute dates and counts from the raw sessions themselves — so this exists for weak answerers only.
+- **`RecallResult.sessions`**: head-protected RRF session-completeness ranking (A1) over the returned memories; `memories` order is untouched.
+- **`RetrievedMemory.sessionId`** on every retrieval path, including the PostgREST recall RPCs (`session_id` column; idempotent `schema.sql`).
+- **Event-date convention**: `occurredAt ?? createdAt` resolved once (`parseEventDate`/`resolveEventDate`, exported); `formatted` tags carry full ISO dates.
+- **(bench, internal)**: provider-configurable gen/judge endpoints (any OpenAI-compatible API; keys referenced by env-var name), 3-vote heterogeneous judge panel with a conservative strictest-tie-break, `rejudge`/`resynthesize`/`drift-compare` tooling, exact-McNemar paired analysis.
+
+### Changed
+
+- Synthesis note semantics hardened against the judged failure modes: evidence dates are labeled by provenance (`conversation dated D`; `event dated D` only when the content's own quoted date phrase parses to the same calendar day), zero-information "0 days" clauses dropped, 14–60-day spans rendered as colloquial weeks, aggregation counts phrased as candidates that defer to in-context evidence, and the shared block header disclaims completeness/relevance (abstention safety).
+
+### Notes
+
+- **Reader choice dominates memory-QA quality.** On the identical retrieval stack, swapping the answering model from gpt-4o-mini to a current flash-tier thinking model moved end-to-end LongMemEval-S accuracy from 52.8% to 79.4% strict (p = 8.7e-13) at the same per-query cost — while injected compute notes measured within the rerun-noise floor. Consumers should pair Engram with a current thinking-tier answerer.
+- **Upgrading a PostgREST deployment:** re-apply `schema.sql` (adds `session_id` to the recall RPCs), then reload the schema cache — `psql -c "NOTIFY pgrst, 'reload schema';"` (or restart PostgREST).
+
 ## [0.5.2] - 2026-06-08
 
 All 10 `@engram-mem/*` packages bumped to 0.5.2 (lockstep). **`forget()` correctness fix** — the shipped `forget()` was inverted — plus an internal bench harness that makes the graph's contribution measurable.
