@@ -4,6 +4,13 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`schema.sql` re-apply on existing installs** (the documented v0.6.0 upgrade path): the constraint section was raw pg_dump output — 16 bare `ADD CONSTRAINT` statements (15 PK/UNIQUE + 1 FK) that abort the apply at the first one under `psql -v ON_ERROR_STOP=1` on any database that already has the constraints. Each is now wrapped in a `DO` block gated on a `pg_constraint` lookup. Verified end-to-end (exit 0, zero ERROR lines, in-file post-apply smoke) against a scratch database restored from a real pre-upgrade production schema dump, a fresh empty database, and a live production re-apply.
+- **`schema.sql` fresh install**: the dump preamble empties `search_path`, so the unqualified `CREATE EXTENSION vector` failed on a new database with `no schema has been selected to create in` — it only ever worked where the extension pre-existed. Now `CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public`.
+
 ## [0.6.0] - 2026-07-15
 
 All 10 `@engram-mem/*` packages bumped to 0.6.0 (lockstep). **Opt-in `synthesize` recall mode**, shipped preference-first after a two-gate judged benchmark program (LongMemEval-S, 500 questions, pre-registered criteria, paired McNemar statistics; artifacts under `results/longmemeval/`).

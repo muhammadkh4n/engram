@@ -43,6 +43,16 @@ console.log(memories[0]?.content)
 
 No API keys required. SQLite + BM25 out of the box. Upgrade to embeddings, cloud storage, or Neo4j graph when ready.
 
+## What's New in v0.6.0
+
+**Synthesize recall mode (preference-first) + session ranking — judged end-to-end on LongMemEval-S.**
+
+- **`recall(query, { synthesize: true })`** returns a deterministic, citation-anchored `synthesis` block derived from the recalled memories and appends it to `formatted`. The default renders **preference constraint-surfacing only** — stated user preferences quoted verbatim with session/date citations plus an apply-this-preference instruction. Code-only: zero LLM calls at recall time. Judged effect on preference questions under a current answerer: 30.0% → 53.3% strict, 7 improvements / 0 regressions, p = 0.016.
+- **Temporal/aggregation compute notes are opt-in** (`synthesize: { includeComputeNotes: true }`): current thinking-tier answerers recompute dates and counts from the raw sessions themselves, so injected notes measured noise-level to slightly negative for them — opt in only for weak answerers. Grounding guards regardless: every calendar date in a block is validated against the source evidence date set, counts are phrased as candidates that defer to in-context evidence, and `memories` is byte-identical whether synthesis ran or not.
+- **`RecallResult.sessions`** — additive session-completeness ranking (RRF mass per session, earliest/latest event dates); the memories array is never reordered. `RetrievedMemory.sessionId` now flows through every retrieval path.
+- **Judged end-to-end accuracy** (LongMemEval-S, 500 questions, 3-vote heterogeneous judge panel, strictest tie-break): **79.4% strict / 83.4% lenient** with a DeepSeek V4-Flash thinking answerer over Engram retrieval — the answerer, not the memory system, was the previous bottleneck (same stack with gpt-4o-mini: 52.8% strict). Pre-registered criteria, paired McNemar; artifacts committed under `results/longmemeval/`.
+- **Self-host upgrade:** re-apply `packages/postgrest/schema.sql` (idempotent) and run `NOTIFY pgrst, 'reload schema';` so the recall RPCs expose `session_id`.
+
 ## What's New in v0.4.x
 
 **Self-host story complete — bring your own infra, zero marginal cost.**
@@ -247,8 +257,12 @@ interface RecallResult {
   primed: string[]                 // Boosted topics
   estimatedTokens: number          // Token estimate for context
   formatted: string                // Ready to inject into prompt
+  sessions?: SessionGroup[]        // v0.6: session-completeness ranking (additive)
+  synthesis?: SynthesisBlock | null // v0.6: opt-in derived-from-memory block
 }
 ```
+
+Pass `{ synthesize: true }` to opt into the synthesis block — preference constraint-surfacing by default, compute notes via `{ synthesize: { includeComputeNotes: true } }`. Full reference in the [`@engram-mem/core` README](packages/core/README.md#synthesize-mode-v06).
 
 #### `expand(memoryId): Promise<{ episodes: Episode[] }>`
 Drill into a digest to see original episodes.
