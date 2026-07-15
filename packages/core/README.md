@@ -100,6 +100,8 @@ interface RecallResult {
   primed: string[]                  // Topics now boosted for this session
   estimatedTokens: number           // Token count for assembled context
   formatted: string                 // Ready to inject into system prompt
+  sessions?: SessionGroup[]         // v0.6: session-completeness ranking (additive)
+  synthesis?: SynthesisBlock | null // v0.6: opt-in derived-from-memory block (see below)
 }
 
 interface RetrievedMemory {
@@ -123,9 +125,50 @@ Options:
 interface RecallOptions {
   embedding?: number[]    // Pre-computed embedding (skip embedding service call)
   tokenBudget?: number    // Max tokens for assembled context
+  projectId?: string      // Per-call project scope (overrides the instance default)
+  synthesize?: boolean | SynthesizeOpts  // Opt-in synthesis block (see below)
+  now?: Date              // Anchor for now-relative temporal arithmetic in synthesis
 }
 
 const result = await memory.recall(query, { tokenBudget: 2000 })
+```
+
+##### Synthesize mode (v0.6)
+
+`synthesize: true` computes a **derived-from-memory block** over the recalled memories, returns it as `result.synthesis`, and appends its text to `formatted`. The `memories` array is byte-identical whether synthesis runs or not, and an explicit block header tells the answerer to verify against the memories above (abstention safety).
+
+```typescript
+const result = await memory.recall('write the commit message', { synthesize: true })
+// result.synthesis?.text →
+// ### Derived from memory (computed deterministically — verify against the memories above; …)
+// - [constraint] Stated user preference (s42, 2026-07-01): "no attribution lines
+//   in commit messages" Apply this stated preference when answering — do not
+//   merely mention it.
+```
+
+By default only **preference constraint-surfacing** renders: stated user preferences quoted verbatim with session/date citations. This path is code-only — zero LLM calls at recall time — and it is the synthesis component with a significant judged gain under a current answerer (LongMemEval-S preference questions: 30.0% → 53.3% strict accuracy, p = 0.016).
+
+```typescript
+interface SynthesizeOpts {
+  maxEvidenceSessions?: number   // Cap evidence to the first K distinct sessions (rank order)
+  includeComputeNotes?: boolean  // Default false — see below
+}
+```
+
+`includeComputeNotes: true` additionally renders the **temporal date-arithmetic** and **aggregation counting** sections: an LLM evidence-selection call per fired recall, deterministic arithmetic and template rendering, a date-anchoring hard guard (any block citing a calendar date absent from the source evidence is dropped), and no-LLM degradation tiers when no selection adapter is available. Leave it off for current thinking-tier answerers — they recompute dates and counts from the raw sessions themselves, and injected notes measured noise-level to slightly negative on judged benchmarks. Opt in for weak answerers that cannot do their own date/count arithmetic.
+
+The structured block:
+
+```typescript
+interface SynthesisBlock {
+  intent: 'temporal' | 'aggregation' | 'preference'
+  method: 'date-arithmetic' | 'count-enumerate' | 'constraint-surface'
+        | 'temporal-grounding' | 'evidence-index'   // last two = no-LLM degradation tier
+  text: string                // Rendered block (also appended to `formatted`)
+  items: SynthesisItem[]      // Machine-readable derivation trace with citations
+  evidenceCount: number
+  llmSelectionUsed: boolean
+}
 ```
 
 #### `expand(memoryId): Promise<{ episodes: Episode[] }>`

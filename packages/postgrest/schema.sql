@@ -12,6 +12,8 @@
 --   - CREATE OR REPLACE FUNCTION
 --   - CREATE EXTENSION IF NOT EXISTS
 --   - DROP POLICY IF EXISTS … ; CREATE POLICY …
+--   - ADD CONSTRAINT wrapped in a DO block gated on a pg_constraint lookup
+--     (bare ADD CONSTRAINT errors on re-apply; IF NOT EXISTS has no PK/FK form)
 --
 -- For schema evolution history (per-migration diffs over time), see git log
 -- on this file and the commit history of the deleted migrations/ directory.
@@ -46,8 +48,10 @@ SET xmloption = content;
 SET client_min_messages = warning;
 SET row_security = off;
 
--- pgvector extension required for vector(1536) columns
-CREATE EXTENSION IF NOT EXISTS vector;
+-- pgvector extension required for vector(1536) columns. WITH SCHEMA is
+-- mandatory: the dump preamble empties search_path, so an unqualified
+-- CREATE EXTENSION has no target schema and fails on a fresh database.
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 -- =============================================================================
 -- forget() tombstone — within-file ordering note
@@ -879,120 +883,180 @@ ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at times
 -- Name: community_summaries community_summaries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.community_summaries
-    ADD CONSTRAINT community_summaries_pkey PRIMARY KEY (community_id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'community_summaries_pkey' AND conrelid = 'public.community_summaries'::regclass) THEN
+    ALTER TABLE ONLY public.community_summaries
+      ADD CONSTRAINT community_summaries_pkey PRIMARY KEY (community_id);
+  END IF;
+END $$;
 
 
 --
 -- Name: consolidation_runs consolidation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.consolidation_runs
-    ADD CONSTRAINT consolidation_runs_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'consolidation_runs_pkey' AND conrelid = 'public.consolidation_runs'::regclass) THEN
+    ALTER TABLE ONLY public.consolidation_runs
+      ADD CONSTRAINT consolidation_runs_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: episode_parts episode_parts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.episode_parts
-    ADD CONSTRAINT episode_parts_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'episode_parts_pkey' AND conrelid = 'public.episode_parts'::regclass) THEN
+    ALTER TABLE ONLY public.episode_parts
+      ADD CONSTRAINT episode_parts_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memories memories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memories
-    ADD CONSTRAINT memories_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memories_pkey' AND conrelid = 'public.memories'::regclass) THEN
+    ALTER TABLE ONLY public.memories
+      ADD CONSTRAINT memories_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_associations memory_associations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_associations
-    ADD CONSTRAINT memory_associations_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_associations_pkey' AND conrelid = 'public.memory_associations'::regclass) THEN
+    ALTER TABLE ONLY public.memory_associations
+      ADD CONSTRAINT memory_associations_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_consolidation_runs memory_consolidation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_consolidation_runs
-    ADD CONSTRAINT memory_consolidation_runs_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_consolidation_runs_pkey' AND conrelid = 'public.memory_consolidation_runs'::regclass) THEN
+    ALTER TABLE ONLY public.memory_consolidation_runs
+      ADD CONSTRAINT memory_consolidation_runs_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_digests memory_digests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_digests
-    ADD CONSTRAINT memory_digests_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_digests_pkey' AND conrelid = 'public.memory_digests'::regclass) THEN
+    ALTER TABLE ONLY public.memory_digests
+      ADD CONSTRAINT memory_digests_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_episodes memory_episodes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_episodes
-    ADD CONSTRAINT memory_episodes_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_episodes_pkey' AND conrelid = 'public.memory_episodes'::regclass) THEN
+    ALTER TABLE ONLY public.memory_episodes
+      ADD CONSTRAINT memory_episodes_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_semantic memory_knowledge_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_semantic
-    ADD CONSTRAINT memory_knowledge_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_knowledge_pkey' AND conrelid = 'public.memory_semantic'::regclass) THEN
+    ALTER TABLE ONLY public.memory_semantic
+      ADD CONSTRAINT memory_knowledge_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_knowledge memory_knowledge_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_knowledge
-    ADD CONSTRAINT memory_knowledge_pkey1 PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_knowledge_pkey1' AND conrelid = 'public.memory_knowledge'::regclass) THEN
+    ALTER TABLE ONLY public.memory_knowledge
+      ADD CONSTRAINT memory_knowledge_pkey1 PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_procedural memory_procedural_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_procedural
-    ADD CONSTRAINT memory_procedural_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_procedural_pkey' AND conrelid = 'public.memory_procedural'::regclass) THEN
+    ALTER TABLE ONLY public.memory_procedural
+      ADD CONSTRAINT memory_procedural_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_write_buffer memory_write_buffer_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_write_buffer
-    ADD CONSTRAINT memory_write_buffer_pkey PRIMARY KEY (id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_write_buffer_pkey' AND conrelid = 'public.memory_write_buffer'::regclass) THEN
+    ALTER TABLE ONLY public.memory_write_buffer
+      ADD CONSTRAINT memory_write_buffer_pkey PRIMARY KEY (id);
+  END IF;
+END $$;
 
 
 --
 -- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.schema_migrations
-    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schema_migrations_pkey' AND conrelid = 'public.schema_migrations'::regclass) THEN
+    ALTER TABLE ONLY public.schema_migrations
+      ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+  END IF;
+END $$;
 
 
 --
 -- Name: sensory_snapshots sensory_snapshots_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.sensory_snapshots
-    ADD CONSTRAINT sensory_snapshots_pkey PRIMARY KEY (session_id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sensory_snapshots_pkey' AND conrelid = 'public.sensory_snapshots'::regclass) THEN
+    ALTER TABLE ONLY public.sensory_snapshots
+      ADD CONSTRAINT sensory_snapshots_pkey PRIMARY KEY (session_id);
+  END IF;
+END $$;
 
 
 --
 -- Name: memory_associations uq_association_pair; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.memory_associations
-    ADD CONSTRAINT uq_association_pair UNIQUE (source_id, target_id, edge_type);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_association_pair' AND conrelid = 'public.memory_associations'::regclass) THEN
+    ALTER TABLE ONLY public.memory_associations
+      ADD CONSTRAINT uq_association_pair UNIQUE (source_id, target_id, edge_type);
+  END IF;
+END $$;
 
 
 --
@@ -1255,8 +1319,12 @@ CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural 
 -- Name: episode_parts episode_parts_episode_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.episode_parts
-    ADD CONSTRAINT episode_parts_episode_id_fkey FOREIGN KEY (episode_id) REFERENCES public.memory_episodes(id) ON DELETE CASCADE;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'episode_parts_episode_id_fkey' AND conrelid = 'public.episode_parts'::regclass) THEN
+    ALTER TABLE ONLY public.episode_parts
+      ADD CONSTRAINT episode_parts_episode_id_fkey FOREIGN KEY (episode_id) REFERENCES public.memory_episodes(id) ON DELETE CASCADE;
+  END IF;
+END $$;
 
 
 --
