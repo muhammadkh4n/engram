@@ -15,6 +15,9 @@ import type {
 export interface OpenAISummarizerOptions {
   apiKey: string
   model?: string
+  /** Chat-completions endpoint override (any OpenAI-compatible host, e.g.
+   *  OpenRouter). Omitted → the SDK's default api.openai.com endpoint. */
+  baseURL?: string
 }
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are a memory summarizer for an AI assistant. Given content from conversation episodes, produce a structured summary.
@@ -174,7 +177,7 @@ export class OpenAISummarizer {
   private readonly model: string
 
   constructor(opts: OpenAISummarizerOptions) {
-    this.client = new OpenAI({ apiKey: opts.apiKey })
+    this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? 'gpt-4o-mini'
   }
 
