@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/recall-engine",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "RAM-resident quantized recall engine for Engram — TurboQuant codec for fast exhaustive ANN with exact float rescore",
   "keywords": [
     "memory",
