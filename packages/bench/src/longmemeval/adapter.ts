@@ -112,6 +112,7 @@ export class LongMemEvalAdapter {
             lmeSessionId,
             lmeMsgIndex: t,
             lmeSessionDate: sessionDate ?? null,
+            occurredAt: sessionDate ?? null,
             lmeQuestionType: question.question_type,
           },
         })

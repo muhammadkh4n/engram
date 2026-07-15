@@ -38,6 +38,8 @@ export type {
   SalienceCategory,
   SalienceClassification,
   SalienceOpts,
+  EvidenceItem,
+  EvidenceSelection,
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
@@ -65,7 +67,12 @@ export type { RetryOptions } from './resilience/retry.js'
 export { recall } from './retrieval/engine.js'
 export type { RecallOpts } from './retrieval/engine.js'
 export { unifiedSearch } from './retrieval/search.js'
+export { rankSessions } from './retrieval/session-ordering.js'
+export { parseEventDate, resolveEventDate, isoDate } from './utils/event-date.js'
 export type { UnifiedSearchOpts } from './retrieval/search.js'
 export { Memory } from './memory.js'
 export type { MemoryOptions, SessionHandle, BridgeResult } from './memory.js'
 export { createMemory } from './create-memory.js'
+export { synthesize } from './synthesis/index.js'
+export type { SynthesizeInput } from './synthesis/index.js'
+export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'

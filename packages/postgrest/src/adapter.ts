@@ -615,6 +615,7 @@ interface VectorSearchRow {
   entities: string[]
   metadata: Record<string, unknown>
   project_id?: string | null
+  session_id?: string | null
 }
 
 interface TextBoostRow {
@@ -630,7 +631,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
         type: 'episode',
         data: {
           id: row.id,
-          sessionId: '',
+          sessionId: row.session_id ?? '',
           role: (row.role ?? 'user') as 'user' | 'assistant' | 'system',
           content: row.content,
           salience: row.salience,
@@ -649,7 +650,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
         type: 'digest',
         data: {
           id: row.id,
-          sessionId: '',
+          sessionId: row.session_id ?? '',
           summary: row.content,
           keyTopics: row.entities ?? [],
           sourceEpisodeIds: [],
@@ -711,7 +712,7 @@ function vectorRowToTypedMemory(row: VectorSearchRow): TypedMemory {
         type: 'episode',
         data: {
           id: row.id,
-          sessionId: '',
+          sessionId: row.session_id ?? '',
           role: 'user',
           content: row.content,
           salience: row.salience,

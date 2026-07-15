@@ -198,6 +198,11 @@ export interface RecallResult {
   primed: string[]
   estimatedTokens: number
   formatted: string
+  /** Mirrors retrieval/engine.ts RecallResult.sessions (the authoritative
+   *  computed source) — Memory.recall's public contract is typed here. */
+  sessions?: SessionGroup[]
+  /** Mirrors retrieval/engine.ts RecallResult.synthesis. */
+  synthesis?: SynthesisBlock | null
 }
 
 export interface RetrievedMemory {
@@ -209,6 +214,87 @@ export interface RetrievedMemory {
   metadata: Record<string, unknown>
   /** Project tag from the storage row's project_id column; takes precedence over metadata.project for project preference. */
   projectId?: string | null
+  /** Session provenance from the storage row (episodes/digests). null for
+   *  semantic/procedural tiers and for rows whose adapter path did not carry
+   *  a session id (legacy RPC rows map '' → null). */
+  sessionId?: string | null
+}
+
+/** A1 session-completeness ranking entry (additive recall enrichment).
+ *  Computed over the FINAL ranked memories; the memories array itself is
+ *  never reordered by this feature. */
+export interface SessionGroup {
+  /** Episode/Digest session provenance (storage session id). */
+  sessionId: string
+  /** Aggregate RRF mass: Σ 1/(60 + rank + 1) over member memories. */
+  score: number
+  /** Member memory ids, in relevance order. */
+  memoryIds: string[]
+  /** ISO date (YYYY-MM-DD) of the oldest member (occurredAt ?? createdAt), null when undated. */
+  earliest: string | null
+  /** ISO date of the newest member, null when undated. */
+  latest: string | null
+}
+
+// === Synthesis Types (opt-in `synthesize` recall mode) ===
+
+/** How a synthesis block was produced. The last two are the no-LLM
+ *  degradation tier (deterministic grounding/index over ALL evidence,
+ *  used when no selection adapter is available or the selection call
+ *  fails — never when selection explicitly returned empty). */
+export type SynthesisMethod =
+  | 'date-arithmetic'
+  | 'count-enumerate'
+  | 'constraint-surface'
+  | 'temporal-grounding'
+  | 'evidence-index'
+
+export interface SynthesisCitation {
+  memoryId: string
+  sessionId: string | null
+  /** ISO date (YYYY-MM-DD) of the cited memory's event time, null when undated. */
+  date: string | null
+}
+
+export interface SynthesisItem {
+  claim: string
+  value?: string
+  citations: SynthesisCitation[]
+}
+
+/** Derived-from-memory block returned alongside raw memories. The LLM (when
+ *  used at all) only SELECTS and LABELS evidence; every date and count in
+ *  `text` is computed deterministically and template-rendered, and every
+ *  calendar date is validated to be a member of the source evidence date set
+ *  (date-anchoring hard guard). `memories` is byte-identical whether
+ *  synthesis ran or not. */
+export interface SynthesisBlock {
+  intent: 'temporal' | 'aggregation' | 'preference'
+  method: SynthesisMethod
+  /** Rendered, citation-bearing block (also appended to `formatted`). */
+  text: string
+  /** Machine-readable derivation trace. */
+  items: SynthesisItem[]
+  evidenceCount: number
+  llmSelectionUsed: boolean
+}
+
+export interface SynthesizeOpts {
+  /** Cap synthesis evidence to memories from the first K distinct sessions
+   *  in A1 rank order (the benchmark judged run sets 5 so the block only cites
+   *  sessions the answerer can see and verify). Default: unlimited. */
+  maxEvidenceSessions?: number
+  /** Also render compute sections (temporal date-arithmetic / aggregation
+   *  counting, including their no-LLM degradation tiers). Default OFF:
+   *  current thinking-tier answerers recompute dates and counts from the
+   *  raw sessions themselves, so injected compute notes measure noise-level
+   *  to slightly negative for them while costing an LLM selection call per
+   *  recall — only preference constraint-surfacing showed a significant
+   *  judged gain (results/longmemeval/s2-mcnemar-c4-vs-c5-2026-07.json).
+   *  Opt in for weak answerers that cannot do their own date/count
+   *  arithmetic. Preference constraint sections are code-only and always
+   *  eligible regardless of this flag. */
+  includeComputeNotes?: boolean
 }
 
 // === Storage Types ===

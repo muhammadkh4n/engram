@@ -88,6 +88,35 @@ export interface SalienceOpts {
   priorTurn?: string
 }
 
+// ---------------------------------------------------------------------------
+// Synthesis evidence selection (opt-in `synthesize` recall mode)
+// ---------------------------------------------------------------------------
+
+/** One numbered evidence line shown to the selection model. */
+export interface EvidenceItem {
+  index: number
+  /** Memory content, capped at 120 chars by the caller. */
+  text: string
+  /** ISO event date (occurredAt ?? createdAt) when resolvable. */
+  date?: string
+}
+
+/**
+ * Index-constrained selection result. The model only SELECTS (indices),
+ * LABELS (instance grouping for distinct-instance counting), and QUOTES
+ * date phrases verbatim (`dateText` — located, never resolved, never
+ * computed with). All arithmetic and counting happen in deterministic code.
+ */
+export interface EvidenceSelection {
+  items: Array<{
+    index: number
+    /** Lines describing the same real-world event share a label. */
+    instance?: string
+    /** Explicit date phrase quoted verbatim from the line, if any. */
+    dateText?: string
+  }>
+}
+
 export interface IntelligenceAdapter {
   embed?(text: string): Promise<number[]>
   embedBatch?(texts: string[]): Promise<number[][]>
@@ -155,4 +184,17 @@ export interface IntelligenceAdapter {
     query: string,
     documents: ReadonlyArray<{ id: string; content: string }>,
   ): Promise<Array<{ id: string; score: number }>>
+  /**
+   * Synthesis evidence selection: given a question and numbered evidence
+   * lines, return the indices describing the asked-about event(s), instance
+   * labels, and verbatim date phrases. MUST return {"items": []} when no
+   * line matches — an empty selection suppresses the synthesis block
+   * entirely (abstention safety). Implementations never compute dates,
+   * durations, or counts.
+   */
+  selectEvidence?(
+    query: string,
+    evidence: ReadonlyArray<EvidenceItem>,
+    opts: { mode: 'temporal' | 'aggregation' },
+  ): Promise<EvidenceSelection>
 }

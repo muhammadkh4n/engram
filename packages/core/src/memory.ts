@@ -1,4 +1,4 @@
-import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, RetrievedMemory } from './types.js'
+import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, RetrievedMemory, SynthesizeOpts } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -597,7 +597,17 @@ export class Memory {
    *  use it to vary maxResults / association hops without re-classifying. */
   async recall(
     query: string,
-    opts?: { embedding?: number[]; tokenBudget?: number; asOf?: Date; strategyOverride?: Partial<RecallStrategy>; projectId?: string }
+    opts?: {
+      embedding?: number[]
+      tokenBudget?: number
+      asOf?: Date
+      strategyOverride?: Partial<RecallStrategy>
+      projectId?: string
+      /** Opt-in synthesis block computed from the returned memories. */
+      synthesize?: boolean | SynthesizeOpts
+      /** Anchor for now-relative temporal arithmetic in synthesis. */
+      now?: Date
+    }
   ): Promise<RecallResult> {
     this.assertInitialized()
 
@@ -642,6 +652,8 @@ export class Memory {
       asOf: opts?.asOf,
       ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
+      ...(opts?.synthesize !== undefined ? { synthesize: opts.synthesize } : {}),
+      ...(opts?.now !== undefined ? { now: opts.now } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn
@@ -654,6 +666,8 @@ export class Memory {
       primed: result.primed,
       estimatedTokens: result.estimatedTokens,
       formatted: result.formatted,
+      sessions: result.sessions ?? [],
+      synthesis: result.synthesis ?? null,
     }
   }
 
