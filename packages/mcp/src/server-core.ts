@@ -178,7 +178,20 @@ export async function getMemory(): Promise<Memory> {
   // quantized recall engine. See maybeWithRecallEngine's doc comment for why
   // exactRescore is always forced true here regardless of ENGRAM_ENGINE_EXACT.
   const storage: StorageAdapter = await maybeWithRecallEngine(rawStorage, supabaseUrl)
-  const baseIntelligence: IntelligenceAdapter = openaiIntelligence({ apiKey: openaiApiKey })
+  // Chat-model override (v0.6.1): ENGRAM_CHAT_MODEL / ENGRAM_CHAT_BASE_URL /
+  // ENGRAM_CHAT_API_KEY route every LLM call (summarize, extraction, synthesis
+  // selection) to any OpenAI-compatible host — e.g. a V4-Flash-class model via
+  // OpenRouter. Embeddings always stay on OPENAI_API_KEY's default endpoint so
+  // the vector space of stored memories is independent of the chat model.
+  const chatModel = process.env['ENGRAM_CHAT_MODEL']?.trim() || undefined
+  const chatBaseUrl = process.env['ENGRAM_CHAT_BASE_URL']?.trim() || undefined
+  const chatApiKey = process.env['ENGRAM_CHAT_API_KEY']?.trim() || undefined
+  const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
+    apiKey: openaiApiKey,
+    ...(chatModel ? { summarizationModel: chatModel } : {}),
+    ...(chatBaseUrl ? { chatBaseUrl } : {}),
+    ...(chatApiKey ? { chatApiKey } : {}),
+  })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
   // cross-encoder over the openaiIntelligence adapter so the rerank stage
   // uses ONNX CPU inference (~$0 per query) instead of gpt-4o-mini pointwise.

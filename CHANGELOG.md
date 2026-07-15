@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`ENGRAM_CHAT_MODEL` / `ENGRAM_CHAT_BASE_URL` / `ENGRAM_CHAT_API_KEY`** (MCP server): route every chat-LLM call — ingest summarization, knowledge/entity/salience extraction, synthesis evidence selection — to any OpenAI-compatible host, e.g. `deepseek/deepseek-v4-flash` via OpenRouter. Embeddings always stay on `OPENAI_API_KEY`'s default endpoint so the stored vector space is independent of the chat-model choice. Programmatic equivalents: `OpenAISummarizerOptions.baseURL`, `OpenAIIntelligenceOptions.chatBaseUrl` / `chatApiKey`.
+
 ### Fixed
 
 - **`schema.sql` re-apply on existing installs** (the documented v0.6.0 upgrade path): the constraint section was raw pg_dump output — 16 bare `ADD CONSTRAINT` statements (15 PK/UNIQUE + 1 FK) that abort the apply at the first one under `psql -v ON_ERROR_STOP=1` on any database that already has the constraints. Each is now wrapped in a `DO` block gated on a `pg_constraint` lookup. Verified end-to-end (exit 0, zero ERROR lines, in-file post-apply smoke) against a scratch database restored from a real pre-upgrade production schema dump, a fresh empty database, and a live production re-apply.

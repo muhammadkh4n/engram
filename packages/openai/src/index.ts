@@ -12,6 +12,16 @@ export interface OpenAIIntelligenceOptions {
   embeddingModel?: string
   embeddingDimensions?: number
   summarizationModel?: string
+  /** Chat-completions endpoint override for ALL LLM calls (summarize,
+   *  knowledge/entity/salience extraction, synthesis evidence selection) —
+   *  any OpenAI-compatible host, e.g. OpenRouter. Embeddings always stay on
+   *  the default OpenAI endpoint: OpenAI-compatible chat hosts generally do
+   *  not serve an embeddings API, and the stored vectors must keep coming
+   *  from the same embedding space regardless of the chat model choice. */
+  chatBaseUrl?: string
+  /** API key for the chat endpoint when it differs from the embeddings key
+   *  (e.g. an OpenRouter key). Defaults to `apiKey`. */
+  chatApiKey?: string
   /** Reserved for future LLM-powered intent classification. */
   intentAnalysis?: boolean
 }
@@ -33,8 +43,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
   })
 
   const summarizer = new OpenAISummarizer({
-    apiKey: opts.apiKey,
+    apiKey: opts.chatApiKey ?? opts.apiKey,
     model: opts.summarizationModel,
+    ...(opts.chatBaseUrl ? { baseURL: opts.chatBaseUrl } : {}),
   })
 
   return {
