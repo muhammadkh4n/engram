@@ -180,11 +180,17 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
 export class OpenAISummarizer {
   private readonly client: OpenAI
   private readonly model: string
+  /** contextualizeChunk's model: follows the configured model when one is
+   *  set (a configured endpoint override must apply to EVERY chat call —
+   *  a hardcoded OpenAI model 404s on non-OpenAI hosts), but keeps its own
+   *  historical default on unconfigured installs. */
+  private readonly contextualizeModel: string
   private readonly providerPrefs: Record<string, unknown> | undefined
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? 'gpt-4o-mini'
+    this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
   }
 
@@ -597,7 +603,7 @@ export class OpenAISummarizer {
 
     try {
       const resp = await this.chatCreate({
-        model: 'gpt-4.1-mini',
+        model: this.contextualizeModel,
         messages: [
           {
             role: 'system',
