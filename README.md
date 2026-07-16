@@ -324,6 +324,17 @@ Add to your `~/.claude/settings.json`:
 }
 ```
 
+**Chat-model env flags (v0.6.1+)** — run the chat-LLM tier (summarization, extraction, synthesis selection) on any OpenAI-compatible host; embeddings always stay on `OPENAI_API_KEY`'s default endpoint:
+
+```json
+"env": {
+  "ENGRAM_CHAT_MODEL": "deepseek/deepseek-v4-flash",
+  "ENGRAM_CHAT_BASE_URL": "https://openrouter.ai/api/v1",
+  "ENGRAM_CHAT_API_KEY": "sk-or-...",
+  "ENGRAM_CHAT_PROVIDER_PREFS": "{\"order\":[\"baidu\"],\"quantizations\":[\"fp8\"]}"  // v0.6.2+: OpenRouter provider routing — pin/order hosts, quantization floor
+}
+```
+
 > **Project isolation (Wave 5).** `memory_recall` and `memory_ingest` take an optional declarative `project_id` parameter — the agent passes the current project (e.g. the git repo name) to scope the call. A scoped recall returns only that project's memories plus shared (`NULL`) ones; every other project is excluded, enforced in both SQL and the graph traversal. Omit it for unscoped (all projects). The server itself holds no project state, so one shared HTTP server isolates correctly per request. The git/hook ingest CLIs auto-detect the project from their working directory (`ENGRAM_PROJECT_ID` overrides).
 
 Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`, `memory_consolidation_status`.

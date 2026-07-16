@@ -186,11 +186,30 @@ export async function getMemory(): Promise<Memory> {
   const chatModel = process.env['ENGRAM_CHAT_MODEL']?.trim() || undefined
   const chatBaseUrl = process.env['ENGRAM_CHAT_BASE_URL']?.trim() || undefined
   const chatApiKey = process.env['ENGRAM_CHAT_API_KEY']?.trim() || undefined
+  // ENGRAM_CHAT_PROVIDER_PREFS: JSON object sent verbatim as the request
+  // body's `provider` field (OpenRouter provider routing — pin/order hosts,
+  // quantization floor, fallback policy). Malformed JSON is a config error
+  // and must fail startup: silently dropping it would route private memory
+  // content to whatever host the account default picks.
+  const chatProviderPrefsRaw = process.env['ENGRAM_CHAT_PROVIDER_PREFS']?.trim() || undefined
+  let chatProviderPrefs: Record<string, unknown> | undefined
+  if (chatProviderPrefsRaw) {
+    try {
+      const parsed: unknown = JSON.parse(chatProviderPrefsRaw)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('not a JSON object')
+      }
+      chatProviderPrefs = parsed as Record<string, unknown>
+    } catch (err) {
+      throw new Error(`ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
     apiKey: openaiApiKey,
     ...(chatModel ? { summarizationModel: chatModel } : {}),
     ...(chatBaseUrl ? { chatBaseUrl } : {}),
     ...(chatApiKey ? { chatApiKey } : {}),
+    ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
   // cross-encoder over the openaiIntelligence adapter so the rerank stage

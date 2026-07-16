@@ -22,6 +22,9 @@ export interface OpenAIIntelligenceOptions {
   /** API key for the chat endpoint when it differs from the embeddings key
    *  (e.g. an OpenRouter key). Defaults to `apiKey`. */
   chatApiKey?: string
+  /** OpenRouter provider-routing preferences for chat calls (request-body
+   *  `provider` field): pin/order hosts, restrict quantizations, etc. */
+  chatProviderPrefs?: Record<string, unknown>
   /** Reserved for future LLM-powered intent classification. */
   intentAnalysis?: boolean
 }
@@ -46,6 +49,7 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     apiKey: opts.chatApiKey ?? opts.apiKey,
     model: opts.summarizationModel,
     ...(opts.chatBaseUrl ? { baseURL: opts.chatBaseUrl } : {}),
+    ...(opts.chatProviderPrefs ? { providerPrefs: opts.chatProviderPrefs } : {}),
   })
 
   return {

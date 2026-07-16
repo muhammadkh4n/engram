@@ -18,6 +18,11 @@ export interface OpenAISummarizerOptions {
   /** Chat-completions endpoint override (any OpenAI-compatible host, e.g.
    *  OpenRouter). Omitted → the SDK's default api.openai.com endpoint. */
   baseURL?: string
+  /** OpenRouter provider-routing preferences, sent verbatim as the request
+   *  body's `provider` field on every chat call (order/only/ignore/
+   *  quantizations/allow_fallbacks — see openrouter.ai/docs/provider-routing).
+   *  Non-OpenRouter hosts ignore unknown body fields. Omitted → no field. */
+  providerPrefs?: Record<string, unknown>
 }
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are a memory summarizer for an AI assistant. Given content from conversation episodes, produce a structured summary.
@@ -175,10 +180,19 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
 export class OpenAISummarizer {
   private readonly client: OpenAI
   private readonly model: string
+  private readonly providerPrefs: Record<string, unknown> | undefined
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? 'gpt-4o-mini'
+    this.providerPrefs = opts.providerPrefs
+  }
+
+  /** Single point through which every chat call goes: merges the optional
+   *  OpenRouter `provider` routing object into the request body. */
+  private chatCreate(body: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming) {
+    const merged = this.providerPrefs ? ({ ...body, provider: this.providerPrefs } as typeof body) : body
+    return this.client.chat.completions.create(merged)
   }
 
   async summarize(content: string, opts: SummarizeOptions): Promise<SummaryResult> {
@@ -202,7 +216,7 @@ export class OpenAISummarizer {
       content,
     ].join('\n')
 
-    const resp = await this.client.chat.completions.create({
+    const resp = await this.chatCreate({
       model: this.model,
       messages: [
         { role: 'system', content: SUMMARIZE_SYSTEM_PROMPT },
@@ -229,7 +243,7 @@ export class OpenAISummarizer {
     // stays "last week" so the retrieval catches the same phrasing in
     // conversation turns; (c) write in conversational style, not
     // encyclopedic — source is dialogue, not Wikipedia.
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: this.model,
       messages: [
         {
@@ -272,7 +286,7 @@ export class OpenAISummarizer {
     // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
     //   IDF naturally, but short queries get dropped entirely if
     //   they're all stopwords.
-    const response = await this.client.chat.completions.create({
+    const response = await this.chatCreate({
       model: this.model,
       messages: [
         {
@@ -351,7 +365,7 @@ export class OpenAISummarizer {
       .join('\n')
     const user = `MODE: ${opts.mode}\nQUESTION: ${query}\nEVIDENCE:\n${lines}`
 
-    const resp = await this.client.chat.completions.create({
+    const resp = await this.chatCreate({
       model: this.model,
       messages: [
         { role: 'system', content: system },
@@ -367,7 +381,7 @@ export class OpenAISummarizer {
   }
 
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
-    const resp = await this.client.chat.completions.create({
+    const resp = await this.chatCreate({
       model: this.model,
       messages: [
         { role: 'system', content: KNOWLEDGE_SYSTEM_PROMPT },
@@ -398,7 +412,7 @@ export class OpenAISummarizer {
     if (trimmed.length < 30) return []
 
     try {
-      const resp = await this.client.chat.completions.create({
+      const resp = await this.chatCreate({
         model: this.model,
         messages: [
           { role: 'system', content: ENTITY_SYSTEM_PROMPT },
@@ -450,7 +464,7 @@ export class OpenAISummarizer {
     const userMessage = buildSalienceUserMessage(trimmed, opts)
 
     try {
-      const resp = await this.client.chat.completions.create({
+      const resp = await this.chatCreate({
         model: this.model,
         messages: [
           { role: 'system', content: SALIENCE_SYSTEM_PROMPT },
@@ -582,7 +596,7 @@ export class OpenAISummarizer {
     }
 
     try {
-      const resp = await this.client.chat.completions.create({
+      const resp = await this.chatCreate({
         model: 'gpt-4.1-mini',
         messages: [
           {
@@ -638,7 +652,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
       .join('\n')
 
     try {
-      const resp = await this.client.chat.completions.create({
+      const resp = await this.chatCreate({
         model: this.model,
         messages: [
           {
