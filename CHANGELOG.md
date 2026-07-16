@@ -4,6 +4,12 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`contextualizeChunk` ignored the configured chat model**: it hardcoded `gpt-4.1-mini`, so with `ENGRAM_CHAT_BASE_URL` set the contextual-ingest preamble silently routed to a different vendor through the override endpoint — and 404'd outright under a `quantizations` provider filter (no fp8-quantized `gpt-4.1-mini` endpoints exist), degrading every ingest's preamble to empty. It now follows the configured model; unconfigured installs keep the historical `gpt-4.1-mini` default.
+
 ## [0.6.2] - 2026-07-16
 
 All `@engram-mem/*` packages bumped to 0.6.2 (lockstep). Patch release: OpenRouter provider routing for the chat-LLM tier.

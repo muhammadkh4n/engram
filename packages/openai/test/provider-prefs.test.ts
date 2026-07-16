@@ -59,6 +59,20 @@ describe('provider preferences pass-through', () => {
     expect('provider' in mockChatCreate.mock.calls[0]![0]).toBe(false)
   })
 
+  it('contextualizeChunk() follows the configured model (documented ENGRAM_CHAT_MODEL contract)', async () => {
+    mockChatCreate.mockResolvedValueOnce(chatResponse('a preamble'))
+    const s = new OpenAISummarizer({ apiKey: 'k', model: 'deepseek/deepseek-v4-flash' })
+    await s.contextualizeChunk('chunk text', { conversationContext: 'prior turns' })
+    expect(mockChatCreate.mock.calls[0]![0]).toMatchObject({ model: 'deepseek/deepseek-v4-flash' })
+  })
+
+  it('contextualizeChunk() keeps its historical gpt-4.1-mini default when no model is configured', async () => {
+    mockChatCreate.mockResolvedValueOnce(chatResponse('a preamble'))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+    await s.contextualizeChunk('chunk text', { conversationContext: 'prior turns' })
+    expect(mockChatCreate.mock.calls[0]![0]).toMatchObject({ model: 'gpt-4.1-mini' })
+  })
+
   it('openaiIntelligence forwards chatProviderPrefs to the summarizer', async () => {
     mockChatCreate.mockResolvedValueOnce(chatResponse(JSON.stringify({
       text: 't', topics: [], entities: [], decisions: [],
