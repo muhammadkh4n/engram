@@ -4,6 +4,12 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`ENGRAM_CHAT_PROVIDER_PREFS`** (MCP server): JSON object sent verbatim as the request body's `provider` field on every chat call — OpenRouter provider routing (pin/order hosts, quantization floor, fallback policy). Malformed JSON fails startup rather than silently falling back to unpinned routing. Programmatic equivalents: `OpenAISummarizerOptions.providerPrefs`, `OpenAIIntelligenceOptions.chatProviderPrefs`.
+
 ## [0.6.1] - 2026-07-15
 
 All `@engram-mem/*` packages bumped to 0.6.1 (lockstep). Patch release: the v0.6.0 self-host upgrade path (`schema.sql` re-apply) actually works now, and the MCP server's chat model is env-configurable.
