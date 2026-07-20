@@ -49,7 +49,7 @@
     "@engram-mem/openai": "*",
     "@engram-mem/sqlite": "*",
     "@engram-mem/postgrest": "0.5.2",
-    "@sinclair/typebox": "^0.34.49"
+    "@sinclair/typebox": "^0.34.52"
   },
   "peerDependencies": {
     "openclaw": ">=2026.3.0"
