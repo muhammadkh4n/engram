@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/openclaw",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "OpenClaw plugin for Engram — persistent cross-session memory for OpenClaw AI agents",
   "keywords": [
     "memory",

@@ -1,6 +1,6 @@
 {
   "name": "@engram-mem/postgrest",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "PostgREST storage adapter for Engram — works against Supabase, self-hosted Postgres + PostgREST, or any PostgREST-compatible deployment. pgvector + full-text search.",
   "keywords": [
     "memory",
