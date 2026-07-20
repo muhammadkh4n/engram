@@ -4,6 +4,12 @@ All notable changes to Engram are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`memory_recall` tool description promised suppressed output**: it still told agents `synthesize=true` yields timelines with absolute dates and distinct-instance counts — sections the preference-first default gate (v0.6.0 `includeComputeNotes: false`) no longer renders, and the MCP server never opts into. Agents following it would request synthesis on temporal/counting questions and get nothing. Both the tool description and the `synthesize` param description now describe the actual behavior: a code-only stated-preference constraint block, no LLM call at recall time.
+
 ## [0.6.3] - 2026-07-16
 
 All `@engram-mem/*` packages bumped to 0.6.3 (lockstep). Patch release: contextual-ingest preamble honors the configured chat model.

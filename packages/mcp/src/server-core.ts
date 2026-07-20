@@ -276,7 +276,7 @@ const TOOLS = [
   {
     name: 'memory_recall',
     description:
-      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first. Pass synthesize=true for questions needing dates/durations, counting across sessions, or recommendations: the result then includes a deterministic derived block (timelines with absolute dates, distinct-instance counts, stated user preferences). Derived dates in that block are authoritative; stated preferences must be APPLIED to your answer, not merely mentioned.',
+      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first. Pass synthesize=true when the question touches the user\'s stated preferences, habits, or requirements, or when making a recommendation: the result then appends a deterministic constraint block quoting stated preferences verbatim with citations. Constraints in that block must be APPLIED to your answer, not merely mentioned.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -297,7 +297,7 @@ const TOOLS = [
         synthesize: {
           type: 'boolean',
           description:
-            'Opt-in: compute a derived block (timeline with absolute dates / distinct-instance count / stated-preference constraints) from the recalled memories and append it to the formatted result. Adds one small LLM call on temporal/counting questions; no effect otherwise.',
+            'Opt-in: append a deterministic stated-preference constraint block (verbatim quotes with session/date citations) computed from the recalled memories. Code-only, no LLM call at recall time; no effect when the recalled memories contain no stated preferences.',
         },
       },
       required: ['query'],
