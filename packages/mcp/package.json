@@ -60,8 +60,8 @@
     "@engram-mem/recall-engine": "*",
     "@engram-mem/rerank-onnx": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@supabase/postgrest-js": "^2.105.1",
-    "openai": "^6.35.0"
+    "@supabase/postgrest-js": "^2.110.7",
+    "openai": "^6.48.0"
   },
   "devDependencies": {
     "typescript": "^6.0.2",
