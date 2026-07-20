@@ -1,0 +1,161 @@
+{
+ "meta": {
+  "source_cell": "s2-cell4-v4flash-notes-2026-07.json",
+  "strict_misses": 103,
+  "method": "priority buckets: _abs -> gold\u2229top5=\u2205 -> gold\u2284top5 -> D-repeat-correct -> partial-verdict -> residual"
+ },
+ "buckets": {
+  "missed-abstention": [
+   "031748ae_abs",
+   "09ba9854_abs",
+   "6456829e_abs",
+   "a96c20ee_abs",
+   "eeda8a6d_abs",
+   "gpt4_372c3eed_abs"
+  ],
+  "evidence-absent-top5": [
+   "9a707b82",
+   "d6233ab6",
+   "gpt4_21adecb5",
+   "gpt4_468eb064"
+  ],
+  "evidence-partial-top5": [
+   "129d1232",
+   "157a136e",
+   "370a8ff4",
+   "3c1045c8",
+   "6d550036",
+   "6e984302",
+   "8e91e7d9",
+   "a3838d2b",
+   "aae3761f",
+   "b46e15ed",
+   "ba358f49",
+   "c18a7dc8",
+   "d23cf73b",
+   "d905b33f",
+   "eac54add",
+   "gpt4_15e38248",
+   "gpt4_31ff4165",
+   "gpt4_372c3eed",
+   "gpt4_45189cb4",
+   "gpt4_731e37d7",
+   "gpt4_7abb270c",
+   "gpt4_7f6b06db",
+   "gpt4_a1b77f9c",
+   "gpt4_d12ceb0e",
+   "gpt4_d6585ce8",
+   "gpt4_e05b82a6",
+   "gpt4_e061b84f"
+  ],
+  "drift-band (D repeat judged correct)": [
+   "0f05491a",
+   "3ba21379",
+   "42ec0761",
+   "5d3d2817",
+   "60159905",
+   "618f13b2",
+   "7024f17c",
+   "8c18457d",
+   "ce6d2d27",
+   "d01c6aa8",
+   "dad224aa",
+   "edced276",
+   "f35224e0",
+   "fca70973",
+   "gpt4_2ba83207",
+   "gpt4_2f56ae70",
+   "gpt4_5501fe77",
+   "gpt4_7a0daae1",
+   "gpt4_85da3956",
+   "gpt4_93159ced",
+   "gpt4_f420262d"
+  ],
+  "judge-strictness (lenient-correct)": [
+   "07741c45",
+   "1c0ddc50",
+   "1cea1afa",
+   "22d2cb42",
+   "66f24dbb",
+   "a2f3aa27",
+   "a89d7624",
+   "b6025781",
+   "gpt4_61e13b3c",
+   "gpt4_fa19884d"
+  ],
+  "residual-reasoning": [
+   "09ba9854",
+   "09d032c9",
+   "0a995998",
+   "0bc8ad93",
+   "0edc2aef",
+   "1da05512",
+   "32260d93",
+   "35a27287",
+   "37f165cf",
+   "38146c39",
+   "4dfccbf7",
+   "51a45a95",
+   "51c32626",
+   "57f827a0",
+   "58ef2f1c",
+   "69fee5aa",
+   "6a1eabeb",
+   "71017277",
+   "852ce960",
+   "88432d0a",
+   "89941a94",
+   "9aaed6a3",
+   "9ee3ecd6",
+   "a11281a2",
+   "afdc33df",
+   "b86304ba",
+   "bf659f65",
+   "d24813b1",
+   "dd2973ad",
+   "e25c3b8d",
+   "gpt4_1916e0ea",
+   "gpt4_2f8be40d",
+   "gpt4_4929293b",
+   "gpt4_9a159967",
+   "gpt4_e414231f"
+  ]
+ },
+ "residual_subcategories": {
+  "method": "per-row classification of the 35 residual-reasoning misses (question + gold vs generated + judge_reasoning); dominant cause per row",
+  "counts": {
+   "preference-application": 9,
+   "aggregation-count": 8,
+   "other-extraction-derivation-abstention": 9,
+   "date-arithmetic": 3,
+   "wrong-instance": 3,
+   "stale-value": 3
+  },
+  "notes": [
+   "Dominant residual mode is over-abstention with sufficient evidence visible: ~18/35 rows abstained.",
+   "Preference-application (9): 6 had a rendered preference constraint block (intent=preference) and the reader still abstained/failed \u2014 apply-instruction insufficient; 3 never fired \u2014 detection gap.",
+   "aggregation-count (8) + date-arithmetic (3) failed WITH compute notes enabled (Cell 4 ran includeComputeNotes) \u2014 notes did not rescue these.",
+   "stale-value (3): knowledge-update answered with the superseded value.",
+   "wrong-instance (3): coreference/instance confusion between similar events."
+  ]
+ },
+ "headline": {
+  "strict_misses": 103,
+  "actionable": {
+   "top5-context-cap": {
+    "n": 31,
+    "pp_upper_bound": 6.2,
+    "note": "evidence-absent (4) + evidence-partial (27); R@10=99.6% puts the missing gold sessions almost entirely at ranks 6-10 \u2014 context assembly, not retrieval quality"
+   },
+   "over-abstention-with-evidence": {
+    "n": "~18 of residual 35",
+    "note": "gen-prompt abstention calibration / preference apply-instruction strength"
+   }
+  },
+  "measurement-bands": {
+   "drift": 21,
+   "judge-strictness-partials": 10,
+   "note": "symmetric rerun noise + strict-judge band; not system defects, bound the measurable ceiling"
+  }
+ }
+}
