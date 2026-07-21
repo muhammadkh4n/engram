@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-07-21T10:44:58Z",
+  "program": "S3 context-assembly verdict (pre-registration: s3-preregistration-2026-07.json)",
+  "cells": {
+    "4B_top5_prod_host": {
+      "strict": "390/500 = 78.0%",
+      "lenient": "82.2%",
+      "cost_usd": 1.04,
+      "gen_in_tokens_M": 6.8
+    },
+    "8_top10_prod_host": {
+      "strict": "401/500 = 80.2%",
+      "lenient": "85.0%",
+      "cost_usd": 1.6,
+      "gen_in_tokens_M": 10.8
+    }
+  },
+  "primary_result": {
+    "overall_strict_delta_pp": 2.2,
+    "mcnemar_flips": "41 improvements vs 30 regressions",
+    "p_exact_two_sided": 0.235,
+    "preregistered_adopt_bar": "p<0.05 \u2014 NOT MET",
+    "artifact": "s3-mcnemar-c8-vs-c4b-2026-07.json"
+  },
+  "mechanism_result": {
+    "prespecified_subset": "15 rows frozen pre-spend: Cell 4 context-capped misses whose gold set becomes complete at top-10",
+    "conversion": "0/15 correct at top-5 -> 10/15 at top-10, zero reverse flips (exact two-sided p ~ 0.002)",
+    "negative_control": "the 16 context-capped misses whose gold stays incomplete at top-10: 0/16 -> 1/16",
+    "churn_symmetry": "outside the mechanism subset flips are exactly 30 vs 30 \u2014 the whole +2.2pp is the predicted mechanism; everything else is generation drift (Cell D byte-identical band: 21 flips)"
+  },
+  "secondary_results": {
+    "host_effect": "Cell 4B vs archived Cell 4 (DeepSeek first-party): -1.4pp strict, p=0.43 \u2014 within the drift band; the no-train fp8 failover config is statistically indistinguishable from the retired host (artifact s3-mcnemar-c4b-vs-c4-2026-07.json)",
+    "provider_mix": "Baidu was TPM-saturated; GMICloud served 492/500 (4B) and 400/500 (Cell 8), StreamLake 6 -> 91. Flip rate by provider is flat (GMICloud 15%, StreamLake 13%) \u2014 mix shift does not explain flips",
+    "by_type": "multi-session +6.0pp, temporal-reasoning +3.8pp, knowledge-update +1.2pp; single-session-preference REGRESSED 40.0% -> 26.7% strict (3 impr / 7 regr, p=0.34; 4 of 7 regressions hedged to partial) \u2014 context dilution on single-gold-session questions",
+    "abstention_guardrail": "4/30 -> 4/30 incorrect on *_abs rows; 2 newly incorrect, offset by 2 newly correct \u2014 neutral"
+  },
+  "verdict": {
+    "adopt_blind_top10": false,
+    "reason": "Fails the pre-registered significance bar; costs 1.59x gen input for a gain confined entirely to the 15 gold-completion rows while doubling context for the other 485 (and directionally hurting preference questions).",
+    "validated_lever": "Session-completeness-aware widening: the causal mechanism (complete the gold session set in context) is confirmed at 10/15 conversion with zero downside on those rows. Widen PAST top-5 only when coverage signals say the evidence set is likely incomplete; never for single-session-preference. Runtime-computable signals: question intent class (multi-session/temporal benefit; the intent classifier already exists for synthesis), retrieval score continuation past rank 5.",
+    "expected_value": "~+2pp strict of the +3.0pp mechanical ceiling at a small fraction of the 1.59x token overhead, without the preference-dilution exposure"
+  }
+}

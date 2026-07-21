@@ -1,0 +1,94 @@
+{
+  "registered_at": "2026-07-21T09:50:42Z",
+  "program": "S3 context-assembly (Cell 4 failure-taxonomy follow-up: top-5 context cap = 31/103 strict misses)",
+  "frozen_before_any_judged_call": true,
+  "retrieval": {
+    "sweep": "results/longmemeval/synthesis-resweep-s2-2026-07.json",
+    "note": "same frozen sweep as all S2 cells; Cell 8 differs from Cell 4 in exactly one variable: --top-sessions 10 (was 5). Within-sweep, paired by question_id."
+  },
+  "coverage_registered_pre_spend": {
+    "gold_fully_covered_top5": "456/500",
+    "gold_fully_covered_top10": "480/500",
+    "retrieved_depth_note": "retrieval lists are variable-depth (2-18 sessions; 55 rows have exactly 5 or fewer, receiving byte-identical context in both cells); 445/500 rows gain context at top-10",
+    "cell4_context_capped_misses": {
+      "evidence_absent_top5": {
+        "n": 4,
+        "gold_complete_at_top10": 3
+      },
+      "evidence_partial_top5": {
+        "n": 27,
+        "gold_complete_at_top10": 12,
+        "gain_partial_gold_only": 13,
+        "no_gain_within_10": 2
+      }
+    },
+    "mechanical_ceiling_note": "full-conversion of the 15 newly-gold-complete rows = +3.0pp strict; the taxonomy's coarse +6.2pp bound assumed all 31 context-capped rows convert, which top-10 cannot deliver (gold beyond rank 10 / list depth on 16 of them)"
+  },
+  "cells": {
+    "8": {
+      "kind": "judge",
+      "gen_endpoint": "identical to S2 Cell 4 (deepseek/deepseek-v4-flash via OpenRouter, first-party DeepSeek pinned, reasoning effort high, max_tokens 12000)",
+      "judge_panel": "identical to S2 panel (gpt-4o-mini + z-ai/glm-4.7-flash + qwen/qwen3.5-flash-02-23, majority with strictest tie-break)",
+      "include_synthesis": true,
+      "top_sessions": 10,
+      "output": "results/longmemeval/s3-cell8-v4flash-notes-top10-2026-07.json"
+    }
+  },
+  "primary_comparison": {
+    "test": "paired exact two-sided McNemar on strict correct/incorrect, Cell 8 vs Cell 4, within-sweep",
+    "output": "results/longmemeval/s3-mcnemar-c8-vs-c4-2026-07.json"
+  },
+  "predictions": {
+    "expected_band_strict": "+1.0 to +3.0pp overall",
+    "upside": "13 evidence-partial rows gain gold sessions without full coverage; some may still convert",
+    "downside_risk": "context roughly doubles for the 397 currently-correct rows; long-context distraction regressions are the known failure mode of widening",
+    "noise_band": "byte-identical Cell D repeat flipped 21/500 rows vs Cell 4; treat |delta| inside ~2pp as indistinguishable from generation drift even if nominally significant"
+  },
+  "decision_rule": {
+    "adopt_top10": "overall strict delta positive AND McNemar p<0.05 AND no question type shows significant strict regression AND missed-abstention guardrail shows no significant increase in newly-incorrect *_abs rows",
+    "reject": "delta within drift band or significant regression anywhere -> keep top-5, and the remaining lever becomes session-completeness-aware selection rather than blind widening",
+    "cost_gate": "report gen-input token multiplier; adoption also requires the cost multiple to stay under ~2x Cell 4 gen input"
+  },
+  "cost_estimate_usd": "~1.7 (Cell 4 was 1.04 at avg 13.6k gen-in tokens/row; top-10 raises avg sessions in context from ~4.9 to ~8.2)",
+  "amended_pre_spend": {
+    "amended_at": "2026-07-21T09:52:23Z",
+    "reason": "Cell 4's registered gen host (DeepSeek first-party, allow_fallbacks:false) 404s for this account: the account-level no-train policy (enabled after S2 ran) filters DeepSeek out of routing. Verified live before any judged spend; a probe pinned to {order:[baidu],quantizations:[fp8],allow_fallbacks:false} routes to Baidu and returns content.",
+    "change": "Both S3 cells pin the production serving host: Baidu fp8 (identical to prod ENGRAM_CHAT_PROVIDER_PREFS, plus allow_fallbacks:false for host purity in the benchmark). A new Cell 4B (top-5, Baidu) replaces archived Cell 4 as the paired baseline so Cell 8 vs 4B isolates context width as the only variable, on the host prod actually uses.",
+    "cells": {
+      "4B": {
+        "top_sessions": 5,
+        "include_synthesis": true,
+        "output": "results/longmemeval/s3-cell4b-v4flash-notes-baidu-2026-07.json"
+      },
+      "8": {
+        "top_sessions": 10,
+        "include_synthesis": true,
+        "output": "results/longmemeval/s3-cell8-v4flash-notes-top10-2026-07.json"
+      }
+    },
+    "gen_extra_body": {
+      "max_tokens": 12000,
+      "reasoning": {
+        "effort": "high"
+      },
+      "provider": {
+        "order": [
+          "baidu"
+        ],
+        "quantizations": [
+          "fp8"
+        ],
+        "allow_fallbacks": false
+      }
+    },
+    "primary_comparison": "Cell 8 vs Cell 4B (within-sweep, within-host), output results/longmemeval/s3-mcnemar-c8-vs-c4b-2026-07.json",
+    "secondary_comparison": "Cell 4B vs archived Cell 4 (host effect DeepSeek-first-party -> Baidu fp8 at top-5; confounded with the ~21-row generation drift band, interpret as a band not a point), output results/longmemeval/s3-mcnemar-c4b-vs-c4-2026-07.json",
+    "cost_estimate_usd": "~2.7 total (two judged cells)",
+    "amendment_2": {
+      "amended_at": "2026-07-21T10:02:36Z",
+      "reason": "First launch (both cells concurrent, allow_fallbacks:false) died on Baidu upstream TPM saturation (tpm_rate_limit_exceeded) that outlasted the 8-attempt/30s-capped backoff; the harness writes output only at completion, so no judged rows were produced.",
+      "change": "Provider prefs become production-exact: {order:[baidu],quantizations:[fp8]} with fallbacks ALLOWED \u2014 Baidu-first, TPM overflow reroutes to other fp8 hosts within the account's no-train filter instead of failing the run. Cells run sequentially (4B then 8) at concurrency 6, the load Cell 4 proved. Both cells share identical prefs, so context width remains the only configured difference; per-row gen_provider is recorded and the provider mix of each cell must be reported alongside the McNemar result \u2014 a materially different mix between cells is a flagged confound.",
+      "note": "This makes the benchmark measure the deployed configuration verbatim (prod ENGRAM_CHAT_PROVIDER_PREFS has no allow_fallbacks:false)."
+    }
+  }
+}
