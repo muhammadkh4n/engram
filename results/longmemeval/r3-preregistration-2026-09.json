@@ -1,0 +1,101 @@
+{
+  "registered_at": "2026-09-30T00:00:00Z",
+  "program": "R3 retrieval remediation baseline: judge what production hands the reader (the memory_recall MCP payload, result.formatted) instead of top-5 dataset sessions re-hydrated from the recall ranking",
+  "frozen_before_any_judged_call": true,
+  "retrieval": {
+    "sweep_command": "npx tsx packages/bench/src/longmemeval/forensics/recall-sweep.ts --data ./packages/bench/data/longmemeval/longmemeval_s_cleaned.json --context-mode formatted --reranker onnx --onnx-model mixedbread-ai/mxbai-rerank-large-v1 --output ./results/longmemeval/r3-g0-formatted-sweep-2026-09.json",
+    "questions": 500,
+    "context_mode": "formatted",
+    "reranker": {
+      "backend": "onnx",
+      "model": "mixedbread-ai/mxbai-rerank-large-v1",
+      "note": "the production reranker (ENGRAM_RERANK_LOCAL_MODEL on the live MCP service, recorded 2026-09-30)"
+    },
+    "recall_options": "exactly what the memory_recall MCP handler passes to Memory.recall: no strategyOverride.maxResults, no tokenBudget, no synthesis; the intent strategy's default result cap applies",
+    "ingest": "unchanged from S2/S3: no contextual preamble",
+    "output": "results/longmemeval/r3-g0-formatted-sweep-2026-09.json"
+  },
+  "cells": {
+    "r3-g0-formatted": {
+      "kind": "judge",
+      "judge_command": "npx tsx packages/bench/src/longmemeval/forensics/judge.ts --recall-output ./results/longmemeval/r3-g0-formatted-sweep-2026-09.json --data ./packages/bench/data/longmemeval/longmemeval_s_cleaned.json --context-mode formatted --gen-endpoint '<gen_endpoint below>' --judge-panel '<judge_panel below>' --concurrency 6 --output ./results/longmemeval/r3-g0-formatted-judge-2026-09.json",
+      "context_mode": "formatted",
+      "top_sessions": null,
+      "include_synthesis": false,
+      "gen_endpoint_source": "meta.gen_endpoint of results/longmemeval/s3-cell4b-v4flash-notes-baidu-2026-07.json, verbatim",
+      "gen_endpoint": {
+        "model": "deepseek/deepseek-v4-flash",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "extraBody": {
+          "max_tokens": 12000,
+          "reasoning": {
+            "effort": "high"
+          },
+          "provider": {
+            "order": [
+              "baidu"
+            ],
+            "quantizations": [
+              "fp8"
+            ]
+          }
+        },
+        "priceIn": 0.14,
+        "priceOut": 0.28
+      },
+      "gen_endpoint_arg": "{\"model\":\"deepseek/deepseek-v4-flash\",\"baseUrl\":\"https://openrouter.ai/api/v1\",\"apiKeyEnv\":\"OPENROUTER_API_KEY\",\"extraBody\":{\"max_tokens\":12000,\"reasoning\":{\"effort\":\"high\"},\"provider\":{\"order\":[\"baidu\"],\"quantizations\":[\"fp8\"]}},\"priceIn\":0.14,\"priceOut\":0.28}",
+      "judge_panel_source": "meta.judge_panel of results/longmemeval/s3-cell4b-v4flash-notes-baidu-2026-07.json, verbatim (majority with strictest tie-break)",
+      "judge_panel": [
+        {
+          "model": "gpt-4o-mini"
+        },
+        {
+          "model": "z-ai/glm-4.7-flash",
+          "baseUrl": "https://openrouter.ai/api/v1",
+          "apiKeyEnv": "OPENROUTER_API_KEY",
+          "extraBody": {
+            "reasoning": {
+              "enabled": false
+            }
+          },
+          "priceIn": 0.06,
+          "priceOut": 0.4
+        },
+        {
+          "model": "qwen/qwen3.5-flash-02-23",
+          "baseUrl": "https://openrouter.ai/api/v1",
+          "apiKeyEnv": "OPENROUTER_API_KEY",
+          "extraBody": {
+            "reasoning": {
+              "enabled": false
+            }
+          },
+          "priceIn": 0.065,
+          "priceOut": 0.26
+        }
+      ],
+      "judge_panel_arg": "[{\"model\":\"gpt-4o-mini\"},{\"model\":\"z-ai/glm-4.7-flash\",\"baseUrl\":\"https://openrouter.ai/api/v1\",\"apiKeyEnv\":\"OPENROUTER_API_KEY\",\"extraBody\":{\"reasoning\":{\"enabled\":false}},\"priceIn\":0.06,\"priceOut\":0.40},{\"model\":\"qwen/qwen3.5-flash-02-23\",\"baseUrl\":\"https://openrouter.ai/api/v1\",\"apiKeyEnv\":\"OPENROUTER_API_KEY\",\"extraBody\":{\"reasoning\":{\"enabled\":false}},\"priceIn\":0.065,\"priceOut\":0.26}]",
+      "gen_prompt": "template unchanged (buildGenUserPrompt); only the context block differs: the recorded payload replaces the re-hydrated sessions, and no derived-notes section is inserted",
+      "output": "results/longmemeval/r3-g0-formatted-judge-2026-09.json"
+    }
+  },
+  "primary_comparison": {
+    "test": "paired exact two-sided McNemar on strict correct/incorrect, r3-g0-formatted vs S3 Cell 4B, paired by question_id",
+    "baseline": "results/longmemeval/s3-cell4b-v4flash-notes-baidu-2026-07.json",
+    "output": "results/longmemeval/r3-mcnemar-g0-formatted-vs-c4b-2026-09.json"
+  },
+  "recorded_not_gated": [
+    "mean context_chars over the 500 rows",
+    "gold_ids_in_context rate: rows whose gold session ids all appear in the payload, and rows with at least one",
+    "per-question-type table (n, strict correct, partial, accuracy) beside Cell 4B",
+    "per-row gen_provider mix, beside Cell 4B's"
+  ],
+  "known_differences_from_cell_4b": {
+    "reranker": "openai (Cell 4B's sweep) -> production ONNX mixedbread-ai/mxbai-rerank-large-v1",
+    "context": "top-5 re-hydrated dataset sessions + synthesis derived notes -> the production memory_recall payload (result.formatted, incl. Related Memories and Faint Associations)",
+    "recall_options": "maxResults 30 -> the production default (no override)",
+    "ingest": "unchanged: no contextual preamble, as in S2/S3",
+    "note": "several variables move at once by design: the cell measures production end to end, so a delta vs Cell 4B is not attributable to any single one of them"
+  }
+}
