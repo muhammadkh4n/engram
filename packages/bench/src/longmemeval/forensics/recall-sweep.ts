@@ -24,13 +24,15 @@
  *     [--onnx-model <hf id>]      # with --reranker onnx; default mixedbread-ai/mxbai-rerank-large-v1
  *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     [--synthesize]              # record per-row RecallResult.synthesis (now = question_date, evidence capped to top-5 sessions)
+ *     [--context-mode sessions|formatted]  # formatted: recall as the MCP memory_recall tool does and
+ *                                 # record its text payload per row (no --synthesize, --max-results unused)
  *     --output ./results/longmemeval/baseline.json
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
-import { projectSessionIds, stripBenchSessionNamespace } from './project-sessions.js'
+import { parseContextMode, runSweepRecall, type ContextMode, type FormattedContextFields } from './context-modes.js'
 import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
 import { parseEventDate } from '@engram-mem/core'
 import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
@@ -48,6 +50,7 @@ interface SweepArgs {
   onnxRerankerModel?: string
   vectorMode?: 'full' | 'engine'
   synthesize: boolean
+  contextMode: ContextMode
   output: string
 }
 
@@ -65,6 +68,8 @@ interface PerQRow {
   synthesis?: SynthesisBlock | null
 }
 
+type SweepRow = PerQRow & Partial<FormattedContextFields>
+
 const K_VALUES = [5, 10, 20, 30]
 
 main().catch((err) => { console.error(err); process.exit(1) })
@@ -77,7 +82,7 @@ async function main(): Promise<void> {
   const allQs = await adapter.loadDataset(args.data)
   const questions = args.limit > 0 ? allQs.slice(0, args.limit) : allQs
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
-  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}`)
+  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}, contextMode=${args.contextMode}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
   console.log()
 
@@ -91,7 +96,7 @@ async function main(): Promise<void> {
     ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
-  const rows: PerQRow[] = []
+  const rows: SweepRow[] = []
   // The backend createBenchMemory actually wired, not the raw flag.
   let resolvedBackend: RerankerBackend | null = null
   const totalStart = Date.now()
@@ -111,6 +116,7 @@ async function main(): Promise<void> {
     let evalMs = 0
     let recalledSessionIds: string[] = []
     let synthesisRow: SynthesisBlock | null | undefined
+    let formattedFields: FormattedContextFields | undefined
 
     try {
       const ingestStart = Date.now()
@@ -121,25 +127,15 @@ async function main(): Promise<void> {
       const evalStart = Date.now()
       const maxK = Math.max(...K_VALUES)
       const questionNow = parseEventDate(q.question_date)
-      const recallResult = await memory.recall(q.question, {
-        strategyOverride: { maxResults: maxK },
-        ...(args.synthesize
-          ? {
-              synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true },
-              ...(questionNow ? { now: questionNow } : {}),
-            }
-          : {}),
+      const outcome = await runSweepRecall(memory, q, {
+        contextMode: args.contextMode,
+        maxK,
+        synthesize: args.synthesize,
+        now: questionNow,
       })
-      recalledSessionIds = projectSessionIds(recallResult)
-      if (args.synthesize) {
-        synthesisRow = recallResult.synthesis
-          ? {
-              intent: recallResult.synthesis.intent,
-              method: recallResult.synthesis.method,
-              text: stripBenchSessionNamespace(recallResult.synthesis.text, q.question_id),
-            }
-          : null
-      }
+      recalledSessionIds = outcome.recalledSessionIds
+      synthesisRow = outcome.synthesisRow
+      formattedFields = outcome.formattedFields
       evalMs = Date.now() - evalStart
     } finally {
       await memory.dispose().catch(() => {})
@@ -163,6 +159,7 @@ async function main(): Promise<void> {
       eval_ms: evalMs,
       recall_at_k: recallAtK,
       ...buildSynthesisField(args.synthesize, synthesisRow),
+      ...(formattedFields ?? {}),
     })
 
     const qDur = ((Date.now() - qStart) / 1000).toFixed(1)
@@ -188,7 +185,7 @@ async function main(): Promise<void> {
   }
 
   const byType: Record<string, Record<string, { hits: number; total: number; rate: number }>> = {}
-  const typeBuckets = new Map<string, PerQRow[]>()
+  const typeBuckets = new Map<string, SweepRow[]>()
   for (const r of rows) {
     const bucket = typeBuckets.get(r.question_type) ?? []
     bucket.push(r)
@@ -269,8 +266,10 @@ function parseArgs(argv: string[]): SweepArgs {
     process.exit(1)
   }
   let reranker: ReturnType<typeof parseRerankerArgs>
+  let contextMode: ContextMode
   try {
     reranker = parseRerankerArgs(argv)
+    contextMode = parseContextMode(argv)
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`)
     process.exit(1)
@@ -285,6 +284,7 @@ function parseArgs(argv: string[]): SweepArgs {
     ...reranker,
     ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
     synthesize: has('synthesize'),
+    contextMode,
     output: get('output') ?? './results/longmemeval/baseline.json',
   }
 }
