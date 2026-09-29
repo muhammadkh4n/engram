@@ -203,6 +203,8 @@ export interface RecallResult {
   sessions?: SessionGroup[]
   /** Mirrors retrieval/engine.ts RecallResult.synthesis. */
   synthesis?: SynthesisBlock | null
+  /** Mirrors retrieval/engine.ts RecallResult.timings (ENGRAM_RECALL_TIMING=1). */
+  timings?: Record<string, number>
 }
 
 export interface RetrievedMemory {

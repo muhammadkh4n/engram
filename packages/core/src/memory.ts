@@ -668,6 +668,7 @@ export class Memory {
       formatted: result.formatted,
       sessions: result.sessions ?? [],
       synthesis: result.synthesis ?? null,
+      ...(result.timings ? { timings: result.timings } : {}),
     }
   }
 

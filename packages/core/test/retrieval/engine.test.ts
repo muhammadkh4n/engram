@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { recall } from '../../src/retrieval/engine.js'
 import type { RecallOpts, RecallResult } from '../../src/retrieval/engine.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
@@ -403,5 +403,74 @@ describe('recall engine — result shape', () => {
     const result = await recall('hi', storage, sensory, opts)
 
     expect(result.formatted).toBe('')
+  })
+})
+
+describe('recall engine — ENGRAM_RECALL_TIMING', () => {
+  const original = process.env['ENGRAM_RECALL_TIMING']
+
+  afterEach(() => {
+    if (original === undefined) delete process.env['ENGRAM_RECALL_TIMING']
+    else process.env['ENGRAM_RECALL_TIMING'] = original
+  })
+
+  it('populates per-stage timings when the flag is 1', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const intelligence: IntelligenceAdapter = {
+      expandQuery: vi.fn().mockResolvedValue(['typescript', 'strict']),
+      rerank: vi.fn().mockImplementation(async (_q: string, docs: Array<{ id: string }>) =>
+        docs.map((d, i) => ({ id: d.id, score: 1 - i * 0.1 })),
+      ),
+    }
+    const opts = makeOpts({ strategy: RECALL_STRATEGIES.deep, intelligence })
+
+    const result = await recall('TypeScript strict mode', storage, sensory, opts)
+
+    expect(result.timings).toBeDefined()
+    const timings = result.timings!
+    for (const stage of ['total', 'expand', 'search', 'graph', 'format']) {
+      expect(timings).toHaveProperty(stage)
+    }
+    for (const value of Object.values(timings)) {
+      expect(Number.isFinite(value)).toBe(true)
+      expect(value).toBeGreaterThanOrEqual(0)
+      expect(timings['total']).toBeGreaterThanOrEqual(value)
+    }
+  })
+
+  it('omits stages that did not run', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const result = await recall('TypeScript strict mode', storage, sensory, makeOpts())
+
+    expect(result.timings).toBeDefined()
+    expect(result.timings).not.toHaveProperty('expand')
+    expect(result.timings).not.toHaveProperty('hyde')
+    expect(result.timings).not.toHaveProperty('rerank')
+    expect(result.timings).not.toHaveProperty('synthesis')
+  })
+
+  it('leaves timings undefined when the flag is unset', async () => {
+    delete process.env['ENGRAM_RECALL_TIMING']
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const result = await recall('TypeScript strict mode', storage, sensory, makeOpts())
+
+    expect(result.timings).toBeUndefined()
+  })
+
+  it('leaves timings undefined for any value other than 1', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = 'true'
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+
+    const result = await recall('TypeScript strict mode', storage, sensory, makeOpts())
+
+    expect(result.timings).toBeUndefined()
   })
 })
