@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  goldIdsInContext,
   parseContextMode,
   productionRecallOptions,
   runSweepRecall,
@@ -52,7 +53,11 @@ function stubMemory(result: SweepRecallResult): SweepMemory & { calls: Array<{ q
   }
 }
 
-const QUESTION = { question_id: QID, question: 'Where did I move the herb planters?' }
+const QUESTION = {
+  question_id: QID,
+  question: 'Where did I move the herb planters?',
+  answer_session_ids: ['sess_b', 'sess_z'],
+}
 
 describe('parseContextMode', () => {
   it('defaults to sessions', () => {
@@ -78,6 +83,39 @@ describe('parseContextMode', () => {
   it('keeps --synthesize legal in sessions mode', () => {
     expect(parseContextMode(['--synthesize'])).toBe('sessions')
     expect(parseContextMode(['--synthesize', '--context-mode', 'sessions'])).toBe('sessions')
+  })
+
+  it('rejects --max-results with formatted', () => {
+    expect(() => parseContextMode(['--context-mode', 'formatted', '--max-results', '30'])).toThrow(/--max-results cannot be combined/)
+    expect(() => parseContextMode(['--max-results', '10', '--context-mode', 'formatted'])).toThrow(/--max-results cannot be combined/)
+  })
+
+  it('keeps --max-results legal in sessions mode', () => {
+    expect(parseContextMode(['--max-results', '30'])).toBe('sessions')
+    expect(parseContextMode(['--max-results', '30', '--context-mode', 'sessions'])).toBe('sessions')
+  })
+})
+
+describe('goldIdsInContext', () => {
+  it('finds gold ids across recalled, related and faint memories, in gold order', () => {
+    const result = stubResult({
+      memories: [{ id: 'm1', metadata: { lmeSessionId: 'sess_a' } }],
+      associations: [{ metadata: { lmeSessionId: 'sess_c' } }],
+      faintAssociations: [{ metadata: { lmeSessionId: 'sess_d' } }],
+    })
+    expect(goldIdsInContext(result, ['sess_d', 'sess_x', 'sess_c', 'sess_a'])).toEqual(['sess_d', 'sess_c', 'sess_a'])
+  })
+
+  it('ignores memories without a dataset session id and repeated gold ids', () => {
+    const result = stubResult({
+      memories: [{ id: 'm1' }, { id: 'm2', metadata: { lmeSessionId: 42 } }, { id: 'm3', metadata: { lmeSessionId: 'sess_a' } }],
+      associations: [{ metadata: {} }],
+    })
+    expect(goldIdsInContext(result, ['sess_a', 'sess_a', 'sess_b'])).toEqual(['sess_a'])
+  })
+
+  it('treats absent association lists as empty', () => {
+    expect(goldIdsInContext(stubResult({ memories: [] }), ['sess_a'])).toEqual([])
   })
 })
 
@@ -139,6 +177,23 @@ describe('runSweepRecall — formatted mode', () => {
     expect(out.formattedFields?.context_items).toBe(3)
   })
 
+  it('counts a gold id reached only through a faint association and leaves the payload untouched', async () => {
+    const result = stubResult({
+      memories: [{ id: 'm1', metadata: { lmeSessionId: 'sess_a' } }],
+      associations: [{ metadata: { lmeSessionId: 'sess_c' } }],
+      faintAssociations: [{ metadata: { lmeSessionId: 'sess_z' } }],
+    })
+    const out = await runSweepRecall(stubMemory(result), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
+    expect(out.formattedFields?.gold_ids_in_context).toEqual(['sess_z'])
+    expect(out.formattedFields?.formatted).toBe(PAYLOAD.split(`lme:${QID}:`).join(''))
+    expect(out.formattedFields?.context_items).toBe(1)
+  })
+
+  it('counts gold ids among recalled memories', async () => {
+    const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
+    expect(out.formattedFields?.gold_ids_in_context).toEqual(['sess_b'])
+  })
+
   it('projects session ids exactly as sessions mode does', async () => {
     const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
     expect(out.recalledSessionIds).toEqual(['sess_a', 'sess_b'])
@@ -151,7 +206,7 @@ describe('runSweepRecall — formatted mode', () => {
       QUESTION,
       { contextMode: 'formatted', maxK: 30, synthesize: false },
     )
-    expect(out.formattedFields).toEqual({ formatted: '', context_chars: 0, context_items: 0 })
+    expect(out.formattedFields).toEqual({ formatted: '', context_chars: 0, context_items: 0, gold_ids_in_context: [] })
     expect(out.recalledSessionIds).toEqual([])
   })
 })

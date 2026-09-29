@@ -66,6 +66,10 @@ export interface RecallResult {
   /** Wall-clock milliseconds per pipeline stage plus `total`, populated only
    *  when ENGRAM_RECALL_TIMING=1. A stage that did not run has no key. */
   timings?: Record<string, number>
+  /** Low-activation graph neighbours rendered under "Faint Associations" in
+   *  `formatted`. Present only when spreading activation produced at least
+   *  one; they are not part of `associations`. */
+  faintAssociations?: RetrievedMemory[]
 }
 
 export interface RecallOpts {
@@ -774,6 +778,9 @@ export async function recall(
     formatted,
     sessions,
     synthesis,
+    ...(compositeContext !== null && compositeContext.faintAssociations.length > 0
+      ? { faintAssociations: compositeContext.faintAssociations }
+      : {}),
     ...finishTimings(timings, recallStart),
   }
 }

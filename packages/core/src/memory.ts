@@ -669,6 +669,7 @@ export class Memory {
       sessions: result.sessions ?? [],
       synthesis: result.synthesis ?? null,
       ...(result.timings ? { timings: result.timings } : {}),
+      ...(result.faintAssociations ? { faintAssociations: result.faintAssociations } : {}),
     }
   }
 

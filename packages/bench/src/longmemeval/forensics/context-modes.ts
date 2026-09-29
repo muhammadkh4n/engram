@@ -17,9 +17,10 @@ const CONTEXT_MODES: readonly ContextMode[] = ['sessions', 'formatted']
 
 /**
  * Parse `--context-mode sessions|formatted` (default `sessions`). Throws on an
- * unknown value, a missing value, or `formatted` combined with `--synthesize`:
- * the MCP handler only synthesizes when the caller asks, and the formatted
- * payload is defined as the no-synthesis response.
+ * unknown value, a missing value, or `formatted` combined with `--synthesize`
+ * or `--max-results`: the MCP handler neither synthesizes nor overrides the
+ * result cap unless the caller asks, and the formatted payload is defined as
+ * that default response.
  */
 export function parseContextMode(argv: readonly string[]): ContextMode {
   const i = argv.indexOf('--context-mode')
@@ -34,6 +35,9 @@ export function parseContextMode(argv: readonly string[]): ContextMode {
   const mode = raw as ContextMode
   if (mode === 'formatted' && argv.includes('--synthesize')) {
     throw new Error('--synthesize cannot be combined with --context-mode formatted (the MCP payload is recalled without synthesis)')
+  }
+  if (mode === 'formatted' && argv.includes('--max-results')) {
+    throw new Error('--max-results cannot be combined with --context-mode formatted (the MCP payload uses the intent strategy\'s own result cap)')
   }
   return mode
 }
@@ -53,9 +57,17 @@ export function productionRecallOptions(projectId?: string): ProductionRecallOpt
   return projectId ? { projectId } : {}
 }
 
+interface MetadataCarrier {
+  metadata?: Record<string, unknown>
+}
+
 export interface SweepRecallResult extends SessionProjectionInput {
   formatted: string
   synthesis?: SynthesisBlock | null
+  /** "Related Memories" in `formatted`. */
+  associations?: ReadonlyArray<MetadataCarrier>
+  /** "Faint Associations" in `formatted`; absent when there were none. */
+  faintAssociations?: ReadonlyArray<MetadataCarrier>
 }
 
 export interface SweepMemory {
@@ -75,6 +87,8 @@ export interface FormattedContextFields {
   formatted: string
   context_chars: number
   context_items: number
+  /** Gold session ids with at least one memory in the payload, in gold order. */
+  gold_ids_in_context: string[]
 }
 
 export interface SweepRecallOutcome {
@@ -100,13 +114,28 @@ export function sweepRecallOptions(cfg: SweepRecallConfig): Record<string, unkno
 }
 
 /**
+ * Gold session ids present in the payload. The formatter's line tags carry no
+ * session id, so presence is read from `metadata.lmeSessionId` of every memory
+ * the payload renders: recalled, related and faint.
+ */
+export function goldIdsInContext(result: SweepRecallResult, goldIds: readonly string[]): string[] {
+  const inContext = new Set<string>()
+  const rendered = [...result.memories, ...(result.associations ?? []), ...(result.faintAssociations ?? [])]
+  for (const m of rendered) {
+    const sid = m.metadata?.['lmeSessionId']
+    if (typeof sid === 'string') inContext.add(sid)
+  }
+  return goldIds.filter((id, i) => inContext.has(id) && goldIds.indexOf(id) === i)
+}
+
+/**
  * One recall for one question. Session projection (and so recall@K) is the
  * same in both modes; `formatted` mode additionally captures the payload text
  * with the bench session namespace rewritten to dataset ids.
  */
 export async function runSweepRecall(
   memory: SweepMemory,
-  question: { question_id: string; question: string },
+  question: { question_id: string; question: string; answer_session_ids: readonly string[] },
   cfg: SweepRecallConfig,
 ): Promise<SweepRecallOutcome> {
   const result = await memory.recall(question.question, sweepRecallOptions(cfg))
@@ -128,6 +157,7 @@ export async function runSweepRecall(
       formatted,
       context_chars: formatted.length,
       context_items: result.memories.length,
+      gold_ids_in_context: goldIdsInContext(result, question.answer_session_ids),
     }
   }
 

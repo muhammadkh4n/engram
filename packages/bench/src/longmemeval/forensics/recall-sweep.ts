@@ -25,7 +25,7 @@
  *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     [--synthesize]              # record per-row RecallResult.synthesis (now = question_date, evidence capped to top-5 sessions)
  *     [--context-mode sessions|formatted]  # formatted: recall as the MCP memory_recall tool does and
- *                                 # record its text payload per row (no --synthesize, --max-results unused)
+ *                                 # record its text payload per row (no --synthesize or --max-results)
  *     --output ./results/longmemeval/baseline.json
  */
 import * as fs from 'node:fs'

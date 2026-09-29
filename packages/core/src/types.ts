@@ -205,6 +205,8 @@ export interface RecallResult {
   synthesis?: SynthesisBlock | null
   /** Mirrors retrieval/engine.ts RecallResult.timings (ENGRAM_RECALL_TIMING=1). */
   timings?: Record<string, number>
+  /** Mirrors retrieval/engine.ts RecallResult.faintAssociations. */
+  faintAssociations?: RetrievedMemory[]
 }
 
 export interface RetrievedMemory {
