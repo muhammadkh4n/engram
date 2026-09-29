@@ -48,7 +48,7 @@ const AUTH_SCHEME = String.raw`(?:Bearer|Basic|Token|Digest)[ \t]+`
 const ASSIGNMENT_RE = new RegExp(
   String.raw`(?<![\w.$])(["']?)(${SECRET_KEY})\1` +
     String.raw`([ \t]*[=:](?:[ \t]+(?![A-Z][A-Z0-9_]*=))?)(?![=:])` +
-    String.raw`(?:"([^"\n]*)"|'([^'\n]*)'|(${AUTH_SCHEME})?(?!${AUTH_SCHEME})(${VALUE_CHARS}{1,1024})${VALUE_END})`,
+    String.raw`(?:"([^"\n]*)"|'([^'\n]*)'|\`([^\`\n]*)\`|(${AUTH_SCHEME})?(?!${AUTH_SCHEME})(${VALUE_CHARS}{1,1024})${VALUE_END})`,
   'gim',
 )
 
@@ -71,19 +71,38 @@ const DOC_PLACEHOLDER_RE = /(?:\.\.\.|…)$|^<[^>]*>$|^(?:x{3,}|\*{3,})$/i
 const INDIRECTION_RE = /^\$[{(]?[A-Za-z_]|^%[A-Za-z_]+%$/
 // `process.env.X!`, `opts.token`, `resp.usage?.prompt_tokens`: a code reference.
 const MEMBER_PATH_RE = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+!?$/
-// `ANSWER_MAX_TOKENS`, `'OPENAI_API_KEY'`: the name of a constant or env var.
+// `ANSWER_MAX_TOKENS`: the name of a constant.
 const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/
 // `openaiKey`: a camelCase variable passed by name in code.
 const CAMEL_IDENTIFIER_RE = /^[a-z]+(?:[A-Z][a-z]+)+$/
+// Keys that say where a secret is found rather than holding it:
+// `DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'`, `TOKEN_FILE=/run/secrets/token`, `passwordPath`.
+const VARIABLE_KEY_RES = [/[_.-](?:ENV|NAME|VAR|FILE|PATH)$/i, /[a-z0-9](?:Env|Name|Var|File|Path)$/]
 
-/** Values that are configuration, types or references rather than credentials. */
-function isNonSecretValue(value: string, name: string, quoted: boolean): boolean {
+function isVariableKey(name: string): boolean {
+  return VARIABLE_KEY_RES.some((re) => re.test(name))
+}
+
+/** Values that cannot be a credential whatever syntax surrounds them. */
+function isInertValue(value: string, name: string): boolean {
   if (value === '' || isOnlyPlaceholders(value)) return true
   if (QUANTITY_RE.test(value)) return !NAME_ENDS_IN_SECRET_WORD_RE.test(name)
-  if (LITERAL_VALUES.has(value.toLowerCase())) return true
-  const patterns = [DOC_PLACEHOLDER_RE, INDIRECTION_RE, MEMBER_PATH_RE, CONSTANT_NAME_RE]
-  if (patterns.some((re) => re.test(value))) return true
-  return !quoted && CAMEL_IDENTIFIER_RE.test(value)
+  return LITERAL_VALUES.has(value.toLowerCase()) || DOC_PLACEHOLDER_RE.test(value)
+}
+
+/**
+ * A quoted value is a literal in every language, so its shape proves nothing: a
+ * password can look like a constant or a camelCase word. Only shell expansion
+ * inside double quotes and template interpolation make it a reference.
+ */
+function isQuotedReference(value: string, quote: string): boolean {
+  if (quote === '"') return INDIRECTION_RE.test(value)
+  return quote === '`' && value.includes('${')
+}
+
+/** Identifier shapes, exempt only where the syntax shows the value is a code expression. */
+function isCodeReference(value: string): boolean {
+  return [MEMBER_PATH_RE, CONSTANT_NAME_RE, CAMEL_IDENTIFIER_RE].some((re) => re.test(value))
 }
 
 function isEnvStyleKey(name: string): boolean {
@@ -95,10 +114,29 @@ function isAtLineStart(text: string, offset: number): boolean {
   return /^[ \t]*(?:-[ \t]+)?$/.test(text.slice(lineStart, offset))
 }
 
+function restOfLine(text: string, offset: number): string {
+  const lineEnd = text.indexOf('\n', offset)
+  return text.slice(offset, lineEnd === -1 ? text.length : lineEnd)
+}
+
+/**
+ * Whether an unquoted value sits in data syntax (its text is the value) or in
+ * code syntax (it may name a variable). Data: a tight `NAME=value` (env line,
+ * `export`, CLI flag, query string), an auth-scheme header, a `key: value`
+ * inside a string, or a line-leading `key: value` with nothing code-like after
+ * it (YAML, env dumps, HTTP headers). Everything else is code: a mid-line
+ * assignment or a line-leading pair followed by `,` `;` `(` or `{`.
+ */
+function isDataSyntax(text: string, offset: number, keyQuote: string, sep: string, valueEnd: number): boolean {
+  if (sep === '=') return true
+  if (!keyQuote && /["']/.test(text.charAt(offset - 1))) return true
+  if (!isAtLineStart(text, offset)) return false
+  return !/^\s*[,;({]|[,;({]\s*$/.test(restOfLine(text, valueEnd))
+}
+
 /**
  * A plain word after a code-style key (`password: see the runbook`,
- * `const token = await …`) is prose or code, not a credential. Line-leading
- * keys (YAML, ini) and tight `key=value` pairs are always treated as data.
+ * `const token = await …`) is prose or code, not a credential.
  */
 function isProseOrCode(name: string, separator: string, value: string, lineLeading: boolean): boolean {
   if (!/^[A-Za-z]+$/.test(value) || isEnvStyleKey(name) || lineLeading) return false
@@ -106,22 +144,52 @@ function isProseOrCode(name: string, separator: string, value: string, lineLeadi
   return trimmed === ':' || separator !== trimmed
 }
 
+interface BarePair {
+  offset: number
+  end: number
+  keyQuote: string
+  name: string
+  sep: string
+  hasScheme: boolean
+  value: string
+}
+
+function isExemptBareValue(text: string, pair: BarePair): boolean {
+  const { offset, end, keyQuote, name, sep, hasScheme, value } = pair
+  if (INDIRECTION_RE.test(value)) return true
+  if (hasScheme || isDataSyntax(text, offset, keyQuote, sep, end)) return false
+  return isCodeReference(value) || isProseOrCode(name, sep, value, isAtLineStart(text, offset))
+}
+
 function redactAssignments(text: string, redactions: SecretRedaction[]): string {
   return text.replace(
     ASSIGNMENT_RE,
-    (match, quote: string, name: string, sep: string, dq?: string, sq?: string, scheme?: string, bare?: string, offset?: number) => {
-      const quotedValue = dq ?? sq
+    (
+      match: string,
+      keyQuote: string,
+      name: string,
+      sep: string,
+      dq: string | undefined,
+      sq: string | undefined,
+      bt: string | undefined,
+      scheme: string | undefined,
+      bare: string | undefined,
+      offset: number,
+    ) => {
+      if (isVariableKey(name)) return match
+      const quotedValue = dq ?? sq ?? bt
       if (quotedValue !== undefined) {
-        if (isNonSecretValue(quotedValue, name, true)) return match
-        const q = dq !== undefined ? '"' : "'"
+        const q = dq !== undefined ? '"' : sq !== undefined ? "'" : '`'
+        if (isInertValue(quotedValue, name) || isQuotedReference(quotedValue, q)) return match
         redactions.push({ kind: 'named-secret', name })
-        return `${quote}${name}${quote}${sep}${q}${placeholder(name)}${q}`
+        return `${keyQuote}${name}${keyQuote}${sep}${q}${placeholder(name)}${q}`
       }
       const value = bare ?? ''
-      if (isNonSecretValue(value, name, false)) return match
-      if (!scheme && isProseOrCode(name, sep, value, isAtLineStart(text, offset ?? 0))) return match
+      if (isInertValue(value, name)) return match
+      const pair = { offset, end: offset + match.length, keyQuote, name, sep, hasScheme: scheme !== undefined, value }
+      if (isExemptBareValue(text, pair)) return match
       redactions.push({ kind: 'named-secret', name })
-      return `${quote}${name}${quote}${sep}${scheme ?? ''}${placeholder(name)}`
+      return `${keyQuote}${name}${keyQuote}${sep}${scheme ?? ''}${placeholder(name)}`
     },
   )
 }

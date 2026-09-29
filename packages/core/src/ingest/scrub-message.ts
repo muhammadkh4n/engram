@@ -33,8 +33,8 @@ function scrubText(text: string, redactions: SecretRedaction[]): string {
 /**
  * A structured `{ password: "hunter2hunter2" }` carries no `NAME=` shape inside
  * the value itself, so the key is judged the same way the scrubber judges a
- * JSON pair in text. Values the scrubber would keep under that key (literals,
- * `$VAR` references, constants) are kept here too.
+ * JSON pair in text. Values the scrubber would keep under that key (empty,
+ * booleans, `$VAR` references, keys naming a variable) are kept here too.
  */
 function scrubKeyedText(key: string, value: string, redactions: SecretRedaction[]): string {
   if (!value.includes('"') && !value.includes('\n')) {

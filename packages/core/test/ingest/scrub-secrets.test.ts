@@ -251,6 +251,57 @@ describe('scrubSecrets — leaves non-secrets alone', () => {
   }
 })
 
+describe('scrubSecrets — a literal under a secret-named key is redacted whatever its shape', () => {
+  const redacted: Array<[string, string, string]> = [
+    ['NEO4J_PASSWORD=correctHorse', 'NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]', 'NEO4J_PASSWORD'],
+    ['DB_PASSWORD=SUPER_SECRET_PW', 'DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
+    ['ENGRAM_API_KEY=myApiKey', 'ENGRAM_API_KEY=[REDACTED:ENGRAM_API_KEY]', 'ENGRAM_API_KEY'],
+    ['{"password": "MY_PROD_PASS"}', '{"password": "[REDACTED:password]"}', 'password'],
+    ['API_KEY=abc.def.ghi', 'API_KEY=[REDACTED:API_KEY]', 'API_KEY'],
+    ['export DB_PASSWORD=hunter2', 'export DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
+    ['password: hunter2', 'password: [REDACTED:password]', 'password'],
+    ["      NEO4J_PASSWORD: 'correctHorse',", "      NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',", 'NEO4J_PASSWORD'],
+    ['DB_PASSWORD: "SUPER_SECRET_PW",', 'DB_PASSWORD: "[REDACTED:DB_PASSWORD]",', 'DB_PASSWORD'],
+    ['const password = `correctHorse`', 'const password = `[REDACTED:password]`', 'password'],
+    ['docker run -e NEO4J_PASSWORD=correctHorse neo4j', 'docker run -e NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD] neo4j', 'NEO4J_PASSWORD'],
+    ['curl -H "X-Api-Key: myApiKey" https://api.example.com', 'curl -H "X-Api-Key: [REDACTED:X-Api-Key]" https://api.example.com', 'X-Api-Key'],
+    ['Authorization: Bearer SUPER_SECRET_PW', 'Authorization: Bearer [REDACTED:Authorization]', 'Authorization'],
+  ]
+
+  for (const [input, expected, name] of redacted) {
+    it(`redacts ${input.trim()}`, () => {
+      const { text, redactions } = scrubSecrets(input)
+      expect(text).toBe(expected)
+      expect(redactions).toEqual([{ kind: 'named-secret', name }])
+    })
+  }
+
+  const references: string[] = [
+    "DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'",
+    'const apiKey = openaiKey',
+    '  apiKey: openaiKey,',
+    '  apiKey: config.openai.apiKey,',
+    'const token = await getToken()',
+    '  password: args.password,',
+    'OPENAI_API_KEY=$OPENAI_API_KEY',
+    'API_KEY=${API_KEY}',
+    'TOKEN=$(cat ~/.token)',
+    'TOKEN_LIMIT=4096',
+    'OPENAI_API_KEY= NEO4J_PASSWORD=',
+    'NEO4J_PASSWORD_FILE=/run/secrets/neo4j',
+    'const tokenName = "GITHUB_TOKEN"',
+    'const auth = `Bearer ${token}`',
+  ]
+
+  for (const input of references) {
+    it(`keeps the reference ${input.trim()}`, () => {
+      const { text, redactions } = scrubSecrets(input)
+      expect(redactions).toEqual([])
+      expect(text).toBe(input)
+    })
+  }
+})
+
 describe('scrubSecrets — numeric values', () => {
   it('redacts a numeric value under a bare secret name', () => {
     expect(scrubSecrets('DB_PASSWORD=12345678').text).toBe('DB_PASSWORD=[REDACTED:DB_PASSWORD]')
