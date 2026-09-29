@@ -20,6 +20,8 @@
  *     [--limit 50]                # smoke run (default: all 500)
  *     [--max-results 30]          # passed to memory.recall
  *     [--no-consolidate] [--no-graph] [--no-rerank]
+ *     [--reranker openai|onnx|none]  # default openai (none under --no-rerank)
+ *     [--onnx-model <hf id>]      # with --reranker onnx; default mixedbread-ai/mxbai-rerank-large-v1
  *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     [--synthesize]              # record per-row RecallResult.synthesis (now = question_date, evidence capped to top-5 sessions)
  *     --output ./results/longmemeval/baseline.json
@@ -31,8 +33,9 @@ import { createBenchMemory } from '../../memory-factory.js'
 import { projectSessionIds, stripBenchSessionNamespace } from './project-sessions.js'
 import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
 import { parseEventDate } from '@engram-mem/core'
+import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
-import type { BenchmarkOpts } from '../../types.js'
+import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
 
 interface SweepArgs {
   data: string
@@ -41,6 +44,8 @@ interface SweepArgs {
   noConsolidate: boolean
   noGraph: boolean
   noRerank: boolean
+  rerankerBackend?: RerankerBackend
+  onnxRerankerModel?: string
   vectorMode?: 'full' | 'engine'
   synthesize: boolean
   output: string
@@ -72,7 +77,7 @@ async function main(): Promise<void> {
   const allQs = await adapter.loadDataset(args.data)
   const questions = args.limit > 0 ? allQs.slice(0, args.limit) : allQs
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
-  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${!args.noRerank}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}`)
+  console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
   console.log()
 
@@ -81,10 +86,14 @@ async function main(): Promise<void> {
     graph: !args.noGraph,
     topK: args.maxResults,
     noRerank: args.noRerank,
+    ...(args.rerankerBackend ? { rerankerBackend: args.rerankerBackend } : {}),
+    ...(args.onnxRerankerModel ? { onnxRerankerModel: args.onnxRerankerModel } : {}),
     ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
   const rows: PerQRow[] = []
+  // The backend createBenchMemory actually wired, not the raw flag.
+  let resolvedBackend: RerankerBackend | null = null
   const totalStart = Date.now()
 
   for (let i = 0; i < questions.length; i++) {
@@ -95,7 +104,8 @@ async function main(): Promise<void> {
     // BUT — runQuestion currently slices to topK before computing recall@K.
     // For the sweep we want a fuller view: retrieve max(K_VALUES) once, then
     // compute recall@K from the same list. We need a slightly different path.
-    const { memory } = await createBenchMemory(benchOpts)
+    const { memory, config } = await createBenchMemory(benchOpts)
+    resolvedBackend = config.rerankerBackend
     let episodes = 0
     let ingestMs = 0
     let evalMs = 0
@@ -196,6 +206,7 @@ async function main(): Promise<void> {
   const output = {
     meta: {
       args: args as unknown as Record<string, unknown>,
+      ...buildModelMeta(resolvedBackend, args.onnxRerankerModel),
       K_values: K_VALUES,
       total_questions: rows.length,
       total_seconds: parseFloat(totalDur),
@@ -257,6 +268,13 @@ function parseArgs(argv: string[]): SweepArgs {
     console.error(`Error: --vector-mode must be "full" or "engine", got ${JSON.stringify(vectorModeRaw)}`)
     process.exit(1)
   }
+  let reranker: ReturnType<typeof parseRerankerArgs>
+  try {
+    reranker = parseRerankerArgs(argv)
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`)
+    process.exit(1)
+  }
   return {
     data: get('data') ?? './data/longmemeval/longmemeval_s_cleaned.json',
     limit: parseInt(get('limit') ?? '0', 10),
@@ -264,6 +282,7 @@ function parseArgs(argv: string[]): SweepArgs {
     noConsolidate: has('no-consolidate'),
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
+    ...reranker,
     ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
     synthesize: has('synthesize'),
     output: get('output') ?? './results/longmemeval/baseline.json',

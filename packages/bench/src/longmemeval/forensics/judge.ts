@@ -48,6 +48,7 @@ import {
   DEFAULT_API_KEY_ENV, type EndpointSpec, type JudgeVote,
 } from './provider-lib.js'
 import { runJudgePanel, aggregateVerdicts } from './judge-call.js'
+import { buildJudgeModelMeta } from './reranker-meta-lib.js'
 
 interface JudgeArgs {
   recallOutput: string
@@ -112,6 +113,7 @@ async function main(): Promise<void> {
   }
 
   const recallOutput = JSON.parse(fs.readFileSync(args.recallOutput, 'utf8')) as {
+    meta?: unknown
     rows: RecallRow[]
   }
   const allDataset = JSON.parse(fs.readFileSync(args.data, 'utf8')) as LongMemEvalQuestion[]
@@ -204,6 +206,7 @@ async function main(): Promise<void> {
       args: args as unknown as Record<string, unknown>,
       gen_endpoint: genSpec as unknown as Record<string, unknown>,
       judge_panel: panel as unknown as Array<Record<string, unknown>>,
+      ...buildJudgeModelMeta(recallOutput.meta, genSpec.model),
       total_questions: acc.total,
       total_cost_usd: totalCost,
       total_seconds: (Date.now() - start) / 1000,
