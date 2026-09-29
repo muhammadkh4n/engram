@@ -53,6 +53,7 @@ import { tryCreateGraph } from '../graph-helper.js'
 import { resolveProject, resolveProjectScope } from './project-detect.js'
 import { findDuplicate, boostDuplicate } from './dedup.js'
 import { logRejection } from './rejection-log.js'
+import { scrubModelInput } from './scrub-model-input.js'
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -275,11 +276,14 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const content = await resolveContent(args)
-  if (!content) {
+  const resolved = await resolveContent(args)
+  if (!resolved) {
     log(args.verbose, 'no content to ingest, exiting')
     process.exit(0)
   }
+  // Every later consumer (classifier model, rejection log, dedup embedding,
+  // rawTurn metadata, verbose log lines) reads this scrubbed copy.
+  const content = scrubModelInput(resolved, '[engram-ingest]')
 
   if (content.length < 2) {
     log(args.verbose, `content too short (${content.length} chars)`)
