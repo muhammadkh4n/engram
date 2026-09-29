@@ -19,6 +19,8 @@ export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
 export { parseContent } from './ingestion/content-parser.js'
 export type { ParsedContent, ParsedPart } from './ingestion/content-parser.js'
+export { scrubSecrets } from './ingest/scrub-secrets.js'
+export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
 export type {
   StorageAdapter,
   EpisodeStorage,
