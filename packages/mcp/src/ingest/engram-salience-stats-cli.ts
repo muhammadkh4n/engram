@@ -91,7 +91,8 @@ function main(): void {
   process.stdout.write('\nby project:\n')
   const byProject = new Map<string, number>()
   for (const e of entries) {
-    byProject.set(e.project, (byProject.get(e.project) ?? 0) + 1)
+    const proj = e.project ?? '<shared>'
+    byProject.set(proj, (byProject.get(proj) ?? 0) + 1)
   }
   for (const [proj, count] of [...byProject.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)) {
     process.stdout.write(`  ${count.toString().padStart(4)}  ${proj}\n`)

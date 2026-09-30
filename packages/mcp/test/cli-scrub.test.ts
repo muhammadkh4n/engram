@@ -70,6 +70,7 @@ vi.mock('../src/graph-helper.js', () => ({ tryCreateGraph: vi.fn().mockResolvedV
 vi.mock('../src/ingest/project-detect.js', () => ({
   resolveProject: () => 'engram',
   resolveProjectScope: () => ({ id: undefined, source: 'unscoped' }),
+  projectForCategory: (project: string | null) => project,
 }))
 vi.mock('../src/ingest/dedup.js', () => ({
   findDuplicate: h.findDuplicate,

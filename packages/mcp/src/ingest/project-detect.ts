@@ -1,71 +1,152 @@
 /**
  * Project detection from a working directory.
  *
- * The rule: walk up from cwd looking for a `.git` directory. Use the
- * basename of the directory that contains it. If no git ancestor is
- * found, fall back to the basename of cwd. Ultimate fallback: 'global'.
+ * The rule: walk up from cwd to the nearest `.git` entry and name the
+ * repository that owns it.
+ *   - `.git` directory → the directory that contains it.
+ *   - `.git` file pointing at a linked worktree's admin dir (it carries a
+ *     `commondir` file) → the repository owning the common git dir, so every
+ *     worktree of a repo shares one tag with its main checkout.
+ *   - `.git` file of a submodule (no `commondir`) → the submodule's own
+ *     directory; it is a separate codebase.
+ * No git ancestor → null (shared). A directory name outside any repository
+ * (a home dir, ~/.claude, /tmp, an org folder) says nothing about which
+ * codebase a memory belongs to, and tagging it would scatter shared
+ * knowledge across meaningless buckets.
  *
- * This coarsens monorepo subpackages into a single project (first git
- * ancestor wins), which is the right call for project-scoped recall:
- * memories within `engram/packages/core` and `engram/packages/graph`
- * should share the same project tag because they're the same codebase.
+ * Monorepo subpackages coarsen to the repository (first git ancestor wins):
+ * `engram/packages/core` and `engram/packages/graph` are one codebase.
  */
 
-import { existsSync, statSync } from 'node:fs'
-import { basename, dirname, resolve } from 'node:path'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
+import type { SalienceCategory } from '@engram-mem/core'
 
-export function detectProject(cwd: string = process.cwd()): string {
-  const absolute = resolve(cwd)
-  let current = absolute
+/** At most this many parent directories: bounds pathological trees and symlink loops. */
+const MAX_ANCESTORS = 20
 
-  // Safety bound: at most 20 parent directories. Protects against
-  // pathological filesystems and symlink loops.
-  for (let i = 0; i < 20; i++) {
+export function detectProject(cwd: string = process.cwd()): string | null {
+  let current = resolve(cwd)
+
+  for (let i = 0; i < MAX_ANCESTORS; i++) {
     const gitPath = `${current}/.git`
     if (existsSync(gitPath)) {
-      // .git can be a directory (normal repo) or a file (git worktree /
-      // submodule pointer). Either way, the containing dir is the repo.
-      try {
-        const name = basename(current)
-        return name || 'global'
-      } catch {
-        return 'global'
-      }
+      return repositoryNameFor(current, gitPath)
     }
 
     const parent = dirname(current)
-    if (parent === current) {
-      // Reached filesystem root
-      break
-    }
+    if (parent === current) break
     current = parent
   }
 
-  // No git ancestor found. Use basename of cwd.
-  try {
-    const st = statSync(absolute)
-    if (st.isDirectory()) {
-      const name = basename(absolute)
-      return name || 'global'
-    }
-  } catch {
-    // fall through
-  }
-  return 'global'
+  return null
+}
+
+function repositoryNameFor(checkoutDir: string, gitPath: string): string | null {
+  const own = basename(checkoutDir) || null
+  const gitDir = readGitDirPointer(gitPath, checkoutDir)
+  if (!gitDir) return own
+
+  const commonDir = readCommonDir(gitDir)
+  if (!commonDir) return own
+
+  return repositoryNameFromCommonDir(commonDir) ?? own
 }
 
 /**
- * Resolve the project identifier to use for an ingestion, given the
- * user's --project flag. `auto` → detectProject(cwd). `none` → the
- * global bucket. Any other string → that string verbatim (caller
- * explicitly named a project).
+ * The admin git dir a `.git` file points at, or null when `.git` is a
+ * directory or the file is not a `gitdir:` pointer. Relative pointers are
+ * relative to the directory holding the `.git` file.
  */
-export function resolveProject(flag: string, cwd: string = process.cwd()): string {
-  if (flag === 'none') return 'global'
-  if (flag === 'auto') return detectProject(cwd)
-  return flag
+function readGitDirPointer(gitPath: string, checkoutDir: string): string | null {
+  try {
+    if (!statSync(gitPath).isFile()) return null
+    const match = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(gitPath, 'utf8'))
+    if (!match?.[1]) return null
+    return isAbsolute(match[1]) ? match[1] : resolve(checkoutDir, match[1])
+  } catch {
+    return null
+  }
 }
 
+/** A linked worktree's admin dir names the shared git dir in `commondir`. */
+function readCommonDir(gitDir: string): string | null {
+  try {
+    const raw = readFileSync(`${gitDir}/commondir`, 'utf8').trim()
+    if (!raw) return null
+    return isAbsolute(raw) ? raw : resolve(gitDir, raw)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `<repo>/.git` → `<repo>`; a submodule's `<super>/.git/modules/<name>` →
+ * `<name>`; a bare `<name>.git` → `<name>`.
+ */
+function repositoryNameFromCommonDir(commonDir: string): string | null {
+  const name = basename(commonDir)
+  if (name === '.git') return basename(dirname(commonDir)) || null
+  if (basename(dirname(commonDir)) === 'modules') return name || null
+  return name.replace(/\.git$/, '') || null
+}
+
+/**
+ * Identifiers that mean "no project — shared across all projects". They map
+ * to a NULL `project_id`.
+ */
+const SHARED_ALIASES = new Set(['global', 'none', 'shared'])
+
+function isSharedAlias(id: string): boolean {
+  return SHARED_ALIASES.has(id.toLowerCase())
+}
+
+/**
+ * Resolve the project for an ingestion from the `--project` flag.
+ * `auto` → resolveProjectScope (ENGRAM_PROJECT_ID, then the repository);
+ * `none` or any other shared alias → null (shared); anything else → that
+ * name verbatim. The same resolution feeds the stored `project_id` and the
+ * `metadata.project` tag so the two never disagree.
+ */
+export function resolveProject(
+  flag: string,
+  cwd: string = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (flag === 'auto') return resolveProjectScope({ env, cwd }).id
+  return normalizeProjectId(flag) ?? null
+}
+
+/**
+ * Normalise a caller-supplied project id: trimmed, and blank or shared
+ * aliases become undefined (shared).
+ */
+export function normalizeProjectId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const id = raw.trim()
+  if (!id || isSharedAlias(id)) return undefined
+  return id
+}
+
+/**
+ * Salience categories that describe the user or people rather than one
+ * codebase: working-style preferences, who someone is, and priority
+ * signals apply in every project, so they are stored shared.
+ */
+const CROSS_CUTTING_CATEGORIES: ReadonlySet<SalienceCategory> = new Set<SalienceCategory>([
+  'preference',
+  'identity',
+  'emotional_signal',
+])
+
+/** The project to store a classified memory under: null for cross-cutting kinds. */
+export function projectForCategory(
+  project: string | null,
+  category: SalienceCategory,
+): string | null {
+  if (CROSS_CUTTING_CATEGORIES.has(category)) return null
+  return project
+}
 
 /**
  * The hard-isolation project scope used for the `project_id` storage column
@@ -82,21 +163,14 @@ export interface ProjectScope {
 }
 
 /**
- * Identifiers that mean "no isolation — shared across all projects". These
- * map to a NULL `project_id` so they match every scoped recall (the SQL
- * filter treats NULL rows as shared).
- */
-const SHARED_ALIASES = new Set(['global', 'none', 'shared'])
-
-/**
  * Resolve the hard project scope for ingest + recall.
  *
  * Order (first match wins):
  *   1. ENGRAM_PROJECT_ID env var (explicit) — required for the remote HTTP
  *      server, which has no project cwd. A shared alias ('global'/'none'/
  *      'shared') explicitly selects the shared bucket.
- *   2. detectProject(cwd) — repo basename, drift-free across clone methods and
- *      already the convention behind the soft `metadata.project` tag.
+ *   2. detectProject(cwd) — the owning repository's name (worktrees resolve
+ *      to their main repository), drift-free across clone methods.
  *   3. null — shared bucket (the safe, non-isolating default).
  *
  * Ingest and recall MUST resolve through this single function so the tag
@@ -111,14 +185,14 @@ export function resolveProjectScope(
 
   const explicit = env['ENGRAM_PROJECT_ID']?.trim()
   if (explicit) {
-    if (SHARED_ALIASES.has(explicit.toLowerCase())) {
+    if (isSharedAlias(explicit)) {
       return { id: null, source: 'env' }
     }
     return { id: explicit, source: 'env' }
   }
 
   const detected = detectProject(cwd)
-  if (detected && !SHARED_ALIASES.has(detected.toLowerCase())) {
+  if (detected && !isSharedAlias(detected)) {
     return { id: detected, source: 'detected' }
   }
   return { id: null, source: 'unscoped' }

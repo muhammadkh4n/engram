@@ -22,6 +22,7 @@ import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
+import { normalizeProjectId } from './ingest/project-detect.js'
 
 /**
  * Read the package version once at module load from the colocated package.json.
@@ -497,7 +498,7 @@ export function createEngramServer(): Server {
         const content = args['content']
         const role = args['role']
         const sessionId = args['session_id']
-        const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
+        const projectId = normalizeProjectId(args['project_id'])
 
         if (typeof content !== 'string' || content.trim().length === 0) {
           return {
