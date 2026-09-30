@@ -56,7 +56,7 @@
     "@engram-mem/core": "*",
     "@engram-mem/graph": "*",
     "@engram-mem/openai": "*",
-    "@engram-mem/postgrest": "0.5.2",
+    "@engram-mem/postgrest": "*",
     "@engram-mem/recall-engine": "*",
     "@engram-mem/rerank-onnx": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",

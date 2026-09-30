@@ -30,7 +30,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@engram-mem/postgrest": "0.5.2"
+    "@engram-mem/postgrest": "*"
   },
   "devDependencies": {
     "typescript": "^6.0.2",

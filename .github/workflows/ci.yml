@@ -16,6 +16,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: node scripts/check-workspace-links.mjs
       - run: npm run build
       - run: npm run typecheck
       # NEO4J_TEST_READY is intentionally unset: graph integration tests
