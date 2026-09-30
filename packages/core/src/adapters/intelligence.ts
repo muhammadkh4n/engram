@@ -197,4 +197,21 @@ export interface IntelligenceAdapter {
     evidence: ReadonlyArray<EvidenceItem>,
     opts: { mode: 'temporal' | 'aggregation' },
   ): Promise<EvidenceSelection>
+  /**
+   * Digest a conversation transcript excerpt into storable memory.
+   *
+   * - `session-summary`: a bullet summary of a finished session (decisions,
+   *   solved problems, preferences, facts, next steps). `context` is always
+   *   the empty string for this kind.
+   * - `pre-compact`: `memory` holds the long-term bullet points; `context`
+   *   holds a short paragraph for re-injection after context compaction
+   *   (empty when the model produced none).
+   *
+   * An empty `memory` means the model returned nothing usable; callers
+   * should store nothing.
+   */
+  digestTranscript?(
+    excerpt: string,
+    opts: { kind: 'session-summary' | 'pre-compact' },
+  ): Promise<{ memory: string; context: string }>
 }

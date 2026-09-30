@@ -392,4 +392,98 @@ describe('OpenAISummarizer', () => {
       expect(await expand(null)).toEqual([])
     })
   })
+
+  describe('digestTranscript()', () => {
+    type Body = {
+      model: string
+      max_tokens: number
+      temperature: number
+      messages: { role: string; content: string }[]
+      reasoning?: unknown
+    }
+    const lastBody = (): Body => mockChatCreate.mock.calls[0]![0] as Body
+
+    it('session-summary sends the session prompt with max_tokens 500 and temperature 0.3', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('Fixing the dedup race\n- chose advisory locks\n'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('User: hi\n\nAssistant: hello', { kind: 'session-summary' })
+
+      const body = lastBody()
+      expect(body.model).toBe('gpt-4o-mini')
+      expect(body.max_tokens).toBe(500)
+      expect(body.temperature).toBe(0.3)
+      expect(body.messages[0]!.role).toBe('system')
+      expect(body.messages[0]!.content).toContain('You summarize Claude Code work sessions.')
+      expect(body.messages[1]).toEqual({ role: 'user', content: 'User: hi\n\nAssistant: hello' })
+      expect(result).toEqual({ memory: 'Fixing the dedup race\n- chose advisory locks', context: '' })
+    })
+
+    it('pre-compact sends the compaction prompt with max_tokens 600 and temperature 0.2', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- a\n\nCONTEXT:\nb'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key', model: 'deepseek/deepseek-v4-flash' })
+
+      await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      const body = lastBody()
+      expect(body.model).toBe('deepseek/deepseek-v4-flash')
+      expect(body.max_tokens).toBe(600)
+      expect(body.temperature).toBe(0.2)
+      expect(body.messages[0]!.content).toContain('You analyze Claude Code conversations before context compaction.')
+      expect(body.messages[0]!.content).toContain('MEMORY:\n<bullet points>\n\nCONTEXT:\n<paragraph>')
+    })
+
+    it('pre-compact splits the MEMORY and CONTEXT sections', async () => {
+      mockChatCreate.mockResolvedValueOnce(
+        makeChatResponse('MEMORY:\n- Chose pgvector HNSW\n- MK prefers bullets\n\nCONTEXT:\nMigrating the recall index.\n'),
+      )
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({
+        memory: '- Chose pgvector HNSW\n- MK prefers bullets',
+        context: 'Migrating the recall index.',
+      })
+    })
+
+    it('pre-compact without a CONTEXT section gives an empty context', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- only memory here'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({ memory: '- only memory here', context: '' })
+    })
+
+    it('pre-compact without markers keeps the whole reply as memory', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('  - unlabelled bullet\n'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({ memory: '- unlabelled bullet', context: '' })
+    })
+
+    it.each(['session-summary', 'pre-compact'] as const)('an empty reply gives an empty memory (%s)', async (kind) => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(''))
+      mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: null } }] })
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      expect(await summarizer.digestTranscript('transcript', { kind })).toEqual({ memory: '', context: '' })
+      expect(await summarizer.digestTranscript('transcript', { kind })).toEqual({ memory: '', context: '' })
+    })
+
+    it.each(['session-summary', 'pre-compact'] as const)(
+      'carries the reasoning-off field when reasoning is off (%s)',
+      async (kind) => {
+        mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- x'))
+        const summarizer = new OpenAISummarizer({ apiKey: 'test-key', reasoning: 'off' })
+
+        await summarizer.digestTranscript('transcript', { kind })
+
+        expect(lastBody().reasoning).toEqual({ effort: 'none' })
+      },
+    )
+  })
 })

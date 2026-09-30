@@ -195,6 +195,66 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
   return parts.join('\n')
 }
 
+/** Chat model used when none is configured. */
+export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini'
+
+export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
+
+const SESSION_SUMMARY_SYSTEM_PROMPT = `You summarize Claude Code work sessions. Extract ONLY:
+- Key decisions made
+- Problems solved (with solutions)
+- Architectural choices
+- User preferences expressed
+- Important facts learned
+- Action items / next steps
+
+Skip: file reads, grep output, test runs, routine tool use, small talk.
+Output a concise bullet-point summary (max 300 words). Start with a one-line session title.`
+
+const PRE_COMPACT_SYSTEM_PROMPT = `You analyze Claude Code conversations before context compaction.
+
+Extract TWO outputs:
+
+1. MEMORY (for long-term storage):
+Bullet points of ONLY high-value items:
+- Architectural decisions with rationale
+- User preferences / requirements stated
+- Non-obvious solutions found
+- Important facts learned (credentials, endpoints, configs discovered)
+- Bugs found and their root causes
+- Action items / next steps agreed on
+Skip: routine operations, file reads, test runs, greps, build commands.
+Max 200 words.
+
+2. CONTEXT (for immediate re-injection after compaction):
+A brief paragraph (max 100 words) summarizing what the user is currently working on and what was just decided, so Claude can resume seamlessly.
+
+Format your response EXACTLY as:
+MEMORY:
+<bullet points>
+
+CONTEXT:
+<paragraph>`
+
+const TRANSCRIPT_DIGEST_PARAMS: Record<
+  TranscriptDigestKind,
+  { prompt: string; maxTokens: number; temperature: number }
+> = {
+  'session-summary': { prompt: SESSION_SUMMARY_SYSTEM_PROMPT, maxTokens: 500, temperature: 0.3 },
+  'pre-compact': { prompt: PRE_COMPACT_SYSTEM_PROMPT, maxTokens: 600, temperature: 0.2 },
+}
+
+/** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
+ *  without a MEMORY: marker is kept whole as memory. */
+function parsePreCompactDigest(output: string): { memory: string; context: string } {
+  const memoryMatch = output.match(/MEMORY:\s*([\s\S]*?)(?=CONTEXT:|$)/)
+  const contextMatch = output.match(/CONTEXT:\s*([\s\S]*)$/)
+  return {
+    memory: memoryMatch?.[1]?.trim() ?? output.trim(),
+    context: contextMatch?.[1]?.trim() ?? '',
+  }
+}
+
 export class OpenAISummarizer {
   private readonly client: OpenAI
   private readonly model: string
@@ -209,7 +269,7 @@ export class OpenAISummarizer {
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
-    this.model = opts.model ?? 'gpt-4o-mini'
+    this.model = opts.model ?? DEFAULT_CHAT_MODEL
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
     this.reasoning = opts.reasoning
@@ -289,6 +349,25 @@ export class OpenAISummarizer {
 
     const raw = resp.choices[0]?.message?.content ?? '{}'
     return this.parseSummaryResult(raw, content)
+  }
+
+  async digestTranscript(
+    excerpt: string,
+    opts: { kind: TranscriptDigestKind },
+  ): Promise<{ memory: string; context: string }> {
+    const params = TRANSCRIPT_DIGEST_PARAMS[opts.kind]
+    const resp = await this.chatCreate(`digestTranscript:${opts.kind}`, {
+      model: this.model,
+      messages: [
+        { role: 'system', content: params.prompt },
+        { role: 'user', content: excerpt },
+      ],
+      max_tokens: params.maxTokens,
+      temperature: params.temperature,
+    })
+    const output = resp.choices[0]?.message?.content ?? ''
+    if (opts.kind === 'pre-compact') return parsePreCompactDigest(output)
+    return { memory: output.trim(), context: '' }
   }
 
   async generateHypotheticalDoc(query: string): Promise<string> {
