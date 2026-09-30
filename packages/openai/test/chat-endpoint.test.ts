@@ -62,3 +62,130 @@ describe('chat endpoint override', () => {
     expect(ctorOpts[1]).toEqual({ apiKey: 'shared-key', baseURL: 'https://openrouter.ai/api/v1' })
   })
 })
+
+// ---------------------------------------------------------------------------
+// Reasoning control. Reasoning models count reasoning tokens against
+// max_tokens, so small caps can leave the visible reply empty; the summarizer
+// can switch reasoning off or add headroom to every cap.
+// ---------------------------------------------------------------------------
+
+function chatReply(content: string | null, extra: Record<string, unknown> = {}) {
+  return { choices: [{ message: { content }, finish_reason: 'stop', ...extra }] }
+}
+
+const SUMMARY_JSON = JSON.stringify({ text: 't', topics: [], entities: [], decisions: [] })
+
+async function callEverySite(s: OpenAISummarizer): Promise<Array<Record<string, unknown>>> {
+  mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
+  await s.expandQuery('what did Alice say')
+  mockChatCreate.mockResolvedValueOnce(chatReply('Alice said hi'))
+  await s.generateHypotheticalDoc('what did Alice say')
+  mockChatCreate.mockResolvedValueOnce(chatReply('Alice is speaking.'))
+  await s.contextualizeChunk('chunk text', { conversationContext: 'prior turns' })
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"category":"noise"}'))
+  await s.extractSalience('a turn that is long enough to classify for salience', { turnRole: 'user' })
+  mockChatCreate.mockResolvedValueOnce(chatReply(SUMMARY_JSON))
+  await s.summarize('content', { mode: 'preserve_details', targetTokens: 100 })
+  return mockChatCreate.mock.calls.map((c) => c[0] as Record<string, unknown>)
+}
+
+describe('chat reasoning control', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockChatCreate.mockReset()
+  })
+
+  it('unset: no reasoning key and the historical caps', async () => {
+    const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k' }))
+    expect(bodies).toHaveLength(5)
+    for (const b of bodies) expect('reasoning' in b).toBe(false)
+    expect(bodies[0]!['max_tokens']).toBe(100)
+    expect(bodies[1]!['max_tokens']).toBe(180)
+    expect(bodies[2]!['max_tokens']).toBe(80)
+    expect(bodies[3]!['max_tokens']).toBe(400)
+    expect(bodies[4]!['max_tokens']).toBe(500)
+  })
+
+  it("'off': sends reasoning effort none on every call site, caps unchanged, provider still merged", async () => {
+    const prefs = { order: ['baidu'] }
+    const bodies = await callEverySite(
+      new OpenAISummarizer({ apiKey: 'k', reasoning: 'off', providerPrefs: prefs }),
+    )
+    expect(bodies).toHaveLength(5)
+    for (const b of bodies) {
+      expect(b['reasoning']).toEqual({ effort: 'none' })
+      expect(b['provider']).toEqual(prefs)
+    }
+    expect(bodies[0]!['max_tokens']).toBe(100)
+    expect(bodies[2]!['max_tokens']).toBe(80)
+  })
+
+  it("'default': every cap raised by the default 2048-token headroom, no reasoning key", async () => {
+    const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k', reasoning: 'default' }))
+    for (const b of bodies) expect('reasoning' in b).toBe(false)
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548])
+  })
+
+  it("'default': honours a configured headroom", async () => {
+    const bodies = await callEverySite(
+      new OpenAISummarizer({ apiKey: 'k', reasoning: 'default', reasoningHeadroom: 1000 }),
+    )
+    expect(bodies[0]!['max_tokens']).toBe(1100)
+    expect(bodies[2]!['max_tokens']).toBe(1080)
+  })
+
+  it('openaiIntelligence forwards chatReasoning and chatReasoningHeadroom', async () => {
+    mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
+    const intel = openaiIntelligence({ apiKey: 'k', chatReasoning: 'default', chatReasoningHeadroom: 10 })
+    await intel.expandQuery!('q')
+    expect(mockChatCreate.mock.calls[0]![0]).toMatchObject({ max_tokens: 110 })
+    mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
+    const off = openaiIntelligence({ apiKey: 'k', chatReasoning: 'off' })
+    await off.expandQuery!('q')
+    expect(mockChatCreate.mock.calls[1]![0]).toMatchObject({ reasoning: { effort: 'none' } })
+  })
+
+  it("finish_reason 'length' writes exactly one stderr line with the label and reasoning count, no content", async () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      mockChatCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: 'SECRET-ish partial hypothetical' }, finish_reason: 'length' }],
+        usage: { completion_tokens: 180, completion_tokens_details: { reasoning_tokens: 170 } },
+      })
+      await new OpenAISummarizer({ apiKey: 'k' }).generateHypotheticalDoc('q')
+      const lines = write.mock.calls.map((c) => String(c[0]))
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toBe(
+        '[openai] generateHypotheticalDoc output hit max_tokens (visible_chars=31, reasoning_tokens=170)\n',
+      )
+      expect(lines[0]).not.toContain('SECRET')
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it("finish_reason 'length' without usage details reports reasoning_tokens=n/a", async () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      mockChatCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: null }, finish_reason: 'length' }],
+      })
+      await new OpenAISummarizer({ apiKey: 'k' }).expandQuery('q')
+      const lines = write.mock.calls.map((c) => String(c[0]))
+      expect(lines).toEqual(['[openai] expandQuery output hit max_tokens (visible_chars=0, reasoning_tokens=n/a)\n'])
+    } finally {
+      write.mockRestore()
+    }
+  })
+
+  it('a normal finish writes nothing to stderr', async () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
+      await new OpenAISummarizer({ apiKey: 'k' }).expandQuery('q')
+      expect(write).not.toHaveBeenCalled()
+    } finally {
+      write.mockRestore()
+    }
+  })
+})

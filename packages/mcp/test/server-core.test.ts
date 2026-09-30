@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs } from '../src/server-core.js'
+import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs, parseChatReasoningEnv } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
 
@@ -134,5 +134,35 @@ describe('recallOptionsFromArgs', () => {
 
   it('ignores a non-string project id and passes synthesize through', () => {
     expect(recallOptionsFromArgs({ query: 'q', project_id: 42, synthesize: true })).toEqual({ synthesize: true })
+  })
+})
+
+describe('parseChatReasoningEnv', () => {
+  it('returns nothing when neither variable is set, so request bodies stay unchanged', () => {
+    expect(parseChatReasoningEnv({})).toEqual({})
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: '  ' })).toEqual({})
+  })
+
+  it('accepts off and default', () => {
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'off' })).toEqual({ chatReasoning: 'off' })
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: ' default ' })).toEqual({ chatReasoning: 'default' })
+  })
+
+  it('accepts a positive integer headroom', () => {
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: '4096' }))
+      .toEqual({ chatReasoning: 'default', chatReasoningHeadroom: 4096 })
+  })
+
+  it('rejects any other reasoning value', () => {
+    for (const v of ['low', 'high', 'none', 'OFFF', 'true']) {
+      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: v })).toThrow(/ENGRAM_CHAT_REASONING/)
+    }
+  })
+
+  it('rejects a non-positive or non-integer headroom', () => {
+    for (const v of ['0', '-5', '1.5', 'abc', '2048tokens']) {
+      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v }))
+        .toThrow(/ENGRAM_CHAT_REASONING_HEADROOM/)
+    }
   })
 })

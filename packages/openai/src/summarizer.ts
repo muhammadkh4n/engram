@@ -23,7 +23,25 @@ export interface OpenAISummarizerOptions {
    *  quantizations/allow_fallbacks — see openrouter.ai/docs/provider-routing).
    *  Non-OpenRouter hosts ignore unknown body fields. Omitted → no field. */
   providerPrefs?: Record<string, unknown>
+  /** Reasoning control for reasoning-capable chat models, which count their
+   *  reasoning tokens against `max_tokens`:
+   *  - omitted: request bodies are sent unchanged;
+   *  - `'off'`: every request carries `reasoning: { effort: 'none' }`
+   *    (OpenRouter's switch that disables reasoning entirely), caps unchanged;
+   *  - `'default'`: no `reasoning` field (the model's own default effort) and
+   *    every call's `max_tokens` is raised by `reasoningHeadroom`, so the
+   *    visible reply survives the reasoning prefix. */
+  reasoning?: ChatReasoningMode
+  /** Tokens added to every call's `max_tokens` in `'default'` reasoning mode.
+   *  Default 2048. Ignored otherwise. */
+  reasoningHeadroom?: number
 }
+
+export type ChatReasoningMode = 'off' | 'default'
+
+export const DEFAULT_REASONING_HEADROOM = 2048
+
+type ChatBody = OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are a memory summarizer for an AI assistant. Given content from conversation episodes, produce a structured summary.
 
@@ -186,19 +204,50 @@ export class OpenAISummarizer {
    *  historical default on unconfigured installs. */
   private readonly contextualizeModel: string
   private readonly providerPrefs: Record<string, unknown> | undefined
+  private readonly reasoning: ChatReasoningMode | undefined
+  private readonly reasoningHeadroom: number
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? 'gpt-4o-mini'
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
+    this.reasoning = opts.reasoning
+    this.reasoningHeadroom = opts.reasoningHeadroom ?? DEFAULT_REASONING_HEADROOM
   }
 
   /** Single point through which every chat call goes: merges the optional
-   *  OpenRouter `provider` routing object into the request body. */
-  private chatCreate(body: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming) {
-    const merged = this.providerPrefs ? ({ ...body, provider: this.providerPrefs } as typeof body) : body
-    return this.client.chat.completions.create(merged)
+   *  OpenRouter `provider` routing object and the reasoning control into the
+   *  request body, and reports a reply cut off at `max_tokens`. `label` names
+   *  the call site in that report. */
+  private async chatCreate(label: string, body: ChatBody) {
+    const resp = await this.client.chat.completions.create(this.buildChatBody(body))
+    this.warnIfTruncated(label, resp)
+    return resp
+  }
+
+  private buildChatBody(body: ChatBody): ChatBody {
+    let out: ChatBody = body
+    if (this.providerPrefs) out = { ...out, provider: this.providerPrefs } as ChatBody
+    if (this.reasoning === 'off') {
+      out = { ...out, reasoning: { effort: 'none' } } as ChatBody
+    } else if (this.reasoning === 'default' && typeof out.max_tokens === 'number') {
+      out = { ...out, max_tokens: out.max_tokens + this.reasoningHeadroom }
+    }
+    return out
+  }
+
+  /** A reasoning model that exhausts `max_tokens` on reasoning returns an
+   *  empty or cut-short reply with no error; one stderr line makes that
+   *  visible. Only sizes are logged — never the reply content. */
+  private warnIfTruncated(label: string, resp: OpenAI.Chat.Completions.ChatCompletion): void {
+    const choice = resp?.choices?.[0]
+    if (choice?.finish_reason !== 'length') return
+    const visibleChars = choice.message?.content?.length ?? 0
+    const reasoningTokens = resp.usage?.completion_tokens_details?.reasoning_tokens
+    process.stderr.write(
+      `[openai] ${label} output hit max_tokens (visible_chars=${visibleChars}, reasoning_tokens=${reasoningTokens ?? 'n/a'})\n`,
+    )
   }
 
   async summarize(content: string, opts: SummarizeOptions): Promise<SummaryResult> {
@@ -222,7 +271,7 @@ export class OpenAISummarizer {
       content,
     ].join('\n')
 
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('summarize', {
       model: this.model,
       messages: [
         { role: 'system', content: SUMMARIZE_SYSTEM_PROMPT },
@@ -249,7 +298,7 @@ export class OpenAISummarizer {
     // stays "last week" so the retrieval catches the same phrasing in
     // conversation turns; (c) write in conversational style, not
     // encyclopedic — source is dialogue, not Wikipedia.
-    const response = await this.chatCreate({
+    const response = await this.chatCreate('generateHypotheticalDoc', {
       model: this.model,
       messages: [
         {
@@ -292,7 +341,7 @@ export class OpenAISummarizer {
     // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
     //   IDF naturally, but short queries get dropped entirely if
     //   they're all stopwords.
-    const response = await this.chatCreate({
+    const response = await this.chatCreate('expandQuery', {
       model: this.model,
       messages: [
         {
@@ -371,7 +420,7 @@ export class OpenAISummarizer {
       .join('\n')
     const user = `MODE: ${opts.mode}\nQUESTION: ${query}\nEVIDENCE:\n${lines}`
 
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('selectEvidence', {
       model: this.model,
       messages: [
         { role: 'system', content: system },
@@ -387,7 +436,7 @@ export class OpenAISummarizer {
   }
 
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('extractKnowledge', {
       model: this.model,
       messages: [
         { role: 'system', content: KNOWLEDGE_SYSTEM_PROMPT },
@@ -418,7 +467,7 @@ export class OpenAISummarizer {
     if (trimmed.length < 30) return []
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('extractEntities', {
         model: this.model,
         messages: [
           { role: 'system', content: ENTITY_SYSTEM_PROMPT },
@@ -470,7 +519,7 @@ export class OpenAISummarizer {
     const userMessage = buildSalienceUserMessage(trimmed, opts)
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('extractSalience', {
         model: this.model,
         messages: [
           { role: 'system', content: SALIENCE_SYSTEM_PROMPT },
@@ -602,7 +651,7 @@ export class OpenAISummarizer {
     }
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('contextualizeChunk', {
         model: this.contextualizeModel,
         messages: [
           {
@@ -658,7 +707,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
       .join('\n')
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('rerank', {
         model: this.model,
         messages: [
           {
