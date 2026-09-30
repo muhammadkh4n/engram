@@ -20,11 +20,20 @@ const FUSED_KEY_WORDS = new Set([
 ])
 
 // `<word>_KEY` where the key names or indexes data rather than unlocking
-// anything: `issue_key` holds a ticket id, `COLUMN_KEY` MySQL's PRI/MUL,
-// `stepKey` a workflow step.
+// anything. In structured data (config and env files) only these qualify:
+// there a key reliably says what its value holds, so `PROJECT_KEY` or
+// `UPLOAD_KEY` in a secrets file is treated as a credential.
 const DATA_STRUCTURE_WORDS = new Set([
-  'cache', 'sort', 'sorting', 'primary', 'foreign', 'partition', 'idempotency', 'routing', 'shard', 'lookup',
-  'object', 'bucket', 'map', 'row', 'column', 'cursor', 'hash', 'translation', 'query', 'storage', 'state',
+  'cache', 'sort', 'primary', 'foreign', 'partition', 'idempotency', 'routing', 'shard', 'lookup',
+  'object', 'bucket', 'map', 'row', 'cursor', 'hash', 'translation',
+])
+
+// In free text many more words before `KEY` name data than a credential:
+// `issue_key` holds a ticket id, `COLUMN_KEY` MySQL's PRI/MUL, `stepKey` a
+// workflow step.
+const FREE_TEXT_DATA_STRUCTURE_WORDS = new Set([
+  ...DATA_STRUCTURE_WORDS,
+  'sorting', 'column', 'query', 'storage', 'state',
   'context', 'index', 'range', 'group', 'dedup', 'dedupe', 'unique', 'composite', 'issue', 'project', 'step',
   'payload', 'scope', 'target', 'source', 'catalog', 'filter', 'version', 'holder', 'item', 'entry', 'field',
   'record', 'table', 'node', 'event', 'message', 'type', 'category', 'parent', 'child', 'page', 'label',
@@ -93,19 +102,41 @@ function isCredentialWord(word: string): boolean {
   return CREDENTIAL_WORDS.has(word) || FUSED_KEY_WORDS.has(word) || CREDENTIAL_SUFFIXES.some((s) => word.endsWith(s))
 }
 
-/** Whether a value assigned to this key is a credential, judged by the key's last word. */
-export function isSecretKey(name: string): boolean {
+interface KeyRule {
+  dataStructureWords: ReadonlySet<string>
+  /** Prose uses `no-auth`, `non-secret` and a bare `pass` without meaning a credential. */
+  proseGuards: boolean
+}
+
+const FREE_TEXT_RULE: KeyRule = { dataStructureWords: FREE_TEXT_DATA_STRUCTURE_WORDS, proseGuards: true }
+const STRUCTURED_RULE: KeyRule = { dataStructureWords: DATA_STRUCTURE_WORDS, proseGuards: false }
+
+function judgeKey(name: string, rule: KeyRule): boolean {
   if (WORKDIR_KEYS.has(name) || NON_SECRET_KEYS.has(name.toLowerCase())) return false
   const words = withoutQualifiers(keyWords(name))
-  if (words.length > 1 && NEGATION_WORDS.has(words[words.length - 2]!)) return false
+  if (rule.proseGuards && words.length > 1 && NEGATION_WORDS.has(words[words.length - 2]!)) return false
   if (SECRET_WORD_SEQUENCES.some((seq) => endsWithSequence(words, seq))) return true
   const last = words[words.length - 1]
   if (last === undefined) return false
-  if (words.length === 1 && QUALIFIED_ONLY_WORDS.has(last)) return false
+  if (rule.proseGuards && words.length === 1 && QUALIFIED_ONLY_WORDS.has(last)) return false
   if (isCredentialWord(last)) return true
   if (last !== 'key') return false
   const before = words[words.length - 2]
-  return before !== undefined && !DATA_STRUCTURE_WORDS.has(before)
+  return before !== undefined && !rule.dataStructureWords.has(before)
+}
+
+/** Whether a value assigned to this key in free text is a credential, judged by the key's last word. */
+export function isSecretKey(name: string): boolean {
+  return judgeKey(name, FREE_TEXT_RULE)
+}
+
+/**
+ * The same last-word rule for keys in structured data (env, ini, JSON and
+ * YAML files), where a key names its value reliably: a bare `pass` is a
+ * credential, and only the core data-structure words exempt `<word>_KEY`.
+ */
+export function isStructuredSecretKey(name: string): boolean {
+  return judgeKey(name, STRUCTURED_RULE)
 }
 
 /** Keys whose values are public by design, whatever their last word says. */

@@ -14,3 +14,8 @@ export function placeholder(label: string): string {
 export function isOnlyPlaceholders(value: string): boolean {
   return value.includes(PLACEHOLDER_PREFIX) && value.replace(PLACEHOLDER_RE, '').replace(/\\n|\s/g, '') === ''
 }
+
+/** Start and end offsets of every placeholder in the text, in order. */
+export function placeholderRanges(text: string): Array<readonly [number, number]> {
+  return [...text.matchAll(PLACEHOLDER_RE)].map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length] as const)
+}

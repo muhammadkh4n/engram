@@ -4,6 +4,7 @@
  * *which* secret was involved; only the value is replaced.
  *
  * Every rule reads the original text and reports spans:
+ *   - values registered from this machine's secret files, in any spelling (secret-registry.ts)
  *   - known token formats, private keys and connection strings (secretlint)
  *   - values assigned to secret-named keys and CLI password arguments (keyed-secrets.ts)
  *   - PEM private-key blocks, including truncated ones
@@ -20,6 +21,7 @@
 
 import { KEYED_RANK, keyedSpans } from './keyed-secrets.js'
 import { PLACEHOLDER_PREFIX, placeholder } from './placeholder.js'
+import { defaultSecretRegistry } from './secret-registry.js'
 import { SECRETLINT_RANK, secretlintSpans } from './secretlint-spans.js'
 import type { DetectedSpan } from './secretlint-spans.js'
 import { isShellReference } from './value-extent.js'
@@ -44,9 +46,17 @@ export interface DetectedSecret extends SecretRedaction {
 // `<` and `>` cannot appear unencoded in a URL, so `<pwd>` is never a password.
 const DOC_PLACEHOLDER_RE = /(?:\.\.\.|…)$|^<[^>]*>$|^(?:x{3,}|\*{3,})$/i
 
-// Equally wide overlapping spans take the label of the lowest rank: the key
-// name first, then our format rules, then secretlint, then the entropy guess.
+// Equally wide overlapping spans take the label of the lowest rank: a known
+// value first (certain, and named by its source), then the key name, then our
+// format rules, then secretlint, then the entropy guess.
+const KNOWN_VALUE_RANK = KEYED_RANK - 1
 const OWN_RANK = KEYED_RANK + 1
+
+function knownValueSpans(text: string): DetectedSpan[] {
+  return defaultSecretRegistry()
+    .findKnownValues(text)
+    .map(({ start, end, name }) => ({ start, end, kind: 'known', name, rank: KNOWN_VALUE_RANK }))
+}
 const HIGH_ENTROPY_RANK = SECRETLINT_RANK + 1
 
 // Also covers blocks the secretlint rule leaves out: truncated ones (no END
@@ -226,6 +236,7 @@ function mergeSpans(spans: DetectedSpan[]): MergedSpan[] {
 export async function detectSecrets(text: string): Promise<DetectedSecret[]> {
   if (text === '') return []
   const spans = [
+    ...knownValueSpans(text),
     ...narrowUrlSpans(text, await secretlintSpans(text)),
     ...keyedSpans(text),
     ...pemSpans(text),
