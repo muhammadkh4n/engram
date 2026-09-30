@@ -1,11 +1,12 @@
 import type { IntelligenceAdapter } from '@engram-mem/core'
 import { OpenAIEmbeddingService } from './embeddings.js'
 import { OpenAISummarizer } from './summarizer.js'
+import type { ChatReasoningMode } from './summarizer.js'
 
 export { OpenAIEmbeddingService } from './embeddings.js'
 export type { OpenAIEmbeddingServiceOptions } from './embeddings.js'
-export { OpenAISummarizer } from './summarizer.js'
-export type { OpenAISummarizerOptions } from './summarizer.js'
+export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM } from './summarizer.js'
+export type { OpenAISummarizerOptions, ChatReasoningMode } from './summarizer.js'
 
 export interface OpenAIIntelligenceOptions {
   apiKey: string
@@ -25,6 +26,12 @@ export interface OpenAIIntelligenceOptions {
   /** OpenRouter provider-routing preferences for chat calls (request-body
    *  `provider` field): pin/order hosts, restrict quantizations, etc. */
   chatProviderPrefs?: Record<string, unknown>
+  /** Reasoning control for chat calls: `'off'` disables reasoning, `'default'`
+   *  keeps the model's default effort and adds `chatReasoningHeadroom` tokens
+   *  to every cap. Omitted → request bodies unchanged. */
+  chatReasoning?: ChatReasoningMode
+  /** Tokens added to every chat cap in `'default'` reasoning mode (default 2048). */
+  chatReasoningHeadroom?: number
   /** Reserved for future LLM-powered intent classification. */
   intentAnalysis?: boolean
 }
@@ -50,6 +57,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     model: opts.summarizationModel,
     ...(opts.chatBaseUrl ? { baseURL: opts.chatBaseUrl } : {}),
     ...(opts.chatProviderPrefs ? { providerPrefs: opts.chatProviderPrefs } : {}),
+    ...(opts.chatReasoning ? { reasoning: opts.chatReasoning } : {}),
+    ...(opts.chatReasoningHeadroom !== undefined ? { reasoningHeadroom: opts.chatReasoningHeadroom } : {}),
   })
 
   return {

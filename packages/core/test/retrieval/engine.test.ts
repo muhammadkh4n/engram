@@ -265,6 +265,64 @@ describe('recall engine — HyDE fallback', () => {
   })
 })
 
+describe('recall engine — empty HyDE document', () => {
+  const originalTiming = process.env['ENGRAM_RECALL_TIMING']
+
+  afterEach(() => {
+    if (originalTiming === undefined) delete process.env['ENGRAM_RECALL_TIMING']
+    else process.env['ENGRAM_RECALL_TIMING'] = originalTiming
+  })
+
+  it.each(['', '   \n'])('skips the HyDE embed and search when the document is %j', async (hydeDoc) => {
+    const sensory = new SensoryBuffer()
+    const direct = await recall(
+      'deployment strategy',
+      createMockStorage({ vectorSearchResults: makeWeakVectorResults(), textBoostResults: [] }),
+      sensory,
+      makeOpts({ strategy: RECALL_STRATEGIES.light }),
+    )
+
+    const storage = createMockStorage({ vectorSearchResults: makeWeakVectorResults(), textBoostResults: [] })
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue(hydeDoc)
+    const embed = vi.fn().mockResolvedValue([0.9, 0.8, 0.7])
+    const intelligence: IntelligenceAdapter = { generateHypotheticalDoc, embed }
+
+    const result = await recall(
+      'deployment strategy',
+      storage,
+      new SensoryBuffer(),
+      makeOpts({ strategy: RECALL_STRATEGIES.light, intelligence }),
+    )
+
+    expect(generateHypotheticalDoc).toHaveBeenCalledWith('deployment strategy')
+    expect(embed).not.toHaveBeenCalledWith(hydeDoc)
+    expect(embed).not.toHaveBeenCalled()
+    expect(result.memories.map((m: RetrievedMemory) => m.id)).toEqual(direct.memories.map((m) => m.id))
+    // Recency decay reads the clock, so the two runs differ past ~9 decimals.
+    result.memories.forEach((m: RetrievedMemory, i) => {
+      expect(m.relevance).toBeCloseTo(direct.memories[i]!.relevance, 6)
+    })
+  })
+
+  it('still records the hyde stage timing', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const storage = createMockStorage({ vectorSearchResults: makeWeakVectorResults(), textBoostResults: [] })
+    const intelligence: IntelligenceAdapter = {
+      generateHypotheticalDoc: vi.fn().mockResolvedValue(''),
+      embed: vi.fn().mockResolvedValue([0.9, 0.8, 0.7]),
+    }
+
+    const result = await recall(
+      'deployment strategy',
+      storage,
+      new SensoryBuffer(),
+      makeOpts({ strategy: RECALL_STRATEGIES.light, intelligence }),
+    )
+
+    expect(result.timings).toHaveProperty('hyde')
+  })
+})
+
 describe('recall engine — cross-encoder reranking', () => {
   it('reranks memories when intelligence.rerank is provided', async () => {
     const storage = createMockStorage()

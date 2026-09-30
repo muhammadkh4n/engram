@@ -466,20 +466,24 @@ export async function recall(
     const hydeStart = stageStart(timings)
     try {
       const hydeDoc = await intelligence!.generateHypotheticalDoc!(query)
-      const hydeEmbedding = await intelligence!.embed!(hydeDoc)
-      const hydeMemories = await unifiedSearch({
-        query,
-        embedding: hydeEmbedding,
-        strategy,
-        storage,
-        sensory,
-        sessionId,
-        expandedTerms,
-        projectId,
-        ...(ranking ? { projectRanking: ranking } : {}),
-      })
+      // An empty document (no usable model output) would embed to noise or
+      // repeat the direct pass; fusing that only reshuffles the direct ranks.
+      if (hydeDoc.trim() !== '') {
+        const hydeEmbedding = await intelligence!.embed!(hydeDoc)
+        const hydeMemories = await unifiedSearch({
+          query,
+          embedding: hydeEmbedding,
+          strategy,
+          storage,
+          sensory,
+          sessionId,
+          expandedTerms,
+          projectId,
+          ...(ranking ? { projectRanking: ranking } : {}),
+        })
 
-      memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)
+        memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)
+      }
     } catch (err) {
       // HyDE failed — use direct results
       console.error('[engram] HyDE error:', err)

@@ -23,7 +23,25 @@ export interface OpenAISummarizerOptions {
    *  quantizations/allow_fallbacks — see openrouter.ai/docs/provider-routing).
    *  Non-OpenRouter hosts ignore unknown body fields. Omitted → no field. */
   providerPrefs?: Record<string, unknown>
+  /** Reasoning control for reasoning-capable chat models, which count their
+   *  reasoning tokens against `max_tokens`:
+   *  - omitted: request bodies are sent unchanged;
+   *  - `'off'`: every request carries `reasoning: { effort: 'none' }`
+   *    (OpenRouter's switch that disables reasoning entirely), caps unchanged;
+   *  - `'default'`: no `reasoning` field (the model's own default effort) and
+   *    every call's `max_tokens` is raised by `reasoningHeadroom`, so the
+   *    visible reply survives the reasoning prefix. */
+  reasoning?: ChatReasoningMode
+  /** Tokens added to every call's `max_tokens` in `'default'` reasoning mode.
+   *  Default 2048. Ignored otherwise. */
+  reasoningHeadroom?: number
 }
+
+export type ChatReasoningMode = 'off' | 'default'
+
+export const DEFAULT_REASONING_HEADROOM = 2048
+
+type ChatBody = OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
 
 const SUMMARIZE_SYSTEM_PROMPT = `You are a memory summarizer for an AI assistant. Given content from conversation episodes, produce a structured summary.
 
@@ -186,19 +204,56 @@ export class OpenAISummarizer {
    *  historical default on unconfigured installs. */
   private readonly contextualizeModel: string
   private readonly providerPrefs: Record<string, unknown> | undefined
+  private readonly reasoning: ChatReasoningMode | undefined
+  private readonly reasoningHeadroom: number
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? 'gpt-4o-mini'
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
+    this.reasoning = opts.reasoning
+    // The headroom is added to every request cap; NaN or a negative value would
+    // send an invalid max_tokens that the API rejects on every call.
+    const headroom = opts.reasoningHeadroom ?? DEFAULT_REASONING_HEADROOM
+    if (!Number.isInteger(headroom) || headroom < 0) {
+      throw new Error(`reasoningHeadroom must be a non-negative integer, got ${String(opts.reasoningHeadroom)}`)
+    }
+    this.reasoningHeadroom = headroom
   }
 
   /** Single point through which every chat call goes: merges the optional
-   *  OpenRouter `provider` routing object into the request body. */
-  private chatCreate(body: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming) {
-    const merged = this.providerPrefs ? ({ ...body, provider: this.providerPrefs } as typeof body) : body
-    return this.client.chat.completions.create(merged)
+   *  OpenRouter `provider` routing object and the reasoning control into the
+   *  request body, and reports a reply cut off at `max_tokens`. `label` names
+   *  the call site in that report. */
+  private async chatCreate(label: string, body: ChatBody) {
+    const resp = await this.client.chat.completions.create(this.buildChatBody(body))
+    this.warnIfTruncated(label, resp)
+    return resp
+  }
+
+  private buildChatBody(body: ChatBody): ChatBody {
+    let out: ChatBody = body
+    if (this.providerPrefs) out = { ...out, provider: this.providerPrefs } as ChatBody
+    if (this.reasoning === 'off') {
+      out = { ...out, reasoning: { effort: 'none' } } as ChatBody
+    } else if (this.reasoning === 'default' && typeof out.max_tokens === 'number') {
+      out = { ...out, max_tokens: out.max_tokens + this.reasoningHeadroom }
+    }
+    return out
+  }
+
+  /** A reasoning model that exhausts `max_tokens` on reasoning returns an
+   *  empty or cut-short reply with no error; one stderr line makes that
+   *  visible. Only sizes are logged — never the reply content. */
+  private warnIfTruncated(label: string, resp: OpenAI.Chat.Completions.ChatCompletion): void {
+    const choice = resp?.choices?.[0]
+    if (choice?.finish_reason !== 'length') return
+    const visibleChars = choice.message?.content?.length ?? 0
+    const reasoningTokens = resp.usage?.completion_tokens_details?.reasoning_tokens
+    process.stderr.write(
+      `[openai] ${label} output hit max_tokens (visible_chars=${visibleChars}, reasoning_tokens=${reasoningTokens ?? 'n/a'})\n`,
+    )
   }
 
   async summarize(content: string, opts: SummarizeOptions): Promise<SummaryResult> {
@@ -222,7 +277,7 @@ export class OpenAISummarizer {
       content,
     ].join('\n')
 
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('summarize', {
       model: this.model,
       messages: [
         { role: 'system', content: SUMMARIZE_SYSTEM_PROMPT },
@@ -249,7 +304,7 @@ export class OpenAISummarizer {
     // stays "last week" so the retrieval catches the same phrasing in
     // conversation turns; (c) write in conversational style, not
     // encyclopedic — source is dialogue, not Wikipedia.
-    const response = await this.chatCreate({
+    const response = await this.chatCreate('generateHypotheticalDoc', {
       model: this.model,
       messages: [
         {
@@ -274,7 +329,12 @@ export class OpenAISummarizer {
       max_tokens: 180,
       temperature: 0.7,
     })
-    return response.choices[0].message.content ?? query
+    const doc = response.choices[0]?.message?.content ?? ''
+    // An empty reply or a restated question is not a hypothetical document:
+    // embedding it would re-run the direct search and fuse a duplicate pass.
+    // An empty string tells the retrieval engine to skip HyDE.
+    if (doc.trim() === '' || normalizeForEcho(doc) === normalizeForEcho(query)) return ''
+    return doc
   }
 
   async expandQuery(query: string): Promise<string[]> {
@@ -292,7 +352,7 @@ export class OpenAISummarizer {
     // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
     //   IDF naturally, but short queries get dropped entirely if
     //   they're all stopwords.
-    const response = await this.chatCreate({
+    const response = await this.chatCreate('expandQuery', {
       model: this.model,
       messages: [
         {
@@ -324,18 +384,7 @@ export class OpenAISummarizer {
       temperature: 0.5,
     })
 
-    const raw = response.choices[0]?.message?.content ?? '[]'
-    try {
-      const parsed: unknown = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        return parsed
-          .filter((item): item is string => typeof item === 'string')
-          .slice(0, 5)
-      }
-    } catch {
-      // parse failed — return empty
-    }
-    return []
+    return parseExpansionTerms(response.choices[0]?.message?.content ?? '')
   }
 
   /**
@@ -371,7 +420,7 @@ export class OpenAISummarizer {
       .join('\n')
     const user = `MODE: ${opts.mode}\nQUESTION: ${query}\nEVIDENCE:\n${lines}`
 
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('selectEvidence', {
       model: this.model,
       messages: [
         { role: 'system', content: system },
@@ -387,7 +436,7 @@ export class OpenAISummarizer {
   }
 
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
-    const resp = await this.chatCreate({
+    const resp = await this.chatCreate('extractKnowledge', {
       model: this.model,
       messages: [
         { role: 'system', content: KNOWLEDGE_SYSTEM_PROMPT },
@@ -418,7 +467,7 @@ export class OpenAISummarizer {
     if (trimmed.length < 30) return []
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('extractEntities', {
         model: this.model,
         messages: [
           { role: 'system', content: ENTITY_SYSTEM_PROMPT },
@@ -470,7 +519,7 @@ export class OpenAISummarizer {
     const userMessage = buildSalienceUserMessage(trimmed, opts)
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('extractSalience', {
         model: this.model,
         messages: [
           { role: 'system', content: SALIENCE_SYSTEM_PROMPT },
@@ -602,7 +651,7 @@ export class OpenAISummarizer {
     }
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('contextualizeChunk', {
         model: this.contextualizeModel,
         messages: [
           {
@@ -658,7 +707,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
       .join('\n')
 
     try {
-      const resp = await this.chatCreate({
+      const resp = await this.chatCreate('rerank', {
         model: this.model,
         messages: [
           {
@@ -811,4 +860,53 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
       return []
     }
   }
+}
+
+const MAX_EXPANSION_TERMS = 5
+
+/**
+ * Chat models often wrap the requested JSON array in prose or a ```json
+ * fence. The array is the span from the first `[` to the last `]`; anything
+ * that does not parse to an array yields no terms.
+ */
+function parseExpansionTerms(raw: string): string[] {
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end <= start) return []
+  const whole = tryParseArray(raw.slice(start, end + 1))
+  if (whole) return cleanExpansionTerms(whole)
+  // Prose around the array can carry its own brackets ("Variants [JSON]: [...]",
+  // "[...] (see [1])"), which breaks the outermost span. Try every bracketed
+  // span in order and take the first array holding at least one string.
+  for (let s = start; s !== -1; s = raw.indexOf('[', s + 1)) {
+    for (let e = raw.indexOf(']', s + 1); e !== -1; e = raw.indexOf(']', e + 1)) {
+      const arr = tryParseArray(raw.slice(s, e + 1))
+      if (arr && arr.some((item) => typeof item === 'string')) return cleanExpansionTerms(arr)
+    }
+  }
+  return []
+}
+
+function tryParseArray(text: string): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function cleanExpansionTerms(items: unknown[]): string[] {
+  return items
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, MAX_EXPANSION_TERMS)
+}
+
+function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\p{P}`]+|[\s\p{P}`]+$/gu, '')
 }

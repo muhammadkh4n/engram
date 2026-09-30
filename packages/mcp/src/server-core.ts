@@ -165,6 +165,47 @@ export async function maybeWithRecallEngine(storage: StorageAdapter, supabaseUrl
   }
 }
 
+export interface ChatReasoningConfig {
+  chatReasoning?: 'off' | 'default'
+  chatReasoningHeadroom?: number
+}
+
+/**
+ * ENGRAM_CHAT_REASONING (`off` | `default`) and ENGRAM_CHAT_REASONING_HEADROOM
+ * (positive integer tokens). Reasoning chat models count reasoning tokens
+ * against max_tokens, so the summarizer either disables reasoning (`off`) or
+ * adds headroom to every cap (`default`). Unset → no fields, and request bodies
+ * stay exactly as before. Any other value is a config error and fails startup,
+ * like a malformed ENGRAM_CHAT_PROVIDER_PREFS: a silently ignored typo would
+ * leave the chat tier returning empty replies.
+ */
+export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): ChatReasoningConfig {
+  const out: ChatReasoningConfig = {}
+  const mode = env['ENGRAM_CHAT_REASONING']?.trim()
+  if (mode) {
+    if (mode !== 'off' && mode !== 'default') {
+      throw new Error(`ENGRAM_CHAT_REASONING must be "off" or "default", got "${mode}"`)
+    }
+    // `reasoning` is an OpenRouter request field; the default OpenAI endpoint
+    // may reject it, and chat failures are swallowed by recall and ingest.
+    if (!env['ENGRAM_CHAT_BASE_URL']?.trim()) {
+      throw new Error(
+        'ENGRAM_CHAT_REASONING requires ENGRAM_CHAT_BASE_URL to point at an OpenRouter-compatible host',
+      )
+    }
+    out.chatReasoning = mode
+  }
+  const headroom = env['ENGRAM_CHAT_REASONING_HEADROOM']?.trim()
+  if (headroom) {
+    const n = /^\d+$/.test(headroom) ? Number(headroom) : NaN
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      throw new Error(`ENGRAM_CHAT_REASONING_HEADROOM must be a positive integer, got "${headroom}"`)
+    }
+    out.chatReasoningHeadroom = n
+  }
+  return out
+}
+
 let memory: Memory | null = null
 
 export async function getMemory(): Promise<Memory> {
@@ -205,12 +246,14 @@ export async function getMemory(): Promise<Memory> {
       throw new Error(`ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
+  const chatReasoning = parseChatReasoningEnv()
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
     apiKey: openaiApiKey,
     ...(chatModel ? { summarizationModel: chatModel } : {}),
     ...(chatBaseUrl ? { chatBaseUrl } : {}),
     ...(chatApiKey ? { chatApiKey } : {}),
     ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
+    ...chatReasoning,
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
   // cross-encoder over the openaiIntelligence adapter so the rerank stage

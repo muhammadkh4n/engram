@@ -266,14 +266,46 @@ describe('OpenAISummarizer', () => {
       expect(result).toBe(hydeDoc)
     })
 
-    it('falls back to the original query when model returns null content', async () => {
+    it('returns an empty string when the model returns null content', async () => {
       mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: null } }] })
 
       const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const query = 'What is our deployment strategy?'
-      const result = await summarizer.generateHypotheticalDoc(query)
+      const result = await summarizer.generateHypotheticalDoc('What is our deployment strategy?')
 
-      expect(result).toBe(query)
+      expect(result).toBe('')
+    })
+
+    it('returns an empty string when the model returns blank content', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('  \n '))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.generateHypotheticalDoc('What is our deployment strategy?')
+
+      expect(result).toBe('')
+    })
+
+    it.each([
+      'What is our deployment strategy?',
+      '"what is our   deployment strategy"',
+      '  WHAT IS OUR DEPLOYMENT\nSTRATEGY?  ',
+      '\u201cWhat is our deployment strategy?\u201d',
+    ])('returns an empty string when the model echoes the query (%j)', async (echo) => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(echo))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.generateHypotheticalDoc('What is our deployment strategy?')
+
+      expect(result).toBe('')
+    })
+
+    it('passes a real passage through unchanged', async () => {
+      const passage = 'We agreed to deploy with blue-green releases on Kubernetes, starting last week.'
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(passage))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.generateHypotheticalDoc('What is our deployment strategy?')
+
+      expect(result).toBe(passage)
     })
 
     it('calls the model with the correct system prompt and user query', async () => {
@@ -321,6 +353,43 @@ describe('OpenAISummarizer', () => {
 
       expect(typeof result).toBe('string')
       expect(result.length).toBeGreaterThan(0)
+    })
+  })
+  describe('expandQuery()', () => {
+    async function expand(content: string | null): Promise<string[]> {
+      mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content } }] })
+      return new OpenAISummarizer({ apiKey: 'test-key' }).expandQuery('Where did Alice meet Bob?')
+    }
+
+    it('parses a bare JSON array', async () => {
+      expect(await expand('["Alice Bob", "met"]')).toEqual(['Alice Bob', 'met'])
+    })
+
+    it('parses an array wrapped in prose', async () => {
+      expect(await expand('Here are the variants: ["Alice Bob", "first meeting"] Hope this helps.'))
+        .toEqual(['Alice Bob', 'first meeting'])
+    })
+
+    it('parses an array inside a json code fence', async () => {
+      expect(await expand('```json\n["Alice Bob", "meeting place"]\n```'))
+        .toEqual(['Alice Bob', 'meeting place'])
+    })
+
+    it('keeps only non-empty trimmed strings, capped at 5', async () => {
+      expect(await expand('[" Alice ", "", "   ", 7, null, "Bob", "a", "b", "c", "d"]'))
+        .toEqual(['Alice', 'Bob', 'a', 'b', 'c'])
+    })
+
+    it('finds the array when the surrounding prose carries its own brackets', async () => {
+      expect(await expand('Variants [JSON]: ["Alice Bob"]')).toEqual(['Alice Bob'])
+      expect(await expand('["a"] (see [1])')).toEqual(['a'])
+    })
+
+    it('returns [] for a non-array reply', async () => {
+      expect(await expand('{"terms": "Alice"}')).toEqual([])
+      expect(await expand('Alice, Bob, meeting')).toEqual([])
+      expect(await expand('] not [ an array')).toEqual([])
+      expect(await expand(null)).toEqual([])
     })
   })
 })
