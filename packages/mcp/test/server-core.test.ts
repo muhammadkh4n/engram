@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import { maybeWithRecallEngine, formatRecallTimingLine } from '../src/server-core.js'
+import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
 
@@ -118,5 +118,21 @@ describe('formatRecallTimingLine', () => {
 
   it('prints only total and counts when no optional stage ran', () => {
     expect(formatRecallTimingLine({ total: 3.2 }, 0, 0)).toBe('[recall] total=3 items=0 chars=0')
+  })
+})
+
+describe('recallOptionsFromArgs', () => {
+  it('trims the project id the way memory_ingest does', () => {
+    expect(recallOptionsFromArgs({ query: 'q', project_id: '  engram  ' })).toEqual({ projectId: 'engram' })
+  })
+
+  it('treats blank and shared aliases as no project', () => {
+    for (const alias of ['', '   ', 'global', 'none', 'shared', 'GLOBAL']) {
+      expect(recallOptionsFromArgs({ query: 'q', project_id: alias })).toEqual({})
+    }
+  })
+
+  it('ignores a non-string project id and passes synthesize through', () => {
+    expect(recallOptionsFromArgs({ query: 'q', project_id: 42, synthesize: true })).toEqual({ synthesize: true })
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -10,6 +10,7 @@ import {
   projectBoostFor,
   applyProjectRanking,
   resetProjectGroupsCache,
+  PROJECT_GROUPS_RECHECK_MS,
 } from '../../src/retrieval/project-groups.js'
 import type { RetrievedMemory } from '../../src/types.js'
 
@@ -120,6 +121,77 @@ describe('loadProjectGroups', () => {
   })
 })
 
+describe('loadProjectGroups reload', () => {
+  let dir: string
+  let warn: ReturnType<typeof vi.spyOn>
+  let clock: number
+  const now = (): number => clock
+
+  function write(file: string, groups: Record<string, string[]>, mtimeSec: number): void {
+    writeFileSync(file, JSON.stringify({ groups }))
+    utimesSync(file, mtimeSec, mtimeSec)
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'engram-groups-reload-'))
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    resetProjectGroupsCache()
+    clock = 1_000_000
+  })
+
+  afterEach(() => {
+    warn.mockRestore()
+    rmSync(dir, { recursive: true, force: true })
+    resetProjectGroupsCache()
+  })
+
+  it('picks up an edited file at the next check, not before', () => {
+    const file = join(dir, 'groups.json')
+    write(file, { one: ['engram*'] }, 1_000)
+    expect(groupOf('engram-x', loadProjectGroups(file, now))).toBe('one')
+    write(file, { two: ['engram*'] }, 2_000)
+    clock += PROJECT_GROUPS_RECHECK_MS - 1
+    expect(groupOf('engram-x', loadProjectGroups(file, now))).toBe('one')
+    clock += 1
+    expect(groupOf('engram-x', loadProjectGroups(file, now))).toBe('two')
+  })
+
+  it('keeps the parsed groups when the mtime is unchanged', () => {
+    const file = join(dir, 'groups.json')
+    write(file, { one: ['engram*'] }, 1_000)
+    const first = loadProjectGroups(file, now)
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(loadProjectGroups(file, now)).toBe(first)
+  })
+
+  it('loads a file created after a failed read, and warns once per distinct failure', () => {
+    const file = join(dir, 'groups.json')
+    expect(loadProjectGroups(file, now)).toEqual([])
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(loadProjectGroups(file, now)).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+    writeFileSync(file, '{ not json')
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(loadProjectGroups(file, now)).toEqual([])
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(loadProjectGroups(file, now)).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(2)
+    write(file, { fixed: ['engram'] }, 3_000)
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(groupOf('engram', loadProjectGroups(file, now))).toBe('fixed')
+    expect(warn).toHaveBeenCalledTimes(2)
+  })
+
+  it('drops the groups when the file is deleted', () => {
+    const file = join(dir, 'groups.json')
+    write(file, { one: ['engram'] }, 1_000)
+    expect(loadProjectGroups(file, now)).toHaveLength(1)
+    rmSync(file)
+    clock += PROJECT_GROUPS_RECHECK_MS
+    expect(loadProjectGroups(file, now)).toEqual([])
+  })
+})
+
 describe('projectRankingFromEnv', () => {
   beforeEach(() => resetProjectGroupsCache())
 
@@ -149,6 +221,11 @@ describe('projectBoostFor / applyProjectRanking', () => {
     expect(projectBoostFor('cih-mfe', ranking)).toBeCloseTo(0.05)
     expect(projectBoostFor(null, ranking)).toBe(0)
     expect(projectBoostFor('engram', ranking)).toBe(0)
+  })
+
+  it('matches the same project case-insensitively, like the group globs', () => {
+    expect(projectBoostFor('Aithentic-SAM-mfe', ranking)).toBeCloseTo(0.1)
+    expect(projectBoostFor('aithentic-sam-mfe', { ...ranking, project: 'AITHENTIC-SAM-MFE' })).toBeCloseTo(0.1)
   })
 
   it('gives no group boost when the current project has no group', () => {

@@ -167,4 +167,20 @@ describe('project scoping — end-to-end through Memory', () => {
     expect(relevanceOf(result.memories, 'beta secret')).toBeGreaterThan(relevanceOf(result.memories, 'alpha secret'))
     expect(contentsOf(result.memories).some((c) => c.includes('shared principle'))).toBe(true)
   })
+
+  it("scoped forget removes its own and shared matches, never another project's", async () => {
+    // One embedding for every text, so beta's memory is as close a match as
+    // alpha's; only the project guard keeps it out of the forget set.
+    const affected = await alpha.forget('secret', { confirm: true, minRelevance: 0 })
+    const forgotten = contentsOf(affected.previewed)
+
+    expect(forgotten.some((c) => c.includes('alpha secret'))).toBe(true)
+    expect(forgotten.some((c) => c.includes('shared principle'))).toBe(true)
+    expect(forgotten.some((c) => c.includes('beta secret'))).toBe(false)
+
+    const after = contentsOf((await shared.recall('what secret did we store earlier?')).memories)
+    expect(after.some((c) => c.includes('beta secret'))).toBe(true)
+    expect(after.some((c) => c.includes('alpha secret'))).toBe(false)
+    expect(after.some((c) => c.includes('shared principle'))).toBe(false)
+  })
 })

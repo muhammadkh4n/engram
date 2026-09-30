@@ -179,3 +179,39 @@ describe('graph activation project scope', () => {
     expect(args[6]).toBe('alpha')
   })
 })
+
+describe('forget on a project-scoped instance', () => {
+  const intelligence = {
+    embed: async (): Promise<number[]> => DUMMY_EMBEDDING,
+    dimensions: (): number => DUMMY_EMBEDDING.length,
+  }
+
+  async function forgetFromAlpha(storage: StorageAdapter): Promise<string[]> {
+    const memory = createMemory({ storage, intelligence, projectId: 'alpha' })
+    await memory.initialize()
+    const result = await memory.forget('release notes', { confirm: true, minRelevance: 0 })
+    await memory.dispose()
+    return result.previewed.map((m) => m.id)
+  }
+
+  it("never tombstones another project's memory, even when it is the closest match", async () => {
+    // Storage returns every project's rows, as the recall SQL does now that
+    // it no longer filters by project; the guard must live in core.
+    const storage = createMockStorage({
+      vectorSearchResults: hits([
+        [episode('theirs', 'beta', 0), 0.95],
+        [episode('mine', 'alpha', 1), 0.6],
+        [episode('shared', null, 2), 0.6],
+      ]),
+      textBoostResults: [],
+    })
+
+    const affected = await forgetFromAlpha(storage)
+
+    expect(affected).not.toContain('theirs')
+    expect(affected).toEqual(expect.arrayContaining(['mine', 'shared']))
+    const tombstoned = vi.mocked(storage.episodes.markForgotten).mock.calls.flatMap((c) => c[0])
+    expect(tombstoned).not.toContain('theirs')
+    expect(tombstoned).toEqual(expect.arrayContaining(['mine', 'shared']))
+  })
+})

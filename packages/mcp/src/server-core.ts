@@ -427,6 +427,19 @@ const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'rerank', 'gr
 
 /** One-line recall latency summary. Absent stages are omitted, not zeroed, so
  *  a missing key means the stage never ran for that query. */
+/**
+ * Recall options from memory_recall arguments. The project id is normalised
+ * exactly as memory_ingest normalises it, so a padded id or a shared alias
+ * (blank/global/none/shared) ranks against the same tag ingest wrote.
+ */
+export function recallOptionsFromArgs(args: Record<string, unknown>): { projectId?: string; synthesize?: true } {
+  const projectId = normalizeProjectId(args['project_id'])
+  return {
+    ...(projectId ? { projectId } : {}),
+    ...(args['synthesize'] === true ? { synthesize: true as const } : {}),
+  }
+}
+
 export function formatRecallTimingLine(
   timings: Record<string, number>,
   items: number,
@@ -471,12 +484,7 @@ export function createEngramServer(): Server {
           }
         }
 
-        const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
-        const synthesize = args['synthesize'] === true
-        const result = await mem.recall(query.trim(), {
-          ...(projectId ? { projectId } : {}),
-          ...(synthesize ? { synthesize: true } : {}),
-        })
+        const result = await mem.recall(query.trim(), recallOptionsFromArgs(args))
 
         if (result.timings) {
           // stderr: stdout carries the stdio JSON-RPC stream.
@@ -597,7 +605,7 @@ export function createEngramServer(): Server {
         const maxCommunities = typeof args['max_communities'] === 'number'
           ? Math.min(args['max_communities'], 20)
           : 5
-        const projectId = typeof args['project_id'] === 'string' ? args['project_id'] : undefined
+        const projectId = normalizeProjectId(args['project_id'])
 
         const communities = await mem.getCommunitySummaries({ topic, limit: maxCommunities, projectId })
 

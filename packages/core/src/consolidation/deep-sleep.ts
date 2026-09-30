@@ -175,8 +175,10 @@ export async function deepSleep(
     allCandidates.push(...candidates)
   }
 
-  // Promotions inherit the project of the digests they derive from, so
-  // scoped recall survives consolidation.
+  // Semantic promotions inherit the project of the digests they derive from,
+  // so same-project ranking survives consolidation. Procedural promotions are
+  // stored shared: a procedure or habit describes how the user works, which
+  // applies in every project, not only the one it was first observed in.
   const digestProjectById = new Map(digests.map(d => [d.id, d.projectId]))
   const candidateProjectId = (candidate: KnowledgeCandidate): string | null =>
     majorityProjectId(candidate.sourceDigestIds.map(id => digestProjectById.get(id)))
@@ -408,7 +410,7 @@ export async function deepSleep(
       sourceEpisodeIds: candidate.sourceEpisodeIds,
       embedding: proceduralEmbedding ?? null,
       metadata: {},
-      projectId: candidateProjectId(candidate),
+      projectId: null,
     })
 
     // --- Neo4j: Procedural Memory node ---

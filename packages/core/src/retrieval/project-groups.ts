@@ -12,8 +12,9 @@
  *   { "groups": { "<group>": ["<project name or glob>", ...] } }
  * Globs support `*` and `?`, match the whole project name, case-insensitively.
  * A project belongs to the first group (in file order) with a matching pattern.
+ * The same-project comparison is case-insensitive too, like the globs.
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import type { RetrievedMemory } from '../types.js'
 
 export interface ProjectGroup {
@@ -72,26 +73,59 @@ export function groupOf(project: string, groups: readonly ProjectGroup[]): strin
   return null
 }
 
-const loaded = new Map<string, ProjectGroup[]>()
+/** How long a loaded groups file is trusted before its mtime is checked again. */
+export const PROJECT_GROUPS_RECHECK_MS = 60_000
+
+interface GroupsCacheEntry {
+  readonly groups: ProjectGroup[]
+  /** mtime of the file when it was last read; -1 when it did not exist. */
+  readonly mtimeMs: number
+  readonly checkedAt: number
+  /** Message of the last read failure, or null after a clean read. */
+  readonly failure: string | null
+}
+
+const loaded = new Map<string, GroupsCacheEntry>()
+
+function mtimeOf(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return -1
+  }
+}
 
 /**
- * Groups from `filePath`, read once per path per process. An unset path means
+ * Groups from `filePath`. The file is re-stat'ed at most once per
+ * PROJECT_GROUPS_RECHECK_MS and re-read when its mtime or existence changed,
+ * so edits apply to a running server without a restart. An unset path means
  * no groups. An unreadable or malformed file also means no groups: ranking
  * degrades to the same-project boost alone, which hides nothing, so recall
- * keeps working and the problem is reported once on stderr.
+ * keeps working. A failed read is retried at the next check, and each distinct
+ * failure is reported once on stderr rather than on every recall.
  */
-export function loadProjectGroups(filePath: string | undefined): ProjectGroup[] {
+export function loadProjectGroups(filePath: string | undefined, now: () => number = Date.now): ProjectGroup[] {
   if (!filePath) return []
   const cached = loaded.get(filePath)
-  if (cached) return cached
-  let groups: ProjectGroup[] = []
-  try {
-    groups = parseProjectGroups(JSON.parse(readFileSync(filePath, 'utf8')))
-  } catch (err) {
-    console.warn(`[engram] project groups file ${filePath} ignored: ${(err as Error).message}`)
+  const t = now()
+  if (cached && t - cached.checkedAt < PROJECT_GROUPS_RECHECK_MS) return cached.groups
+  const mtimeMs = mtimeOf(filePath)
+  if (cached && cached.failure === null && cached.mtimeMs === mtimeMs) {
+    loaded.set(filePath, { ...cached, checkedAt: t })
+    return cached.groups
   }
-  loaded.set(filePath, groups)
-  return groups
+  try {
+    const groups = parseProjectGroups(JSON.parse(readFileSync(filePath, 'utf8')))
+    loaded.set(filePath, { groups, mtimeMs, checkedAt: t, failure: null })
+    return groups
+  } catch (err) {
+    const failure = (err as Error).message
+    if (failure !== cached?.failure) {
+      console.warn(`[engram] project groups file ${filePath} ignored: ${failure}`)
+    }
+    loaded.set(filePath, { groups: [], mtimeMs, checkedAt: t, failure })
+    return []
+  }
 }
 
 /** Forget cached group files (tests, or a caller that rewrote the file). */
@@ -105,7 +139,10 @@ function boostFromEnv(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback
 }
 
-/** Ranking settings for one recall. Environment is read per call so a flag flip needs no restart. */
+/**
+ * Ranking settings for one recall. Environment is read per call and the groups
+ * file is reloaded when it changes, so neither needs a restart.
+ */
 export function projectRankingFromEnv(
   project: string,
   env: Env = process.env,
@@ -131,7 +168,7 @@ export function memoryProject(m: RetrievedMemory): string | null {
 
 export function projectBoostFor(memProject: string | null, ranking: ProjectRanking): number {
   if (memProject === null) return 0
-  if (memProject === ranking.project) return ranking.projectBoost
+  if (memProject.toLowerCase() === ranking.project.toLowerCase()) return ranking.projectBoost
   if (ranking.group !== null && groupOf(memProject, ranking.groups) === ranking.group) return ranking.groupBoost
   return 0
 }

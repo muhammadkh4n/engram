@@ -675,11 +675,12 @@ describe('deepSleep', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Promotions inherit projectId from their source digests — a hardcoded
-  // null makes every promoted memory "shared" and defeats scoped recall.
+  // Semantic promotions inherit projectId from their source digests so
+  // same-project ranking survives consolidation; procedural promotions
+  // describe how the user works and are stored shared.
   // -------------------------------------------------------------------------
 
-  describe('promotions inherit projectId from source digests', () => {
+  describe('promotion project tags', () => {
     it('tags promoted semantic memories with the source digest project', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.', projectId: 'engram' }),
@@ -712,7 +713,7 @@ describe('deepSleep', () => {
       )
     })
 
-    it('tags promoted procedural memories with the source digest project', async () => {
+    it('stores promoted procedural memories shared even when source digests are tagged', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I always run prettier before committing.', projectId: 'engram' }),
         makeDigest({ summary: 'Filler content one.', projectId: 'engram' }),
@@ -724,7 +725,7 @@ describe('deepSleep', () => {
 
       expect(result.procedural).toBeGreaterThanOrEqual(1)
       expect(storage.procedural.insert).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: 'engram' })
+        expect.objectContaining({ projectId: null })
       )
     })
   })
