@@ -68,6 +68,9 @@ function requireValue(raw: string | undefined, flag: string): string {
 const HELP =
   'engram-project-backfill — restore project_id on episodes from metadata.project\n' +
   '  (dry run by default)\n' +
+  '  A tag <repo>-<suffix> folds into <repo> when <repo> is also a tag (worktrees).\n' +
+  "  Two real repositories sharing a prefix fold too: read the dry run's rename\n" +
+  '  list and pass --keep for each one before --apply.\n' +
   '  --apply            write project_id\n' +
   '  --map FROM=TO      explicit tag mapping, repeatable; TO=none keeps FROM shared\n' +
   '  --shared NAME      treat NAME as a folder, not a repository (repeatable)\n' +
