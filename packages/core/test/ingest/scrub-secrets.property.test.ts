@@ -1,7 +1,17 @@
-import { describe, it, expect } from 'vitest'
+/**
+ * Redaction guarantees over random passwords:
+ *   - a value registered from the machine's secret files is masked in every
+ *     syntax it can be written in, down to the last 4-character piece;
+ *   - an unregistered value is guaranteed only where its syntax identifies it
+ *     as a credential (JWT, Authorization header, URL userinfo). Anywhere else
+ *     an unregistered password is left for the review list: that is the known
+ *     gap of redacting only what is certain, and it is not asserted here.
+ */
+import { afterAll, beforeAll, describe, it, expect } from 'vitest'
 import { scrubSecrets } from '../../src/ingest/scrub-secrets.js'
 import { scrubMessage } from '../../src/ingest/scrub-message.js'
 import { isShellReference } from '../../src/ingest/value-extent.js'
+import { useNoRegistry, useTempRegistry } from './registry-fixture.js'
 
 // A seeded generator so any failure reproduces exactly.
 function mulberry32(seed: number): () => number {
@@ -55,6 +65,8 @@ const jsDoubleInner = (s: string): string => s.replace(/[\\"]/g, (c) => `\\${c}`
 const YAML_PLAIN_RE = /^[A-Za-z0-9][A-Za-z0-9 _./+=-]*[A-Za-z0-9]$/
 const yamlValue = (s: string): string => (YAML_PLAIN_RE.test(s) ? s : JSON.stringify(s))
 const flagValue = (flag: string, s: string): string => (s.startsWith('-') ? `${flag}=${shellQuote(s)}` : `${flag} ${shellQuote(s)}`)
+const xmlText = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const b64url = (s: string): string => Buffer.from(s, 'utf8').toString('base64url')
 
 interface Syntax {
   name: string
@@ -93,7 +105,33 @@ const SYNTAXES: Syntax[] = [
   { name: 'URL userinfo', render: (pw) => `psql postgresql://engram:${encodeURIComponent(pw)}@db.internal:5432/engram -c "select 1"`, keys: ['postgresql://engram:', '@db.internal:5432/engram'] },
   { name: 'PGPASSWORD prefix', render: (pw) => `PGPASSWORD=${shellQuote(pw)} psql -h db -U engram`, keys: ['PGPASSWORD=', ' psql -h db -U engram'] },
   { name: '--password flag', render: (pw) => `psql ${flagValue('--password', pw)} -h db`, keys: ['--password', ' -h db'] },
+  { name: 'prose', render: (pw) => `I set the staging password to ${pw} and restarted the service.`, keys: ['I set the staging password to ', ' and restarted the service.'] },
+  {
+    name: 'JSON-in-JSON',
+    render: (pw) => JSON.stringify({ tool: 'Bash', output: JSON.stringify({ user: 'engram', password: pw }) }),
+    keys: ['{"tool":"Bash","output":', '\\"user\\":\\"engram\\"', '\\"password\\":'],
+  },
+  { name: 'query string', render: (pw) => `GET /callback?code=abc&token=${encodeURIComponent(pw)}&state=xyz HTTP/1.1`, keys: ['GET /callback?code=abc&token=', '&state=xyz HTTP/1.1'] },
+  { name: 'TS typed declaration', render: (pw) => `const dbPassword: string = '${jsSingleInner(pw)}'\nconnect(dbPassword)`, keys: ['const dbPassword: string = ', 'connect(dbPassword)'] },
+  { name: 'subscript assignment', render: (pw) => `process.env['DB_PASSWORD'] = "${jsDoubleInner(pw)}"\nstart()`, keys: ["process.env['DB_PASSWORD'] = ", 'start()'] },
+  { name: 'XML', render: (pw) => `<datasource>\n  <user>engram</user>\n  <password>${xmlText(pw)}</password>\n</datasource>`, keys: ['<user>engram</user>', '<password>', '</password>'] },
 ]
+
+/** Syntaxes that identify a credential by themselves: the value must redact even when nobody registered it. */
+const SELF_IDENTIFYING: Syntax[] = [
+  ...SYNTAXES.filter((s) => ['curl Authorization: Bearer', 'raw Authorization header', 'URL userinfo'].includes(s.name)),
+  {
+    name: 'JWT',
+    render: (pw) => `session cookie: ${b64url('{"alg":"HS256","typ":"JWT"}')}.${b64url(JSON.stringify({ sub: pw }))}.${b64url(pw + pw)} expires soon`,
+    keys: ['session cookie: ', ' expires soon'],
+  },
+]
+
+/** The JWT syntax writes the password only in base64url; its pieces are what must not survive. */
+const encodingsOf = (syntax: Syntax, pw: string): string[] =>
+  syntax.name === 'JWT'
+    ? [b64url(JSON.stringify({ sub: pw })), b64url(pw + pw)]
+    : [encodeURIComponent(pw), JSON.stringify(pw), JSON.stringify(JSON.stringify(pw)), xmlText(pw)]
 
 function windows(s: string): string[] {
   const out: string[] = []
@@ -112,21 +150,45 @@ function survivors(pw: string, encodings: string[], output: string, scaffold: st
   return [...pieces].filter((w) => output.includes(w) && !context.includes(w))
 }
 
-describe('scrubSecrets — random passwords in every syntax', () => {
+const registered = Object.fromEntries(PASSWORDS.map((pw, i) => [`PW_${String(i).padStart(3, '0')}_PASSWORD`, pw]))
+
+async function assertMasked(syntax: Syntax, pw: string): Promise<void> {
+  const scaffold = syntax.render('')
+  const input = syntax.render(pw)
+  const { text } = await scrubSecrets(input)
+  const leaked = survivors(pw, encodingsOf(syntax, pw), text, scaffold)
+  expect(leaked, `${syntax.name}\ninput:  ${input}\noutput: ${text}`).toEqual([])
+  for (const key of syntax.keys) expect(text, `${syntax.name}: ${input}`).toContain(key)
+}
+
+describe('scrubSecrets — registered random passwords in every syntax', () => {
+  let restore: () => void = () => {}
+  beforeAll(() => {
+    restore = useTempRegistry(registered)
+  })
+  afterAll(() => restore())
+
   for (const syntax of SYNTAXES) {
     it(`${syntax.name}: ${PASSWORD_COUNT} passwords leave no ${WINDOW}-character piece and keep the keys`, async () => {
-      const scaffold = syntax.render('')
-      for (const pw of PASSWORDS) {
-        const input = syntax.render(pw)
-        const { text } = await scrubSecrets(input)
-        const leaked = survivors(pw, [encodeURIComponent(pw), JSON.stringify(pw)], text, scaffold)
-        expect(leaked, `${syntax.name}\ninput:  ${input}\noutput: ${text}`).toEqual([])
-        for (const key of syntax.keys) expect(text, `${syntax.name}: ${input}`).toContain(key)
-      }
+      for (const pw of PASSWORDS) await assertMasked(syntax, pw)
+    }, 60_000)
+  }
+})
+
+describe('scrubSecrets — unregistered random passwords in self-identifying syntax', () => {
+  let restore: () => void = () => {}
+  beforeAll(() => {
+    restore = useNoRegistry()
+  })
+  afterAll(() => restore())
+
+  for (const syntax of SELF_IDENTIFYING) {
+    it(`${syntax.name}: ${PASSWORD_COUNT} passwords leave no ${WINDOW}-character piece and keep the keys`, async () => {
+      for (const pw of PASSWORDS) await assertMasked(syntax, pw)
     }, 60_000)
   }
 
-  it(`metadata object: ${PASSWORD_COUNT} passwords are replaced whole`, async () => {
+  it(`metadata object: ${PASSWORD_COUNT} passwords under secret-named keys are replaced whole`, async () => {
     for (const pw of PASSWORDS) {
       const { message } = await scrubMessage({
         role: 'user',
@@ -183,9 +245,27 @@ const NEGATIVE_CORPUS: string[] = [
   'DATABASE_URL=postgres://engram:${DB_PASSWORD}@db:5432/engram',
   'NEO4J_URI=bolt://localhost:7687\nREDIS_URL=redis://cache:6379/0',
   'npm run build && npx vitest run test/ingest --maxWorkers=2',
+  "fetch('/api/session', { method: 'POST', credentials: 'include' })",
+  'const reqHasAuth = Boolean(req.headers.authorization)\nif (!reqHasAuth) return res.status(401).end()',
+  'grep -rn "password=" src/ && sed -i \'s/password=.*/password=CHANGEME/\' .env.example',
+  'Usage: engram-ingest [options]\n  --token <token>     API token for the HTTP server\n  --password <pw>     database password',
+  'const SESSION_LAUNCHED_KEY = "engram:session-launched"',
+  'db_password: ENC[AES256_GCM,data:q2W9xLkV0pA=,iv:Zm9vYmFyYmF6cXV4,tag:YmFzZTY0dGFn,type:str]',
+  '{"db_password": "ENC[AES256_GCM,data:q2W9xLkV0pA=,iv:Zm9vYmFyYmF6cXV4,tag:YmFzZTY0dGFn,type:str]"}',
+  'NEO4J_PASSWORD=ENC[AES256_GCM,data:q2W9xLkV0pA=,iv:Zm9vYmFyYmF6cXV4,tag:YmFzZTY0dGFn,type:str]',
+  'git checkout -b feature/ACA-2447-software-inventory && git push -u origin fix/PROG-230-review-renewals',
+  'password: hunter2\nDB_PASSWORD: "SUPER_SECRET_PW",',
+  'curl -u admin:pa55word https://api.example.com && mysql -u root -pS3cret engram',
+  'The issue_key ACA-2331 and the stepKey deploy-3 stay searchable.',
 ]
 
 describe('scrubSecrets — a fixed negative corpus stays byte-identical', () => {
+  let restore: () => void = () => {}
+  beforeAll(() => {
+    restore = useNoRegistry()
+  })
+  afterAll(() => restore())
+
   for (const input of NEGATIVE_CORPUS) {
     it(`keeps ${input.split('\n')[0]!.slice(0, 60)}`, async () => {
       expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })

@@ -28,7 +28,8 @@ const DATA_STRUCTURE_WORDS = new Set([
   'object', 'bucket', 'map', 'row', 'cursor', 'hash', 'translation',
 ])
 
-// In free text many more words before `KEY` name data than a credential:
+// In free text many more words before `KEY` name data than a credential
+// (used only to flag review candidates):
 // `issue_key` holds a ticket id, `COLUMN_KEY` MySQL's PRI/MUL, `stepKey` a
 // workflow step.
 const FREE_TEXT_DATA_STRUCTURE_WORDS = new Set([
@@ -125,8 +126,12 @@ function judgeKey(name: string, rule: KeyRule): boolean {
   return before !== undefined && !rule.dataStructureWords.has(before)
 }
 
-/** Whether a value assigned to this key in free text is a credential, judged by the key's last word. */
-export function isSecretKey(name: string): boolean {
+/**
+ * The last-word rule tuned for free text, where it only flags review
+ * candidates: prose negations (`no-auth`), a bare `pass` and many more
+ * data words before `KEY` (`issue_key`, `stepKey`) do not qualify.
+ */
+export function isCandidateSecretKey(name: string): boolean {
   return judgeKey(name, FREE_TEXT_RULE)
 }
 

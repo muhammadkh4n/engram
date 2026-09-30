@@ -1,9 +1,24 @@
-import { describe, it, expect } from 'vitest'
-import { isPublicKey, isSecretKey } from '../../src/ingest/secret-keys.js'
+import { afterAll, beforeAll, describe, it, expect } from 'vitest'
+import { isCandidateSecretKey, isPublicKey, isStructuredSecretKey } from '../../src/ingest/secret-keys.js'
+import { findSecretCandidates } from '../../src/ingest/secret-candidates.js'
 import { scrubSecrets } from '../../src/ingest/scrub-secrets.js'
 import { scrubMessage } from '../../src/ingest/scrub-message.js'
+import { useNoRegistry } from './registry-fixture.js'
 
-describe('isSecretKey — the last word of the key decides', () => {
+let restoreRegistry: () => void = () => {}
+beforeAll(() => {
+  restoreRegistry = useNoRegistry()
+})
+afterAll(() => restoreRegistry())
+
+/** Replaces each candidate span the way a redaction would, to show exactly what was flagged. */
+function markCandidates(text: string): string {
+  let out = text
+  for (const c of findSecretCandidates(text).reverse()) out = out.slice(0, c.start) + `[REDACTED:${c.name ?? c.kind}]` + out.slice(c.end)
+  return out
+}
+
+describe('isCandidateSecretKey — the last word of the key decides', () => {
   const secret = [
     'NEO4J_PASSWORD', 'PGPASSWORD', 'DB_PASSWD', 'DB_PWD', 'DB_PW', 'DB_PASS', 'smtpPass', 'OPENSEARCH_PASS', 'GPG_PASSPHRASE', 'CLIENT_SECRET',
     'clientsecret', 'authToken', 'GITHUB_TOKEN', 'GOOGLE_CREDENTIALS', 'basicAuth', 'Authorization', 'SENTRY_DSN',
@@ -20,8 +35,13 @@ describe('isSecretKey — the last word of the key decides', () => {
     'Access-Control-Allow-Credentials',
   ]
 
-  for (const name of secret) it(`${name} holds a secret`, () => expect(isSecretKey(name)).toBe(true))
-  for (const name of notSecret) it(`${name} does not`, () => expect(isSecretKey(name)).toBe(false))
+  for (const name of secret) it(`${name} holds a secret`, () => expect(isCandidateSecretKey(name)).toBe(true))
+  for (const name of notSecret) it(`${name} does not`, () => expect(isCandidateSecretKey(name)).toBe(false))
+
+  it('in structured data a bare pass and only the core data words before KEY decide', () => {
+    for (const name of ['pass', 'PASS', 'project_key', 'issue_key', 'NO_AUTH_TOKEN', 'NEO4J_PASSWORD']) expect(isStructuredSecretKey(name)).toBe(true)
+    for (const name of ['cacheKey', 'sort_key', 'translation_key', 'TOKEN_LIMIT', 'PWD']) expect(isStructuredSecretKey(name)).toBe(false)
+  })
 
   it('treats browser-exposed and publishable keys as public', () => {
     for (const name of ['NEXT_PUBLIC_SUPABASE_ANON_KEY', 'VITE_API_KEY', 'REACT_APP_TOKEN', 'SUPABASE_ANON_KEY', 'STRIPE_PUBLISHABLE_KEY', 'publicKey', 'sentry_key']) {
@@ -31,7 +51,7 @@ describe('isSecretKey — the last word of the key decides', () => {
   })
 })
 
-describe('keyed values — extent comes from the syntax', () => {
+describe('keyed candidates in free text — extent comes from the syntax', () => {
   const redacted: Array<[string, string]> = [
     ['SECRET_KEY_BASE=f00dfeed', 'SECRET_KEY_BASE=[REDACTED:SECRET_KEY_BASE]'],
     ['DB_PASSWORD_PROD=hunter2', 'DB_PASSWORD_PROD=[REDACTED:DB_PASSWORD_PROD]'],
@@ -64,8 +84,8 @@ describe('keyed values — extent comes from the syntax', () => {
   ]
 
   for (const [input, expected] of redacted) {
-    it(`redacts ${input}`, async () => {
-      expect((await scrubSecrets(input)).text).toBe(expected)
+    it(`flags the value in ${input}`, () => {
+      expect(markCandidates(input)).toBe(expected)
     })
   }
 
@@ -78,10 +98,10 @@ describe('keyed values — extent comes from the syntax', () => {
   ]
 
   for (const [input, expected] of cli) {
-    it(`redacts the CLI password in ${input}`, async () => {
-      const { text, redactions } = await scrubSecrets(input)
-      expect(text).toBe(expected)
-      expect(redactions).toEqual([{ kind: 'cli-password' }])
+    it(`flags the CLI password in ${input} and leaves the text alone`, async () => {
+      expect(markCandidates(input)).toBe(expected)
+      expect(findSecretCandidates(input).map((c) => c.kind)).toEqual(['cli-password'])
+      expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
     })
   }
 
@@ -114,7 +134,8 @@ describe('keyed values — extent comes from the syntax', () => {
   ]
 
   for (const input of kept) {
-    it(`keeps ${input}`, async () => {
+    it(`neither flags nor redacts ${input}`, async () => {
+      expect(findSecretCandidates(input)).toEqual([])
       expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
     })
   }
@@ -135,5 +156,21 @@ describe('scrubMessage — values under secret-named object keys', () => {
       nested: { authToken: '[REDACTED:authToken]', note: 'kept' },
     })
     expect(redactions.map((r) => r.name)).toEqual(['apiKey', 'password', 'authToken'])
+  })
+})
+
+describe('scrubMessage — structured walks', () => {
+  it('redacts numbers under secret-named keys and keeps other numbers', async () => {
+    const { message } = await scrubMessage({ role: 'user', content: 'x', metadata: { pin_password: 12345678, port: 5432 } })
+    expect(message.metadata).toEqual({ pin_password: '[REDACTED:pin_password]', port: 5432 })
+  })
+
+  it('replaces whatever lies past the depth limit instead of storing it unscrubbed', async () => {
+    let deep: Record<string, unknown> = { password_hint: 'leaf' }
+    for (let i = 0; i < 40; i++) deep = { next: deep }
+    const { message, redactions } = await scrubMessage({ role: 'user', content: 'x', metadata: deep })
+    expect(JSON.stringify(message.metadata)).toContain('[REDACTED:depth-limit]')
+    expect(JSON.stringify(message.metadata)).not.toContain('leaf')
+    expect(redactions).toEqual([{ kind: 'depth-limit' }])
   })
 })

@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterAll, afterEach, beforeAll } from 'vitest'
 import { sqliteAdapter } from '@engram-mem/sqlite'
 import { createMemory } from '../../src/create-memory.js'
 import { scrubMessage, describeRedactions } from '../../src/ingest/scrub-message.js'
 import type { IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type { GraphPort } from '../../src/adapters/graph.js'
 import type { StorageAdapter } from '../../src/adapters/storage.js'
+import { useTempRegistry } from './registry-fixture.js'
 
 // Synthetic credential shapes: none of these is a real key.
 const FAKE_KEY = 'sk-test-0123456789abcdefghijklmnop'
@@ -31,6 +32,13 @@ function makeGraph(): GraphPort & { ingestEpisode: ReturnType<typeof vi.fn> } {
 async function storedEpisodes(storage: StorageAdapter, sessionId: string) {
   return storage.episodes.getBySession(sessionId)
 }
+
+// The values this machine keeps in its secret files; free text is masked by value.
+let restoreRegistry: () => void = () => {}
+beforeAll(() => {
+  restoreRegistry = useTempRegistry({ API_KEY: FAKE_KEY, NEO4J_PASSWORD: 'c0rrect-h0rse-battery' })
+})
+afterAll(() => restoreRegistry())
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -76,7 +84,7 @@ describe('Memory.ingest — secret scrubbing', () => {
     for (const text of sent) {
       expect(text).not.toContain(FAKE_KEY)
       expect(text).not.toContain('c0rrect-h0rse-battery')
-      expect(text).toContain('OPENAI_API_KEY: "[REDACTED:OPENAI_API_KEY]"')
+      expect(text).toContain('OPENAI_API_KEY: "[REDACTED:API_KEY]"')
       expect(text).toContain('NEO4J_PASSWORD: "[REDACTED:NEO4J_PASSWORD]"')
       expect(text).toContain('PORT: 8787')
     }
@@ -138,7 +146,7 @@ describe('Memory.ingest — secret scrubbing', () => {
 
     const lines = warn.mock.calls.map((c) => c.map(String).join(' '))
     const line = lines.find((l) => l.includes('redacted'))
-    expect(line).toBe('[engram] ingest: redacted 2 secret value(s): named-secret(1), github(1)')
+    expect(line).toBe('[engram] ingest: redacted 2 secret value(s): known(1), github(1)')
     for (const l of lines) {
       expect(l).not.toContain(FAKE_KEY)
       expect(l).not.toContain('API_KEY')

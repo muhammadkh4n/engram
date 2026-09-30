@@ -1,19 +1,19 @@
 /**
- * Values assigned to secret-named keys. The key's name decides whether the
- * value is a credential (see secret-keys.ts); the syntax around the pair
- * decides where the value ends. The value's own characters are never judged:
- * a literal under a secret key is redacted whatever it looks like. The only
- * values kept are those the syntax shows are not literals — empty values,
- * shell references (`$X`, `${X}`, `$(…)`), code references in code syntax
- * (identifiers, member paths, calls, type annotations), typed `true` / `null`
- * in YAML, JSON and JS — plus placeholders this module wrote itself.
+ * Free-text heuristic: values assigned to secret-named keys. The key's name
+ * decides whether the value may be a credential (see secret-keys.ts); the
+ * syntax around the pair decides where the value ends. Empty values, shell
+ * references (`$X`, `${X}`, `$(…)`), code references in code syntax
+ * (identifiers, member paths, calls, type annotations) and typed `true` /
+ * `null` in YAML, JSON and JS are skipped, as are placeholders.
  *
  * Also covers credentials passed as CLI arguments: `--password value`,
  * `curl -u user:pass`, `mysql -p'…'`.
+ *
+ * Detect-only: these spans feed findSecretCandidates and never redact.
  */
 
 import { isOnlyPlaceholders } from './placeholder.js'
-import { isPublicKey, isPublishableValue, isSecretKey } from './secret-keys.js'
+import { isCandidateSecretKey, isPublicKey, isPublishableValue } from './secret-keys.js'
 import type { DetectedSpan } from './secretlint-spans.js'
 import { Lines, isQuote, isShellReference, quotedValueEnd, shellWordEnd } from './value-extent.js'
 
@@ -237,7 +237,7 @@ function pairSpans(text: string, lines: Lines): DetectedSpan[] {
   for (const m of text.matchAll(KEY_RE)) {
     const name = m[2] ?? ''
     // `token?: string` is a TypeScript optional-property annotation.
-    if (m[3] === '?' || !isSecretKey(name) || isPublicKey(name)) continue
+    if (m[3] === '?' || !isCandidateSecretKey(name) || isPublicKey(name)) continue
     const keyStart = m.index ?? 0
     if (!isAssignment(text, m[1] ?? '', m[4] ?? '', m[5] ?? '', keyStart + m[0].length)) continue
     const pair: KeyedPair = {
@@ -274,7 +274,7 @@ function longFlagSpans(text: string, lines: Lines): DetectedSpan[] {
   const spans: DetectedSpan[] = []
   for (const m of text.matchAll(LONG_FLAG_RE)) {
     const name = m[1] ?? ''
-    if (!isSecretKey(name) || isPublicKey(name)) continue
+    if (!isCandidateSecretKey(name) || isPublicKey(name)) continue
     const span = argumentSpan(text, lines, (m.index ?? 0) + m[0].length)
     if (span) spans.push({ start: span[0], end: span[1], kind: 'named-secret', name, rank: KEYED_RANK })
   }
@@ -328,15 +328,4 @@ export function keyedSpans(text: string): DetectedSpan[] {
     ...curlUserSpans(text, lines),
     ...mysqlPasswordSpans(text, lines),
   ]
-}
-
-/**
- * A string stored under an object key (`{ password: '…' }` in message
- * metadata or tool input) has no surrounding syntax, so it is a literal:
- * redacted whole unless empty, a shell reference or already a placeholder.
- */
-export function isSecretForKey(name: string, value: string): boolean {
-  if (!isSecretKey(name) || isPublicKey(name)) return false
-  const trimmed = value.trim()
-  return trimmed !== '' && !isShellReference(trimmed) && !isOnlyPlaceholders(value) && !isPublishableValue(trimmed)
 }

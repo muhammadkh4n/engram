@@ -262,3 +262,8 @@ export function defaultSecretRegistry(): SecretRegistry {
   defaultRegistry ??= createSecretRegistry({ configPath: process.env[SECRET_SOURCES_ENV] })
   return defaultRegistry
 }
+
+/** Drops the process-wide registry so the next use reads `ENGRAM_SECRET_SOURCES_FILE` again. */
+export function resetDefaultSecretRegistry(): void {
+  defaultRegistry = undefined
+}

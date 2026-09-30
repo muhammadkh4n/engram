@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { afterAll, beforeAll, describe, it, expect } from 'vitest'
 import { scrubSecrets } from '../../src/ingest/scrub-secrets.js'
+import { findSecretCandidates } from '../../src/ingest/secret-candidates.js'
 import { secretlintSpans } from '../../src/ingest/secretlint-spans.js'
+import { useNoRegistry, useTempRegistry } from './registry-fixture.js'
 
 // Token-shaped fixtures are assembled at runtime so the source file never
 // carries a literal that a push-time secret scanner would flag. None of them
@@ -33,7 +35,13 @@ async function kinds(text: string): Promise<string[]> {
   return ((await scrubSecrets(text))).redactions.map((r) => r.kind)
 }
 
-describe('scrubSecrets — named assignments keep the key name', () => {
+let restoreRegistry: () => void = () => {}
+beforeAll(() => {
+  restoreRegistry = useNoRegistry()
+})
+afterAll(() => restoreRegistry())
+
+describe('scrubSecrets — key names decide in env blocks and JSON', () => {
   it('redacts a .env line and keeps the key', async () => {
     const { text, redactions } = await scrubSecrets('NEO4J_PASSWORD=hunter2hunter2')
     expect(text).toBe('NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]')
@@ -45,55 +53,10 @@ describe('scrubSecrets — named assignments keep the key name', () => {
     expect(text).toBe('export OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
   })
 
-  it('redacts a YAML-style colon assignment', async () => {
-    const { text, redactions } = await scrubSecrets('db:\n  password: s3cr3t-Value\n  port: 5432')
-    expect(text).toBe('db:\n  password: [REDACTED:password]\n  port: 5432')
-    expect(redactions).toEqual([{ kind: 'named-secret', name: 'password' }])
-  })
-
   it('preserves quotes around the placeholder in JSON', async () => {
     const { text, redactions } = await scrubSecrets('{"SESSION_SECRET": "abc123def456", "PORT": "3100"}')
     expect(text).toBe('{"SESSION_SECRET": "[REDACTED:SESSION_SECRET]", "PORT": "3100"}')
     expect(redactions).toEqual([{ kind: 'named-secret', name: 'SESSION_SECRET' }])
-  })
-
-  it('redacts every secret in a pm2 ecosystem env block', async () => {
-    const block = [
-      'module.exports = {',
-      '  apps: [{',
-      "    name: 'engram-mcp-http',",
-      "    script: 'dist/server.js',",
-      '    env: {',
-      `      OPENAI_API_KEY: '${OPENAI_KEY}',`,
-      `      OPENROUTER_API_KEY: '${OPENROUTER_KEY}',`,
-      "      NEO4J_PASSWORD: 'correct-horse-battery',",
-      `      SUPABASE_SERVICE_ROLE_KEY: '${JWT}',`,
-      "      DATABASE_URL: 'postgresql://engram:Pg-Pass-99@db.internal:5432/engram',",
-      "      ENGRAM_AUTH_TOKEN: 'tok_live_5a6b7c8d',",
-      '      PORT: 3100,',
-      '    },',
-      '  }],',
-      '}',
-    ].join('\n')
-    const { text, redactions } = await scrubSecrets(block)
-    expect(text).toContain("OPENAI_API_KEY: '[REDACTED:OPENAI_API_KEY]',")
-    expect(text).toContain("OPENROUTER_API_KEY: '[REDACTED:OPENROUTER_API_KEY]',")
-    expect(text).toContain("NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',")
-    expect(text).toContain("SUPABASE_SERVICE_ROLE_KEY: '[REDACTED:SUPABASE_SERVICE_ROLE_KEY]',")
-    expect(text).toContain("DATABASE_URL: 'postgresql://engram:[REDACTED:postgres-url]@db.internal:5432/engram',")
-    expect(text).toContain("ENGRAM_AUTH_TOKEN: '[REDACTED:ENGRAM_AUTH_TOKEN]',")
-    expect(text).toContain("name: 'engram-mcp-http',")
-    expect(text).toContain('PORT: 3100,')
-    for (const secret of [OPENAI_KEY, OPENROUTER_KEY, JWT, 'correct-horse-battery', 'Pg-Pass-99', 'tok_live_5a6b7c8d']) {
-      expect(text).not.toContain(secret)
-    }
-    expect(redactions.map((r) => r.name).filter(Boolean)).toEqual([
-      'OPENAI_API_KEY',
-      'OPENROUTER_API_KEY',
-      'NEO4J_PASSWORD',
-      'SUPABASE_SERVICE_ROLE_KEY',
-      'ENGRAM_AUTH_TOKEN',
-    ])
   })
 
   it('redacts a .env dump line by line', async () => {
@@ -118,27 +81,66 @@ describe('scrubSecrets — named assignments keep the key name', () => {
     )
   })
 
-  it('redacts the token of a curl Authorization header and keeps the scheme', async () => {
-    const cmd = `curl -s -H "Authorization: Bearer ${OPENAI_KEY}" https://api.example.com/v1/models`
-    const { text, redactions } = await scrubSecrets(cmd)
-    expect(text).toBe(
-      'curl -s -H "Authorization: Bearer [REDACTED:Authorization]" https://api.example.com/v1/models',
-    )
-    expect(redactions).toEqual([{ kind: 'named-secret', name: 'Authorization' }])
+  it('reads a JSON document as structure, whatever its layout', async () => {
+    const doc = '{\n  "db": { "user": "engram", "password": "a \\"quoted\\" pw", "port": 5432 },\n  "apiKey": 12345678\n}'
+    const { text, redactions } = await scrubSecrets(doc)
+    expect(text).toBe('{\n  "db": { "user": "engram", "password": "[REDACTED:password]", "port": 5432 },\n  "apiKey": [REDACTED:apiKey]\n}')
+    expect(redactions.map((r) => r.name)).toEqual(['password', 'apiKey'])
   })
 
-  it('redacts hyphenated header keys and CLI flags', async () => {
-    expect((await scrubSecrets('curl -H "X-Api-Key: 0a1b2c3d4e5f"')).text).toBe(
-      'curl -H "X-Api-Key: [REDACTED:X-Api-Key]"',
-    )
-    expect((await scrubSecrets('psql --password=Sup3rS3cret')).text).toBe('psql --password=[REDACTED:password]')
+  it('keeps env references, key-only lines and non-secret keys in an env block', async () => {
+    const block = '# local\nexport DB_PASSWORD=$DB_PASSWORD\nTOKEN_LIMIT=4096\nAPI_KEY=\nPGPASS= next'
+    expect(await scrubSecrets(block)).toEqual({ text: block, redactions: [] })
   })
 
-  it('redacts query-string secrets without swallowing the next parameter', async () => {
-    expect((await scrubSecrets('GET /cb?token=abc123&state=xyz')).text).toBe(
-      'GET /cb?token=[REDACTED:token]&state=xyz',
-    )
+  it('reads an env assignment value as one shell word, so a command after it survives', async () => {
+    expect((await scrubSecrets('PGPASSWORD=s3cr3t psql -h db -U engram')).text).toBe('PGPASSWORD=[REDACTED:PGPASSWORD] psql -h db -U engram')
+    expect((await scrubSecrets("export DB_PASSWORD='it'\\''s here' && run")).text).toBe("export DB_PASSWORD='[REDACTED:DB_PASSWORD]' && run")
   })
+
+  it('reads a single-quoted env value as a literal', async () => {
+    expect((await scrubSecrets("DB_PASSWORD='$ecret'")).text).toBe("DB_PASSWORD='[REDACTED:DB_PASSWORD]'")
+  })
+
+  it('does not apply key names to free text', async () => {
+    const inputs = [
+      'db:\n  password: s3cr3t-Value\n  port: 5432',
+      'curl -H "X-Api-Key: 0a1b2c3d4e5f"',
+      'psql --password=Sup3rS3cret',
+      'GET /cb?token=abc123&state=xyz',
+      'Set NEO4J_PASSWORD=correctHorse on the box, then restart.',
+    ]
+    for (const input of inputs) expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
+  })
+})
+
+describe('scrubSecrets — Authorization header values', () => {
+  const cases: Array<[string, string]> = [
+    [`curl -s -H "Authorization: Bearer ${OPENAI_KEY}" https://api.example.com/v1/models`, 'curl -s -H "Authorization: Bearer [REDACTED:authorization]" https://api.example.com/v1/models'],
+    ['Authorization: Bearer SUPER_SECRET_PW', 'Authorization: Bearer [REDACTED:authorization]'],
+    ['GET / HTTP/1.1\nAuthorization: Basic dXNlcjpwYSBzcw==\nAccept: */*', 'GET / HTTP/1.1\nAuthorization: Basic [REDACTED:authorization]\nAccept: */*'],
+    ['fetch(u, {"headers": {"Authorization": "Bearer tok with \\"quote"}})', 'fetch(u, {"headers": {"Authorization": "Bearer [REDACTED:authorization]"}})'],
+    ["fetch(url, { headers: { authorization: 'bearer a b c' } })", "fetch(url, { headers: { authorization: 'bearer [REDACTED:authorization]' } })"],
+    ['then send Proxy-Authorization: Basic Zm9vOmJhcg== upstream', 'then send Proxy-Authorization: Basic [REDACTED:authorization] upstream'],
+  ]
+  for (const [input, expected] of cases) {
+    it(`redacts the credential in ${input.slice(0, 40)}`, async () => {
+      expect((await scrubSecrets(input)).text).toBe(expected)
+    })
+  }
+
+  const kept = [
+    'curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user',
+    'const auth = { Authorization: `Bearer ${token}` }',
+    "headers: { Authorization: 'Bearer ' + token }",
+    'Authorization: Bearer <token>',
+    'The Authorization header carries a bearer token.',
+  ]
+  for (const input of kept) {
+    it(`keeps ${input.slice(0, 40)}`, async () => {
+      expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
+    })
+  }
 })
 
 describe('scrubSecrets — known credential formats anywhere in text', () => {
@@ -199,6 +201,17 @@ describe('scrubSecrets — known credential formats anywhere in text', () => {
     const { text, redactions } = await scrubSecrets('git clone https://mk:gh-pass-77@git.example.com/repo.git')
     expect(text).toBe('git clone https://mk:[REDACTED:http-url]@git.example.com/repo.git')
     expect(redactions).toEqual([{ kind: 'http-url' }])
+  })
+
+  it('takes the last @ before the host, so a password may hold / # @', async () => {
+    expect((await scrubSecrets('psql postgres://engram:p/a#s@s@db:5432/engram?user=a@b.c')).text).toBe(
+      'psql postgres://engram:[REDACTED:postgres-url]@db:5432/engram?user=a@b.c',
+    )
+  })
+
+  it('keeps ports and paths that hold @', async () => {
+    const inputs = ['npm view https://registry.example.com:8080/@scope/pkg', 'see https://example.com/users/a:b@c', 'https://github.com/org@x']
+    for (const input of inputs) expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
   })
 
   it('redacts the password of other connection-string schemes', async () => {
@@ -269,16 +282,15 @@ describe('scrubSecrets — secretlint formats replace the value only', () => {
   })
 })
 
-describe('scrubSecrets — high-entropy values under unrecognised keys', () => {
-  it('redacts a 32+ char mixed-class value after "="', async () => {
-    const { text, redactions } = await scrubSecrets(`COOKIE_SIGNING_SEED=${HIGH_ENTROPY}`)
-    expect(text).toBe('COOKIE_SIGNING_SEED=[REDACTED:high-entropy]')
-    expect(redactions).toEqual([{ kind: 'high-entropy' }])
-  })
-
-  it('redacts a quoted 32+ char mixed-class value after ":"', async () => {
-    expect((await scrubSecrets(`signingSeed: "${HIGH_ENTROPY}"`)).text).toBe('signingSeed: "[REDACTED:high-entropy]"')
-  })
+describe('high-entropy values under unrecognised keys are review candidates only', () => {
+  for (const input of [`COOKIE_SIGNING_SEED=${HIGH_ENTROPY}`, `signingSeed: "${HIGH_ENTROPY}"`]) {
+    it(`flags and keeps ${input.slice(0, 20)}`, async () => {
+      expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
+      const [candidate] = findSecretCandidates(input)
+      expect(candidate?.kind).toBe('high-entropy')
+      expect(input.slice(candidate!.start, candidate!.end)).toBe(HIGH_ENTROPY)
+    })
+  }
 })
 
 describe('scrubSecrets — leaves non-secrets alone', () => {
@@ -319,7 +331,7 @@ describe('scrubSecrets — leaves non-secrets alone', () => {
   }
 })
 
-describe('scrubSecrets — a literal under a secret-named key is redacted whatever its shape', () => {
+describe('scrubSecrets — in structured text a literal under a secret-named key is redacted whatever its shape', () => {
   const redacted: Array<[string, string, string]> = [
     ['NEO4J_PASSWORD=correctHorse', 'NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]', 'NEO4J_PASSWORD'],
     ['DB_PASSWORD=SUPER_SECRET_PW', 'DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
@@ -327,15 +339,11 @@ describe('scrubSecrets — a literal under a secret-named key is redacted whatev
     ['{"password": "MY_PROD_PASS"}', '{"password": "[REDACTED:password]"}', 'password'],
     ['API_KEY=abc.def.ghi', 'API_KEY=[REDACTED:API_KEY]', 'API_KEY'],
     ['export DB_PASSWORD=hunter2', 'export DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
-    ['password: hunter2', 'password: [REDACTED:password]', 'password'],
-    ["      NEO4J_PASSWORD: 'correctHorse',", "      NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',", 'NEO4J_PASSWORD'],
-    ['DB_PASSWORD: "SUPER_SECRET_PW",', 'DB_PASSWORD: "[REDACTED:DB_PASSWORD]",', 'DB_PASSWORD'],
-    ['const password = `correctHorse`', 'const password = `[REDACTED:password]`', 'password'],
-    ['docker run -e NEO4J_PASSWORD=correctHorse neo4j', 'docker run -e NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD] neo4j', 'NEO4J_PASSWORD'],
-    ['curl -H "X-Api-Key: myApiKey" https://api.example.com', 'curl -H "X-Api-Key: [REDACTED:X-Api-Key]" https://api.example.com', 'X-Api-Key'],
-    ['Authorization: Bearer SUPER_SECRET_PW', 'Authorization: Bearer [REDACTED:Authorization]', 'Authorization'],
     ['export OPENAI_API_KEY=sk-...', 'export OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]', 'OPENAI_API_KEY'],
-    ['"NEO4J_PASSWORD": "...",', '"NEO4J_PASSWORD": "[REDACTED:NEO4J_PASSWORD]",', 'NEO4J_PASSWORD'],
+    ['{"NEO4J_PASSWORD": "..."}', '{"NEO4J_PASSWORD": "[REDACTED:NEO4J_PASSWORD]"}', 'NEO4J_PASSWORD'],
+    ['DB_PASS=hunter2', 'DB_PASS=[REDACTED:DB_PASS]', 'DB_PASS'],
+    ['pass=hunter2', 'pass=[REDACTED:pass]', 'pass'],
+    ['PROJECT_KEY=abcdef', 'PROJECT_KEY=[REDACTED:PROJECT_KEY]', 'PROJECT_KEY'],
     ['DB_PASSWORD=true', 'DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
   ]
 
@@ -369,6 +377,77 @@ describe('scrubSecrets — a literal under a secret-named key is redacted whatev
       const { text, redactions } = await scrubSecrets(input)
       expect(redactions).toEqual([])
       expect(text).toBe(input)
+    })
+  }
+})
+
+describe('scrubSecrets — registered values are masked in free text', () => {
+  let restore: () => void = () => {}
+  beforeAll(() => {
+    restore = useTempRegistry({
+      NEO4J_PASSWORD: 'correct-horse-battery',
+      ENGRAM_AUTH_TOKEN: 'tok_live_5a6b7c8d',
+      DB_PASSWORD: 's3cr3t-Value',
+      ADMIN_PASSWORD: 'correctHorse',
+      ENGRAM_API_KEY: 'myApiKey',
+    })
+  })
+  afterAll(() => restore())
+
+  it('redacts every secret in a pm2 ecosystem env block', async () => {
+    const block = [
+      'module.exports = {',
+      '  apps: [{',
+      "    name: 'engram-mcp-http',",
+      "    script: 'dist/server.js',",
+      '    env: {',
+      `      OPENAI_API_KEY: '${OPENAI_KEY}',`,
+      `      OPENROUTER_API_KEY: '${OPENROUTER_KEY}',`,
+      "      NEO4J_PASSWORD: 'correct-horse-battery',",
+      `      SUPABASE_SERVICE_ROLE_KEY: '${JWT}',`,
+      "      DATABASE_URL: 'postgresql://engram:Pg-Pass-99@db.internal:5432/engram',",
+      "      ENGRAM_AUTH_TOKEN: 'tok_live_5a6b7c8d',",
+      '      PORT: 3100,',
+      '    },',
+      '  }],',
+      '}',
+    ].join('\n')
+    const { text, redactions } = await scrubSecrets(block)
+    expect(text).toContain("OPENAI_API_KEY: '[REDACTED:openai]',")
+    expect(text).toContain("OPENROUTER_API_KEY: '[REDACTED:openrouter-key]',")
+    expect(text).toContain("NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',")
+    expect(text).toContain("SUPABASE_SERVICE_ROLE_KEY: '[REDACTED:jwt]',")
+    expect(text).toContain("DATABASE_URL: 'postgresql://engram:[REDACTED:postgres-url]@db.internal:5432/engram',")
+    expect(text).toContain("ENGRAM_AUTH_TOKEN: '[REDACTED:ENGRAM_AUTH_TOKEN]',")
+    expect(text).toContain("name: 'engram-mcp-http',")
+    expect(text).toContain('PORT: 3100,')
+    for (const secret of [OPENAI_KEY, OPENROUTER_KEY, JWT, 'correct-horse-battery', 'Pg-Pass-99', 'tok_live_5a6b7c8d']) {
+      expect(text).not.toContain(secret)
+    }
+    expect(redactions.map((r) => r.name ?? r.kind)).toEqual([
+      'openai',
+      'openrouter-key',
+      'NEO4J_PASSWORD',
+      'jwt',
+      'postgres-url',
+      'ENGRAM_AUTH_TOKEN',
+    ])
+  })
+
+  const freeText: Array<[string, string]> = [
+    ['db:\n  password: s3cr3t-Value\n  port: 5432', 'db:\n  password: [REDACTED:DB_PASSWORD]\n  port: 5432'],
+    ["      NEO4J_PASSWORD: 'correct-horse-battery',", "      NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',"],
+    ['const password = `correctHorse`', 'const password = `[REDACTED:ADMIN_PASSWORD]`'],
+    ['docker run -e NEO4J_PASSWORD=correctHorse neo4j', 'docker run -e NEO4J_PASSWORD=[REDACTED:ADMIN_PASSWORD] neo4j'],
+    ['curl -H "X-Api-Key: myApiKey" https://api.example.com', 'curl -H "X-Api-Key: [REDACTED:ENGRAM_API_KEY]" https://api.example.com'],
+    ['GET /cb?token=tok_live_5a6b7c8d&state=xyz', 'GET /cb?token=[REDACTED:ENGRAM_AUTH_TOKEN]&state=xyz'],
+    ['the password was correct-horse-battery all along', 'the password was [REDACTED:NEO4J_PASSWORD] all along'],
+  ]
+  for (const [input, expected] of freeText) {
+    it(`masks the registered value in ${input.trim().slice(0, 40)}`, async () => {
+      const { text, redactions } = await scrubSecrets(input)
+      expect(text).toBe(expected)
+      expect(redactions.map((r) => r.kind)).toEqual(['known'])
     })
   }
 })
@@ -421,6 +500,6 @@ describe('scrubSecrets — idempotence', () => {
   }
 
   it('reports kinds in text order', async () => {
-    expect(await kinds(`${SLACK_BOT} and NEO4J_PASSWORD=x1y2`)).toEqual(['slack', 'named-secret'])
+    expect(await kinds(`SLACK_BOT=${SLACK_BOT}\nNEO4J_PASSWORD=x1y2`)).toEqual(['slack', 'named-secret'])
   })
 })

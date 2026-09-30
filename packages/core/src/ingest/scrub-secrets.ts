@@ -3,14 +3,17 @@
  * sent to a summarisation model. Key names are kept so the memory still says
  * *which* secret was involved; only the value is replaced.
  *
- * Every rule reads the original text and reports spans:
+ * Only rules that are right whenever they fire redact:
  *   - values registered from this machine's secret files, in any spelling (secret-registry.ts)
  *   - known token formats, private keys and connection strings (secretlint)
- *   - values assigned to secret-named keys and CLI password arguments (keyed-secrets.ts)
- *   - PEM private-key blocks, including truncated ones
- *   - passwords inside URL userinfo, for any scheme
- *   - formats secretlint lacks (JWTs, OpenRouter keys, Anthropic OAuth/admin tokens)
- *   - high-entropy values after `=` / `:` whose key name gave no signal
+ *   - self-identifying formats: PEM private-key blocks (including truncated
+ *     ones), JWTs, OpenRouter keys, Anthropic OAuth/admin tokens,
+ *     `Authorization: Bearer|Basic` header values and URL userinfo passwords
+ *   - values under secret-named keys, only when the whole text is structured
+ *     data (JSON, an env block; see structured-text.ts)
+ * Guesses from free-text key names and entropy only flag review candidates
+ * (secret-candidates.ts) and never change text.
+ *
  * Overlapping spans collapse into one covering both, labelled by the widest
  * (ties by rank, below). Spans are replaced right to left so earlier offsets
  * stay valid.
@@ -19,12 +22,13 @@
  * placeholder, so scrubbing already-scrubbed text is a no-op.
  */
 
-import { KEYED_RANK, keyedSpans } from './keyed-secrets.js'
 import { PLACEHOLDER_PREFIX, placeholder } from './placeholder.js'
 import { defaultSecretRegistry } from './secret-registry.js'
-import { SECRETLINT_RANK, secretlintSpans } from './secretlint-spans.js'
+import { secretlintSpans } from './secretlint-spans.js'
 import type { DetectedSpan } from './secretlint-spans.js'
-import { isShellReference } from './value-extent.js'
+import { STRUCTURED_RANK, structuredSpans } from './structured-text.js'
+import { DOC_PLACEHOLDER_RE, urlPasswords } from './url-userinfo.js'
+import { Lines, isQuote, isShellReference, quotedValueEnd, shellWordEnd } from './value-extent.js'
 
 export interface SecretRedaction {
   kind: string
@@ -42,22 +46,17 @@ export interface DetectedSecret extends SecretRedaction {
   end: number
 }
 
-// Documentation placeholders inside a URL: `...`, `<pwd>`, `xxxx`, `****`.
-// `<` and `>` cannot appear unencoded in a URL, so `<pwd>` is never a password.
-const DOC_PLACEHOLDER_RE = /(?:\.\.\.|…)$|^<[^>]*>$|^(?:x{3,}|\*{3,})$/i
-
 // Equally wide overlapping spans take the label of the lowest rank: a known
 // value first (certain, and named by its source), then the key name, then our
-// format rules, then secretlint, then the entropy guess.
-const KNOWN_VALUE_RANK = KEYED_RANK - 1
-const OWN_RANK = KEYED_RANK + 1
+// format rules, then secretlint.
+const KNOWN_VALUE_RANK = STRUCTURED_RANK - 1
+const OWN_RANK = STRUCTURED_RANK + 1
 
 function knownValueSpans(text: string): DetectedSpan[] {
   return defaultSecretRegistry()
     .findKnownValues(text)
     .map(({ start, end, name }) => ({ start, end, kind: 'known', name, rank: KNOWN_VALUE_RANK }))
 }
-const HIGH_ENTROPY_RANK = SECRETLINT_RANK + 1
 
 // Also covers blocks the secretlint rule leaves out: truncated ones (no END
 // line), short bodies, and types such as ENCRYPTED PRIVATE KEY.
@@ -68,55 +67,6 @@ function pemSpans(text: string): DetectedSpan[] {
     const start = m.index ?? 0
     return { start, end: start + m[0].length, kind: 'private-key', rank: OWN_RANK }
   })
-}
-
-// The authority runs from `//` to the first `/`, `?`, `#` or whitespace; its
-// userinfo ends at the last `@` and the password follows the first `:`.
-// Characters a password may contain are not restricted: URL syntax alone
-// delimits it. Authorities are length-bounded to keep the scan linear.
-const URL_AUTHORITY_RE = /\b([a-z][a-z0-9+.-]{0,31}):\/\/([^\s/?#]{1,2048})/gi
-
-function urlKind(scheme: string): string {
-  const s = scheme.toLowerCase()
-  if (s === 'postgres' || s === 'postgresql') return 'postgres-url'
-  if (s === 'http' || s === 'https') return 'http-url'
-  return 'url-password'
-}
-
-interface UrlPassword {
-  start: number
-  end: number
-  kind: string
-  isPlaceholder: boolean
-}
-
-/**
- * A URL wrapped in quotes (`'postgres://u:p@h'`) ends at the matching quote,
- * so the authority cannot run on into the text after it.
- */
-function authorityWithinQuotes(text: string, schemeStart: number, authority: string): string {
-  const quote = text.charAt(schemeStart - 1)
-  if (quote !== '"' && quote !== "'" && quote !== '`') return authority
-  const close = authority.indexOf(quote)
-  return close === -1 ? authority : authority.slice(0, close)
-}
-
-function urlPasswords(text: string, from: number, to: number): UrlPassword[] {
-  const found: UrlPassword[] = []
-  for (const m of text.slice(from, to).matchAll(URL_AUTHORITY_RE)) {
-    const schemeStart = from + (m.index ?? 0)
-    const authorityStart = schemeStart + (m[1] ?? '').length + 3
-    const authority = authorityWithinQuotes(text, schemeStart, m[2] ?? '')
-    const at = authority.lastIndexOf('@')
-    const colon = at === -1 ? -1 : authority.indexOf(':')
-    if (colon === -1 || colon > at) continue
-    const password = authority.slice(colon + 1, at)
-    if (password === '') continue
-    const isPlaceholder =
-      password.startsWith(PLACEHOLDER_PREFIX) || DOC_PLACEHOLDER_RE.test(password) || isShellReference(password)
-    found.push({ start: authorityStart + colon + 1, end: authorityStart + at, kind: urlKind(m[1] ?? ''), isPlaceholder })
-  }
-  return found
 }
 
 function urlPasswordSpans(text: string): DetectedSpan[] {
@@ -143,44 +93,59 @@ function knownFormatSpans(text: string): DetectedSpan[] {
   )
 }
 
-const HIGH_ENTROPY_MIN_LENGTH = 32
-const HIGH_ENTROPY_MAX_LENGTH = 1024
-const HIGH_ENTROPY_MIN_BITS = 4.0
-// A token directly after `=` / `:` (optionally quoted). A leading `/` is a URL
-// or path, and `.` is excluded so filenames and hostnames never qualify.
-const HIGH_ENTROPY_RE = new RegExp(
-  String.raw`(?<=[=:][ \t]*["']?)(?<!\[REDACTED:)(?!\/)([A-Za-z0-9+\/_-]{${HIGH_ENTROPY_MIN_LENGTH},${HIGH_ENTROPY_MAX_LENGTH}}={0,2})(?=$|[\s"',;)}\]])`,
-  'gm',
-)
+// `Authorization: Bearer <token>` in a raw header, a curl `-H "…"`, JSON or
+// a JS object. The token's extent comes from the syntax around the header:
+// the string it sits in, the quoted value, the line of a raw header, or one
+// shell word mid-line. `Proxy-Authorization` carries the same credential.
+const AUTH_HEADER_RE = /(?<![\w-])(?:proxy-)?authorization(["'`]?)[ \t]*[:=][ \t]*/gi
+const AUTH_SCHEME_RE = /^(?:bearer|basic)[ \t]+/i
+const LINE_LEADING_RE = /^[ \t]*(?:[-*+>][ \t]*)?$/
 
-function shannonEntropy(s: string): number {
-  const counts = new Map<string, number>()
-  for (const ch of s) counts.set(ch, (counts.get(ch) ?? 0) + 1)
-  let bits = 0
-  for (const n of counts.values()) {
-    const p = n / s.length
-    bits -= p * Math.log2(p)
+type Range = readonly [number, number]
+
+function quotedContent(text: string, open: number, lineEnd: number): Range {
+  const close = quotedValueEnd(text, open, lineEnd)
+  return [open + 1, close === -1 ? lineEnd : close]
+}
+
+function authValueRange(text: string, lines: Lines, nameStart: number, keyQuote: string, from: number): Range {
+  const lineEnd = lines.endOf(from)
+  if (isQuote(text.charAt(from))) return quotedContent(text, from, lineEnd)
+  const before = text.charAt(nameStart - 1)
+  if (!keyQuote && isQuote(before)) return [from, quotedContent(text, nameStart - 1, lineEnd)[1]]
+  if (LINE_LEADING_RE.test(text.slice(lines.startOf(nameStart), nameStart))) return [from, lineEnd]
+  const scheme = AUTH_SCHEME_RE.exec(text.slice(from, lineEnd))
+  return [from, shellWordEnd(text, from + (scheme?.[0].length ?? 0), lineEnd)]
+}
+
+/** In a JS template (`` `Bearer ${token}` ``) `${…}` is interpolation, elsewhere it is literal text. */
+function isReferenceOrPlaceholder(token: string, isTemplate: boolean): boolean {
+  return (
+    token === '' ||
+    (isTemplate && token.includes('${')) ||
+    isShellReference(token) ||
+    token.startsWith(PLACEHOLDER_PREFIX) ||
+    DOC_PLACEHOLDER_RE.test(token)
+  )
+}
+
+function authorizationSpans(text: string): DetectedSpan[] {
+  const lines = new Lines(text)
+  const spans: DetectedSpan[] = []
+  for (const m of text.matchAll(AUTH_HEADER_RE)) {
+    const nameStart = m.index ?? 0
+    const valueFrom = nameStart + m[0].length
+    const isTemplate = text.charAt(valueFrom) === '`' || text.charAt(nameStart - 1) === '`'
+    const [from, end] = authValueRange(text, lines, nameStart, m[1] ?? '', valueFrom)
+    const value = text.slice(from, end)
+    const scheme = AUTH_SCHEME_RE.exec(value)
+    if (!scheme) continue
+    const token = value.slice(scheme[0].length).trimEnd()
+    if (isReferenceOrPlaceholder(token.trim(), isTemplate)) continue
+    const start = from + scheme[0].length
+    spans.push({ start, end: start + token.length, kind: 'authorization', rank: OWN_RANK })
   }
-  return bits
-}
-
-/**
- * Requires upper case, lower case and digits together: hex digests, commit
- * shas and UUIDs are single-case and never qualify, random base64/base62
- * secrets virtually always do.
- */
-function looksRandom(token: string): boolean {
-  const mixed = /[A-Z]/.test(token) && /[a-z]/.test(token) && /[0-9]/.test(token)
-  return mixed && shannonEntropy(token) >= HIGH_ENTROPY_MIN_BITS
-}
-
-function highEntropySpans(text: string): DetectedSpan[] {
-  return [...text.matchAll(HIGH_ENTROPY_RE)]
-    .filter((m) => looksRandom(m[0]))
-    .map((m) => {
-      const start = m.index ?? 0
-      return { start, end: start + m[0].length, kind: 'high-entropy', rank: HIGH_ENTROPY_RANK }
-    })
+  return spans
 }
 
 /**
@@ -238,11 +203,11 @@ export async function detectSecrets(text: string): Promise<DetectedSecret[]> {
   const spans = [
     ...knownValueSpans(text),
     ...narrowUrlSpans(text, await secretlintSpans(text)),
-    ...keyedSpans(text),
+    ...structuredSpans(text),
     ...pemSpans(text),
     ...urlPasswordSpans(text),
+    ...authorizationSpans(text),
     ...knownFormatSpans(text),
-    ...highEntropySpans(text),
   ]
   return mergeSpans(spans).map(({ start, end, label }) =>
     label.name !== undefined ? { start, end, kind: label.kind, name: label.name } : { start, end, kind: label.kind },

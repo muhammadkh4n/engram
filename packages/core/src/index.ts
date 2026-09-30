@@ -21,6 +21,8 @@ export { parseContent } from './ingestion/content-parser.js'
 export type { ParsedContent, ParsedPart } from './ingestion/content-parser.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
+export { findSecretCandidates } from './ingest/secret-candidates.js'
+export type { SecretCandidate } from './ingest/secret-candidates.js'
 export { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 export type { ScrubbedMessage } from './ingest/scrub-message.js'
 export type {

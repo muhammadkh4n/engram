@@ -5,7 +5,10 @@
  * dependency stubbed and assert that the model call, the rejection log and
  * the ingest call all receive scrubbed text.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // Synthetic credential shapes: none of these is a real key.
 const FAKE_KEY = 'sk-test-0123456789abcdefghijklmnop'
@@ -74,7 +77,19 @@ vi.mock('../src/ingest/dedup.js', () => ({
 }))
 vi.mock('../src/ingest/rejection-log.js', () => ({ logRejection: h.logRejection }))
 
-const ENV = { SUPABASE_URL: 'https://example.test', SUPABASE_KEY: 'test-key', OPENAI_API_KEY: 'test-openai' }
+// Free text is masked by value: the CLIs see these as values kept in this
+// machine's secret files.
+const registryDir = mkdtempSync(join(tmpdir(), 'engram-cli-scrub-registry-'))
+writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ OPENAI_API_KEY: FAKE_KEY, NEO4J_PASSWORD: FAKE_PASSWORD }))
+writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
+afterAll(() => rmSync(registryDir, { recursive: true, force: true }))
+
+const ENV = {
+  SUPABASE_URL: 'https://example.test',
+  SUPABASE_KEY: 'test-key',
+  OPENAI_API_KEY: 'test-openai',
+  ENGRAM_SECRET_SOURCES_FILE: join(registryDir, 'sources.json'),
+}
 
 let stderrLines: string[] = []
 let exitSpy: ReturnType<typeof vi.spyOn>
@@ -149,14 +164,14 @@ describe('engram-ingest CLI', () => {
 
     expect(h.extractSalience).toHaveBeenCalledOnce()
     expect(h.extractSalience.mock.calls[0]![0]).toBe(
-      'Deploy note: API_KEY=[REDACTED:API_KEY] lives in the staging .env from now on',
+      'Deploy note: API_KEY=[REDACTED:OPENAI_API_KEY] lives in the staging .env from now on',
     )
     expect(h.memoryIngest).toHaveBeenCalledOnce()
     const ingested = h.memoryIngest.mock.calls[0]![0] as { content: string; metadata: Record<string, unknown> }
-    expect(ingested.content).toContain('API_KEY=[REDACTED:API_KEY]')
-    expect(String(ingested.metadata['rawTurn'])).toContain('API_KEY=[REDACTED:API_KEY]')
+    expect(ingested.content).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
+    expect(String(ingested.metadata['rawTurn'])).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(allText(h.memoryIngest.mock.calls)).not.toContain(FAKE_KEY)
-    expect(stderrLines).toContain('[engram-ingest] redacted 1 secret value(s): named-secret(1)\n')
+    expect(stderrLines).toContain('[engram-ingest] redacted 1 secret value(s): known(1)\n')
     expect(stderrLines.join('')).not.toContain(FAKE_KEY)
   })
 
@@ -170,7 +185,7 @@ describe('engram-ingest CLI', () => {
     await vi.waitFor(() => expect(h.logRejection).toHaveBeenCalled())
 
     const entry = h.logRejection.mock.calls[0]![0] as { contentPreview: string }
-    expect(entry.contentPreview).toContain('API_KEY=[REDACTED:API_KEY]')
+    expect(entry.contentPreview).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(entry.contentPreview).not.toContain(FAKE_KEY)
     expect(exitSpy).toHaveBeenCalledWith(0)
   })
@@ -193,7 +208,7 @@ describe('session-summary CLI', () => {
     expect(prompt).toContain('NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]')
     expect(prompt).not.toContain(FAKE_KEY)
     expect(prompt).not.toContain(FAKE_PASSWORD)
-    expect(stderrLines).toContain('[engram-summary] redacted 2 secret value(s): named-secret(2)\n')
+    expect(stderrLines).toContain('[engram-summary] redacted 2 secret value(s): known(2)\n')
   })
 })
 
@@ -213,6 +228,6 @@ describe('pre-compact CLI', () => {
     expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(prompt).not.toContain(FAKE_KEY)
     expect(prompt).not.toContain(FAKE_PASSWORD)
-    expect(stderrLines).toContain('[engram-compact] redacted 4 secret value(s): named-secret(4)\n')
+    expect(stderrLines).toContain('[engram-compact] redacted 4 secret value(s): known(4)\n')
   })
 })
