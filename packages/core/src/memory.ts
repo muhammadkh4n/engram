@@ -966,7 +966,7 @@ export class Memory {
   async forget(query: string, opts?: { tier?: string }): Promise<ForgetPreview> {
     this.assertInitialized()
 
-    // The light strategy (no association expansion, 8 results) keeps the
+    // The light strategy (no association expansion, at most 30 results) keeps the
     // preview to what the query plainly matches. Deep recall casts a 2-hop
     // net and lists dozens of loosely related memories for any query.
     // Embed the query so the vector path runs; without an embedding only the
