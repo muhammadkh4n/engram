@@ -85,6 +85,7 @@ interface MetadataCarrier {
 }
 
 export interface SweepRecallResult extends SessionProjectionInput {
+  memories: ReadonlyArray<SessionProjectionInput['memories'][number] & { relevance?: number }>
   formatted: string
   synthesis?: SynthesisBlock | null
   /** "Related Memories" in `formatted`. */
@@ -116,6 +117,8 @@ export interface FormattedContextFields {
 
 export interface SweepRecallOutcome {
   recalledSessionIds: string[]
+  /** Relevance of each recalled memory, in returned order (see `relevanceTop`). */
+  relevanceTop: Array<number | null>
   /** Set only when `synthesize` is on; null when recall produced no block. */
   synthesisRow?: SynthesisBlock | null
   /** Set only in `formatted` mode. */
@@ -151,6 +154,22 @@ export function goldIdsInContext(result: SweepRecallResult, goldIds: readonly st
   return goldIds.filter((id, i) => inContext.has(id) && goldIds.indexOf(id) === i)
 }
 
+const RELEVANCE_DECIMALS = 1e4
+
+/**
+ * The score of every recalled memory in returned order, rounded to 4
+ * decimals. Scores only, never content: the row shows the distribution a
+ * reranker produces, which feeds the rerank blend and the forget delete gate.
+ * A memory without a finite score records null so positions stay aligned.
+ */
+export function relevanceTop(result: Pick<SweepRecallResult, 'memories'>): Array<number | null> {
+  return result.memories.map((m) =>
+    typeof m.relevance === 'number' && Number.isFinite(m.relevance)
+      ? Math.round(m.relevance * RELEVANCE_DECIMALS) / RELEVANCE_DECIMALS
+      : null,
+  )
+}
+
 /**
  * One recall for one question. Session projection (and so recall@K) is the
  * same in both modes; `formatted` mode additionally captures the payload text
@@ -162,7 +181,10 @@ export async function runSweepRecall(
   cfg: SweepRecallConfig,
 ): Promise<SweepRecallOutcome> {
   const result = await memory.recall(question.question, sweepRecallOptions(cfg))
-  const outcome: SweepRecallOutcome = { recalledSessionIds: projectSessionIds(result) }
+  const outcome: SweepRecallOutcome = {
+    recalledSessionIds: projectSessionIds(result),
+    relevanceTop: relevanceTop(result),
+  }
 
   if (cfg.contextMode === 'sessions' && cfg.synthesize) {
     outcome.synthesisRow = result.synthesis

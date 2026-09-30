@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   goldIdsInContext,
+  relevanceTop,
   parseContextMode,
   productionRecallOptions,
   runSweepRecall,
@@ -32,9 +33,9 @@ const PAYLOAD = [
 function stubResult(overrides: Partial<SweepRecallResult> = {}): SweepRecallResult {
   return {
     memories: [
-      { id: 'm1', metadata: { lmeSessionId: 'sess_a' } },
-      { id: 'm2', metadata: { lmeSessionId: 'sess_b' } },
-      { id: 'm3', metadata: { lmeSessionId: 'sess_a' } },
+      { id: 'm1', relevance: 0.912345, metadata: { lmeSessionId: 'sess_a' } },
+      { id: 'm2', relevance: 0.5, metadata: { lmeSessionId: 'sess_b' } },
+      { id: 'm3', relevance: 0.03333333, metadata: { lmeSessionId: 'sess_a' } },
     ],
     formatted: PAYLOAD,
     synthesis: null,
@@ -230,7 +231,7 @@ describe('runSweepRecall — sessions mode keeps the row shape', () => {
     const out = await runSweepRecall(memory, QUESTION, { contextMode: 'sessions', maxK: 30, synthesize: false })
 
     expect(memory.calls[0]!.opts).toEqual({ strategyOverride: { maxResults: 30 } })
-    expect(out).toEqual({ recalledSessionIds: ['sess_a', 'sess_b'] })
+    expect(out).toEqual({ recalledSessionIds: ['sess_a', 'sess_b'], relevanceTop: [0.9123, 0.5, 0.0333] })
 
     const row = {
       ...baseRow(out.recalledSessionIds),
@@ -257,5 +258,46 @@ describe('runSweepRecall — sessions mode keeps the row shape', () => {
   it('records synthesis null when recall produced no block under --synthesize', async () => {
     const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, { contextMode: 'sessions', maxK: 30, synthesize: true })
     expect(out.synthesisRow).toBeNull()
+  })
+})
+
+describe('relevanceTop', () => {
+  it('records every recalled score in returned order, rounded to 4 decimals, in both modes', async () => {
+    const result = stubResult({
+      memories: [
+        { id: 'm9', relevance: 0.123456789, metadata: { lmeSessionId: 'sess_c' } },
+        { id: 'm1', relevance: 0.98765, metadata: { lmeSessionId: 'sess_a' } },
+        { id: 'm4', relevance: 0.00004, metadata: { lmeSessionId: 'sess_b' } },
+      ],
+    })
+    for (const contextMode of ['sessions', 'formatted'] as const) {
+      const out = await runSweepRecall(stubMemory(result), QUESTION, { contextMode, maxK: 30, synthesize: false })
+      expect(out.relevanceTop).toEqual([0.1235, 0.9877, 0])
+    }
+  })
+
+  it('carries numbers only, never memory content or ids', () => {
+    const scores = relevanceTop({
+      memories: [
+        { id: 'm1', relevance: 0.7, metadata: { lmeSessionId: 'sess_a', content: 'basil needs sun' } },
+      ],
+    })
+    expect(scores).toEqual([0.7])
+    expect(JSON.stringify(scores)).not.toMatch(/basil|m1|sess_a/)
+  })
+
+  it('keeps positions aligned with null for a missing or non-finite score', () => {
+    expect(relevanceTop({
+      memories: [
+        { id: 'a', relevance: 0.25 },
+        { id: 'b' },
+        { id: 'c', relevance: Number.NaN },
+        { id: 'd', relevance: 1 },
+      ],
+    })).toEqual([0.25, null, null, 1])
+  })
+
+  it('is empty when recall returns nothing', () => {
+    expect(relevanceTop({ memories: [] })).toEqual([])
   })
 })
