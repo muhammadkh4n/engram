@@ -29,7 +29,9 @@
  *   --stdin                       Read content from stdin
  *   --transcript <path>           Read last turn from a Claude Code JSONL
  *   --turn <user|assistant|system>  Role hint for the classifier (default: system)
- *   --project <name|auto|none>    Project scope (default: auto) [Phase 2]
+ *   --project <name|auto|none>    Project tag (default: auto = ENGRAM_PROJECT_ID, else the
+ *                                 git repository, worktrees resolving to their main repo,
+ *                                 else shared; none = shared)
  *   --source <string>             Provenance tag (claude-code-hook, git-commit, cli, ...)
  *   --session-id <string>         Session ID to attach to the memory
  *   --raw                          Skip classifier; store content as-is
@@ -50,7 +52,7 @@ import type { SalienceClassification } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
-import { resolveProject, resolveProjectScope } from './project-detect.js'
+import { projectForCategory, resolveProject } from './project-detect.js'
 import { findDuplicate, boostDuplicate } from './dedup.js'
 import { logRejection } from './rejection-log.js'
 import { scrubModelInput } from './scrub-model-input.js'
@@ -291,8 +293,8 @@ async function main(): Promise<void> {
   }
 
   // --- Project resolution ---
-  const project = resolveProject(args.project, process.cwd())
-  log(args.verbose, `project: ${project} (flag=${args.project})`)
+  const detectedProject = resolveProject(args.project, process.cwd())
+  log(args.verbose, `project: ${detectedProject ?? '<shared>'} (flag=${args.project})`)
 
   // --- Classification ---
   let classification: SalienceClassification
@@ -318,7 +320,7 @@ async function main(): Promise<void> {
 
     classification = await intelligence.extractSalience(content, {
       turnRole: args.turn,
-      project,
+      ...(detectedProject ? { project: detectedProject } : {}),
     })
   }
 
@@ -326,6 +328,10 @@ async function main(): Promise<void> {
     args.verbose,
     `classifier: store=${classification.store} category=${classification.category} confidence=${classification.confidence.toFixed(2)} reason="${classification.reason}"`,
   )
+
+  // Preferences and facts about people hold in every project: they are
+  // stored shared even when the turn happened inside a repository.
+  const project = projectForCategory(detectedProject, classification.category)
 
   // --- Gate ---
   if (!classification.store || classification.confidence < args.threshold) {
@@ -336,7 +342,7 @@ async function main(): Promise<void> {
       logRejection({
         timestamp: new Date().toISOString(),
         cwd: process.cwd(),
-        project,
+        project: detectedProject,
         role: args.turn,
         source: args.source,
         category: classification.category,
@@ -371,9 +377,12 @@ async function main(): Promise<void> {
   if (!args.noDedup) {
     await storage.initialize()
     try {
-      const dup = await findDuplicate(classification.distilled, storage, intelligence, {
-        project,
-      })
+      const dup = await findDuplicate(
+        classification.distilled,
+        storage,
+        intelligence,
+        project ? { project } : {},
+      )
       if (args.verbose && dup.debug) {
         const d = dup.debug
         log(
@@ -402,11 +411,8 @@ async function main(): Promise<void> {
   const ingestStorage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   const graph = await tryCreateGraph('[engram-ingest]')
 
-  // Wave 5: the hard project_id column uses the same env-first → cwd-basename
-  // resolution as the MCP server's recall path, so what we write here matches
-  // what recall filters on. (The soft `project` above feeds metadata + the
-  // classifier and stays as-is.)
-  const scope = resolveProjectScope()
+  // The project_id column and metadata.project carry the same value so the
+  // stored tag and anything later derived from the metadata never disagree.
   const memory = createMemory({
     storage: ingestStorage,
     intelligence,
@@ -415,7 +421,7 @@ async function main(): Promise<void> {
     // to enrich the embedding (Anthropic-style Contextual Retrieval).
     // Content stays pristine for FTS. ~$0.0001 per turn with gpt-4o-mini.
     contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
-    ...(scope.id ? { projectId: scope.id } : {}),
+    ...(project ? { projectId: project } : {}),
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
@@ -430,7 +436,7 @@ async function main(): Promise<void> {
         salienceConfidence: classification.confidence,
         salienceReason: classification.reason,
         source: args.source,
-        project,
+        ...(project ? { project } : {}),
         rawTurn: content.slice(0, 4000),
       },
     })
@@ -438,7 +444,7 @@ async function main(): Promise<void> {
     // process exits. Without this, the CLI can return immediately after
     // the SQL insert and process.exit() kills the inflight Neo4j write.
     await memory.flushPendingWrites()
-    log(args.verbose, `stored as ${classification.category} in project=${project}`)
+    log(args.verbose, `stored as ${classification.category} in project=${project ?? '<shared>'}`)
   } finally {
     await memory.dispose()
   }

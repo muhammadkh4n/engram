@@ -19,7 +19,8 @@ import { join } from 'node:path'
 export interface RejectionEntry {
   timestamp: string
   cwd: string
-  project: string
+  /** Null when the turn happened outside any repository (shared). */
+  project: string | null
   role: 'user' | 'assistant' | 'system'
   source: string
   category: string

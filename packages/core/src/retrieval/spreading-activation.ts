@@ -233,8 +233,8 @@ export async function stageActivate(
       threshold: params.faintThreshold,
       budget: params.budget,
       edgeFilter: params.preferredEdges,
-      // Wave 5: hard project scope — activation must not bridge into or
-      // surface another project's memories via shared entity/person nodes.
+      // Set only for strict project scoping: confines activation to that
+      // project's nodes instead of bridging through shared entity/person nodes.
       ...(projectId !== undefined ? { projectId } : {}),
     })
   } catch (err) {

@@ -5,6 +5,7 @@ import type {
 } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
+import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
@@ -162,12 +163,16 @@ export interface UnifiedSearchOpts {
   sensory: SensoryBuffer
   sessionId?: string
   expandedTerms?: string[]
-  /** Wave 5: hard SQL-level project namespace filter */
+  /** Forwarded to storage as a hard project filter. Set only for strict
+   *  scoping; ranking by project goes through `projectRanking`. */
   projectId?: string
+  /** Project/group boost applied before the maxResults cut, so same-project
+   *  candidates are not crowded out of the slate the reranker sees. */
+  projectRanking?: ProjectRanking
 }
 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
-  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId } = opts
+  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
@@ -350,7 +355,8 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
   }
 
-  return scored
+  const ranked = projectRanking ? applyProjectRanking(scored, projectRanking) : scored
+  return ranked
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, strategy.maxResults)
 }

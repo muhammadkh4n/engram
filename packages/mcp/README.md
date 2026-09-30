@@ -43,7 +43,7 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for the local mxbai-rerank cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
 - `ENGRAM_RERANK_LOCAL_MODEL` — pick the mxbai variant. Default: `mixedbread-ai/mxbai-rerank-large-v1` (~1-1.5 GB peak RAM at load). For memory-constrained boxes try `mixedbread-ai/mxbai-rerank-base-v1` (~50-70 MB) or `mixedbread-ai/mxbai-rerank-xsmall-v1` (smaller still).
 - `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
-- `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project isolation below). `global`/`none` map to the shared bucket.
+- `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
 **Optional (enables Neo4j neural graph):**
 - `NEO4J_URI` — e.g., `bolt://localhost:7687`
@@ -56,16 +56,16 @@ When `NEO4J_URI` is set and reachable, Engram runs in full "graph mode" with spr
 
 Claude Code now has access to Engram's memory tools. The server auto-includes instructions telling Claude when and how to use them.
 
-### Project isolation (Wave 5)
+### Project scoping
 
-Recall and ingest can be scoped to a project so one project's memories never leak into another's. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
+A project tag **ranks** memories; it never hides one. Tags come from the working directory at write time, so a memory written from a worktree, a sibling repo of the same product, or outside any repo would otherwise vanish exactly where it is needed. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
 
-- `memory_recall` and `memory_ingest` accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name) to scope the call; omitting it means unscoped (all projects).
-- A recall scoped to project X returns only X's memories plus shared ones (`project_id IS NULL`); every other project is excluded — enforced in SQL and in the graph spreading-activation traversal.
+- `memory_recall` and `memory_ingest` accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
+- A recall for project X returns every matching memory. X's memories get `+ENGRAM_PROJECT_BOOST` (default `0.10`), memories of another project in X's product group get `+ENGRAM_PROJECT_GROUP_BOOST` (default `0.05`), shared and unrelated memories get nothing. The boost is applied before the candidate cut the reranker sees and again after reranking.
+- Product groups come from the JSON file named by `ENGRAM_PROJECT_GROUPS_FILE`: `{ "groups": { "aithentic": ["aithentic-*", "*-mfe"], "engram": ["engram*"] } }`. Patterns are project names or `*`/`?` globs, matched case-insensitively against the whole name; a project belongs to the first group that matches. Unset, missing or malformed means no groups; each distinct failure is reported once on stderr. The file is re-checked at most every 60 s and re-read when its modification time or existence changes, so an edit takes effect without a restart.
 - Ingest with `project_id` tags the stored memory; without it the memory is shared.
 - The git/hook ingest CLIs auto-detect the project from their working directory (see `ENGRAM_PROJECT_ID` above to override).
-
-Because the parameter is optional and agent-driven, cross-project recall is possible when the agent intends it — it simply passes a different `project_id` (or none).
+- Hard scoping (only X plus shared memories) exists as the `projectStrict` recall option of `@engram-mem/core`; neither the MCP server nor the CLIs enable it.
 
 ## MCP Tools
 
