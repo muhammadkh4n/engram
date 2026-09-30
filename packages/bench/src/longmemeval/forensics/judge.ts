@@ -35,6 +35,9 @@
  *     [--top-sessions 5]         # how many retrieved sessions to feed gen
  *     [--limit 0]                # 0 = all questions in the recall output
  *     [--include-synthesis]      # insert per-row synthesis text as the one derived-notes prompt section
+ *     [--context-mode sessions|formatted]  # formatted: the reader context is the sweep row's recorded
+ *                                # MCP recall payload verbatim (needs a --context-mode formatted sweep;
+ *                                # --top-sessions and --include-synthesis are usage errors with it)
  *     --output ./results/longmemeval/judge-full-500.json
  */
 import * as fs from 'node:fs'
@@ -48,6 +51,8 @@ import {
   DEFAULT_API_KEY_ENV, type EndpointSpec, type JudgeVote,
 } from './provider-lib.js'
 import { runJudgePanel, aggregateVerdicts } from './judge-call.js'
+import { buildJudgeModelMeta } from './reranker-meta-lib.js'
+import { judgeReaderContext, parseJudgeContextMode, type ContextMode, type FormattedJudgeFields } from './context-modes.js'
 
 interface JudgeArgs {
   recallOutput: string
@@ -60,6 +65,7 @@ interface JudgeArgs {
   limit: number
   concurrency: number
   includeSynthesis: boolean
+  contextMode: ContextMode
   output: string
 }
 
@@ -72,9 +78,11 @@ interface RecallRow {
   retrieved_count: number
   recall_at_k: Record<string, boolean>
   synthesis?: { intent: string; method: string; text: string } | null
+  formatted?: string
+  gold_ids_in_context?: string[]
 }
 
-interface JudgeRow {
+interface JudgeRow extends Partial<FormattedJudgeFields> {
   question_id: string
   question_type: LongMemEvalQuestionType
   question: string
@@ -112,6 +120,7 @@ async function main(): Promise<void> {
   }
 
   const recallOutput = JSON.parse(fs.readFileSync(args.recallOutput, 'utf8')) as {
+    meta?: unknown
     rows: RecallRow[]
   }
   const allDataset = JSON.parse(fs.readFileSync(args.data, 'utf8')) as LongMemEvalQuestion[]
@@ -121,7 +130,7 @@ async function main(): Promise<void> {
     ? recallOutput.rows.slice(0, args.limit)
     : recallOutput.rows
   console.log(`Loaded ${recallOutput.rows.length} recall rows, judging ${rows.length}`)
-  console.log(`gen=${genSpec.model}${genSpec.baseUrl ? ` @ ${genSpec.baseUrl}` : ''}, judge panel=[${panel.map((p) => p.model).join(', ')}], top-sessions=${args.topSessions}`)
+  console.log(`gen=${genSpec.model}${genSpec.baseUrl ? ` @ ${genSpec.baseUrl}` : ''}, judge panel=[${panel.map((p) => p.model).join(', ')}], ${args.contextMode === 'formatted' ? 'context=formatted payload' : `top-sessions=${args.topSessions}`}`)
   console.log()
 
   // One client per distinct (baseUrl, apiKeyEnv) — endpoints may point at
@@ -150,13 +159,11 @@ async function main(): Promise<void> {
       return
     }
 
-    // Build context: top-N retrieved sessions, full content, in rank order
-    const topSessions = r.retrieved_session_ids.slice(0, args.topSessions)
-    const sessionContext = buildSessionContext(q, topSessions)
+    // Reader context: top-N retrieved sessions in rank order, or the recorded payload
+    const reader = judgeReaderContext(r, args, (ids) => buildSessionContext(q, ids))
 
     // Answer-gen
-    const synthesisText = args.includeSynthesis && r.synthesis?.text ? r.synthesis.text : undefined
-    const genResult = await generateAnswer(clientFor(genSpec), genSpec, q.question, q.question_date, sessionContext, synthesisText)
+    const genResult = await generateAnswer(clientFor(genSpec), genSpec, q.question, q.question_date, reader.context, reader.synthesisText)
     const generated = genResult.text
 
     // Judge: every panel member votes; plurality with a strict tie-break decides.
@@ -177,12 +184,13 @@ async function main(): Promise<void> {
       judge_votes: panelResult.votes,
       gen_model: genSpec.model,
       gen_provider: genResult.provider,
-      retrieved_sessions_used: topSessions.length,
+      retrieved_sessions_used: reader.sessionsUsed,
       gen_tokens_in: genResult.tokensIn,
       gen_tokens_out: genResult.tokensOut,
       judge_tokens_in: panelResult.tokensIn,
       judge_tokens_out: panelResult.tokensOut,
       cost_usd: cost,
+      ...(reader.rowFields ?? {}),
     }
 
     done++
@@ -204,6 +212,7 @@ async function main(): Promise<void> {
       args: args as unknown as Record<string, unknown>,
       gen_endpoint: genSpec as unknown as Record<string, unknown>,
       judge_panel: panel as unknown as Array<Record<string, unknown>>,
+      ...buildJudgeModelMeta(recallOutput.meta, genSpec.model),
       total_questions: acc.total,
       total_cost_usd: totalCost,
       total_seconds: (Date.now() - start) / 1000,
@@ -304,6 +313,13 @@ async function generateAnswer(
 
 
 function parseArgs(argv: string[]): JudgeArgs {
+  let contextMode: ContextMode
+  try {
+    contextMode = parseJudgeContextMode(argv)
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`)
+    process.exit(1)
+  }
   const get = (k: string): string | undefined => {
     const i = argv.indexOf(`--${k}`)
     if (i === -1) return undefined
@@ -321,6 +337,7 @@ function parseArgs(argv: string[]): JudgeArgs {
     limit: parseInt(get('limit') ?? '0', 10),
     concurrency: parseInt(get('concurrency') ?? '1', 10),
     includeSynthesis: argv.includes('--include-synthesis'),
+    contextMode,
     output: get('output') ?? './results/longmemeval/judge.json',
   }
 }

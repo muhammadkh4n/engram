@@ -17,6 +17,7 @@ import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { findDuplicate, boostDuplicate } from './ingest/dedup.js'
 import { resolveProjectScope } from './ingest/project-detect.js'
+import { scrubModelInput } from './ingest/scrub-model-input.js'
 import OpenAI from 'openai'
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,9 @@ async function main(): Promise<void> {
 
   let conversation: string
   try {
-    conversation = extractConversation(hookInput.transcript_path)
+    // The transcript is sent to the extraction model, so credential values
+    // are redacted before that call rather than only at ingest.
+    conversation = await scrubModelInput(extractConversation(hookInput.transcript_path), '[engram-compact]')
   } catch (err) {
     process.stderr.write(`[engram-compact] Failed to read transcript: ${err}\n`)
     return

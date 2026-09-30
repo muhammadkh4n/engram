@@ -66,6 +66,20 @@ OPTIONS:
   --verbose             Verbose logging
 ```
 
+### Matching the production reranker
+
+The LongMemEval recall sweep (`src/longmemeval/forensics/recall-sweep.ts`) defaults to the OpenAI
+pointwise reranker (`gpt-4o-mini`) so older recipes reproduce. Production reranks with the local ONNX
+model `mixedbread-ai/mxbai-rerank-large-v1` (q8). To measure what production ranks, pass:
+
+```bash
+--reranker onnx --onnx-model mixedbread-ai/mxbai-rerank-large-v1
+```
+
+`--reranker` takes `openai|onnx|none`; `--onnx-model` is only valid with `onnx`. The sweep's `meta` records
+the resolved `rerankerBackend`, `rerankModel` and `embedModel`, and the judge copies them into its own
+`meta` alongside `chatModel` (the answer-generation model).
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)

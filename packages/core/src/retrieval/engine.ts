@@ -63,6 +63,13 @@ export interface RecallResult {
    *  synthesis was not requested or produced nothing. `memories` is
    *  byte-identical whether synthesis ran or not. */
   synthesis?: SynthesisBlock | null
+  /** Wall-clock milliseconds per pipeline stage plus `total`, populated only
+   *  when ENGRAM_RECALL_TIMING=1. A stage that did not run has no key. */
+  timings?: Record<string, number>
+  /** Low-activation graph neighbours rendered under "Faint Associations" in
+   *  `formatted`. Present only when spreading activation produced at least
+   *  one; they are not part of `associations`. */
+  faintAssociations?: RetrievedMemory[]
 }
 
 export interface RecallOpts {
@@ -363,6 +370,28 @@ function applyProjectPreference(
 }
 
 // ---------------------------------------------------------------------------
+// Stage timing
+// ---------------------------------------------------------------------------
+
+/** Per-stage accumulator; null when timing is off so the recall path pays
+ *  nothing beyond a null check. */
+type StageTimings = Record<string, number> | null
+
+function stageStart(timings: StageTimings): number {
+  return timings === null ? 0 : performance.now()
+}
+
+function stageEnd(timings: StageTimings, stage: string, start: number): void {
+  if (timings === null) return
+  timings[stage] = (timings[stage] ?? 0) + (performance.now() - start)
+}
+
+function finishTimings(timings: StageTimings, recallStart: number): { timings?: Record<string, number> } {
+  if (timings === null) return {}
+  return { timings: { ...timings, total: performance.now() - recallStart } }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -378,6 +407,9 @@ export async function recall(
   const project = opts.project
   const projectStrict = opts.projectStrict === true
   const projectId = opts.projectId
+  // Read per call so the flag can be flipped without a restart.
+  const timings: StageTimings = process.env['ENGRAM_RECALL_TIMING'] === '1' ? {} : null
+  const recallStart = stageStart(timings)
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -388,6 +420,7 @@ export async function recall(
       primed: [],
       estimatedTokens: 0,
       formatted: '',
+      ...finishTimings(timings, recallStart),
     }
   }
 
@@ -404,14 +437,17 @@ export async function recall(
   const shouldExpand = intelligence?.expandQuery !== undefined &&
     (strategy.expand || signals.multiHop || signals.temporal)
   if (shouldExpand) {
+    const expandStart = stageStart(timings)
     try {
       expandedTerms = await intelligence!.expandQuery!(query)
     } catch {
       // expansion failed — proceed without it
     }
+    stageEnd(timings, 'expand', expandStart)
   }
 
   // Stage 1: Unified vector-first search
+  const searchStart = stageStart(timings)
   let memories = await unifiedSearch({
     query,
     embedding,
@@ -429,6 +465,7 @@ export async function recall(
   if (project) {
     memories = applyProjectPreference(memories, project, projectStrict)
   }
+  stageEnd(timings, 'search', searchStart)
 
   // HyDE: fires on weak direct-match scores OR multi-hop / temporal queries.
   // Multi-hop and temporal queries often have decent vector scores on ONE hop
@@ -446,6 +483,7 @@ export async function recall(
     (topScore < 0.3 || signals.multiHop || signals.temporal)
 
   if (shouldFireHyDE) {
+    const hydeStart = stageStart(timings)
     try {
       const hydeDoc = await intelligence!.generateHypotheticalDoc!(query)
       const hydeEmbedding = await intelligence!.embed!(hydeDoc)
@@ -465,6 +503,7 @@ export async function recall(
       // HyDE failed — use direct results
       console.error('[engram] HyDE error:', err)
     }
+    stageEnd(timings, 'hyde', hydeStart)
   }
 
   // Pattern completion fallback (Wave 5): triggered when RECALL_EXPLICIT query
@@ -474,6 +513,7 @@ export async function recall(
   const isRecallExplicit = /\b(remember|recall|what did|did we|last time|previously|have we|remind me)\b/i.test(query)
 
   if (graph !== null && isRecallExplicit && topScoreAfterHyDE < 0.2 && typeof graph.findMatchingContextNodes === 'function') {
+    const patternStart = stageStart(timings)
     try {
       const queryEntities = extractEntities(query)
       const queryEmotions = extractQueryEmotions(query)
@@ -574,6 +614,7 @@ export async function recall(
       console.error('[engram] pattern completion fallback error:', err)
       // non-fatal: continue with existing weak results
     }
+    stageEnd(timings, 'pattern', patternStart)
   }
 
   // Stage 1a.7: MMR pre-rerank diversification.
@@ -587,7 +628,9 @@ export async function recall(
   // See packages/core/src/retrieval/mmr.ts for full env semantics.
   const mmrCfg = mmrConfigFromEnv()
   if (mmrCfg !== null && memories.length > 1) {
+    const mmrStart = stageStart(timings)
     memories = applyMMR(memories, mmrCfg.lambda, mmrCfg.maxOut)
+    stageEnd(timings, 'mmr', mmrStart)
   }
 
   // Stage 1b: Cross-encoder reranking
@@ -603,6 +646,7 @@ export async function recall(
   //     correctly order the joint pool; downweighting original avoids
   //     handicapping the BM25/HyDE-rescued evidence.
   if (intelligence?.rerank && memories.length > 1) {
+    const rerankStart = stageStart(timings)
     try {
       const docs = memories.map(m => ({ id: m.id, content: m.content }))
       const reranked = await intelligence.rerank(query, docs)
@@ -630,6 +674,7 @@ export async function recall(
       // Non-fatal: use original ranking
       console.error('[engram] reranking error:', err)
     }
+    stageEnd(timings, 'rerank', rerankStart)
   }
 
   // Stage 2: Association expansion
@@ -643,6 +688,7 @@ export async function recall(
   let associations: RetrievedMemory[] = []
   let compositeContext: CompositeMemory | null = null
 
+  const graphStart = stageStart(timings)
   if (strategy.associations && graph !== null) {
     // Context reinstatement (Gap 4): the topics currently primed in the sensory
     // buffer (set by recent turns) are folded into the spreading-activation
@@ -662,6 +708,7 @@ export async function recall(
     const legacyStrategy = toRetrievalStrategy(strategy)
     associations = await stageAssociate(memories, legacyStrategy, storage)
   }
+  if (strategy.associations) stageEnd(timings, 'graph', graphStart)
 
   // Stage 3: Topic priming
   const primed = stagePrime(memories, associations, sensory)
@@ -680,6 +727,7 @@ export async function recall(
     // We detect them from the metadata of association memories that have patternCompletion flag,
     // or directly from storage community cache.
     if (typeof graph.queryCommunities === 'function') {
+      const communityStart = stageStart(timings)
       try {
         const communityResults = await graph.queryCommunities!({
           limit: 3,
@@ -690,6 +738,7 @@ export async function recall(
       } catch {
         // non-fatal: community summaries are enrichment only
       }
+      stageEnd(timings, 'graph', communityStart)
     }
   }
 
@@ -699,6 +748,7 @@ export async function recall(
   // Opt-in synthesis: strictly post-ranking; never mutates memories; error-isolated.
   let synthesis: SynthesisBlock | null = null
   if (opts.synthesize && memories.length > 0) {
+    const synthesisStart = stageStart(timings)
     synthesis = await synthesize({
       query,
       memories,
@@ -707,14 +757,17 @@ export async function recall(
       now: opts.now ?? null,
       ...(typeof opts.synthesize === 'object' ? { opts: opts.synthesize } : {}),
     })
+    stageEnd(timings, 'synthesis', synthesisStart)
   }
 
   // Format results (includes Context section when graph ran successfully)
+  const formatStart = stageStart(timings)
   let formatted = formatMemories(memories, associations, compositeContext, communitySummaries)
   if (synthesis) {
     formatted = formatted.length > 0 ? `${formatted}\n\n${synthesis.text}` : synthesis.text
   }
   const estimatedTokens = estimateTokens(formatted)
+  stageEnd(timings, 'format', formatStart)
 
   return {
     memories,
@@ -725,5 +778,9 @@ export async function recall(
     formatted,
     sessions,
     synthesis,
+    ...(compositeContext !== null && compositeContext.faintAssociations.length > 0
+      ? { faintAssociations: compositeContext.faintAssociations }
+      : {}),
+    ...finishTimings(timings, recallStart),
   }
 }

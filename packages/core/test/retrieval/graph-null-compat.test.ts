@@ -47,6 +47,7 @@ describe('Wave 2 — graph=null backward compatibility', () => {
     const result = await memory.recall('TypeScript integration')
     expect(result.formatted).not.toContain('### Context')
     expect(result.formatted).not.toContain('### Faint Associations')
+    expect(result).not.toHaveProperty('faintAssociations')
   })
 
   it('deep-mode recall still produces associations via SQL walk', async () => {

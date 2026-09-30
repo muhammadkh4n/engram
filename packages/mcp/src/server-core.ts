@@ -422,6 +422,21 @@ const TOOLS = [
   },
 ]
 
+const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'rerank', 'graph'] as const
+
+/** One-line recall latency summary. Absent stages are omitted, not zeroed, so
+ *  a missing key means the stage never ran for that query. */
+export function formatRecallTimingLine(
+  timings: Record<string, number>,
+  items: number,
+  chars: number,
+): string {
+  const parts = RECALL_TIMING_STAGES
+    .filter(stage => timings[stage] !== undefined)
+    .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
+  return ['[recall]', ...parts, `items=${items}`, `chars=${chars}`].join(' ')
+}
+
 export function createEngramServer(): Server {
   const server = new Server(
     { name: 'engram-memory', version: PACKAGE_VERSION },
@@ -461,6 +476,11 @@ export function createEngramServer(): Server {
           ...(projectId ? { projectId } : {}),
           ...(synthesize ? { synthesize: true } : {}),
         })
+
+        if (result.timings) {
+          // stderr: stdout carries the stdio JSON-RPC stream.
+          console.error(formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length))
+        }
 
         if (!result.formatted || result.memories.length === 0) {
           return {

@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import { maybeWithRecallEngine } from '../src/server-core.js'
+import { maybeWithRecallEngine, formatRecallTimingLine } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
 
@@ -102,5 +102,21 @@ describe('maybeWithRecallEngine', () => {
     }
 
     expect(warnSpy.some(msg => msg.includes('refused under MCP'))).toBe(false)
+  })
+})
+
+describe('formatRecallTimingLine', () => {
+  it('prints stages in fixed order with integer ms and omits absent stages', () => {
+    const line = formatRecallTimingLine(
+      { format: 0.4, rerank: 812.6, search: 95.2, total: 1203.49, expand: 240.5, graph: 40.1 },
+      12,
+      4810,
+    )
+
+    expect(line).toBe('[recall] total=1203 expand=241 search=95 rerank=813 graph=40 items=12 chars=4810')
+  })
+
+  it('prints only total and counts when no optional stage ran', () => {
+    expect(formatRecallTimingLine({ total: 3.2 }, 0, 0)).toBe('[recall] total=3 items=0 chars=0')
   })
 })

@@ -21,6 +21,7 @@ import { scoreSalience } from './ingestion/salience.js'
 import { findNearDuplicate } from './ingestion/near-duplicate.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
+import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
 
 // ---------------------------------------------------------------------------
@@ -258,7 +259,7 @@ export class Memory {
 
   /** Store a message. Auto-detects salience, extracts entities. */
   async ingest(
-    message: Message,
+    input: Message,
     opts?: {
       /**
        * Skip the intelligence.embed call and use this vector instead.
@@ -282,6 +283,11 @@ export class Memory {
     },
   ): Promise<void> {
     this.assertInitialized()
+
+    // Credential values are redacted before anything below reads the message:
+    // salience, the contextual-preamble and entity-extraction model calls, the
+    // embedding request, SQL storage and the graph all see the scrubbed copy.
+    const message = await this.scrubForIngest(input, 'ingest')
 
     const effectiveProjectId = opts?.projectId ?? this._projectId
 
@@ -490,6 +496,14 @@ export class Memory {
     }
   }
 
+  private async scrubForIngest(message: Message, path: string): Promise<Message> {
+    const scrubbed = await scrubMessage(message)
+    if (scrubbed.redactions.length > 0) {
+      console.warn(`[engram] ${path}: ${describeRedactions(scrubbed.redactions)}`)
+    }
+    return scrubbed.message
+  }
+
   /**
    * Wait for all fire-and-forget graph writes launched during ingest()
    * to settle. Useful for CLI tools and tests that need deterministic
@@ -503,8 +517,12 @@ export class Memory {
   }
 
   /** Store multiple messages. Batch-optimized. */
-  async ingestBatch(messages: Message[]): Promise<void> {
+  async ingestBatch(inputs: Message[]): Promise<void> {
     this.assertInitialized()
+
+    // Scrubbed here as well as in ingest(): the batched embedding request
+    // below is built from these messages before ingest() runs on them.
+    const messages = await Promise.all(inputs.map((m) => this.scrubForIngest(m, 'ingestBatch')))
 
     // Fast-path: no batch embed support OR small batch — fall back to
     // sequential ingest. The batch round-trip overhead doesn't pay back
@@ -668,6 +686,8 @@ export class Memory {
       formatted: result.formatted,
       sessions: result.sessions ?? [],
       synthesis: result.synthesis ?? null,
+      ...(result.timings ? { timings: result.timings } : {}),
+      ...(result.faintAssociations ? { faintAssociations: result.faintAssociations } : {}),
     }
   }
 

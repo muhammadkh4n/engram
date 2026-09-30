@@ -24,6 +24,7 @@ results/*
 # Uses results/* (not results/) so this negation can re-include the subdir.
 !results/gates/
 data/
+!packages/core/src/ingest/data/
 
 # Build artifacts (prevent leaking compiled files into src/)
 packages/*/src/**/*.js

@@ -29,13 +29,17 @@
     "url": "https://github.com/muhammadkh4n/engram.git"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/ingest/data && cp src/ingest/data/common-passwords.txt dist/ingest/data/",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "uuid": "^14.0.0"
+    "@secretlint/core": "13.0.6",
+    "@secretlint/profiler": "13.0.6",
+    "@secretlint/secretlint-rule-preset-recommend": "13.0.6",
+    "uuid": "^14.0.0",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "typescript": "^6.0.2",
