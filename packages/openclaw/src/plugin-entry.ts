@@ -62,7 +62,7 @@ export function createEngramContextEngine(config: EngramPluginConfig) {
       systemPromptAddition?: string
     }> {
       const query = extractQuery(params.messages, params.prompt)
-      const result = await memory.recall(query, { tokenBudget: params.tokenBudget })
+      const result = await memory.recall(query, { tokenBudget: params.tokenBudget, skipTrivial: true })
       return {
         messages: params.messages,
         estimatedTokens: result.estimatedTokens,

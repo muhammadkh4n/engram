@@ -12,7 +12,7 @@ export type { HeuristicSummaryResult } from './consolidation/heuristic-summarize
 export { AssociationManager } from './systems/association-manager.js'
 export { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 export type { AnalysisContext } from './intent/analyzer.js'
-export { INTENT_PATTERNS, STRATEGY_TABLE, classifyMode, RECALL_STRATEGIES } from './intent/intents.js'
+export { INTENT_PATTERNS, STRATEGY_TABLE, classifyMode, selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 export { generateId } from './utils/id.js'
 export { estimateTokens } from './utils/tokens.js'
 export { extractEntities } from './ingestion/entity-extractor.js'

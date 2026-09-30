@@ -420,7 +420,7 @@ export default definePluginEntry({
         const query = extractQuery(messages, prompt)
         if (!query) return { messages, estimatedTokens: 0 }
         try {
-          const result = await memory.recall(query, { tokenBudget })
+          const result = await memory.recall(query, { tokenBudget, skipTrivial: true })
           console.log(`[engram] assemble: query="${query.slice(0, 80)}" intent=${result.intent.type} memories=${result.memories.length} assoc=${result.associations.length} tokens=${result.estimatedTokens}`)
           if (result.memories.length > 0) {
             console.log(`[engram] top hit: [${result.memories[0].type}] relevance=${result.memories[0].relevance.toFixed(3)} "${result.memories[0].content.slice(0, 80)}"`)
