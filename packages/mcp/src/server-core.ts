@@ -19,10 +19,11 @@ import {
 import { createMemory, startConsolidationWorker, MAX_FORGET_IDS } from '@engram-mem/core'
 import type { StorageAdapter, IntelligenceAdapter, GraphPort, ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
+import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
+import type { CaptureDeps } from './ingest/capture.js'
 
 /**
  * Read the package version once at module load from the colocated package.json.
@@ -212,7 +213,50 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
   return out
 }
 
+const DEFAULT_SALIENCE_THRESHOLD = 0.7
+
+/**
+ * ENGRAM_SALIENCE_THRESHOLD: the classifier confidence a capture needs to be
+ * stored, a number in 0..1 (default 0.7). Anything else fails startup: a
+ * typo read as NaN would reject every capture, and a value above 1 would
+ * silently store nothing.
+ */
+export function parseSalienceThresholdEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['ENGRAM_SALIENCE_THRESHOLD']?.trim()
+  if (!raw) return DEFAULT_SALIENCE_THRESHOLD
+  const n = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) ? Number(raw) : NaN
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`ENGRAM_SALIENCE_THRESHOLD must be a number between 0 and 1, got "${raw}"`)
+  }
+  return n
+}
+
+/** The chat model every capture classification and digest runs on. */
+export function captureModelFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  return env['ENGRAM_CHAT_MODEL']?.trim() || DEFAULT_CHAT_MODEL
+}
+
 let memory: Memory | null = null
+/** The stores getMemory built, shared with the capture route so both use one config. */
+let memoryStores: { storage: StorageAdapter; intelligence: IntelligenceAdapter } | null = null
+
+/**
+ * Capture pipeline deps on the server's own stores and chat model. Builds the
+ * memory stack on first use; the pipeline gets getMemory itself, so it is the
+ * same instance agents' memory_ingest writes through.
+ */
+export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
+  await getMemory()
+  if (!memoryStores) throw new Error('memory stack initialised without its stores')
+  return {
+    getMemory,
+    storage: memoryStores.storage,
+    intelligence: memoryStores.intelligence,
+    threshold: opts.threshold,
+    captureModel: opts.captureModel,
+    logPrefix: '[engram-mcp-http]',
+  }
+}
 
 export async function getMemory(): Promise<Memory> {
   if (memory) return memory
@@ -276,6 +320,8 @@ export async function getMemory(): Promise<Memory> {
   // agent via the declarative `project_id` param on memory_recall /
   // memory_ingest. On recall it ranks that project's memories higher and
   // hides none; omitting it means no project preference.
+  // Set together with memory: a concurrent caller that sees memory must see its stores.
+  memoryStores = { storage, intelligence }
   memory = createMemory({
     storage,
     intelligence,

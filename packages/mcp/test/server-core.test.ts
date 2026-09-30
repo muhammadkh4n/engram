@@ -15,7 +15,15 @@ import { describe, it, expect, afterEach } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
 import type { ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
-import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs, parseChatReasoningEnv, runMemoryForget } from '../src/server-core.js'
+import {
+  maybeWithRecallEngine,
+  formatRecallTimingLine,
+  recallOptionsFromArgs,
+  parseChatReasoningEnv,
+  runMemoryForget,
+  parseSalienceThresholdEnv,
+  captureModelFromEnv,
+} from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
 
@@ -272,5 +280,35 @@ describe('runMemoryForget', () => {
       expect(textOf(r)).toMatch(/^Error: /)
       expect(calls.forgetByIds).toHaveLength(0)
     }
+  })
+})
+
+describe('parseSalienceThresholdEnv', () => {
+  it('defaults to 0.7 when unset or blank', () => {
+    expect(parseSalienceThresholdEnv({})).toBe(0.7)
+    expect(parseSalienceThresholdEnv({ ENGRAM_SALIENCE_THRESHOLD: '  ' })).toBe(0.7)
+  })
+
+  it.each([
+    ['0', 0],
+    ['1', 1],
+    ['0.55', 0.55],
+    ['.8', 0.8],
+  ])('accepts %s', (raw, expected) => {
+    expect(parseSalienceThresholdEnv({ ENGRAM_SALIENCE_THRESHOLD: raw })).toBe(expected)
+  })
+
+  it.each(['abc', '1.5', '-0.2', '0x1', '1e-1', 'NaN'])('throws on %s', (raw) => {
+    expect(() => parseSalienceThresholdEnv({ ENGRAM_SALIENCE_THRESHOLD: raw })).toThrow(/ENGRAM_SALIENCE_THRESHOLD/)
+  })
+})
+
+describe('captureModelFromEnv', () => {
+  it('names the configured chat model', () => {
+    expect(captureModelFromEnv({ ENGRAM_CHAT_MODEL: ' deepseek/deepseek-v4-flash ' })).toBe('deepseek/deepseek-v4-flash')
+  })
+
+  it('falls back to the default chat model', () => {
+    expect(captureModelFromEnv({})).toBe('gpt-4o-mini')
   })
 })

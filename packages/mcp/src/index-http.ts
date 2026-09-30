@@ -8,7 +8,7 @@
  *
  * Required env:
  *   SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY
- *   BEARER_TOKEN          — required for all /mcp requests
+ *   BEARER_TOKEN          — required for all /mcp and /capture requests
  *
  * Optional env:
  *   PORT                  — default 3849
@@ -16,65 +16,18 @@
  *   ALLOWED_HOSTS         — comma-separated allowlist for Host header (DNS-rebind guard).
  *                           If unset, every host is allowed.
  *   NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
+ *   ENGRAM_SALIENCE_THRESHOLD — capture classifier confidence cut, 0..1, default 0.7
  */
 
 import http from 'node:http'
-import { Buffer } from 'node:buffer'
-import { timingSafeEqual } from 'node:crypto'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { createEngramServer } from './server-core.js'
-
-interface Config {
-  port: number
-  host: string
-  bearerToken: string
-  allowedHosts: ReadonlySet<string> | null
-}
-
-function loadConfig(): Config {
-  const bearerToken = process.env.BEARER_TOKEN
-  if (!bearerToken) {
-    throw new Error('Missing required environment variable: BEARER_TOKEN')
-  }
-  const port = Number(process.env.PORT ?? '3849')
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error(`Invalid PORT: ${process.env.PORT}`)
-  }
-  const host = process.env.HOST ?? '0.0.0.0'
-  const allowedHostsEnv = process.env.ALLOWED_HOSTS
-  const allowedHosts = allowedHostsEnv
-    ? new Set(allowedHostsEnv.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean))
-    : null
-  return { port, host, bearerToken, allowedHosts }
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const aBuf = Buffer.from(a)
-  const bBuf = Buffer.from(b)
-  if (aBuf.length !== bBuf.length) {
-    // Still compare against same-length buffer to avoid trivial timing leak,
-    // but the result is always false.
-    const filler = Buffer.alloc(aBuf.length)
-    timingSafeEqual(aBuf, filler)
-    return false
-  }
-  return timingSafeEqual(aBuf, bBuf)
-}
-
-function checkAuth(req: http.IncomingMessage, expected: string): boolean {
-  const header = req.headers['authorization']
-  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false
-  const token = header.slice('Bearer '.length).trim()
-  return constantTimeEqual(token, expected)
-}
-
-function checkHost(req: http.IncomingMessage, allowed: ReadonlySet<string> | null): boolean {
-  if (!allowed) return true
-  const host = (req.headers['host'] ?? '').toLowerCase()
-  // Strip port for comparison
-  const bareHost = host.includes(':') ? host.split(':')[0]! : host
-  return allowed.has(host) || allowed.has(bareHost)
-}
+import {
+  createEngramServer,
+  getCaptureDeps,
+  captureModelFromEnv,
+  parseSalienceThresholdEnv,
+} from './server-core.js'
+import { createRequestListener, loadHttpConfig } from './http-app.js'
 
 async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   // MCP Streamable HTTP requires `Accept: application/json, text/event-stream`.
@@ -104,80 +57,23 @@ async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): P
   await transport.handleRequest(req, res)
 }
 
-function logRequest(req: http.IncomingMessage): void {
-  if (process.env.ENGRAM_HTTP_DEBUG === '1') {
-    process.stdout.write(`[engram-mcp-http] ${req.method} ${req.url} accept="${req.headers['accept'] ?? ''}" ua="${req.headers['user-agent'] ?? ''}"\n`)
-  }
-}
-
 async function main(): Promise<void> {
-  const config = loadConfig()
+  const config = loadHttpConfig()
+  // Parsed before listening so a malformed threshold fails startup instead
+  // of silently gating every capture at a value nobody chose.
+  const threshold = parseSalienceThresholdEnv()
+  const captureModel = captureModelFromEnv()
 
-  const httpServer = http.createServer((req, res) => {
-    void (async () => {
-      try {
-        logRequest(req)
-        if (req.method === 'GET' && (req.url === '/health' || req.url === '/healthz')) {
-          res.writeHead(200, { 'content-type': 'text/plain' })
-          res.end('ok\n')
-          return
-        }
-
-        if (!checkHost(req, config.allowedHosts)) {
-          res.writeHead(403, { 'content-type': 'text/plain' })
-          res.end('Forbidden host\n')
-          return
-        }
-
-        const url = req.url ?? ''
-        const path = url.split('?')[0]
-        if (path !== '/mcp') {
-          res.writeHead(404, { 'content-type': 'text/plain' })
-          res.end('Not found\n')
-          return
-        }
-
-        if (!checkAuth(req, config.bearerToken)) {
-          res.writeHead(401, {
-            'content-type': 'text/plain',
-            'www-authenticate': 'Bearer realm="engram-mcp"',
-          })
-          res.end('Unauthorized\n')
-          return
-        }
-
-        // Probe-friendly GET: external health-checkers (Claude Code's
-        // mcp-health-check hook, uptime probes, etc.) hit GET /mcp without an
-        // SSE Accept header. The MCP SDK strictly returns 406 in that case,
-        // which monitors don't recognize as healthy. Short-circuit those
-        // probes with 200 OK before the SDK sees them. Real SSE clients
-        // sending `Accept: text/event-stream` still pass through to the SDK.
-        if (req.method === 'GET') {
-          const accept = (req.headers['accept'] ?? '').toString()
-          if (!accept.includes('text/event-stream')) {
-            res.writeHead(200, { 'content-type': 'application/json' })
-            res.end(JSON.stringify({ status: 'ok', transport: 'streamable-http' }))
-            return
-          }
-        }
-
-        await handleMcp(req, res)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        process.stderr.write(`[engram-mcp-http] Request error: ${msg}\n`)
-        if (!res.headersSent) {
-          res.writeHead(500, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({
-            jsonrpc: '2.0',
-            error: { code: -32603, message: 'Internal server error' },
-            id: null,
-          }))
-        } else {
-          res.end()
-        }
-      }
-    })()
-  })
+  const httpServer = http.createServer(
+    createRequestListener(config, {
+      mcp: handleMcp,
+      capture: {
+        captureModel,
+        captureDeps: () => getCaptureDeps({ threshold, captureModel }),
+        log: (line) => process.stderr.write(`[engram-mcp-http] ${line}\n`),
+      },
+    }),
+  )
 
   httpServer.listen(config.port, config.host, () => {
     process.stdout.write(`[engram-mcp-http] listening on http://${config.host}:${config.port}/mcp\n`)
