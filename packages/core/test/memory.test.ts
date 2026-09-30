@@ -724,6 +724,27 @@ describe('Memory — forget()', () => {
     expect(result.forgotten).toEqual([{ id, type: 'episode' }])
   })
 
+  it('matches an uppercase UUID to its stored row and tombstones it', async () => {
+    const id = await deployCandidateId()
+    expect(id).toBe(id.toLowerCase())
+
+    const result = await memory.forgetByIds([id.toUpperCase()])
+
+    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [], notForgettable: [] })
+    expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(false)
+  })
+
+  it('collapses the upper and lower case forms of one UUID', async () => {
+    const id = await deployCandidateId()
+    const result = await memory.forgetByIds([id.toUpperCase(), id])
+    expect(result.forgotten).toEqual([{ id, type: 'episode' }])
+  })
+
+  it('keeps the case of an id that is not UUID-shaped', async () => {
+    const result = await memory.forgetByIds(['Not-A-Uuid'])
+    expect(result.notFound).toEqual(['Not-A-Uuid'])
+  })
+
   it('reports an unknown id as notFound', async () => {
     const result = await memory.forgetByIds(['0190aaaa-0000-7000-8000-000000000000'])
     expect(result).toEqual({

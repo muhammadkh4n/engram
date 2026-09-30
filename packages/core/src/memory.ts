@@ -121,6 +121,14 @@ function forgetCandidateDate(metadata: Record<string, unknown> | undefined): str
   return d ? isoDate(d) : null
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** UUID comparison is case-insensitive and Postgres returns uuid columns in
+ *  lowercase, so a UUID-shaped id is lowercased; any other id stays as given. */
+function normalizeForgetId(id: string): string {
+  return UUID_SHAPE.test(id) ? id.toLowerCase() : id
+}
+
 /** Validate and de-duplicate forgetByIds input; throws on anything else. */
 function normalizeForgetIds(ids: unknown): string[] {
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -132,7 +140,7 @@ function normalizeForgetIds(ids: unknown): string[] {
     if (typeof raw !== 'string' || raw.trim() === '') {
       throw new Error('forgetByIds: every id must be a non-empty string')
     }
-    const id = raw.trim()
+    const id = normalizeForgetId(raw.trim())
     if (seen.has(id)) continue
     seen.add(id)
     unique.push(id)
@@ -1027,9 +1035,10 @@ export class Memory {
     )
     const rowsById = new Map<string, TypedMemory[]>()
     for (const row of rows) {
-      const matches = rowsById.get(row.data.id) ?? []
+      const rowId = normalizeForgetId(row.data.id)
+      const matches = rowsById.get(rowId) ?? []
       if (!matches.some((m) => m.type === row.type)) matches.push(row)
-      rowsById.set(row.data.id, matches)
+      rowsById.set(rowId, matches)
     }
 
     const result: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [], notForgettable: [] }
