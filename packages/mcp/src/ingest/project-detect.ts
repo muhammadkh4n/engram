@@ -139,12 +139,23 @@ const CROSS_CUTTING_CATEGORIES: ReadonlySet<SalienceCategory> = new Set<Salience
   'emotional_signal',
 ])
 
+/**
+ * True when a category (possibly read back from stored metadata, so any
+ * value) names a cross-cutting kind that is stored shared.
+ */
+export function isCrossCuttingCategory(category: unknown): boolean {
+  return (
+    typeof category === 'string' &&
+    CROSS_CUTTING_CATEGORIES.has(category as SalienceCategory)
+  )
+}
+
 /** The project to store a classified memory under: null for cross-cutting kinds. */
 export function projectForCategory(
   project: string | null,
   category: SalienceCategory,
 ): string | null {
-  if (CROSS_CUTTING_CATEGORIES.has(category)) return null
+  if (isCrossCuttingCategory(category)) return null
   return project
 }
 
