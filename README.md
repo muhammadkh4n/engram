@@ -335,7 +335,7 @@ Add to your `~/.claude/settings.json`:
 }
 ```
 
-> **Project isolation (Wave 5).** `memory_recall` and `memory_ingest` take an optional declarative `project_id` parameter — the agent passes the current project (e.g. the git repo name) to scope the call. A scoped recall returns only that project's memories plus shared (`NULL`) ones; every other project is excluded, enforced in both SQL and the graph traversal. Omit it for unscoped (all projects). The server itself holds no project state, so one shared HTTP server isolates correctly per request. The git/hook ingest CLIs auto-detect the project from their working directory (`ENGRAM_PROJECT_ID` overrides).
+> **Project scoping.** `memory_recall` and `memory_ingest` take an optional declarative `project_id` parameter — the agent passes the current project (e.g. the git repo name). On recall it is a ranking signal, never a filter: that project's memories rank highest, then those of its product group (`ENGRAM_PROJECT_GROUPS_FILE`), and shared or other projects' memories are still returned. The server itself holds no project state, so one shared HTTP server ranks correctly per request. The git/hook ingest CLIs auto-detect the project from their working directory (`ENGRAM_PROJECT_ID` overrides). See `packages/mcp/README.md` for the boosts and the groups file.
 
 Available MCP tools: `memory_recall`, `memory_ingest`, `memory_forget`, `memory_timeline`, `memory_overview`, `memory_bridges`, `memory_consolidation_status`.
 

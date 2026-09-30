@@ -1,18 +1,18 @@
 /**
- * End-to-end project isolation through the FULL Memory pipeline.
+ * Project scoping end-to-end through the FULL Memory pipeline.
  *
  * The adapter-level filter is covered in namespace.test.ts. This test proves
  * the COMPLETE path — Memory.ingest writes the project_id column from the
  * instance scope, and Memory.recall (→ engineRecall → unifiedSearch →
- * storage.vectorSearch/textBoost) returns only the scoped project plus the
- * shared (NULL) bucket, never another project's memories.
+ * storage.vectorSearch/textBoost) ranks the scoped project above other
+ * projects without hiding them; only an explicit projectStrict recall
+ * returns the scoped project plus the shared (NULL) bucket alone.
  *
  * The fake intelligence embeds every text onto a shared dominant axis so all
  * memories are equally "similar" to any query, with only a tiny per-text
  * perturbation to keep them distinct (so MMR doesn't collapse them). That
- * removes semantic ranking as a confound: if isolation were broken, the other
- * project's memory WOULD survive into the result. The project filter is the
- * sole discriminator.
+ * removes semantic ranking as a confound: the project tag is the sole
+ * discriminator for both the ranking and the strict filter.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createMemory, type IntelligenceAdapter, type Memory } from '@engram-mem/core'
@@ -50,7 +50,13 @@ function contentsOf(memories: Array<{ content: string }>): string[] {
   return memories.map((m) => m.content)
 }
 
-describe('project isolation — end-to-end through Memory', () => {
+function relevanceOf(memories: Array<{ content: string; relevance: number }>, needle: string): number {
+  const m = memories.find((x) => x.content.includes(needle))
+  expect(m, `no memory containing "${needle}"`).toBeDefined()
+  return m!.relevance
+}
+
+describe('project scoping — end-to-end through Memory', () => {
   let storage: SqliteStorageAdapter
   let alpha: Memory
   let beta: Memory
@@ -97,22 +103,30 @@ describe('project isolation — end-to-end through Memory', () => {
     expect([...byContent.entries()].find(([c]) => c.includes('shared principle'))?.[1]).toBeNull()
   })
 
-  it('recall scoped to alpha returns alpha + shared, never beta', async () => {
+  it('recall scoped to alpha returns beta too, ranked below alpha', async () => {
     const result = await alpha.recall('what secret did we store earlier?')
     const contents = contentsOf(result.memories)
 
     expect(contents.some((c) => c.includes('alpha secret'))).toBe(true)
     expect(contents.some((c) => c.includes('shared principle'))).toBe(true)
-    expect(contents.some((c) => c.includes('beta secret'))).toBe(false)
+    expect(contents.some((c) => c.includes('beta secret'))).toBe(true)
+    expect(relevanceOf(result.memories, 'alpha secret')).toBeGreaterThan(relevanceOf(result.memories, 'beta secret'))
   })
 
-  it('recall scoped to beta returns beta + shared, never alpha', async () => {
+  it('recall scoped to beta returns alpha too, ranked below beta', async () => {
     const result = await beta.recall('what secret did we store earlier?')
+
+    expect(relevanceOf(result.memories, 'beta secret')).toBeGreaterThan(relevanceOf(result.memories, 'alpha secret'))
+    expect(contentsOf(result.memories).some((c) => c.includes('shared principle'))).toBe(true)
+  })
+
+  it('strict recall scoped to alpha returns alpha + shared, never beta', async () => {
+    const result = await alpha.recall('what secret did we store earlier?', { projectStrict: true })
     const contents = contentsOf(result.memories)
 
-    expect(contents.some((c) => c.includes('beta secret'))).toBe(true)
+    expect(contents.some((c) => c.includes('alpha secret'))).toBe(true)
     expect(contents.some((c) => c.includes('shared principle'))).toBe(true)
-    expect(contents.some((c) => c.includes('alpha secret'))).toBe(false)
+    expect(contents.some((c) => c.includes('beta secret'))).toBe(false)
   })
 
   it('unscoped recall sees every project (backward compatible)', async () => {
@@ -133,25 +147,24 @@ describe('project isolation — end-to-end through Memory', () => {
     )
     await shared.flushPendingWrites?.()
 
-    // A gamma-scoped recall sees it; an alpha-scoped recall never does.
+    // A gamma-scoped recall ranks it first among the secrets; an alpha-scoped
+    // recall still sees it, below alpha's own.
     const gamma = await shared.recall('what secret did we store earlier?', { projectId: 'gamma' })
-    expect(contentsOf(gamma.memories).some((c) => c.includes('gamma secret'))).toBe(true)
+    expect(relevanceOf(gamma.memories, 'gamma secret')).toBeGreaterThan(relevanceOf(gamma.memories, 'alpha secret'))
 
     const fromAlpha = await alpha.recall('what secret did we store earlier?')
-    expect(contentsOf(fromAlpha.memories).some((c) => c.includes('gamma secret'))).toBe(false)
+    expect(relevanceOf(fromAlpha.memories, 'alpha secret')).toBeGreaterThan(relevanceOf(fromAlpha.memories, 'gamma secret'))
   })
 
   it('per-call projectId overrides the instance default scope', async () => {
-    // The `shared` instance has no default scope. A per-call projectId='beta'
-    // must scope this single recall to beta + shared, excluding alpha —
-    // proving one instance can serve different projects per request.
-    const result = await shared.recall('what secret did we store earlier?', {
+    // The `alpha` instance defaults to alpha. A per-call projectId='beta'
+    // must rank this single recall toward beta — proving one instance can
+    // serve different projects per request.
+    const result = await alpha.recall('what secret did we store earlier?', {
       projectId: 'beta',
     })
-    const contents = contentsOf(result.memories)
 
-    expect(contents.some((c) => c.includes('beta secret'))).toBe(true)
-    expect(contents.some((c) => c.includes('shared principle'))).toBe(true)
-    expect(contents.some((c) => c.includes('alpha secret'))).toBe(false)
+    expect(relevanceOf(result.memories, 'beta secret')).toBeGreaterThan(relevanceOf(result.memories, 'alpha secret'))
+    expect(contentsOf(result.memories).some((c) => c.includes('shared principle'))).toBe(true)
   })
 })

@@ -620,7 +620,11 @@ export class Memory {
       tokenBudget?: number
       asOf?: Date
       strategyOverride?: Partial<RecallStrategy>
+      /** The caller's project: ranks its memories (and its product group's)
+       *  higher; other projects' memories are still returned. */
       projectId?: string
+      /** Opt-in hard scoping: return only this project's and untagged memories. */
+      projectStrict?: boolean
       /** Opt-in synthesis block computed from the returned memories. */
       synthesize?: boolean | SynthesizeOpts
       /** Anchor for now-relative temporal arithmetic in synthesis. */
@@ -653,11 +657,9 @@ export class Memory {
       embedding = await this.intelligence.embed(query)
     }
 
-    // Soft project preference: the per-call scope wins, mirroring the
-    // SQL-level filter's precedence above — a shared instance serving a
-    // per-call project must boost toward that project, not toward the
-    // constructor default the filter already excluded from the results.
-    // The default applies only when no per-call/instance scope is set.
+    // Project ranking: the per-call scope wins over the instance scope, and
+    // the default project applies only when neither is set — a shared
+    // instance serving a per-call project must rank toward that project.
     const effectiveProject = effectiveProjectId ?? this._defaultProject
 
     // Run vector-first pipeline (text-only fallback when no embedding)
@@ -670,6 +672,7 @@ export class Memory {
       asOf: opts?.asOf,
       ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
+      ...(opts?.projectStrict === true ? { projectStrict: true } : {}),
       ...(opts?.synthesize !== undefined ? { synthesize: opts.synthesize } : {}),
       ...(opts?.now !== undefined ? { now: opts.now } : {}),
     })
@@ -950,7 +953,9 @@ export class Memory {
       intelligence: this.intelligence,
       graph: this._graph,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
-      ...(this._projectId ? { projectId: this._projectId } : {}),
+      // forget can delete what it matches, so a scoped instance keeps its
+      // candidates to its own project and untagged memories.
+      ...(this._projectId ? { projectId: this._projectId, projectStrict: true } : {}),
     })
 
     // Score-gate: only memories whose relevance clears the threshold are

@@ -7,6 +7,7 @@ import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
 import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
+import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
 import { stageReconsolidate } from './reconsolidation.js'
@@ -85,14 +86,18 @@ export interface RecallOpts {
    */
   graph?: GraphPort | null
   /**
-   * Optional project scope. When set, vector-search results matching
-   * this project receive a relevance boost, and spreading activation
-   * uses the project node as an additional seed. This is a SOFT
-   * preference — memories from other projects are still returned with
-   * their original ranking. Set projectStrict=true for hard filtering.
+   * The project the recall runs for. Candidates tagged with it, or with
+   * another project of its product group (ENGRAM_PROJECT_GROUPS_FILE), get a
+   * relevance boost, and spreading activation seeds from the project node.
+   * A ranking signal only: every other project's memories stay eligible.
+   * `projectId` takes precedence when both are set.
    */
   project?: string
-  /** When true, drop candidates whose project does not match opts.project. */
+  /**
+   * Opt-in hard scoping: drop candidates tagged with another project
+   * (untagged ones are shared and kept), forward the project to storage as a
+   * filter, and confine graph activation to it. Off unless a caller asks.
+   */
   projectStrict?: boolean
   /**
    * Return memories valid at this point in time. When set:
@@ -102,10 +107,8 @@ export interface RecallOpts {
    */
   asOf?: Date
   /**
-   * Wave 5: Hard namespace filter. When set, vectorSearch and textBoost
-   * only return memories belonging to this project (or NULL = legacy rows).
-   * Distinct from `project` which is a soft preference / spreading-activation
-   * seed. projectId is enforced at the SQL level — other projects are invisible.
+   * The caller's project id. Ranks like `project` and wins over it when
+   * both are set; it filters only together with `projectStrict`.
    */
   projectId?: string
   /** Opt-in synthesis: compute a derived block (timeline/count/constraints)
@@ -340,35 +343,6 @@ export function fuseByReciprocalRank(
     })
 }
 
-/**
- * Apply project soft-preference to a ranked memory list.
- * Same-project matches get a +0.10 relevance boost. When strict is on,
- * explicit different-project matches are dropped (null project is kept
- * because historical memories predate project tagging).
- * The memory's project tag comes from the storage row's project_id column
- * (RetrievedMemory.projectId), with metadata.project as legacy fallback.
- */
-function applyProjectPreference(
-  memories: RetrievedMemory[],
-  project: string,
-  strict: boolean,
-): RetrievedMemory[] {
-  return memories
-    .map((m) => {
-      const memProject = m.projectId ?? ((m.metadata?.['project'] as string | undefined) ?? null)
-      if (memProject === project) {
-        return { ...m, relevance: Math.min(1.0, m.relevance + 0.1) }
-      }
-      return m
-    })
-    .filter((m) => {
-      if (!strict) return true
-      const memProject = m.projectId ?? ((m.metadata?.['project'] as string | undefined) ?? null)
-      return memProject === project || memProject === null
-    })
-    .sort((a, b) => b.relevance - a.relevance)
-}
-
 // ---------------------------------------------------------------------------
 // Stage timing
 // ---------------------------------------------------------------------------
@@ -404,9 +378,12 @@ export async function recall(
   const { strategy, embedding, intelligence, sessionId } = opts
   // Normalize: undefined and null both mean "no graph"
   const graph: GraphPort | null = opts.graph ?? null
-  const project = opts.project
+  const project = opts.projectId ?? opts.project
   const projectStrict = opts.projectStrict === true
-  const projectId = opts.projectId
+  const ranking: ProjectRanking | null = project ? projectRankingFromEnv(project, process.env, projectStrict) : null
+  // A project reaches storage and the graph as a filter only under strict
+  // scoping; otherwise it only ranks, so a mis-tagged memory stays reachable.
+  const projectId = projectStrict ? project : undefined
   // Read per call so the flag can be flipped without a restart.
   const timings: StageTimings = process.env['ENGRAM_RECALL_TIMING'] === '1' ? {} : null
   const recallStart = stageStart(timings)
@@ -457,14 +434,8 @@ export async function recall(
     sessionId,
     expandedTerms,
     projectId,
+    ...(ranking ? { projectRanking: ranking } : {}),
   })
-
-  // Project soft-preference: boost memories matching the current
-  // project so they rank higher than cross-project hits, without hard
-  // filtering. When projectStrict is set, drop explicit mismatches.
-  if (project) {
-    memories = applyProjectPreference(memories, project, projectStrict)
-  }
   stageEnd(timings, 'search', searchStart)
 
   // HyDE: fires on weak direct-match scores OR multi-hop / temporal queries.
@@ -496,6 +467,7 @@ export async function recall(
         sessionId,
         expandedTerms,
         projectId,
+        ...(ranking ? { projectRanking: ranking } : {}),
       })
 
       memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)
@@ -588,6 +560,7 @@ export async function recall(
             content: getMemoryContent(typed),
             relevance: activation,
             source: 'association',
+            projectId: typed.data.projectId ?? null,
             metadata: {
               ...typed.data.metadata,
               patternCompletion: true,
@@ -597,9 +570,10 @@ export async function recall(
         }
 
         // Merge with existing weak results, deduplicate, re-sort
-        if (patternMemories.length > 0) {
+        const rankedPattern = ranking ? applyProjectRanking(patternMemories, ranking) : patternMemories
+        if (rankedPattern.length > 0) {
           const merged = new Map<string, RetrievedMemory>()
-          for (const m of [...memories, ...patternMemories]) {
+          for (const m of [...memories, ...rankedPattern]) {
             const existing = merged.get(m.id)
             if (!existing || m.relevance > existing.relevance) {
               merged.set(m.id, m)
@@ -659,13 +633,12 @@ export async function recall(
         const blended = rerankScore * rerankWeight + m.relevance * originalWeight
         return { ...m, relevance: blended }
       })
-      // Re-apply the project preference to the BLENDED scores before
-      // truncation: the earlier application (pre-HyDE) survives the blend
-      // only as +0.10 * originalWeight, which lets a semantically similar
-      // cross-project candidate outrank a same-project one and take its
-      // slot in the cut below.
-      if (project) {
-        memories = applyProjectPreference(memories, project, projectStrict)
+      // Re-apply the project boost to the BLENDED scores before truncation:
+      // the pre-rerank boost survives the blend only as boost * originalWeight,
+      // which lets a semantically similar cross-project candidate outrank a
+      // same-project one and take its slot in the cut below.
+      if (ranking) {
+        memories = applyProjectRanking(memories, ranking)
       }
       memories = memories
         .sort((a, b) => b.relevance - a.relevance)

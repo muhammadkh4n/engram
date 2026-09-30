@@ -225,8 +225,8 @@ export async function getMemory(): Promise<Memory> {
   // the shared HTTP transport) has no project context of its own, so it must
   // not guess one from its cwd. Project scope is supplied per call by the
   // agent via the declarative `project_id` param on memory_recall /
-  // memory_ingest. Omitting it means unscoped (all projects), which is the
-  // backward-compatible default.
+  // memory_ingest. On recall it ranks that project's memories higher and
+  // hides none; omitting it means no project preference.
   memory = createMemory({
     storage,
     intelligence,
@@ -293,7 +293,7 @@ const TOOLS = [
         project_id: {
           type: 'string',
           description:
-            'Optional project namespace. Pass the current working project (typically the git repository name, e.g. "engram") to scope recall to that project plus shared memories — another project\'s memories are excluded. Omit to search across all projects.',
+            'Optional current project (typically the git repository name, e.g. "engram"). Memories of this project, then of its product group, rank higher; shared memories and other projects\' memories are still returned. Omit for no project preference.',
         },
         synthesize: {
           type: 'boolean',
@@ -327,7 +327,7 @@ const TOOLS = [
         project_id: {
           type: 'string',
           description:
-            'Optional project namespace. Pass the current working project (typically the git repository name, e.g. "engram") to tag this memory so it is only recalled within that project. Omit to store as shared (visible to all projects).',
+            'Optional project tag (typically the git repository name, e.g. "engram"). A tagged memory ranks higher in recalls for that project and its product group and stays recallable from every project. Omit to store as shared.',
         },
       },
       required: ['content', 'role'],
