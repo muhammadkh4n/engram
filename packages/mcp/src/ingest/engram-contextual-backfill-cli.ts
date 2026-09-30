@@ -31,6 +31,7 @@
 
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { openaiIntelligence } from '@engram-mem/openai'
+import { buildTextToEmbed, EMBED_TEXT_VERSION } from '@engram-mem/core'
 import type { IntelligenceAdapter } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
@@ -99,29 +100,6 @@ interface NeighborRow {
 }
 
 // ---------------------------------------------------------------------------
-// textToEmbed: inline copy of the buildTextToEmbed logic from core/memory.ts.
-// Kept in sync manually — if the production embed shape changes, update both.
-// ---------------------------------------------------------------------------
-
-function buildTextToEmbed(
-  cleanText: string,
-  contextualPreamble: string,
-  recentContextTurns: readonly string[],
-): string {
-  if (contextualPreamble) {
-    return `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
-  }
-  if (cleanText.length > 20) {
-    if (recentContextTurns.length > 0) {
-      const context = recentContextTurns.join('\n').slice(-500)
-      return `${context}\n${cleanText}`.slice(-1000)
-    }
-    return cleanText
-  }
-  return cleanText
-}
-
-// ---------------------------------------------------------------------------
 // Backfill workers
 // ---------------------------------------------------------------------------
 
@@ -171,7 +149,11 @@ async function backfillOne(
   }
 
   const recentTwo = neighbors.slice(-2).map((n) => n.content)
-  const textToEmbed = buildTextToEmbed(row.content, preamble, recentTwo)
+  const textToEmbed = buildTextToEmbed({
+    cleanText: row.content,
+    preamble,
+    contextTurns: recentTwo,
+  })
   if (!intelligence.embed) {
     throw new Error('intelligence adapter is missing embed() — wrong adapter version')
   }
@@ -184,6 +166,7 @@ async function backfillOne(
   const newMetadata = {
     ...(row.metadata ?? {}),
     contextualPreamble: preamble,
+    embedTextVersion: EMBED_TEXT_VERSION,
   }
 
   const { error } = await client

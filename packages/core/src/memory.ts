@@ -21,6 +21,7 @@ import { scoreSalience } from './ingestion/salience.js'
 import { findNearDuplicate } from './ingestion/near-duplicate.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
+import { buildTextToEmbed, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
 import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
 import { resolveEventDate, isoDate } from './utils/event-date.js'
@@ -151,48 +152,6 @@ function normalizeForgetIds(ids: unknown): string[] {
   return unique
 }
 
-/**
- * Build the contextual text the embedding model sees for a single message.
- * Extracted as a module-level helper so ingest() and ingestBatch() use the
- * exact same construction rules — drift would silently produce different
- * embedding spaces between the per-message and batched paths.
- *
- * Rules (from the Wave 0 contextual-embedding lift, +17.1% on LoCoMo):
- *  - If a contextualPreamble exists (Anthropic-style opt-in), use it as
- *    the prefix and cap the whole thing at 1500 chars.
- *  - Else if cleanText is long enough to benefit from neighbor context
- *    (>20 chars) and we have prior turns, prepend the last up-to-2 turns
- *    (capped at 500 chars of prior context) and cap the whole at 1000.
- *  - Otherwise embed the cleanText (or raw string content) directly.
- */
-function buildTextToEmbed(
-  message: Message,
-  cleanText: string,
-  contextualPreamble: string,
-  recentContextTurns: readonly string[],
-): string {
-  // Tier 1 (Anthropic-style): preamble + cleanText, capped at 1500 chars
-  if (contextualPreamble) {
-    return `${contextualPreamble.trim()}\n\n${cleanText}`.slice(-1500)
-  }
-  // Tier 2 (Wave 0 contextual): long-enough cleanText benefits from
-  // neighbor-turn context when we have any
-  if (cleanText.length > 20) {
-    if (recentContextTurns.length > 0) {
-      const context = recentContextTurns.join('\n').slice(-500)
-      return `${context}\n${cleanText}`.slice(-1000)
-    }
-    // Long-enough but isolated — embed cleanText alone (strips noise like
-    // timestamps and tool-call markers; covered by memory.test.ts:195).
-    return cleanText
-  }
-  // Tier 3 (short messages): the cleanText would be too thin to embed
-  // meaningfully on its own. Fall back to the raw string content so the
-  // embedder sees whatever surrounding tokens were there. Preserves the
-  // legacy behavior for short utterances.
-  return typeof message.content === 'string' ? message.content : cleanText
-}
-
 export class Memory {
   private storage: StorageAdapter
   private intelligence: IntelligenceAdapter | undefined
@@ -304,7 +263,8 @@ export class Memory {
        * Used by ingestBatch() to amortize one batched embed call across
        * many messages. The caller is responsible for ensuring the vector
        * was computed for the same `textToEmbed` shape that ingest() would
-       * have built — see ingestBatch for the construction rules.
+       * have built with buildTextToEmbed; the stored episode is marked
+       * with the current embedTextVersion.
        *
        * `null` is distinct from `undefined`: null means "embedding failed
        * upstream, store without vector" while undefined means "compute
@@ -389,7 +349,12 @@ export class Memory {
     let embedding: number[] | null = opts?.precomputedEmbedding ?? null
     if (embedding === null && opts?.precomputedEmbedding === undefined && this.intelligence?.embed) {
       try {
-        const textToEmbed = buildTextToEmbed(message, cleanText, contextualPreamble, recentEpisodes.slice(-2).map((e) => e.content))
+        const textToEmbed = buildTextToEmbed({
+          cleanText,
+          rawContent: typeof message.content === 'string' ? message.content : undefined,
+          preamble: contextualPreamble,
+          contextTurns: recentEpisodes.slice(-2).map((e) => e.content),
+        })
         embedding = await this.intelligence.embed(textToEmbed)
       } catch (err) {
         console.error('[engram] embedding failed, storing without vector:', err)
@@ -430,6 +395,11 @@ export class Memory {
     // downstream consumers can inspect it without FTS/BM25 seeing it.
     if (contextualPreamble) {
       metadata.contextualPreamble = contextualPreamble
+    }
+    // Marks which embed-text rules produced the stored vector, so rows embedded
+    // under an older rule can be found and re-embedded. No vector, no marker.
+    if (embedding) {
+      metadata.embedTextVersion = EMBED_TEXT_VERSION
     }
 
     const episode = await this.storage.episodes.insert({
@@ -602,7 +572,12 @@ export class Memory {
       // traffic in between.
       const idx = prepared.length
       const localPrior = prepared.slice(Math.max(0, idx - 2)).map((p) => p.cleanText)
-      const textToEmbed = buildTextToEmbed(message, cleanText, preamble, localPrior)
+      const textToEmbed = buildTextToEmbed({
+        cleanText,
+        rawContent: typeof message.content === 'string' ? message.content : undefined,
+        preamble,
+        contextTurns: localPrior,
+      })
       prepared.push({ message, cleanText, preamble, textToEmbed })
     }
     for (const d of dropped) {

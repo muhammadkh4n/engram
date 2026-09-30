@@ -14,6 +14,7 @@
  *   - memory_digests.fts    = to_tsvector(summary)                  (schema.sql:692)
  *   - memory_procedural.fts = to_tsvector(trigger_text || ' ' || procedure) (schema.sql:761)
  */
+import { EMBED_MAX_CHARS } from '@engram-mem/core'
 
 export type Tier = 'semantic' | 'digests' | 'procedural'
 
@@ -216,11 +217,11 @@ export async function applyBatch<T extends { id: string }>(
 // keeps poison rows from ever reaching OpenAI.
 // ---------------------------------------------------------------------------
 
-/** OpenAI's embedding input limit is ~8191 tokens; 24000 chars is a
- * conservative char-based proxy (see CHARS_PER_TOKEN_ESTIMATE — 24000 / 4 =
- * 6000 tokens, comfortably under the limit even for dense/non-English text
- * where the chars-per-token ratio is lower). */
-export const MAX_EMBED_CHARS = 24000
+/** Character cap for embedding input. A character cap must hold at the fewest
+ * characters per token: dense text (code, hashes, non-English) can approach one
+ * token per character, so the cap stays under OpenAI's 8,191-token limit even
+ * then. Shared with the core embed-text builder and the embedding service. */
+export const MAX_EMBED_CHARS = EMBED_MAX_CHARS
 
 export interface FilterEmptyResult<T> {
   rows: T[]
