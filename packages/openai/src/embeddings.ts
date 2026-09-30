@@ -4,6 +4,7 @@ import {
   withRetry,
   withTimeoutSimple,
   TIMEOUTS,
+  EMBED_MAX_CHARS,
 } from '@engram-mem/core'
 
 export interface OpenAIEmbeddingServiceOptions {
@@ -11,6 +12,19 @@ export interface OpenAIEmbeddingServiceOptions {
   model?: string
   dimensions?: number
   timeoutMs?: number
+}
+
+/**
+ * Validates and caps one embedding input. Empty input is rejected before the
+ * API call so it never spends retries or trips the circuit breaker; long input
+ * keeps its head, which carries the topic, and stays under the model's token
+ * limit.
+ */
+function prepareInput(text: string): string {
+  if (text.trim().length === 0) {
+    throw new Error('Cannot embed empty or whitespace-only text')
+  }
+  return text.length > EMBED_MAX_CHARS ? text.slice(0, EMBED_MAX_CHARS) : text
 }
 
 export class OpenAIEmbeddingService {
@@ -29,13 +43,14 @@ export class OpenAIEmbeddingService {
   }
 
   async embed(text: string): Promise<number[]> {
+    const input = prepareInput(text)
     return withRetry(() =>
       this.breaker.execute(() =>
         withTimeoutSimple(
           this.client.embeddings
             .create({
               model: this.model,
-              input: text,
+              input,
               dimensions: this._dimensions,
             })
             .then((resp) => resp.data[0].embedding),
@@ -46,13 +61,14 @@ export class OpenAIEmbeddingService {
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
+    const inputs = texts.map(prepareInput)
     return withRetry(() =>
       this.breaker.execute(() =>
         withTimeoutSimple(
           this.client.embeddings
             .create({
               model: this.model,
-              input: texts,
+              input: inputs,
               dimensions: this._dimensions,
             })
             .then((resp) => resp.data.map((d) => d.embedding)),

@@ -204,4 +204,47 @@ describe('OpenAIEmbeddingService', () => {
       await expect(service.embed('slow')).rejects.toBeInstanceOf(TimeoutError)
     }, 15_000)
   })
+
+  describe('input cap', () => {
+    it('sends only the first 6,000 characters of a long input', async () => {
+      mockCreate.mockResolvedValueOnce(makeEmbedResponse([makeVector(4)]))
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
+      const input = 'h'.repeat(6000) + 't'.repeat(14000)
+
+      await service.embed(input)
+
+      const sent = mockCreate.mock.calls[0][0].input as string
+      expect(sent).toHaveLength(6000)
+      expect(sent).toBe(input.slice(0, 6000))
+    })
+
+    it('caps each input of a batch', async () => {
+      mockCreate.mockResolvedValueOnce(makeEmbedResponse([makeVector(4), makeVector(4)]))
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
+
+      await service.embedBatch(['a'.repeat(9000), 'short'])
+
+      const sent = mockCreate.mock.calls[0][0].input as string[]
+      expect(sent[0]).toBe('a'.repeat(6000))
+      expect(sent[1]).toBe('short')
+    })
+
+    it('rejects whitespace-only input before any API call', async () => {
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
+      const failuresBefore = (service.getBreaker() as unknown as { failures: number }).failures
+
+      await expect(service.embed('  ')).rejects.toThrow(/empty/i)
+
+      expect(mockCreate).not.toHaveBeenCalled()
+      expect((service.getBreaker() as unknown as { failures: number }).failures).toBe(failuresBefore)
+    })
+
+    it('rejects a batch containing an empty input before any API call', async () => {
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
+
+      await expect(service.embedBatch(['ok', ''])).rejects.toThrow(/empty/i)
+
+      expect(mockCreate).not.toHaveBeenCalled()
+    })
+  })
 })
