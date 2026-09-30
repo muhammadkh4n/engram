@@ -43,6 +43,7 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for a local cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
 - `ENGRAM_RERANK_LOCAL_MODEL` — pick the model. Default: `Alibaba-NLP/gte-reranker-modernbert-base` (rerank p50 3.6 s, RSS 1.66 GB on a CPU host). `mixedbread-ai/mxbai-rerank-large-v1` is the previous default (about 4× slower rerank, RSS 2.84 GB); `mixedbread-ai/mxbai-rerank-base-v1` and `mixedbread-ai/mxbai-rerank-xsmall-v1` are smaller mxbai variants. Rerank scores are not comparable across models. Upgrading with this variable unset switches the model and downloads its weights on first use; set it to `mixedbread-ai/mxbai-rerank-large-v1` to keep the previous one.
 - `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
+- `ENGRAM_SALIENCE_THRESHOLD` — server env for the capture route and the local ingest CLIs: the salience classifier's confidence cut, `0`..`1`, default `0.7`. A capture the classifier marks not worth storing, or scores below it, is rejected.
 - `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
 **Optional (enables Neo4j neural graph):**
@@ -103,6 +104,40 @@ Store a message into memory.
 **Role must be:** `"user"`, `"assistant"`, or `"system"`
 
 **When Claude uses it:** After important user statements, decisions, preferences, or assistant responses worth remembering.
+
+Agents call `memory_ingest` as shown; its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
+
+## Capture route (HTTP server)
+
+`POST /capture` on the HTTP server (`engram-mcp-http`) runs the capture pipeline: secret scrub, salience classification, dedup and storage, with the server's model configuration. It is for hooks and ingest CLIs, not agents, and sits behind the same `Authorization: Bearer $BEARER_TOKEN` check as `/mcp`. One request per capture; no MCP handshake.
+
+**Body** (JSON object; unknown fields are refused with 400):
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string, required | Non-empty, at most 100,000 characters |
+| `source` | string, required | Lowercase slug naming the caller, e.g. `git-commit` |
+| `role` | `"user"` \| `"assistant"` \| `"system"` | Required unless `derive` is set |
+| `session_id` | string | At most 256 characters |
+| `project_id` | string | Project tag; omitted means shared |
+| `gate` | boolean, default `true` | Run the salience classifier; `false` stores without it |
+| `dedup` | boolean, default `true` | Skip near-duplicates of recent memories |
+| `derive` | `"session-summary"` \| `"pre-compact"` | `content` is a transcript; the server digests it first |
+| `dry_run` | boolean, default `false` | Classify but store nothing |
+| `key` | string | Idempotency key, at most 128 characters; a repeat returns `replayed` |
+| `meta` | object of strings | At most 8 keys, values at most 512 characters |
+
+**Response:** always a JSON outcome:
+
+```json
+{ "outcome": "stored", "model": "…", "category": "decision", "confidence": 0.86, "project": "engram" }
+```
+
+- `outcome`: `stored`, `rejected` (with `reason`), `deduped` (with `duplicateOf`, `similarity`), `replayed`, `dry_run` or `error`.
+- `pre-compact` derives also return `context`, the text to re-inject.
+- Status: 200 for every pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 500 failure after validation (`retryable: true`); 405 for methods other than POST.
+
+The ingest CLIs (git post-commit, pre-compact, session-summary) run the same pipeline in-process.
 
 ### memory_forget
 
