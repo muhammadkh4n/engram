@@ -8,10 +8,10 @@
  * unless the pattern segment itself starts with a dot.
  */
 
-import { readdirSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 const PRUNED_DIRS = new Set(['node_modules', '.git'])
 const GLOB_CHARS_RE = /[*?[{]/
@@ -230,4 +230,103 @@ export function expandGlob(pattern: string, isExcluded: (path: string) => boolea
     truncated ||= walk.truncated
   }
   return { files: [...files].sort(), watched: [...watched], truncated }
+}
+
+const PATH_CACHE_VERSION = 1
+
+interface CachedExpansion {
+  files: string[]
+  truncated: boolean
+  /** Every watched path with the mtime it had when the walk ran; -1 when it did not exist. */
+  watched: Array<[string, number]>
+}
+
+function mtimeOrMissing(path: string): number {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return -1
+  }
+}
+
+function isCachedExpansion(value: unknown): value is CachedExpansion {
+  const v = value as Partial<CachedExpansion> | null
+  return (
+    v !== null &&
+    typeof v === 'object' &&
+    Array.isArray(v.files) &&
+    typeof v.truncated === 'boolean' &&
+    Array.isArray(v.watched) &&
+    v.watched.every((w) => Array.isArray(w) && typeof w[0] === 'string' && typeof w[1] === 'number')
+  )
+}
+
+export interface GlobPathCache {
+  /** Expands `pattern`, reusing the last walk while every directory it read keeps its mtime. */
+  expand(pattern: string, excludes: readonly string[]): GlobExpansion
+  /** Writes the walks done since opening, when any were, to the cache file. */
+  save(): void
+}
+
+/**
+ * A walk under a broad pattern (`~/projects/**\/.env*`) reads thousands of
+ * directories; a new file changes its directory's mtime, so while every
+ * directory a walk read keeps its mtime, the walk's result still holds and
+ * one stat per directory replaces one readdir. The cache holds paths and
+ * mtimes only, never file contents, in a file only its owner can read.
+ * `cacheFile` undefined disables it; any cache I/O failure falls back to
+ * walking, reported through `report` with the error code only.
+ */
+export function openGlobPathCache(cacheFile: string | undefined, report: (line: string) => void): GlobPathCache {
+  const entries = new Map<string, CachedExpansion>()
+  if (cacheFile !== undefined) {
+    try {
+      const parsed = JSON.parse(readFileSync(cacheFile, 'utf8')) as { version?: unknown; entries?: unknown }
+      if (parsed.version === PATH_CACHE_VERSION && parsed.entries && typeof parsed.entries === 'object') {
+        for (const [key, value] of Object.entries(parsed.entries)) if (isCachedExpansion(value)) entries.set(key, value)
+      }
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code
+      if (code !== 'ENOENT' && !(err instanceof SyntaxError)) report(`path cache unreadable (${code ?? 'error'}); walking`)
+    }
+  }
+  let dirty = false
+
+  function expand(pattern: string, excludes: readonly string[]): GlobExpansion {
+    // A literal path costs one stat either way; only walks are worth caching.
+    const cacheable = cacheFile !== undefined && GLOB_CHARS_RE.test(pattern)
+    const key = JSON.stringify([pattern, excludes])
+    const cached = cacheable ? entries.get(key) : undefined
+    if (cached !== undefined && cached.watched.every(([path, mtime]) => mtimeOrMissing(path) === mtime)) {
+      return { files: cached.files, watched: cached.watched.map(([path]) => path), truncated: cached.truncated }
+    }
+    const expansion = expandGlob(pattern, excludeMatcher(excludes))
+    if (cacheable) {
+      entries.set(key, {
+        files: expansion.files,
+        truncated: expansion.truncated,
+        watched: expansion.watched.map((path) => [path, mtimeOrMissing(path)]),
+      })
+      dirty = true
+    }
+    return expansion
+  }
+
+  function save(): void {
+    if (cacheFile === undefined || !dirty) return
+    dirty = false
+    const tmp = `${cacheFile}.${process.pid}.tmp`
+    try {
+      mkdirSync(dirname(cacheFile), { recursive: true, mode: 0o700 })
+      writeFileSync(tmp, JSON.stringify({ version: PATH_CACHE_VERSION, entries: Object.fromEntries(entries) }), {
+        mode: 0o600,
+      })
+      renameSync(tmp, cacheFile)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code
+      report(`path cache not written (${code ?? 'error'})`)
+    }
+  }
+
+  return { expand, save }
 }

@@ -29,7 +29,7 @@
     "url": "https://github.com/muhammadkh4n/engram.git"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/ingest/data && cp src/ingest/data/common-passwords.txt dist/ingest/data/",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"

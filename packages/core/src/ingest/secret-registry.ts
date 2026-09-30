@@ -11,6 +11,10 @@
  * An unset or unreadable configuration leaves the registry empty and says so
  * once on stderr; nothing here throws.
  *
+ * Publicly known passwords (common-password and vendor-default lists, see
+ * common-passwords.ts) are never registered: they are not secret, and
+ * masking a dev default such as `postgres` would erase an ordinary word.
+ *
  * Values stay in this process's memory: they are never logged, and no
  * message or error built here carries one. Sources are read on first use and
  * read again when any source file, a directory a glob walked, or the
@@ -18,10 +22,12 @@
  */
 
 import { readFileSync, statSync } from 'node:fs'
-import { basename, dirname, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { commonPasswords, isCommonPassword } from './common-passwords.js'
 import { encodedForms } from './encoded-forms.js'
 import { isOnlyPlaceholders, placeholderRanges } from './placeholder.js'
-import { excludeMatcher, expandGlob, expandHome } from './source-glob.js'
+import { expandHome, openGlobPathCache } from './source-glob.js'
 import { SOURCE_FORMATS, parseSource } from './secret-source-formats.js'
 import type { NamedValue, SourceFormat } from './secret-source-formats.js'
 import { isShellReference } from './value-extent.js'
@@ -47,6 +53,8 @@ export interface SecretRegistry {
 export interface SecretRegistryOptions {
   /** Path of the sources configuration; `undefined` means none is configured. */
   configPath: string | undefined
+  /** File caching glob walk results (paths and directory mtimes only); `undefined` walks every build. */
+  pathCacheFile?: string
   now?: () => number
   log?: (line: string) => void
 }
@@ -92,10 +100,26 @@ function candidateValues(value: string): string[] {
   return [whole, ...lines].filter(isRegistrable)
 }
 
-function buildIndex(values: readonly NamedValue[]): Map<string, Form[]> {
+interface BuiltIndex {
+  index: Map<string, Form[]>
+  /** Key names whose value (or one of whose lines) is a public default and was not registered. */
+  publicDefaults: string[]
+  publicDefaultCount: number
+}
+
+function buildIndex(values: readonly NamedValue[], publicPasswords: ReadonlySet<string>): BuiltIndex {
   const nameByValue = new Map<string, string>()
+  const publicDefaultNames = new Set<string>()
+  let publicDefaultCount = 0
   for (const { name, value } of values) {
-    for (const candidate of candidateValues(value)) if (!nameByValue.has(candidate)) nameByValue.set(candidate, name)
+    for (const candidate of candidateValues(value)) {
+      if (isCommonPassword(candidate, publicPasswords)) {
+        publicDefaultCount++
+        publicDefaultNames.add(name)
+      } else if (!nameByValue.has(candidate)) {
+        nameByValue.set(candidate, name)
+      }
+    }
   }
   const nameByForm = new Map<string, string>()
   for (const [value, name] of nameByValue) {
@@ -109,7 +133,7 @@ function buildIndex(values: readonly NamedValue[]): Map<string, Form[]> {
     index.set(key, [...(index.get(key) ?? []), { text, name }])
   }
   for (const bucket of index.values()) bucket.sort((a, b) => b.text.length - a.text.length)
-  return index
+  return { index, publicDefaults: [...publicDefaultNames], publicDefaultCount }
 }
 
 function mtimeOf(path: string): number {
@@ -172,9 +196,10 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
       logOnce(`${configPath} is not {"sources": [...]} JSON; no known secret values are masked`)
       return []
     }
-    return sources.flatMap((source) => {
+    const pathCache = openGlobPathCache(options.pathCacheFile, logOnce)
+    const values = sources.flatMap((source) => {
       const pattern = resolve(dirname(configPath), expandHome(source.path))
-      const expansion = expandGlob(pattern, excludeMatcher(source.exclude))
+      const expansion = pathCache.expand(pattern, source.exclude)
       expansion.watched.forEach((p) => watched.add(p))
       if (expansion.truncated) logOnce(`${source.path}: glob walk stopped early; narrow the pattern`)
       const unnamed: string[] = []
@@ -197,6 +222,8 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
       }
       return values
     })
+    pathCache.save()
+    return values
   }
 
   function build(): Snapshot {
@@ -208,7 +235,13 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
     const watched = new Set([configPath])
     try {
       const values = readSources(configPath, watched)
-      return { index: buildIndex(values), mtimes: new Map([...watched].map((p) => [p, mtimeOf(p)])) }
+      const built = buildIndex(values, commonPasswords(logOnce))
+      if (built.publicDefaultCount > 0) {
+        logOnce(
+          `${built.publicDefaultCount} publicly known default value(s) not registered, under: ${built.publicDefaults.join(', ')}`,
+        )
+      }
+      return { index: built.index, mtimes: new Map([...watched].map((p) => [p, mtimeOf(p)])) }
     } catch (err) {
       // Report the error's class only: its message may quote a source file.
       logOnce(`building the registry failed (${err instanceof Error ? err.name : 'error'}); no known secret values are masked`)
@@ -257,9 +290,15 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
 
 let defaultRegistry: SecretRegistry | undefined
 
+function defaultPathCacheFile(): string {
+  const cacheHome = process.env.XDG_CACHE_HOME
+  const base = cacheHome !== undefined && isAbsolute(cacheHome) ? cacheHome : join(homedir(), '.cache')
+  return join(base, 'engram', 'secret-source-paths.json')
+}
+
 /** The process-wide registry configured by `ENGRAM_SECRET_SOURCES_FILE`, created on first use. */
 export function defaultSecretRegistry(): SecretRegistry {
-  defaultRegistry ??= createSecretRegistry({ configPath: process.env[SECRET_SOURCES_ENV] })
+  defaultRegistry ??= createSecretRegistry({ configPath: process.env[SECRET_SOURCES_ENV], pathCacheFile: defaultPathCacheFile() })
   return defaultRegistry
 }
 

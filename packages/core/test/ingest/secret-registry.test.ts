@@ -26,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.restoreAllMocks()
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -209,7 +210,7 @@ describe('formats', () => {
       'secrets.yaml',
       [
         'db:',
-        '  password: 12345678',
+        '  password: 90417356',
         '  user: appuser-01',
         'api:',
         '  token: |',
@@ -223,7 +224,7 @@ describe('formats', () => {
       ].join('\n'),
     )
     const registry = registryFor([{ path: 'secrets.yaml', format: 'yaml-keys' }])
-    for (const v of ['12345678', `block-one-${ALNUM}`, `block-two-${ALNUM}`, `second-doc-${ALNUM}`]) {
+    for (const v of ['90417356', `block-one-${ALNUM}`, `block-two-${ALNUM}`, `second-doc-${ALNUM}`]) {
       expect(isKnown(registry, v), v).toBe(true)
     }
     expect(isKnown(registry, 'appuser-01')).toBe(false)
@@ -412,5 +413,139 @@ describe('scrubSecrets masks registered values', () => {
     const result = await scrubSecrets(`deploy with dp-${ALNUM} and a note`)
     expect(result.text).toBe('deploy with [REDACTED:DEPLOY_PASS] and a note')
     expect(result.redactions).toEqual([{ kind: 'known', name: 'DEPLOY_PASS' }])
+  })
+
+  it('a dev default registered from .env leaves a sentence naming it unchanged', async () => {
+    write('dev.env', `POSTGRES_PASSWORD=postgres\nDEPLOY_PASS=dp-${ALNUM}\n`)
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'dev.env', format: 'dotenv' }] }))
+    vi.stubEnv('ENGRAM_SECRET_SOURCES_FILE', configPath)
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.resetModules()
+    const { scrubSecrets } = await import('../../src/ingest/scrub-secrets.js')
+    const text = 'Bumped the local postgres 16 image; the postgres role keeps its default password.'
+    const result = await scrubSecrets(text)
+    expect(result.text).toBe(text)
+    expect(result.redactions).toEqual([])
+  })
+})
+
+describe('publicly known default passwords', () => {
+  it('are never registered; the count and key names are logged, never the values', () => {
+    write(
+      'app/.env',
+      [
+        'POSTGRES_PASSWORD=postgres',
+        'ADMIN_PASSWORD=Password',
+        'PANEL_PASSWORD=admin123',
+        'SMTP_PASSWORD=CHANGEME',
+        `API_TOKEN=${ALNUM}`,
+      ].join('\n') + '\n',
+    )
+    const registry = registryFor([{ path: 'app/.env', format: 'dotenv' }])
+    for (const value of ['postgres', 'password', 'Password', 'admin123', 'changeme', 'CHANGEME']) {
+      expect(isKnown(registry, value)).toBe(false)
+    }
+    expect(isKnown(registry, ALNUM)).toBe(true)
+    const line = logs.find((l) => /publicly known default/.test(l))
+    expect(line).toBe(
+      '4 publicly known default value(s) not registered, under: POSTGRES_PASSWORD, ADMIN_PASSWORD, PANEL_PASSWORD, SMTP_PASSWORD',
+    )
+    for (const value of ['postgres', 'Password', 'admin123', 'CHANGEME']) expect(logs.join('\n')).not.toContain(`=${value}`)
+  })
+
+  it('a sentence naming a default is unchanged', () => {
+    write('app/.env', `DB_PASSWORD=postgres\nAPI_TOKEN=${ALNUM}\n`)
+    const registry = registryFor([{ path: 'app/.env', format: 'dotenv' }])
+    const text = 'Upgraded the local postgres 16 container; the postgres user keeps its default.'
+    expect(mask(registry, text)).toBe(text)
+  })
+
+  it('a multi-line value skips only its public-default lines', () => {
+    write('app/.env', `DB_PASSWORD="changeme\n${ALNUM}"\n`)
+    const registry = registryFor([{ path: 'app/.env', format: 'dotenv' }])
+    expect(isKnown(registry, 'changeme')).toBe(false)
+    expect(isKnown(registry, ALNUM)).toBe(true)
+  })
+})
+
+describe('parseCommonPasswords', () => {
+  it('skips the header up to the first empty line and keeps values starting with #', async () => {
+    const { parseCommonPasswords } = await import('../../src/ingest/common-passwords.js')
+    const set = parseCommonPasswords('# header\n# MIT License\n\nHunter2\n#hash-start\n\n')
+    expect([...set]).toEqual(['hunter2', '#hash-start'])
+  })
+
+  it('the bundled list carries the license header and the required defaults', async () => {
+    const { readFileSync } = await import('node:fs')
+    const content = readFileSync(new URL('../../src/ingest/data/common-passwords.txt', import.meta.url), 'utf8')
+    expect(content).toMatch(/^# [\s\S]*MIT License[\s\S]*Copyright \(c\) 2018 Daniel Miessler[\s\S]*?\n\n/)
+    const { parseCommonPasswords } = await import('../../src/ingest/common-passwords.js')
+    const set = parseCommonPasswords(content)
+    for (const value of ['postgres', 'password', 'admin123', 'changeme']) expect(set.has(value)).toBe(true)
+    expect(set.size).toBeGreaterThan(10_000)
+  })
+})
+
+describe('glob path cache', () => {
+  function cachedRegistry(sources: unknown[], cacheFile: string): SecretRegistry {
+    const configPath = write('sources.json', JSON.stringify({ sources }))
+    return createSecretRegistry({ configPath, pathCacheFile: cacheFile, log: (line) => logs.push(line) })
+  }
+
+  it('stores paths and mtimes only, readable by its owner only', async () => {
+    const { readFileSync, statSync } = await import('node:fs')
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    const cacheFile = join(dir, 'cache', 'engram', 'paths.json')
+    cachedRegistry([{ path: 'projects/**/.env', format: 'dotenv' }], cacheFile).findKnownValues('x')
+    expect(statSync(cacheFile).mode & 0o777).toBe(0o600)
+    const content = readFileSync(cacheFile, 'utf8')
+    expect(content).toContain(join(dir, 'projects/alpha/.env'))
+    expect(content).not.toContain(ALNUM)
+  })
+
+  it('reuses a walk while every directory it read keeps its mtime', async () => {
+    const { readFileSync, writeFileSync } = await import('node:fs')
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    const outside = write('elsewhere/other.env', `API_TOKEN=outside-${ALNUM}\n`)
+    const cacheFile = join(dir, 'cache', 'paths.json')
+    const sources = [{ path: 'projects/**/.env', format: 'dotenv' }]
+    cachedRegistry(sources, cacheFile).findKnownValues('x')
+    // A path planted in the cached result shows the second build did not walk.
+    const cache = JSON.parse(readFileSync(cacheFile, 'utf8'))
+    const [entry] = Object.values(cache.entries) as Array<{ files: string[] }>
+    entry!.files.push(outside)
+    writeFileSync(cacheFile, JSON.stringify(cache))
+    expect(isKnown(cachedRegistry(sources, cacheFile), `outside-${ALNUM}`)).toBe(true)
+  })
+
+  it('walks again when a directory it read changed', () => {
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    const cacheFile = join(dir, 'cache', 'paths.json')
+    const sources = [{ path: 'projects/**/.env', format: 'dotenv' }]
+    cachedRegistry(sources, cacheFile).findKnownValues('x')
+    write('projects/beta/.env', `API_TOKEN=beta-${ALNUM}\n`)
+    utimesSync(join(dir, 'projects'), new Date(), new Date(Date.now() + 5_000))
+    const registry = cachedRegistry(sources, cacheFile)
+    expect(isKnown(registry, `alpha-${ALNUM}`)).toBe(true)
+    expect(isKnown(registry, `beta-${ALNUM}`)).toBe(true)
+  })
+
+  it('an unreadable or corrupt cache falls back to walking', () => {
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    const cacheFile = write('cache/paths.json', '{not json')
+    const registry = cachedRegistry([{ path: 'projects/**/.env', format: 'dotenv' }], cacheFile)
+    expect(isKnown(registry, `alpha-${ALNUM}`)).toBe(true)
+  })
+})
+
+describe('glob path cache, literal paths', () => {
+  it('a source without glob characters is not cached', async () => {
+    const { existsSync } = await import('node:fs')
+    write('app.env', `API_TOKEN=lit-${ALNUM}\n`)
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'app.env', format: 'dotenv' }] }))
+    const cacheFile = join(dir, 'cache', 'paths.json')
+    const registry = createSecretRegistry({ configPath, pathCacheFile: cacheFile, log: (line) => logs.push(line) })
+    expect(isKnown(registry, `lit-${ALNUM}`)).toBe(true)
+    expect(existsSync(cacheFile)).toBe(false)
   })
 })

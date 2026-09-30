@@ -38,7 +38,7 @@
     }
   },
   "scripts": {
-    "build": "tsc && tsup",
+    "build": "tsc && tsup && mkdir -p dist/data && cp ../core/src/ingest/data/common-passwords.txt dist/data/",
     "build:plugin": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
