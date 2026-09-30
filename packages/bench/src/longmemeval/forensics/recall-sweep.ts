@@ -18,6 +18,8 @@
  *   npx tsx packages/bench/src/longmemeval/forensics/recall-sweep.ts \
  *     --data ./data/longmemeval/longmemeval_s_cleaned.json \
  *     [--limit 50]                # smoke run (default: all 500)
+ *     [--question-ids ids.json]   # JSON array of question_id; runs those, in dataset order (not with --limit)
+ *     [--resume]                  # continue from <output>.partial.jsonl; the run config must match its header
  *     [--max-results 30]          # passed to memory.recall
  *     [--no-consolidate] [--no-graph] [--no-rerank]
  *     [--reranker openai|onnx|none]  # default openai (none under --no-rerank)
@@ -27,6 +29,9 @@
  *     [--context-mode sessions|formatted]  # formatted: recall as the MCP memory_recall tool does and
  *                                 # record its text payload per row (no --synthesize or --max-results)
  *     --output ./results/longmemeval/baseline.json
+ *
+ * Every finished row is appended to <output>.partial.jsonl, so a stopped run
+ * keeps its rows; the partial file is deleted once the output is written.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -38,6 +43,19 @@ import { parseEventDate } from '@engram-mem/core'
 import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
 import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
+import {
+  diffRunIdentity,
+  formatHeaderLine,
+  formatRowLine,
+  idListSha256,
+  orderRowsByDataset,
+  parsePartial,
+  parseQuestionIdList,
+  partialPathFor,
+  pendingQuestions,
+  selectQuestions,
+  type RunIdentity,
+} from './sweep-checkpoint-lib.js'
 
 interface SweepArgs {
   data: string
@@ -52,6 +70,9 @@ interface SweepArgs {
   synthesize: boolean
   contextMode: ContextMode
   output: string
+  // Set only when the flag is given, so meta.args of a plain run is unchanged.
+  resume?: true
+  questionIds?: string
 }
 
 interface PerQRow {
@@ -80,7 +101,8 @@ async function main(): Promise<void> {
 
   const adapter = new LongMemEvalAdapter()
   const allQs = await adapter.loadDataset(args.data)
-  const questions = args.limit > 0 ? allQs.slice(0, args.limit) : allQs
+  const selection = loadSelection(args)
+  const questions = exitOnError(() => selectQuestions(allQs, { limit: args.limit, ...(selection ? { ids: selection.ids } : {}) }))
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
   console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}, contextMode=${args.contextMode}`)
   console.log(`K values: ${K_VALUES.join(', ')}`)
@@ -96,13 +118,19 @@ async function main(): Promise<void> {
     ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
-  const rows: SweepRow[] = []
+  const partialPath = partialPathFor(args.output)
+  const identity = buildRunIdentity(args, selection?.sha256)
+  const resumedRows = openCheckpoint(partialPath, identity, args.resume === true)
+  const todo = pendingQuestions(questions, new Set(resumedRows.map((r) => r.question_id)))
+  if (args.resume) console.log(`Resuming: ${resumedRows.length} rows from ${partialPath}, ${todo.length} to run`)
+
+  const newRows: SweepRow[] = []
   // The backend createBenchMemory actually wired, not the raw flag.
   let resolvedBackend: RerankerBackend | null = null
   const totalStart = Date.now()
 
-  for (let i = 0; i < questions.length; i++) {
-    const q = questions[i]!
+  for (let i = 0; i < todo.length; i++) {
+    const q = todo[i]!
     const qStart = Date.now()
 
     // Use the adapter's runQuestion which already handles fresh-memory + dispose
@@ -147,7 +175,7 @@ async function main(): Promise<void> {
       recallAtK[k] = q.answer_session_ids.some((id) => topK.includes(id))
     }
 
-    rows.push({
+    const row: SweepRow = {
       question_id: q.question_id,
       question_type: q.question_type,
       question: q.question,
@@ -160,15 +188,17 @@ async function main(): Promise<void> {
       recall_at_k: recallAtK,
       ...buildSynthesisField(args.synthesize, synthesisRow),
       ...(formattedFields ?? {}),
-    })
+    }
+    newRows.push(row)
+    fs.appendFileSync(partialPath, formatRowLine(row))
 
     const qDur = ((Date.now() - qStart) / 1000).toFixed(1)
-    if ((i + 1) % 10 === 0 || i + 1 === questions.length) {
-      const r5 = rows.filter((r) => r.recall_at_k[5]).length
-      const r10 = rows.filter((r) => r.recall_at_k[10]).length
-      const r30 = rows.filter((r) => r.recall_at_k[30]).length
+    if ((i + 1) % 10 === 0 || i + 1 === todo.length) {
+      const r5 = newRows.filter((r) => r.recall_at_k[5]).length
+      const r10 = newRows.filter((r) => r.recall_at_k[10]).length
+      const r30 = newRows.filter((r) => r.recall_at_k[30]).length
       console.log(
-        `  Q ${i + 1}/${questions.length}  r@5=${r5}  r@10=${r10}  r@30=${r30}  (last Q: ${qDur}s)`,
+        `  Q ${i + 1}/${todo.length}  r@5=${r5}  r@10=${r10}  r@30=${r30}  (last Q: ${qDur}s)`,
       )
     }
   }
@@ -176,6 +206,10 @@ async function main(): Promise<void> {
   const totalDur = ((Date.now() - totalStart) / 1000).toFixed(1)
   console.log()
   console.log(`Sweep complete in ${totalDur}s`)
+
+  const rows = orderRowsByDataset(questions, [...resumedRows, ...newRows])
+  // A resume whose questions were all done wires no memory; report the flag-derived backend.
+  if (resolvedBackend === null && resumedRows.length > 0) resolvedBackend = identity.reranker_backend as RerankerBackend
 
   // Aggregate
   const overall: Record<string, { hits: number; total: number; rate: number }> = {}
@@ -208,6 +242,8 @@ async function main(): Promise<void> {
       total_questions: rows.length,
       total_seconds: parseFloat(totalDur),
       generated_at: new Date().toISOString(),
+      ...(args.resume ? { resumed_rows: resumedRows.length } : {}),
+      ...(selection ? { question_ids_file: args.questionIds, question_ids_sha256: selection.sha256 } : {}),
     },
     recall_at_K: overall,
     by_question_type: byType,
@@ -215,6 +251,7 @@ async function main(): Promise<void> {
   }
   fs.mkdirSync(path.dirname(args.output), { recursive: true })
   fs.writeFileSync(args.output, JSON.stringify(output, null, 2))
+  fs.rmSync(partialPath, { force: true })
   console.log(`Wrote ${args.output}`)
 
   // Print summary
@@ -240,6 +277,70 @@ async function main(): Promise<void> {
     })
     console.log(`| ${t.padEnd(28)} | ${String(b.length).padStart(4)} | ${cells.join(' | ')} |`)
   }
+}
+
+function exitOnError<T>(fn: () => T): T {
+  try {
+    return fn()
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`)
+    process.exit(1)
+  }
+}
+
+function loadSelection(args: SweepArgs): { ids: string[]; sha256: string } | undefined {
+  const file = args.questionIds
+  if (file === undefined) return undefined
+  return exitOnError(() => {
+    const ids = parseQuestionIdList(fs.readFileSync(file, 'utf8'))
+    return { ids, sha256: idListSha256(ids) }
+  })
+}
+
+function buildRunIdentity(args: SweepArgs, idsSha256: string | undefined): RunIdentity {
+  const backend: RerankerBackend = args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')
+  const questionSelection = idsSha256 !== undefined
+    ? `ids:${idsSha256}`
+    : args.limit > 0 ? `limit:${args.limit}` : 'all'
+  return {
+    data: path.resolve(args.data),
+    context_mode: args.contextMode,
+    reranker_backend: backend,
+    reranker_model: buildModelMeta(backend, args.onnxRerankerModel).rerankModel,
+    graph: !args.noGraph,
+    consolidate: !args.noConsolidate,
+    vector_mode: args.vectorMode ?? 'full',
+    max_results: args.maxResults,
+    synthesize: args.synthesize,
+    question_selection: questionSelection,
+  }
+}
+
+/**
+ * Returns the rows already recorded for this run. A fresh run creates the
+ * checkpoint with its header; an existing one is never overwritten, because it
+ * may hold hours of work.
+ */
+function openCheckpoint(partialPath: string, identity: RunIdentity, resume: boolean): SweepRow[] {
+  const exists = fs.existsSync(partialPath)
+  if (exists && !resume) {
+    console.error(`Error: ${partialPath} exists from an earlier run. Pass --resume to continue it, or delete the file to start over.`)
+    process.exit(1)
+  }
+  if (!exists) {
+    fs.mkdirSync(path.dirname(partialPath), { recursive: true })
+    fs.writeFileSync(partialPath, formatHeaderLine(identity), { flag: 'wx' })
+    return []
+  }
+  const partial = exitOnError(() => parsePartial(fs.readFileSync(partialPath, 'utf8')))
+  const field = diffRunIdentity(partial.header, identity)
+  if (field !== null) {
+    console.error(
+      `Error: cannot resume ${partialPath}: ${field} differs (checkpoint ${JSON.stringify(partial.header[field])}, this run ${JSON.stringify(identity[field])})`,
+    )
+    process.exit(1)
+  }
+  return partial.rows as unknown as SweepRow[]
 }
 
 function validateEnv(_args: SweepArgs): void {
@@ -274,6 +375,11 @@ function parseArgs(argv: string[]): SweepArgs {
     console.error(`Error: ${(err as Error).message}`)
     process.exit(1)
   }
+  const questionIds = get('question-ids')
+  if (questionIds === 'true') {
+    console.error('Error: --question-ids requires a path to a JSON array of question_id strings')
+    process.exit(1)
+  }
   return {
     data: get('data') ?? './data/longmemeval/longmemeval_s_cleaned.json',
     limit: parseInt(get('limit') ?? '0', 10),
@@ -286,5 +392,7 @@ function parseArgs(argv: string[]): SweepArgs {
     synthesize: has('synthesize'),
     contextMode,
     output: get('output') ?? './results/longmemeval/baseline.json',
+    ...(has('resume') ? { resume: true as const } : {}),
+    ...(questionIds !== undefined ? { questionIds } : {}),
   }
 }
