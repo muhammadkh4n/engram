@@ -106,17 +106,28 @@ Store a message into memory.
 
 ### memory_forget
 
-Deprioritize memories matching a query. Lossless — memories are never deleted, only decayed below retrieval floor.
+Forget in two steps. Pass exactly one of `query` or `ids`.
 
-**Input:**
-```json
-{
-  "query": "deprecated API endpoint",
-  "confirm": false
-}
-```
+1. **Preview** with a query. Nothing is deleted; each candidate is listed on one line with its id:
 
-Pass `confirm: true` to apply. Omit or `false` to preview only.
+   ```json
+   { "query": "deprecated API endpoint" }
+   ```
+
+   ```
+   - [semantic · 2026-03-14] 3f2c… · relevance 0.71 · The v1 /export endpoint is deprecated …
+   To forget, call memory_forget again with ids set to the ones to remove.
+   ```
+
+2. **Forget** the ids you approved. Exactly those memories are tombstoned (at most 50 per call):
+
+   ```json
+   { "ids": ["3f2c…"] }
+   ```
+
+   The reply lists the ids per outcome: forgotten, not found, out of scope (tagged with another project), not forgettable (digests).
+
+A tombstone hides a memory from every recall path. The row stays in storage, so a forget is reversible there. The `confirm` flag no longer exists: a query never deletes.
 
 ### memory_timeline
 

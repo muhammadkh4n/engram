@@ -319,39 +319,35 @@ describe('Engram OpenClaw Plugin E2E — tool integration', () => {
     expect(typeof stats.associations).toBe('number')
   })
 
-  it('engram_forget deprioritizes memories by topic', async () => {
+  it('engram_forget previews by query and tombstones the approved ids', async () => {
     await runtime.chat('I love eating pizza for lunch every day', 'Great choice, pizza is delicious')
     await runtime.chat('Pizza with extra cheese is my favorite meal', 'Cheese makes everything better')
     await runtime.chat('We always order pizza on Fridays as a team tradition', 'Team bonding over food')
     await runtime.chat('The best pizza toppings are pepperoni and mushrooms', 'Classic combination')
     await runtime.chat('We tried a new Italian restaurant for our last team outing', 'Good choice')
 
-    // Preview forget (no confirm)
     const previewResult = await runtime.callTool('engram_forget', {
       query: 'pizza',
-      confirm: false,
     }) as { content: Array<{ type: string; text: string }> }
 
     const preview = JSON.parse(previewResult.content[0].text) as {
       count: number
-      previewed: unknown[]
+      candidates: Array<{ id: string }>
     }
-    expect(typeof preview.count).toBe('number')
-    expect(Array.isArray(preview.previewed)).toBe(true)
+    expect(preview.count).toBe(preview.candidates.length)
+    expect(preview.count).toBeGreaterThan(0)
 
-    // Apply forget with confirm=true
+    const approved = preview.candidates[0].id
     const forgetResult = await runtime.callTool('engram_forget', {
-      query: 'pizza',
-      confirm: true,
+      ids: [approved],
     }) as { content: Array<{ type: string; text: string }> }
 
     const forgetParsed = JSON.parse(forgetResult.content[0].text) as {
-      count: number
-      previewed: unknown[]
+      forgotten: Array<{ id: string }>
+      notFound: string[]
     }
-    expect(typeof forgetParsed.count).toBe('number')
-    // count should match previewed length
-    expect(forgetParsed.count).toBe(forgetParsed.previewed.length)
+    expect(forgetParsed.forgotten.map((f) => f.id)).toEqual([approved])
+    expect(forgetParsed.notFound).toEqual([])
   })
 
   it('engram_expand drills into digests and returns episodes', async () => {

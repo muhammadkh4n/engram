@@ -4,6 +4,7 @@ import { createMemory } from '../src/create-memory.js'
 import { Memory } from '../src/memory.js'
 import type { StorageAdapter } from '../src/adapters/storage.js'
 import type { IntelligenceAdapter } from '../src/adapters/intelligence.js'
+import type { GraphPort } from '../src/adapters/graph.js'
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -634,95 +635,214 @@ describe('Memory — stats()', () => {
 // ---------------------------------------------------------------------------
 
 describe('Memory — forget()', () => {
+  // Routes texts onto disjoint embedding axes by keyword so a query matches
+  // its topic's memories and nothing else.
+  const DIM = 1536
+  function embedText(text: string): number[] {
+    const v = new Array(DIM).fill(0)
+    if (/deploy|staging|rotat/i.test(text)) v[0] = 1
+    else if (/billing|invoice/i.test(text)) v[1] = 1
+    else v[2] = 1
+    return v
+  }
+  const intelligence: IntelligenceAdapter = {
+    embed: async (text: string) => embedText(text),
+    dimensions: () => DIM,
+  }
+
+  let storage: StorageAdapter
   let memory: Memory
 
   beforeEach(async () => {
-    memory = createMemory({ storage: makeStorage() })
+    storage = makeStorage()
+    memory = createMemory({ storage, intelligence })
     await memory.initialize()
+    await memory.ingest({ role: 'user', content: 'the staging deploy key rotates every monday' })
+    await memory.ingest({ role: 'user', content: 'billing invoices are sent on the first of the month' })
   })
 
   afterEach(async () => {
     await memory.dispose()
   })
 
-  it('returns preview without modifying when confirm=false (default)', async () => {
-    await memory.ingestBatch([
-      { role: 'user', content: 'I prefer TypeScript over JavaScript', sessionId: 'forget-s1' },
-      { role: 'assistant', content: 'TypeScript strict mode enables type checking', sessionId: 'forget-s1' },
-      { role: 'user', content: 'TypeScript generics are powerful features', sessionId: 'forget-s1' },
-    ])
+  async function deployCandidateId(): Promise<string> {
+    const preview = await memory.forget('staging deploy key')
+    const hit = preview.candidates.find((c) => c.content.includes('deploy key'))
+    if (!hit) throw new Error('deploy episode not previewed')
+    return hit.id
+  }
 
-    const result = await memory.forget('TypeScript')
+  async function recallHas(query: string, needle: string): Promise<boolean> {
+    const r = await memory.recall(query)
+    return r.memories.some((m) => m.content.includes(needle))
+  }
 
-    // Should return structured result
-    expect(result).toHaveProperty('count')
-    expect(result).toHaveProperty('previewed')
-    expect(Array.isArray(result.previewed)).toBe(true)
-    expect(typeof result.count).toBe('number')
-    // Count should match previewed length
-    expect(result.count).toBe(result.previewed.length)
-  })
-
-  it('confirm=false does not change memory counts', async () => {
-    await memory.ingestBatch([
-      { role: 'user', content: 'I prefer TypeScript', sessionId: 'forget-s2' },
-      { role: 'assistant', content: 'TypeScript is great', sessionId: 'forget-s2' },
-      { role: 'user', content: 'TypeScript strict mode is important', sessionId: 'forget-s2' },
-    ])
-
+  it('previews candidates with id, type, content, relevance, project and date, and writes nothing', async () => {
     const statsBefore = await memory.stats()
-    await memory.forget('TypeScript') // confirm=false by default
-    const statsAfter = await memory.stats()
+    const preview = await memory.forget('staging deploy key')
 
-    // Episode count should not change
-    expect(statsAfter.episodes).toBe(statsBefore.episodes)
+    expect(preview.count).toBe(preview.candidates.length)
+    const hit = preview.candidates.find((c) => c.content.includes('deploy key'))
+    expect(hit).toMatchObject({ type: 'episode', projectId: null })
+    expect(typeof hit!.id).toBe('string')
+    expect(typeof hit!.relevance).toBe('number')
+    expect(hit!.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+
+    expect((await memory.stats()).episodes).toBe(statsBefore.episodes)
+    expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(true)
   })
 
-  it('confirm=true returns count of deprioritized memories', async () => {
-    await memory.ingestBatch([
-      { role: 'user', content: 'I prefer TypeScript', sessionId: 'forget-s3' },
-      { role: 'assistant', content: 'TypeScript strict mode is useful', sessionId: 'forget-s3' },
-      { role: 'user', content: 'TypeScript generics are powerful', sessionId: 'forget-s3' },
-    ])
-
-    const result = await memory.forget('TypeScript', { confirm: true })
-
-    expect(result).toHaveProperty('count')
-    expect(result).toHaveProperty('previewed')
-    expect(typeof result.count).toBe('number')
-    expect(result.count).toBe(result.previewed.length)
+  it('filters the preview by tier', async () => {
+    const preview = await memory.forget('staging deploy key', { tier: 'semantic' })
+    expect(preview.candidates.every((c) => c.type === 'semantic')).toBe(true)
+    expect(preview.candidates.some((c) => c.content.includes('deploy key'))).toBe(false)
   })
 
-  // Issue #7: forget() used to match 73–99 memories for any query (including
-  // gibberish) because 'deep' strategy + no score gate = entire scan pool is
-  // "affected". Regression: confirm the narrow-strategy + minRelevance gate
-  // keeps gibberish from sweeping the store.
-  it('gibberish query does not carpet-bomb the store (issue #7)', async () => {
-    await memory.ingestBatch([
-      { role: 'user', content: 'I prefer TypeScript over JavaScript', sessionId: 'forget-gibberish' },
-      { role: 'assistant', content: 'TypeScript strict mode enables type checking', sessionId: 'forget-gibberish' },
-      { role: 'user', content: 'Python has good async support', sessionId: 'forget-gibberish' },
-      { role: 'assistant', content: 'asyncio handles concurrent I/O in Python', sessionId: 'forget-gibberish' },
-      { role: 'user', content: 'Go channels are great for concurrency', sessionId: 'forget-gibberish' },
-      { role: 'assistant', content: 'goroutines spawn cheaply compared to threads', sessionId: 'forget-gibberish' },
-    ])
+  it('tombstones the given id and leaves the rest recallable', async () => {
+    const id = await deployCandidateId()
 
-    const result = await memory.forget('xyzzy_nonexistent_gibberish_12345')
+    const result = await memory.forgetByIds([id])
 
-    // Before the fix, this returned 70+ (or at least all ingested + associations).
-    // After the fix, the minRelevance gate prunes the entire pool.
-    expect(result.count).toBeLessThanOrEqual(1)
+    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [], notForgettable: [] })
+    expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(false)
+    expect(await recallHas('when are billing invoices sent?', 'billing invoices')).toBe(true)
   })
 
-  it('minRelevance override lets callers relax or tighten the gate', async () => {
-    await memory.ingestBatch([
-      { role: 'user', content: 'TypeScript is a typed superset of JavaScript', sessionId: 'forget-override' },
-      { role: 'assistant', content: 'TypeScript adds static typing', sessionId: 'forget-override' },
-    ])
+  it('reports an already tombstoned id as forgotten again', async () => {
+    const id = await deployCandidateId()
+    await memory.forgetByIds([id])
 
-    // 999 is unreachable; nothing should pass the gate.
-    const tight = await memory.forget('TypeScript', { minRelevance: 999 })
-    expect(tight.count).toBe(0)
+    const again = await memory.forgetByIds([id])
+
+    expect(again.forgotten).toEqual([{ id, type: 'episode' }])
+    expect(again.notFound).toEqual([])
+  })
+
+  it('collapses duplicate ids', async () => {
+    const id = await deployCandidateId()
+    const result = await memory.forgetByIds([id, id, ` ${id} `])
+    expect(result.forgotten).toEqual([{ id, type: 'episode' }])
+  })
+
+  it('matches an uppercase UUID to its stored row and tombstones it', async () => {
+    const id = await deployCandidateId()
+    expect(id).toBe(id.toLowerCase())
+
+    const result = await memory.forgetByIds([id.toUpperCase()])
+
+    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [], notForgettable: [] })
+    expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(false)
+  })
+
+  it('collapses the upper and lower case forms of one UUID', async () => {
+    const id = await deployCandidateId()
+    const result = await memory.forgetByIds([id.toUpperCase(), id])
+    expect(result.forgotten).toEqual([{ id, type: 'episode' }])
+  })
+
+  it('keeps the case of an id that is not UUID-shaped', async () => {
+    const result = await memory.forgetByIds(['Not-A-Uuid'])
+    expect(result.notFound).toEqual(['Not-A-Uuid'])
+  })
+
+  it('reports an unknown id as notFound', async () => {
+    const result = await memory.forgetByIds(['0190aaaa-0000-7000-8000-000000000000'])
+    expect(result).toEqual({
+      forgotten: [], notFound: ['0190aaaa-0000-7000-8000-000000000000'], outOfScope: [], notForgettable: [],
+    })
+  })
+
+  it('reports a digest id as notForgettable and leaves it in place', async () => {
+    const digest = await storage.digests.insert({
+      sessionId: 'forget-digest', summary: 'staging deploy summary', keyTopics: ['deploy'],
+      sourceEpisodeIds: [], sourceDigestIds: [], level: 1, embedding: embedText('deploy'), metadata: {}, projectId: null,
+    })
+
+    const result = await memory.forgetByIds([digest.id])
+
+    expect(result.notForgettable).toEqual([digest.id])
+    expect(result.forgotten).toEqual([])
+    expect(await storage.getByIds([{ id: digest.id, type: 'digest' }])).toHaveLength(1)
+  })
+
+  it('tombstones a semantic memory under its own tier', async () => {
+    const fact = await storage.semantic.insert({
+      topic: 'deploy policy', content: 'staging deploy keys rotate weekly', confidence: 0.9,
+      sourceDigestIds: [], sourceEpisodeIds: [], decayRate: 0.01, supersedes: null, supersededBy: null,
+      embedding: embedText('deploy'), metadata: {}, projectId: null,
+    })
+    const markSemantic = vi.spyOn(storage.semantic, 'markForgotten')
+    const markEpisodes = vi.spyOn(storage.episodes, 'markForgotten')
+
+    const result = await memory.forgetByIds([fact.id])
+
+    expect(result.forgotten).toEqual([{ id: fact.id, type: 'semantic' }])
+    expect(markSemantic).toHaveBeenCalledWith([fact.id])
+    expect(markEpisodes).not.toHaveBeenCalled()
+  })
+
+  it('rejects an empty list, a blank id and more than 50 distinct ids', async () => {
+    await expect(memory.forgetByIds([])).rejects.toThrow('non-empty array')
+    await expect(memory.forgetByIds(['  '])).rejects.toThrow('non-empty string')
+    const tooMany = Array.from({ length: 51 }, (_, i) => `id-${i}`)
+    await expect(memory.forgetByIds(tooMany)).rejects.toThrow('at most 50 ids')
+    await expect(memory.forgetByIds(Array.from({ length: 50 }, (_, i) => `id-${i}`))).resolves.toMatchObject({
+      forgotten: [],
+    })
+  })
+})
+
+describe('Memory — forgetByIds() graph tombstone', () => {
+  function graphWith(forgetMemories: (ids: string[]) => Promise<number>): GraphPort {
+    return { isAvailable: async () => true, forgetMemories } as unknown as GraphPort
+  }
+
+  async function seeded(graph: GraphPort): Promise<{ memory: Memory; ids: string[] }> {
+    const storage = makeStorage()
+    const memory = createMemory({ storage, graph })
+    await memory.initialize()
+    const a = await storage.episodes.insert({
+      sessionId: 'forget-graph', role: 'user', content: 'rotate the staging deploy key', salience: 0.5,
+      accessCount: 0, lastAccessed: null, consolidatedAt: null, embedding: null, entities: [], metadata: {}, projectId: null,
+    })
+    const b = await storage.episodes.insert({
+      sessionId: 'forget-graph', role: 'user', content: 'rotate the production deploy key', salience: 0.5,
+      accessCount: 0, lastAccessed: null, consolidatedAt: null, embedding: null, entities: [], metadata: {}, projectId: null,
+    })
+    return { memory, ids: [a.id, b.id] }
+  }
+
+  it('passes exactly the tombstoned ids to the graph', async () => {
+    const forgetMemories = vi.fn().mockResolvedValue(1)
+    const { memory, ids } = await seeded(graphWith(forgetMemories))
+
+    await memory.forgetByIds([ids[0]!, 'unknown-id'])
+
+    expect(forgetMemories).toHaveBeenCalledTimes(1)
+    expect(forgetMemories).toHaveBeenCalledWith([ids[0]])
+    await memory.dispose()
+  })
+
+  it('does not call the graph when nothing was tombstoned', async () => {
+    const forgetMemories = vi.fn().mockResolvedValue(0)
+    const { memory } = await seeded(graphWith(forgetMemories))
+
+    await memory.forgetByIds(['unknown-id'])
+
+    expect(forgetMemories).not.toHaveBeenCalled()
+    await memory.dispose()
+  })
+
+  it('still tombstones in SQL when the graph throws', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { memory, ids } = await seeded(graphWith(vi.fn().mockRejectedValue(new Error('neo4j down'))))
+
+    const result = await memory.forgetByIds([ids[1]!])
+
+    expect(result.forgotten).toEqual([{ id: ids[1], type: 'episode' }])
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+    await memory.dispose()
   })
 })
 

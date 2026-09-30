@@ -8,6 +8,7 @@ import { PostgRestProceduralStorage } from './procedural.js'
 import { PostgRestAssociationStorage } from './associations.js'
 import { PostgRestConsolidationRunStorage } from './consolidation-runs.js'
 import { parseVector } from './parse-vector.js'
+import { isUuid } from './uuid.js'
 
 export interface PostgRestAdapterOptions {
   url: string
@@ -127,6 +128,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
   async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
     this.assertInitialized()
+    if (!isUuid(id)) return null
 
     switch (type) {
       case 'episode': {
@@ -177,6 +179,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
     const byType = new Map<MemoryType, string[]>()
     for (const { id, type } of ids) {
+      if (!isUuid(id)) continue
       const list = byType.get(type) ?? []
       list.push(id)
       byType.set(type, list)

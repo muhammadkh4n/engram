@@ -1,4 +1,6 @@
 import type { Memory } from '@engram-mem/core'
+import { executeForget, FORGET_DESCRIPTION } from './forget.js'
+import type { ForgetParams } from './forget.js'
 
 export function createEngramTools(memory: Memory) {
   return {
@@ -23,10 +25,9 @@ export function createEngramTools(memory: Memory) {
 
     engram_forget: {
       name: 'engram_forget',
-      description: 'Deprioritize memories by topic (lossless)',
-      async execute(params: { query: string; confirm?: boolean }) {
-        const result = await memory.forget(params.query, { confirm: params.confirm })
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+      description: FORGET_DESCRIPTION,
+      async execute(params: ForgetParams) {
+        return executeForget(memory, params)
       },
     },
 

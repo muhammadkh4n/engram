@@ -168,16 +168,26 @@ describe('project scoping — end-to-end through Memory', () => {
     expect(contentsOf(result.memories).some((c) => c.includes('shared principle'))).toBe(true)
   })
 
-  it("scoped forget removes its own and shared matches, never another project's", async () => {
+  it("scoped forget removes its own and shared memories, never another project's", async () => {
     // One embedding for every text, so beta's memory is as close a match as
-    // alpha's; only the project guard keeps it out of the forget set.
-    const affected = await alpha.forget('secret', { confirm: true, minRelevance: 0 })
-    const forgotten = contentsOf(affected.previewed)
+    // alpha's; only the project guard keeps it out of the preview and the
+    // tombstone.
+    const preview = await alpha.forget('secret')
+    const listed = contentsOf(preview.candidates)
+    expect(listed.some((c) => c.includes('alpha secret'))).toBe(true)
+    expect(listed.some((c) => c.includes('shared principle'))).toBe(true)
+    expect(listed.some((c) => c.includes('beta secret'))).toBe(false)
 
-    expect(forgotten.some((c) => c.includes('alpha secret'))).toBe(true)
-    expect(forgotten.some((c) => c.includes('shared principle'))).toBe(true)
-    expect(forgotten.some((c) => c.includes('beta secret'))).toBe(false)
+    const idOf = async (needle: string): Promise<string> => {
+      const all = await shared.recall('what secret did we store earlier?')
+      return all.memories.find((m) => m.content.includes(needle))!.id
+    }
+    const [alphaId, sharedId, betaId] = [await idOf('alpha secret'), await idOf('shared principle'), await idOf('beta secret')]
 
+    const res = await alpha.forgetByIds([alphaId, sharedId, betaId])
+
+    expect(res.outOfScope).toEqual([betaId])
+    expect(res.forgotten.map((f) => f.id).sort()).toEqual([alphaId, sharedId].sort())
     const after = contentsOf((await shared.recall('what secret did we store earlier?')).memories)
     expect(after.some((c) => c.includes('beta secret'))).toBe(true)
     expect(after.some((c) => c.includes('alpha secret'))).toBe(false)

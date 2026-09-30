@@ -4,7 +4,7 @@
  * Mirrors the shape of `maybeWithLocalRerank` (env-gated, dynamic import,
  * warn-and-fallback), with one MCP-specific hardening: `exactRescore` is
  * ALWAYS forced true regardless of `ENGRAM_ENGINE_EXACT`, because
- * `memory_forget`'s write-suppression thresholds compare similarity scores
+ * write-suppression thresholds compare similarity scores
  * against a fixed cutoff and must never see a tier-2 quantized estimate
  * instead of true float cosine. These tests exercise the wiring decision
  * itself via env manipulation — no Supabase/OpenAI network access, no real
@@ -14,7 +14,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs, parseChatReasoningEnv } from '../src/server-core.js'
+import type { ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
+import { maybeWithRecallEngine, formatRecallTimingLine, recallOptionsFromArgs, parseChatReasoningEnv, runMemoryForget } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
 
@@ -171,6 +172,105 @@ describe('parseChatReasoningEnv', () => {
     for (const v of ['0', '-5', '1.5', 'abc', '2048tokens']) {
       expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v, ...HOST }))
         .toThrow(/ENGRAM_CHAT_REASONING_HEADROOM/)
+    }
+  })
+})
+
+describe('runMemoryForget', () => {
+  const EMPTY_BY_IDS: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [], notForgettable: [] }
+
+  function stubMemory(preview: ForgetPreview, byIds: ForgetByIdsResult = EMPTY_BY_IDS) {
+    const calls = { forget: [] as unknown[][], forgetByIds: [] as unknown[][] }
+    return {
+      calls,
+      mem: {
+        forget: async (...a: unknown[]) => { calls.forget.push(a); return preview },
+        forgetByIds: async (...a: unknown[]) => { calls.forgetByIds.push(a); return byIds },
+      },
+    }
+  }
+
+  const PREVIEW: ForgetPreview = {
+    count: 2,
+    candidates: [
+      {
+        id: 'ep-1', type: 'episode', relevance: 0.8234, projectId: null, date: '2026-09-28',
+        content: 'the staging deploy key\nrotates every monday   ' + 'x'.repeat(300),
+      },
+      { id: 'sem-2', type: 'semantic', relevance: 0.4, projectId: 'engram', date: null, content: 'billing runs monthly' },
+    ],
+  }
+
+  function textOf(r: { content: Array<{ text: string }> }): string {
+    return r.content.map(c => c.text).join('\n')
+  }
+
+  it('previews a query with one line per candidate, ids included, and never calls forgetByIds', async () => {
+    const { mem, calls } = stubMemory(PREVIEW)
+    const r = await runMemoryForget(mem, { query: '  staging deploy key  ' })
+    const text = textOf(r)
+
+    expect(r.isError).toBeUndefined()
+    expect(calls.forget).toEqual([['staging deploy key']])
+    expect(calls.forgetByIds).toHaveLength(0)
+    const lines = text.split('\n')
+    const first = lines.find(l => l.includes('ep-1'))!
+    expect(first.startsWith('- [episode · 2026-09-28] ep-1 · relevance 0.82 · the staging deploy key rotates every monday x')).toBe(true)
+    expect(first.slice(first.indexOf('· the staging') + 2)).toHaveLength(160)
+    expect(lines).toContain('- [semantic] sem-2 · relevance 0.40 · billing runs monthly')
+    expect(lines[lines.length - 1]).toBe('To forget, call memory_forget again with ids set to the ones to remove.')
+  })
+
+  it('reports no candidates plainly', async () => {
+    const { mem } = stubMemory({ count: 0, candidates: [] })
+    expect(textOf(await runMemoryForget(mem, { query: 'nothing' }))).toBe('No matching memories found.')
+  })
+
+  it('forgets exactly the given ids and reports each outcome with its ids', async () => {
+    const { mem, calls } = stubMemory(PREVIEW, {
+      forgotten: [{ id: 'ep-1', type: 'episode' }, { id: 'sem-2', type: 'semantic' }],
+      notFound: ['gone-3'],
+      outOfScope: ['other-4'],
+      notForgettable: ['dig-5'],
+    })
+    const r = await runMemoryForget(mem, { ids: ['ep-1', 'sem-2', 'gone-3', 'other-4', 'dig-5'] })
+    const text = textOf(r)
+
+    expect(r.isError).toBeUndefined()
+    expect(calls.forget).toHaveLength(0)
+    expect(calls.forgetByIds).toEqual([[['ep-1', 'sem-2', 'gone-3', 'other-4', 'dig-5']]])
+    expect(text).toContain('Forgotten (2): ep-1 (episode), sem-2 (semantic)')
+    expect(text).toContain('Not found (1): gone-3')
+    expect(text).toContain('Out of scope (1): other-4')
+    expect(text).toContain('Not forgettable (1): dig-5')
+  })
+
+  it('rejects both or neither of query and ids', async () => {
+    for (const args of [{ query: 'q', ids: ['a'] }, {}, { confirm: true }]) {
+      const { mem, calls } = stubMemory(PREVIEW)
+      const r = await runMemoryForget(mem, args)
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toMatch(/^Error: pass exactly one of query or ids/)
+      expect(calls.forget).toHaveLength(0)
+      expect(calls.forgetByIds).toHaveLength(0)
+    }
+  })
+
+  it('rejects a blank query and empty or non-string ids', async () => {
+    const bad: Array<Record<string, unknown>> = [
+      { query: '   ' },
+      { query: 42 },
+      { ids: [] },
+      { ids: 'ep-1' },
+      { ids: ['ep-1', ''] },
+      { ids: ['ep-1', 7] },
+    ]
+    for (const args of bad) {
+      const { mem, calls } = stubMemory(PREVIEW)
+      const r = await runMemoryForget(mem, args)
+      expect(r.isError).toBe(true)
+      expect(textOf(r)).toMatch(/^Error: /)
+      expect(calls.forgetByIds).toHaveLength(0)
     }
   })
 })
