@@ -153,7 +153,7 @@ async function main(): Promise<void> {
 
   // The transcript is sent to the summarisation model, so credential values
   // are redacted before that call rather than only at ingest.
-  const conversation = scrubModelInput(extractConversation(transcriptPath), '[engram-summary]')
+  const conversation = await scrubModelInput(extractConversation(transcriptPath), '[engram-summary]')
   if (conversation.length < 100) {
     process.stderr.write('[engram-summary] Session too short to summarize.\n')
     return

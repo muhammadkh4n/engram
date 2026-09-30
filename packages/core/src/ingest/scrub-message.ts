@@ -23,8 +23,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null
 }
 
-function scrubText(text: string, redactions: SecretRedaction[]): string {
-  const result = scrubSecrets(text)
+async function scrubText(text: string, redactions: SecretRedaction[]): Promise<string> {
+  const result = await scrubSecrets(text)
   if (result.redactions.length === 0) return text
   redactions.push(...result.redactions)
   return result.text
@@ -36,9 +36,9 @@ function scrubText(text: string, redactions: SecretRedaction[]): string {
  * JSON pair in text. Values the scrubber would keep under that key (empty,
  * booleans, `$VAR` references, keys naming a variable) are kept here too.
  */
-function scrubKeyedText(key: string, value: string, redactions: SecretRedaction[]): string {
+async function scrubKeyedText(key: string, value: string, redactions: SecretRedaction[]): Promise<string> {
   if (!value.includes('"') && !value.includes('\n')) {
-    const asPair = scrubSecrets(`"${key}": "${value}"`)
+    const asPair = await scrubSecrets(`"${key}": "${value}"`)
     const named = asPair.redactions.find((r) => r.kind === 'named-secret' && r.name === key)
     if (named) {
       redactions.push(named)
@@ -48,33 +48,39 @@ function scrubKeyedText(key: string, value: string, redactions: SecretRedaction[
   return scrubText(value, redactions)
 }
 
-function scrubValue(value: unknown, redactions: SecretRedaction[], depth: number): unknown {
+async function scrubArray(value: unknown[], redactions: SecretRedaction[], depth: number): Promise<unknown[]> {
+  let changed = false
+  const out: unknown[] = []
+  for (const item of value) {
+    const scrubbed = await scrubValue(item, redactions, depth + 1)
+    if (scrubbed !== item) changed = true
+    out.push(scrubbed)
+  }
+  return changed ? out : value
+}
+
+async function scrubObject(
+  value: Record<string, unknown>,
+  redactions: SecretRedaction[],
+  depth: number,
+): Promise<Record<string, unknown>> {
+  let changed = false
+  const out: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    const scrubbed = typeof item === 'string'
+      ? await scrubKeyedText(key, item, redactions)
+      : await scrubValue(item, redactions, depth + 1)
+    if (scrubbed !== item) changed = true
+    out[key] = scrubbed
+  }
+  return changed ? out : value
+}
+
+async function scrubValue(value: unknown, redactions: SecretRedaction[], depth: number): Promise<unknown> {
   if (typeof value === 'string') return scrubText(value, redactions)
   if (depth >= MAX_DEPTH) return value
-
-  if (Array.isArray(value)) {
-    let changed = false
-    const out = value.map((item) => {
-      const scrubbed = scrubValue(item, redactions, depth + 1)
-      if (scrubbed !== item) changed = true
-      return scrubbed
-    })
-    return changed ? out : value
-  }
-
-  if (isPlainObject(value)) {
-    let changed = false
-    const out: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value)) {
-      const scrubbed = typeof item === 'string'
-        ? scrubKeyedText(key, item, redactions)
-        : scrubValue(item, redactions, depth + 1)
-      if (scrubbed !== item) changed = true
-      out[key] = scrubbed
-    }
-    return changed ? out : value
-  }
-
+  if (Array.isArray(value)) return scrubArray(value, redactions, depth)
+  if (isPlainObject(value)) return scrubObject(value, redactions, depth)
   return value
 }
 
@@ -82,12 +88,12 @@ function scrubValue(value: unknown, redactions: SecretRedaction[], depth: number
  * Returns the message with credential values redacted. When nothing was
  * redacted the original message object is returned unchanged.
  */
-export function scrubMessage(message: Message): ScrubbedMessage {
+export async function scrubMessage(message: Message): Promise<ScrubbedMessage> {
   const redactions: SecretRedaction[] = []
-  const content = scrubValue(message.content, redactions, 0) as Message['content']
+  const content = (await scrubValue(message.content, redactions, 0)) as Message['content']
   const metadata = message.metadata === undefined
     ? undefined
-    : (scrubValue(message.metadata, redactions, 0) as Record<string, unknown>)
+    : ((await scrubValue(message.metadata, redactions, 0)) as Record<string, unknown>)
 
   if (redactions.length === 0) return { message, redactions }
   return {

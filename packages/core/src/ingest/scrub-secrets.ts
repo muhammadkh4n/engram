@@ -3,16 +3,23 @@
  * sent to a summarisation model. Key names are kept so the memory still says
  * *which* secret was involved; only the value is replaced.
  *
- * Passes run in a fixed order:
- *   1. PEM private-key blocks (multi-line, so they go before any line-based rule)
- *   2. passwords inside connection-string / URL userinfo
- *   3. values assigned to secret-named keys (`NAME=value`, `NAME: value`, JSON)
- *   4. known credential formats anywhere in text (provider key prefixes, JWTs)
- *   5. high-entropy values after `=` / `:` whose key name gave no signal
+ * Every rule reads the original text and reports spans:
+ *   - known token formats, private keys and connection strings (secretlint)
+ *   - values assigned to secret-named keys (`NAME=value`, `NAME: value`, JSON)
+ *   - PEM private-key blocks, including truncated ones
+ *   - passwords inside URL userinfo, for any scheme
+ *   - formats secretlint lacks (JWTs, OpenRouter keys, Anthropic OAuth/admin tokens)
+ *   - high-entropy values after `=` / `:` whose key name gave no signal
+ * Overlapping spans collapse into one covering both, labelled by the widest
+ * (ties by rank, below). Spans are replaced right to left so earlier offsets
+ * stay valid.
  *
- * Every placeholder has the form `[REDACTED:<label>]` and no pass matches a
+ * Every placeholder has the form `[REDACTED:<label>]` and no rule matches a
  * placeholder, so scrubbing already-scrubbed text is a no-op.
  */
+
+import { SECRETLINT_RANK, secretlintSpans } from './secretlint-spans.js'
+import type { DetectedSpan } from './secretlint-spans.js'
 
 export interface SecretRedaction {
   kind: string
@@ -49,7 +56,7 @@ const ASSIGNMENT_RE = new RegExp(
   String.raw`(?<![\w.$])(["']?)(${SECRET_KEY})\1` +
     String.raw`([ \t]*[=:](?:[ \t]+(?![A-Z][A-Z0-9_]*=))?)(?![=:])` +
     String.raw`(?:"([^"\n]*)"|'([^'\n]*)'|\`([^\`\n]*)\`|(${AUTH_SCHEME})?(?!${AUTH_SCHEME})(${VALUE_CHARS}{1,1024})${VALUE_END})`,
-  'gim',
+  'gimd',
 )
 
 const LITERAL_VALUES = new Set([
@@ -161,49 +168,61 @@ function isExemptBareValue(text: string, pair: BarePair): boolean {
   return isCodeReference(value) || isProseOrCode(name, sep, value, isAtLineStart(text, offset))
 }
 
-function redactAssignments(text: string, redactions: SecretRedaction[]): string {
-  return text.replace(
-    ASSIGNMENT_RE,
-    (
-      match: string,
-      keyQuote: string,
-      name: string,
-      sep: string,
-      dq: string | undefined,
-      sq: string | undefined,
-      bt: string | undefined,
-      scheme: string | undefined,
-      bare: string | undefined,
-      offset: number,
-    ) => {
-      if (isVariableKey(name)) return match
-      const quotedValue = dq ?? sq ?? bt
-      if (quotedValue !== undefined) {
-        const q = dq !== undefined ? '"' : sq !== undefined ? "'" : '`'
-        if (isInertValue(quotedValue, name) || isQuotedReference(quotedValue, q)) return match
-        redactions.push({ kind: 'named-secret', name })
-        return `${keyQuote}${name}${keyQuote}${sep}${q}${placeholder(name)}${q}`
-      }
-      const value = bare ?? ''
-      if (isInertValue(value, name)) return match
-      const pair = { offset, end: offset + match.length, keyQuote, name, sep, hasScheme: scheme !== undefined, value }
-      if (isExemptBareValue(text, pair)) return match
-      redactions.push({ kind: 'named-secret', name })
-      return `${keyQuote}${name}${keyQuote}${sep}${scheme ?? ''}${placeholder(name)}`
-    },
-  )
+// Equally wide overlapping spans take the label of the lowest rank: the key
+// name first, then our format rules, then secretlint, then the entropy guess.
+const KEYED_RANK = 0
+const OWN_RANK = 1
+const HIGH_ENTROPY_RANK = SECRETLINT_RANK + 1
+
+// Capture groups of ASSIGNMENT_RE holding the value, by syntax.
+const DOUBLE_QUOTED = 4
+const SINGLE_QUOTED = 5
+const BACKTICKED = 6
+const AUTH_SCHEME_GROUP = 7
+const BARE = 8
+
+function keyedSpan(text: string, m: RegExpMatchArray): DetectedSpan | null {
+  const offset = m.index ?? 0
+  const keyQuote = m[1] ?? ''
+  const name = m[2] ?? ''
+  const sep = m[3] ?? ''
+  if (isVariableKey(name)) return null
+  const quote = m[DOUBLE_QUOTED] !== undefined ? '"' : m[SINGLE_QUOTED] !== undefined ? "'" : m[BACKTICKED] !== undefined ? '`' : ''
+  const group = quote === '"' ? DOUBLE_QUOTED : quote === "'" ? SINGLE_QUOTED : quote === '`' ? BACKTICKED : BARE
+  const value = m[group] ?? ''
+  const range = m.indices?.[group]
+  if (!range || isInertValue(value, name)) return null
+  if (quote) {
+    if (isQuotedReference(value, quote)) return null
+  } else {
+    const hasScheme = m[AUTH_SCHEME_GROUP] !== undefined
+    const pair = { offset, end: offset + m[0].length, keyQuote, name, sep, hasScheme, value }
+    if (isExemptBareValue(text, pair)) return null
+  }
+  return { start: range[0], end: range[1], kind: 'named-secret', name, rank: KEYED_RANK }
 }
 
+function assignmentSpans(text: string): DetectedSpan[] {
+  const spans: DetectedSpan[] = []
+  for (const m of text.matchAll(ASSIGNMENT_RE)) {
+    const span = keyedSpan(text, m)
+    if (span) spans.push(span)
+  }
+  return spans
+}
+
+// Also covers blocks the secretlint rule leaves out: truncated ones (no END
+// line), short bodies, and types such as ENCRYPTED PRIVATE KEY.
 const PEM_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$(?![\s\S]))/g
 
-function redactPem(text: string, redactions: SecretRedaction[]): string {
-  return text.replace(PEM_RE, () => {
-    redactions.push({ kind: 'private-key' })
-    return placeholder('private-key')
+function pemSpans(text: string): DetectedSpan[] {
+  return [...text.matchAll(PEM_RE)].map((m) => {
+    const start = m.index ?? 0
+    return { start, end: start + m[0].length, kind: 'private-key', rank: OWN_RANK }
   })
 }
 
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]{0,31}):\/\/([^\s:@\/'"]*):([^\s@\/'"]+)@/gi
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]{0,31}):\/\/([^\s:@\/'"]*):([^\s@\/'"]+)@/gid
 
 function urlKind(scheme: string): string {
   const s = scheme.toLowerCase()
@@ -212,35 +231,47 @@ function urlKind(scheme: string): string {
   return 'url-password'
 }
 
-function redactUrlPasswords(text: string, redactions: SecretRedaction[]): string {
-  return text.replace(URL_USERINFO_RE, (match, scheme: string, user: string, password: string) => {
-    if (password.startsWith(PLACEHOLDER_PREFIX) || DOC_PLACEHOLDER_RE.test(password)) return match
-    const kind = urlKind(scheme)
-    redactions.push({ kind })
-    return `${scheme}://${user}:${placeholder(kind)}@`
-  })
+interface UrlPassword {
+  start: number
+  end: number
+  kind: string
+  isPlaceholder: boolean
 }
 
-// Order matters: the provider-specific `sk-` prefixes run before the generic one.
+function urlPasswords(text: string, from: number, to: number): UrlPassword[] {
+  const found: UrlPassword[] = []
+  for (const m of text.slice(from, to).matchAll(URL_USERINFO_RE)) {
+    const password = m[3] ?? ''
+    const range = m.indices?.[3]
+    if (!range) continue
+    const isPlaceholder = password.startsWith(PLACEHOLDER_PREFIX) || DOC_PLACEHOLDER_RE.test(password)
+    found.push({ start: from + range[0], end: from + range[1], kind: urlKind(m[1] ?? ''), isPlaceholder })
+  }
+  return found
+}
+
+function urlPasswordSpans(text: string): DetectedSpan[] {
+  return urlPasswords(text, 0, text.length)
+    .filter((p) => !p.isPlaceholder)
+    .map(({ start, end, kind }) => ({ start, end, kind, rank: OWN_RANK }))
+}
+
+// Formats the secretlint rule set has no rule for.
 const KNOWN_FORMATS: ReadonlyArray<readonly [string, RegExp]> = [
-  ['anthropic-key', /(?<![\w-])sk-ant-[A-Za-z0-9_-]{20,}/g],
+  // secretlint matches only `sk-ant-api0N-` API keys; OAuth and admin tokens
+  // (`sk-ant-oat01-`, `sk-ant-admin01-`) carry the same access.
+  ['anthropic-key', /(?<![\w-])sk-ant-(?!api\d)[a-z]+\d*-[A-Za-z0-9_-]{20,}/g],
   ['openrouter-key', /(?<![\w-])sk-or-v1-[A-Za-z0-9]{20,}/g],
-  ['openai-key', /(?<![\w-])sk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/g],
-  ['github-token', /(?<![\w-])(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{22,})/g],
-  ['aws-access-key', /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g],
-  ['slack-token', /(?<![\w-])xox[baprs]-[A-Za-z0-9-]{10,}/g],
   ['jwt', /(?<![\w-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g],
 ]
 
-function redactKnownFormats(text: string, redactions: SecretRedaction[]): string {
-  let out = text
-  for (const [kind, re] of KNOWN_FORMATS) {
-    out = out.replace(re, () => {
-      redactions.push({ kind })
-      return placeholder(kind)
-    })
-  }
-  return out
+function knownFormatSpans(text: string): DetectedSpan[] {
+  return KNOWN_FORMATS.flatMap(([kind, re]) =>
+    [...text.matchAll(re)].map((m) => {
+      const start = m.index ?? 0
+      return { start, end: start + m[0].length, kind, rank: OWN_RANK }
+    }),
+  )
 }
 
 const HIGH_ENTROPY_MIN_LENGTH = 32
@@ -274,20 +305,82 @@ function looksRandom(token: string): boolean {
   return mixed && shannonEntropy(token) >= HIGH_ENTROPY_MIN_BITS
 }
 
-function redactHighEntropy(text: string, redactions: SecretRedaction[]): string {
-  return text.replace(HIGH_ENTROPY_RE, (token: string) => {
-    if (!looksRandom(token)) return token
-    redactions.push({ kind: 'high-entropy' })
-    return placeholder('high-entropy')
+function highEntropySpans(text: string): DetectedSpan[] {
+  return [...text.matchAll(HIGH_ENTROPY_RE)]
+    .filter((m) => looksRandom(m[0]))
+    .map((m) => {
+      const start = m.index ?? 0
+      return { start, end: start + m[0].length, kind: 'high-entropy', rank: HIGH_ENTROPY_RANK }
+    })
+}
+
+/**
+ * secretlint reports a connection string or basic-auth URL as the whole URL;
+ * only its userinfo password is the secret, so such a span narrows to it, and
+ * is dropped when that password is already a placeholder or a doc placeholder.
+ */
+function narrowUrlSpans(text: string, spans: DetectedSpan[]): DetectedSpan[] {
+  return spans.flatMap((span) => {
+    const passwords = urlPasswords(text, span.start, span.end)
+    if (passwords.length === 0) return [span]
+    return passwords
+      .filter((p) => !p.isPlaceholder)
+      .map(({ start, end }) => ({ ...span, start, end }))
   })
 }
 
-export function scrubSecrets(text: string): ScrubResult {
-  const redactions: SecretRedaction[] = []
-  let out = redactPem(text, redactions)
-  out = redactUrlPasswords(out, redactions)
-  out = redactAssignments(out, redactions)
-  out = redactKnownFormats(out, redactions)
-  out = redactHighEntropy(out, redactions)
+function width(span: DetectedSpan): number {
+  return span.end - span.start
+}
+
+function outranks(candidate: DetectedSpan, current: DetectedSpan): boolean {
+  if (width(candidate) !== width(current)) return width(candidate) > width(current)
+  return candidate.rank < current.rank
+}
+
+interface MergedSpan {
+  start: number
+  end: number
+  label: DetectedSpan
+}
+
+/** Overlapping spans become one span covering all of them, so no part of any detected value survives. */
+function mergeSpans(spans: DetectedSpan[]): MergedSpan[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start || b.end - a.end || a.rank - b.rank)
+  const merged: MergedSpan[] = []
+  for (const span of sorted) {
+    const last = merged[merged.length - 1]
+    if (!last || span.start >= last.end) {
+      merged.push({ start: span.start, end: span.end, label: span })
+      continue
+    }
+    merged[merged.length - 1] = {
+      start: last.start,
+      end: Math.max(last.end, span.end),
+      label: outranks(span, last.label) ? span : last.label,
+    }
+  }
+  return merged
+}
+
+export async function scrubSecrets(text: string): Promise<ScrubResult> {
+  if (text === '') return { text, redactions: [] }
+  const spans = [
+    ...narrowUrlSpans(text, await secretlintSpans(text)),
+    ...assignmentSpans(text),
+    ...pemSpans(text),
+    ...urlPasswordSpans(text),
+    ...knownFormatSpans(text),
+    ...highEntropySpans(text),
+  ]
+  const merged = mergeSpans(spans)
+  const redactions: SecretRedaction[] = merged.map(({ label }) =>
+    label.name !== undefined ? { kind: label.kind, name: label.name } : { kind: label.kind },
+  )
+  let out = text
+  for (let i = merged.length - 1; i >= 0; i--) {
+    const { start, end, label } = merged[i]!
+    out = out.slice(0, start) + placeholder(label.name ?? label.kind) + out.slice(end)
+  }
   return { text: out, redactions }
 }

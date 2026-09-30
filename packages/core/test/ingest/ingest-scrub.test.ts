@@ -138,7 +138,7 @@ describe('Memory.ingest — secret scrubbing', () => {
 
     const lines = warn.mock.calls.map((c) => c.map(String).join(' '))
     const line = lines.find((l) => l.includes('redacted'))
-    expect(line).toBe('[engram] ingest: redacted 2 secret value(s): named-secret(1), github-token(1)')
+    expect(line).toBe('[engram] ingest: redacted 2 secret value(s): named-secret(1), github(1)')
     for (const l of lines) {
       expect(l).not.toContain(FAKE_KEY)
       expect(l).not.toContain('API_KEY')
@@ -175,15 +175,15 @@ describe('Memory.ingestBatch — secret scrubbing', () => {
 })
 
 describe('scrubMessage', () => {
-  it('returns the same message object when nothing is redacted', () => {
+  it('returns the same message object when nothing is redacted', async () => {
     const message = { role: 'user' as const, content: [{ type: 'text', text: 'plain words' }], metadata: { a: 1 } }
-    const result = scrubMessage(message)
+    const result = await scrubMessage(message)
     expect(result.message).toBe(message)
     expect(result.redactions).toEqual([])
   })
 
-  it('redacts a string value under a secret-named key and keeps non-secret values under such keys', () => {
-    const result = scrubMessage({
+  it('redacts a string value under a secret-named key and keeps non-secret values under such keys', async () => {
+    const result = await scrubMessage({
       role: 'user',
       content: 'x',
       metadata: { db_password: 'hunter2hunter2', api_key: '$OPENAI_API_KEY', max_tokens: '500' },
@@ -196,9 +196,9 @@ describe('scrubMessage', () => {
     expect(result.redactions).toEqual([{ kind: 'named-secret', name: 'db_password' }])
   })
 
-  it('is idempotent on an already scrubbed message', () => {
-    const once = scrubMessage({ role: 'user', content: PM2_ENV_TURN })
-    const twice = scrubMessage(once.message)
+  it('is idempotent on an already scrubbed message', async () => {
+    const once = await scrubMessage({ role: 'user', content: PM2_ENV_TURN })
+    const twice = await scrubMessage(once.message)
     expect(twice.message).toBe(once.message)
     expect(twice.redactions).toEqual([])
   })

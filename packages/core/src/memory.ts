@@ -287,7 +287,7 @@ export class Memory {
     // Credential values are redacted before anything below reads the message:
     // salience, the contextual-preamble and entity-extraction model calls, the
     // embedding request, SQL storage and the graph all see the scrubbed copy.
-    const message = this.scrubForIngest(input, 'ingest')
+    const message = await this.scrubForIngest(input, 'ingest')
 
     const effectiveProjectId = opts?.projectId ?? this._projectId
 
@@ -496,8 +496,8 @@ export class Memory {
     }
   }
 
-  private scrubForIngest(message: Message, path: string): Message {
-    const scrubbed = scrubMessage(message)
+  private async scrubForIngest(message: Message, path: string): Promise<Message> {
+    const scrubbed = await scrubMessage(message)
     if (scrubbed.redactions.length > 0) {
       console.warn(`[engram] ${path}: ${describeRedactions(scrubbed.redactions)}`)
     }
@@ -522,7 +522,7 @@ export class Memory {
 
     // Scrubbed here as well as in ingest(): the batched embedding request
     // below is built from these messages before ingest() runs on them.
-    const messages = inputs.map((m) => this.scrubForIngest(m, 'ingestBatch'))
+    const messages = await Promise.all(inputs.map((m) => this.scrubForIngest(m, 'ingestBatch')))
 
     // Fast-path: no batch embed support OR small batch — fall back to
     // sequential ingest. The batch round-trip overhead doesn't pay back

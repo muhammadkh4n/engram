@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   try {
     // The transcript is sent to the extraction model, so credential values
     // are redacted before that call rather than only at ingest.
-    conversation = scrubModelInput(extractConversation(hookInput.transcript_path), '[engram-compact]')
+    conversation = await scrubModelInput(extractConversation(hookInput.transcript_path), '[engram-compact]')
   } catch (err) {
     process.stderr.write(`[engram-compact] Failed to read transcript: ${err}\n`)
     return

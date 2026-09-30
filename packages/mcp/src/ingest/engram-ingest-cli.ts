@@ -283,7 +283,7 @@ async function main(): Promise<void> {
   }
   // Every later consumer (classifier model, rejection log, dedup embedding,
   // rawTurn metadata, verbose log lines) reads this scrubbed copy.
-  const content = scrubModelInput(resolved, '[engram-ingest]')
+  const content = await scrubModelInput(resolved, '[engram-ingest]')
 
   if (content.length < 2) {
     log(args.verbose, `content too short (${content.length} chars)`)
