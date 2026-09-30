@@ -18,7 +18,8 @@
  *   npx tsx packages/bench/src/longmemeval/forensics/recall-sweep.ts \
  *     --data ./data/longmemeval/longmemeval_s_cleaned.json \
  *     [--limit 50]                # smoke run (default: all 500)
- *     [--question-ids ids.json]   # JSON array of question_id; runs those, in dataset order (not with --limit)
+ *     [--question-ids ids.json]   # JSON array of question_id; runs those, in dataset order (not with --limit);
+ *                                 # make-question-subset.ts writes a stratified one
  *     [--resume]                  # continue from <output>.partial.jsonl; the run config must match its header
  *     [--max-results 30]          # passed to memory.recall
  *     [--no-consolidate] [--no-graph] [--no-rerank]
@@ -32,6 +33,10 @@
  *
  * Every finished row is appended to <output>.partial.jsonl, so a stopped run
  * keeps its rows; the partial file is deleted once the output is written.
+ *
+ * Each row carries relevance_top: the relevance score of every recalled memory
+ * in returned order (4 decimals, numbers only), so reranker arms can be
+ * compared on score distribution as well as recall.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -86,6 +91,8 @@ interface PerQRow {
   ingest_ms: number
   eval_ms: number
   recall_at_k: Record<number, boolean>
+  /** Relevance of each recalled memory in returned order, 4 decimals. */
+  relevance_top: Array<number | null>
   synthesis?: SynthesisBlock | null
 }
 
@@ -143,6 +150,7 @@ async function main(): Promise<void> {
     let ingestMs = 0
     let evalMs = 0
     let recalledSessionIds: string[] = []
+    let relevanceTopRow: Array<number | null> = []
     let synthesisRow: SynthesisBlock | null | undefined
     let formattedFields: FormattedContextFields | undefined
 
@@ -162,6 +170,7 @@ async function main(): Promise<void> {
         now: questionNow,
       })
       recalledSessionIds = outcome.recalledSessionIds
+      relevanceTopRow = outcome.relevanceTop
       synthesisRow = outcome.synthesisRow
       formattedFields = outcome.formattedFields
       evalMs = Date.now() - evalStart
@@ -186,6 +195,7 @@ async function main(): Promise<void> {
       ingest_ms: ingestMs,
       eval_ms: evalMs,
       recall_at_k: recallAtK,
+      relevance_top: relevanceTopRow,
       ...buildSynthesisField(args.synthesize, synthesisRow),
       ...(formattedFields ?? {}),
     }
