@@ -168,10 +168,10 @@ describe('PostgRestEpisodeStorage', () => {
     const chain = createChainable({ data: [], error: null })
     mock.from.mockReturnValue(chain)
 
-    await store.getByIds(['id-1', 'id-2'])
+    await store.getByIds(['0192f3a4-0000-7000-8000-000000000001', '0192f3a4-0000-7000-8000-000000000002'])
 
     expect(mock.from).toHaveBeenCalledWith('memory_episodes')
-    expect(chain.in).toHaveBeenCalledWith('id', ['id-1', 'id-2'])
+    expect(chain.in).toHaveBeenCalledWith('id', ['0192f3a4-0000-7000-8000-000000000001', '0192f3a4-0000-7000-8000-000000000002'])
   })
 
   it('getByIds returns empty array for empty ids', async () => {
@@ -751,7 +751,7 @@ describe('PostgRestStorageAdapter', () => {
 
     // First call is episodes.getByIds → memory_episodes
     const episodeRow = {
-      id: 'ep-1',
+      id: '0192f3a4-0000-7000-8000-000000000001',
       session_id: 'sess',
       role: 'user',
       content: 'test',
@@ -776,7 +776,7 @@ describe('PostgRestStorageAdapter', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(adapter as any).client = mock
 
-    const result = await adapter.getById('ep-1', 'episode')
+    const result = await adapter.getById('0192f3a4-0000-7000-8000-000000000001', 'episode')
     expect(result).not.toBeNull()
     expect(result?.type).toBe('episode')
     expect(mock.from).toHaveBeenCalledWith('memory_episodes')
@@ -786,7 +786,7 @@ describe('PostgRestStorageAdapter', () => {
     const mock = makeMockClient()
 
     const semRow = {
-      id: 'sem-1',
+      id: '0192f3a4-0000-7000-8000-000000000002',
       topic: 'TypeScript',
       content: 'typed superset',
       confidence: 0.9,
@@ -812,7 +812,7 @@ describe('PostgRestStorageAdapter', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(adapter as any).client = mock
 
-    const result = await adapter.getById('sem-1', 'semantic')
+    const result = await adapter.getById('0192f3a4-0000-7000-8000-000000000002', 'semantic')
     expect(result?.type).toBe('semantic')
     expect(mock.from).toHaveBeenCalledWith('memory_semantic')
   })

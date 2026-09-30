@@ -4,6 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
+import { onlyUuids } from './uuid.js'
 
 export class PostgRestProceduralStorage implements ProceduralStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -136,7 +137,8 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
   }
 
 
-  async markForgotten(ids: string[]): Promise<number> {
+  async markForgotten(requestedIds: string[]): Promise<number> {
+    const ids = onlyUuids(requestedIds)
     if (ids.length === 0) return 0
     const { data, error } = await this.client
       .from('memory_procedural')
