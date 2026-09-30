@@ -221,6 +221,8 @@ export interface ForgetCandidate {
   content: string
   relevance: number
   projectId: string | null
+  /** Event date (occurredAt, else createdAt) as YYYY-MM-DD; null when undated. */
+  date: string | null
 }
 
 export interface ForgetPreview {

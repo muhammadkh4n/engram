@@ -167,74 +167,68 @@ describe('createEngramTools — engram_forget', () => {
     await memory.dispose()
   })
 
-  it('returns JSON result in content array', async () => {
+  type Preview = { count: number; candidates: Array<{ id: string; type: string; content: string }> }
+
+  async function preview(query: string): Promise<Preview> {
     const tools = createEngramTools(memory)
-    const result = await tools.engram_forget.execute({ query: 'TypeScript' })
+    const result = await tools.engram_forget.execute({ query })
+    return JSON.parse(result.content[0].text) as Preview
+  }
 
-    expect(result.content).toHaveLength(1)
-    expect(result.content[0].type).toBe('text')
-
-    const parsed = JSON.parse(result.content[0].text) as unknown
-    expect(parsed).toHaveProperty('count')
-    expect(parsed).toHaveProperty('previewed')
-  })
-
-  it('confirm=false returns a preview without modifying storage', async () => {
-    const tools = createEngramTools(memory)
-
+  it('query previews candidates with their ids and writes nothing', async () => {
     const statsBefore = await memory.stats()
-    const result = await tools.engram_forget.execute({
-      query: 'TypeScript',
-      confirm: false,
-    })
-    const statsAfter = await memory.stats()
+    const parsed = await preview('TypeScript generics')
 
-    const parsed = JSON.parse(result.content[0].text) as {
-      count: number
-      previewed: unknown[]
-    }
-
-    expect(typeof parsed.count).toBe('number')
-    expect(Array.isArray(parsed.previewed)).toBe(true)
-    expect(parsed.count).toBe(parsed.previewed.length)
-    // Episode count should not change on preview
-    expect(statsAfter.episodes).toBe(statsBefore.episodes)
+    expect(parsed.count).toBe(parsed.candidates.length)
+    expect(parsed.count).toBeGreaterThan(0)
+    expect(parsed.candidates.every((c) => typeof c.id === 'string' && c.id.length > 0)).toBe(true)
+    expect((await memory.stats()).episodes).toBe(statsBefore.episodes)
+    expect((await preview('TypeScript generics')).count).toBe(parsed.count)
   })
 
-  it('confirm=true applies forgetting and returns count', async () => {
-    const tools = createEngramTools(memory)
-    const result = await tools.engram_forget.execute({
-      query: 'TypeScript',
-      confirm: true,
-    })
+  it('ids tombstones exactly the approved ids and reports each outcome', async () => {
+    const before = await preview('TypeScript generics')
+    const target = before.candidates.find((c) => c.content.includes('generics'))!
+    const untouched = before.candidates.filter((c) => c.id !== target.id).map((c) => c.id)
 
+    const tools = createEngramTools(memory)
+    const result = await tools.engram_forget.execute({ ids: [target.id, 'no-such-id'] })
     const parsed = JSON.parse(result.content[0].text) as {
-      count: number
-      previewed: unknown[]
+      forgotten: Array<{ id: string; type: string }>
+      notFound: string[]
+      outOfScope: string[]
+      notForgettable: string[]
     }
 
-    expect(typeof parsed.count).toBe('number')
-    expect(parsed.count).toBe(parsed.previewed.length)
+    expect(parsed.forgotten).toEqual([{ id: target.id, type: target.type }])
+    expect(parsed.notFound).toEqual(['no-such-id'])
+    expect(parsed.outOfScope).toEqual([])
+    expect(parsed.notForgettable).toEqual([])
+
+    const after = (await preview('TypeScript generics')).candidates.map((c) => c.id)
+    expect(after).not.toContain(target.id)
+    for (const id of untouched) expect(after).toContain(id)
   })
 
-  it('returns count=0 and empty previewed for unmatched query', async () => {
+  it('rejects both or neither of query and ids, and an empty id list', async () => {
     const tools = createEngramTools(memory)
-    const result = await tools.engram_forget.execute({ query: 'hi' })
-
-    const parsed = JSON.parse(result.content[0].text) as {
-      count: number
-      previewed: unknown[]
+    for (const params of [{ query: 'TypeScript', ids: ['x'] }, {}, { ids: [] as string[] }, { query: '  ' }]) {
+      const result = await tools.engram_forget.execute(params)
+      expect(result.isError).toBe(true)
+      expect(result.content[0].text).toMatch(/^Error: /)
     }
+  })
 
-    // SOCIAL intent does not recall — count should be 0
+  it('returns count=0 and no candidates for an unmatched query', async () => {
+    const parsed = await preview('hi')
     expect(parsed.count).toBe(0)
-    expect(parsed.previewed).toHaveLength(0)
+    expect(parsed.candidates).toHaveLength(0)
   })
 
-  it('has correct tool name and description', () => {
+  it('has correct tool name and a description of the two modes', () => {
     const tools = createEngramTools(memory)
     expect(tools.engram_forget.name).toBe('engram_forget')
-    expect(tools.engram_forget.description).toContain('eprioritize')
+    expect(tools.engram_forget.description).toContain('never deletes')
   })
 })
 

@@ -16,8 +16,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { createMemory, startConsolidationWorker } from '@engram-mem/core'
-import type { StorageAdapter, IntelligenceAdapter, GraphPort } from '@engram-mem/core'
+import { createMemory, startConsolidationWorker, MAX_FORGET_IDS } from '@engram-mem/core'
+import type { StorageAdapter, IntelligenceAdapter, GraphPort, ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
@@ -117,8 +117,8 @@ async function maybeWithLocalRerank(
  * `ENGRAM_ENGINE_*` knob (bits, tier1M, snapshotDir, reconcileMs, maxN) —
  * except `exactRescore`, which MCP ALWAYS forces to `true` regardless of
  * `ENGRAM_ENGINE_EXACT`. This is a hard MCP-specific override, not a
- * default: `memory_forget`'s write-suppression thresholds and any other
- * caller comparing similarity scores against a fixed cutoff must always see
+ * default: write-suppression thresholds and any other caller comparing
+ * similarity scores against a fixed cutoff must always see
  * true float cosine (tier 3), never the tier-2 unbiased estimate — an
  * estimate silently changing which memories cross a threshold is a
  * correctness bug, not a performance tradeoff, in a shared multi-agent
@@ -149,7 +149,7 @@ export async function maybeWithRecallEngine(storage: StorageAdapter, supabaseUrl
     if (cfg.exactRescore === false) {
       console.warn(
         '[engram-mcp] ENGRAM_ENGINE_EXACT=false is refused under MCP — forcing exactRescore=true. ' +
-          'Write-suppression thresholds (e.g. memory_forget) must always compare true float cosine, ' +
+          'Write-suppression thresholds must always compare true float cosine, ' +
           'never a tier-2 quantized estimate.',
       )
     }
@@ -379,21 +379,25 @@ const TOOLS = [
   {
     name: 'memory_forget',
     description:
-      'Deprioritize memories matching a query. This is lossless — memories are not deleted but their confidence is reduced to the floor. Returns a count of affected memories.',
+      'Forget memories in two steps. Call with query to preview: it lists the matching memories (id, tier, date, relevance, text) and never deletes anything. ' +
+      'Then call with ids set to the ones to remove: exactly those memories are tombstoned, nothing else. ' +
+      'A tombstoned memory is hidden from every recall path; the row stays in storage, so a forget is reversible there. ' +
+      `Pass exactly one of query or ids (at most ${MAX_FORGET_IDS} ids per call). Digests cannot be forgotten.`,
     inputSchema: {
       type: 'object' as const,
       properties: {
         query: {
           type: 'string',
-          description: 'Query describing what to forget.',
+          description: 'Describes what to forget. Previews candidates only; nothing is deleted.',
         },
-        confirm: {
-          type: 'boolean',
-          description:
-            'Set to true to apply the forgetting. Omit or false to preview only.',
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          maxItems: MAX_FORGET_IDS,
+          description: 'Memory ids to tombstone, taken from a preview. Only these ids are forgotten.',
         },
       },
-      required: ['query'],
     },
   },
   {
@@ -494,6 +498,88 @@ export function formatRecallTimingLine(
   return ['[recall]', ...parts, `items=${items}`, `chars=${chars}`].join(' ')
 }
 
+type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
+
+type ForgetRequest = { query: string } | { ids: string[] } | { error: string }
+
+const FORGET_PREVIEW_TEXT_CHARS = 160
+
+function toolText(text: string): ToolTextResult {
+  return { content: [{ type: 'text' as const, text }] }
+}
+
+function toolError(message: string): ToolTextResult {
+  return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+}
+
+/** memory_forget takes a query (preview) or ids (tombstone), never both, so a
+ *  single call can never search and delete at once. */
+function parseForgetArgs(args: Record<string, unknown>): ForgetRequest {
+  const query = args['query']
+  const ids = args['ids']
+  const hasQuery = query !== undefined && query !== null
+  const hasIds = ids !== undefined && ids !== null
+  if (hasQuery === hasIds) {
+    return { error: 'pass exactly one of query or ids (query previews, ids forget)' }
+  }
+  if (hasQuery) {
+    if (typeof query !== 'string' || query.trim().length === 0) {
+      return { error: 'query must be a non-empty string' }
+    }
+    return { query: query.trim() }
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { error: 'ids must be a non-empty array of memory ids' }
+  }
+  if (!ids.every((id): id is string => typeof id === 'string' && id.trim().length > 0)) {
+    return { error: 'every id must be a non-empty string' }
+  }
+  return { ids }
+}
+
+export function formatForgetPreview(preview: ForgetPreview): string {
+  if (preview.candidates.length === 0) return 'No matching memories found.'
+  const lines = preview.candidates.map((c) => {
+    const tag = c.date ? `${c.type} · ${c.date}` : c.type
+    const text = c.content.replace(/\s+/g, ' ').trim().slice(0, FORGET_PREVIEW_TEXT_CHARS)
+    return `- [${tag}] ${c.id} · relevance ${c.relevance.toFixed(2)} · ${text}`
+  })
+  const n = preview.candidates.length
+  return [
+    `Preview: ${n} matching memor${n === 1 ? 'y' : 'ies'}. Nothing was forgotten.`,
+    ...lines,
+    'To forget, call memory_forget again with ids set to the ones to remove.',
+  ].join('\n')
+}
+
+export function formatForgetByIds(result: ForgetByIdsResult): string {
+  const sections: Array<[string, string[]]> = [
+    ['Forgotten', result.forgotten.map((f) => `${f.id} (${f.type})`)],
+    ['Not found', result.notFound],
+    ['Out of scope', result.outOfScope],
+    ['Not forgettable', result.notForgettable],
+  ]
+  const summary =
+    `Forgot ${result.forgotten.length}; not found ${result.notFound.length}; ` +
+    `out of scope ${result.outOfScope.length}; not forgettable ${result.notForgettable.length}.`
+  const detail = sections
+    .filter(([, list]) => list.length > 0)
+    .map(([label, list]) => `${label} (${list.length}): ${list.join(', ')}`)
+  return [summary, ...detail].join('\n')
+}
+
+/** The memory_forget tool body, separated from the server so it can run
+ *  against any object with the two forget entry points. */
+export async function runMemoryForget(
+  mem: Pick<Memory, 'forget' | 'forgetByIds'>,
+  args: Record<string, unknown>,
+): Promise<ToolTextResult> {
+  const request = parseForgetArgs(args)
+  if ('error' in request) return toolError(request.error)
+  if ('query' in request) return toolText(formatForgetPreview(await mem.forget(request.query)))
+  return toolText(formatForgetByIds(await mem.forgetByIds(request.ids)))
+}
+
 export function createEngramServer(): Server {
   const server = new Server(
     { name: 'engram-memory', version: PACKAGE_VERSION },
@@ -585,29 +671,7 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_forget') {
-        const query = args['query']
-        const confirm = args['confirm']
-
-        if (typeof query !== 'string' || query.trim().length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: query must be a non-empty string' }],
-            isError: true,
-          }
-        }
-
-        const shouldConfirm = confirm === true
-        const result = await mem.forget(query.trim(), { confirm: shouldConfirm })
-
-        const action = shouldConfirm ? 'Forgot' : 'Preview'
-        const text =
-          result.count === 0
-            ? 'No matching memories found.'
-            : `${action}: ${result.count} memor${result.count === 1 ? 'y' : 'ies'} affected.` +
-              (shouldConfirm ? '' : ' Pass confirm=true to apply.')
-
-        return {
-          content: [{ type: 'text' as const, text }],
-        }
+        return await runMemoryForget(mem, args)
       }
 
       if (name === 'memory_timeline') {

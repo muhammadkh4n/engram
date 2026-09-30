@@ -224,28 +224,37 @@ const stats = await memory.stats()
 console.log(`Memory contains ${stats.semantic} semantic facts`)
 ```
 
-#### `forget(query, opts?): Promise<ForgetResult>`
+#### `forget(query, opts?)` and `forgetByIds(ids)`
 
-Deprioritize memories matching a query. Lossless — memories are never deleted, only decayed below retrieval floor.
+Forgetting takes two steps. `forget(query)` only previews: it lists what the query matches and never writes. `forgetByIds(ids)` tombstones exactly the ids the caller approved. No relevance score decides a deletion. A tombstone hides a memory from every recall path; the row stays in storage, so it is reversible there.
 
 ```typescript
-interface ForgetResult {
-  count: number                   // Memories matched
-  previewed: RetrievedMemory[]   // Preview without confirm
+interface ForgetPreview {
+  count: number
+  candidates: Array<{
+    id: string
+    type: 'episode' | 'semantic' | 'procedural'
+    content: string
+    relevance: number
+    projectId: string | null
+    date: string | null            // YYYY-MM-DD
+  }>
 }
 
-interface ForgetOptions {
-  tier?: 'episode' | 'digest' | 'semantic' | 'procedural'  // Optional filter
-  confirm?: boolean  // Default: false (preview only)
+interface ForgetByIdsResult {
+  forgotten: Array<{ id: string; type: 'episode' | 'semantic' | 'procedural' }>
+  notFound: string[]
+  outOfScope: string[]      // tagged with another project than a scoped instance's
+  notForgettable: string[]  // digests have no tombstone
 }
 
-// Preview what would be forgotten
-const preview = await memory.forget('legacy API endpoint')
-console.log(`Would deprioritize ${preview.count} memories`)
+// 1. Preview (optional tier filter)
+const preview = await memory.forget('legacy API endpoint', { tier: 'semantic' })
 
-// Actually apply the forgetting
-const result = await memory.forget('legacy API endpoint', { confirm: true })
-console.log(`Deprioritized ${result.count} memories`)
+// 2. Tombstone the ones you approved (1–50 ids per call)
+const approved = preview.candidates.filter(c => c.content.includes('/v1/export')).map(c => c.id)
+const result = await memory.forgetByIds(approved)
+console.log(`Forgot ${result.forgotten.length} memories`)
 ```
 
 #### `session(sessionId?): SessionHandle`

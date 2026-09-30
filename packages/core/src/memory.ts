@@ -23,6 +23,7 @@ import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
 import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
+import { resolveEventDate, isoDate } from './utils/event-date.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -113,6 +114,11 @@ const FORGET_LOOKUP_TYPES: readonly MemoryType[] = ['episode', 'semantic', 'proc
 
 function isForgettableType(type: MemoryType): type is ForgettableType {
   return type === 'episode' || type === 'semantic' || type === 'procedural'
+}
+
+function forgetCandidateDate(metadata: Record<string, unknown> | undefined): string | null {
+  const d = resolveEventDate(metadata)
+  return d ? isoDate(d) : null
 }
 
 /** Validate and de-duplicate forgetByIds input; throws on anything else. */
@@ -994,6 +1000,7 @@ export class Memory {
         content: memory.content,
         relevance: memory.relevance,
         projectId: memory.projectId ?? null,
+        date: forgetCandidateDate(memory.metadata),
       })
     }
     return { count: candidates.length, candidates }

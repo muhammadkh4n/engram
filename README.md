@@ -273,8 +273,11 @@ Run consolidation. Cycle: `'light' | 'deep' | 'dream' | 'decay' | 'all'` (defaul
 #### `stats(): Promise<MemoryStats>`
 Returns counts: episodes, digests, semantic, procedural, associations.
 
-#### `forget(query, opts?): Promise<ForgetResult>`
-Lossless deprioritization. Pass `confirm: true` to apply.
+#### `forget(query, opts?): Promise<ForgetPreview>`
+Preview only: returns the memories a query matches (`id`, `type`, `content`, `relevance`, `projectId`, `date`) and never writes. Optional `tier` filter.
+
+#### `forgetByIds(ids): Promise<ForgetByIdsResult>`
+Tombstones exactly the given ids (1–50) and nothing else. Reports each id as `forgotten`, `notFound`, `outOfScope` (tagged with another project than a scoped instance's) or `notForgettable` (digests). A tombstone hides the memory from every recall path; the row stays in storage, so it is reversible there.
 
 #### `session(sessionId?): SessionHandle`
 Get or create a session-scoped handle. Auto-generates sessionId if omitted.
@@ -399,7 +402,7 @@ npm init -y && npm install @engram-mem/core @engram-mem/sqlite @engram-mem/opena
 - Automatic message ingestion via `afterTurn` hook
 - Deep memory search via `engram_search` tool
 - Memory stats via `engram_stats` tool
-- Manual forget via `engram_forget` tool
+- Two-step forget via `engram_forget` tool (`query` previews, `ids` tombstones)
 - Manual consolidation via `engram_consolidate` tool
 - Auto-consolidation every 100 episodes
 

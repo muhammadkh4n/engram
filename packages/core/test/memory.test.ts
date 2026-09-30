@@ -677,7 +677,7 @@ describe('Memory — forget()', () => {
     return r.memories.some((m) => m.content.includes(needle))
   }
 
-  it('previews candidates with id, type, content, relevance and project, and writes nothing', async () => {
+  it('previews candidates with id, type, content, relevance, project and date, and writes nothing', async () => {
     const statsBefore = await memory.stats()
     const preview = await memory.forget('staging deploy key')
 
@@ -686,6 +686,7 @@ describe('Memory — forget()', () => {
     expect(hit).toMatchObject({ type: 'episode', projectId: null })
     expect(typeof hit!.id).toBe('string')
     expect(typeof hit!.relevance).toBe('number')
+    expect(hit!.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
 
     expect((await memory.stats()).episodes).toBe(statsBefore.episodes)
     expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(true)

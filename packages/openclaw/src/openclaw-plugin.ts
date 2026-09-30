@@ -14,13 +14,15 @@
 // @ts-ignore — openclaw only exists at runtime on the host
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
 import { Type } from '@sinclair/typebox'
-import { Memory } from '@engram-mem/core'
+import { Memory, MAX_FORGET_IDS } from '@engram-mem/core'
 import { SqliteStorageAdapter } from '@engram-mem/sqlite'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import * as fs from 'node:fs'
 import { shouldIngest } from './ingest-filter.js'
+import { executeForget, FORGET_DESCRIPTION } from './forget.js'
+import type { ForgetParams } from './forget.js'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -551,20 +553,20 @@ export default definePluginEntry({
     api.registerTool({
       name: 'engram_forget',
       label: 'Forget Memory',
-      description: 'Deprioritize memories matching a query (lossless — never deletes)',
+      description: FORGET_DESCRIPTION,
       parameters: Type.Object({
-        query: Type.String({ description: 'What to forget' }),
-        confirm: Type.Optional(Type.Boolean({ default: false, description: 'Set true to confirm' })),
+        query: Type.Optional(Type.String({ description: 'Describes what to forget. Previews candidates only; nothing is deleted.' })),
+        ids: Type.Optional(Type.Array(Type.String(), {
+          minItems: 1,
+          maxItems: MAX_FORGET_IDS,
+          description: 'Memory ids to tombstone, taken from a preview. Only these ids are forgotten.',
+        })),
       }),
-      async execute(_id: unknown, params: { query: string; confirm?: boolean }) {
+      async execute(_id: unknown, params: ForgetParams) {
         if (!(await ensureInitialized())) {
           return { content: [{ type: 'text' as const, text: 'Engram memory not available' }] }
         }
-        const result = await memory.forget(params.query, { confirm: params.confirm })
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-          details: result,
-        }
+        return executeForget(memory, params)
       },
     })
 

@@ -167,20 +167,24 @@ Returns:
 ```
 
 #### engram_forget
-Deprioritize memories (lossless).
+Two-step forget: `query` previews candidates and never deletes; `ids` tombstones exactly those memories. Pass exactly one.
 
 ```typescript
 {
   name: 'engram_forget',
-  parameters: { query: string, confirm?: boolean }
+  parameters: { query?: string, ids?: string[] }
 }
 ```
 
 Example:
 ```
-Agent: "engram_forget({ query: 'legacy API', confirm: true })"
-Result: "Deprioritized 3 memories"
+Agent: "engram_forget({ query: 'legacy API' })"
+Result: { "count": 2, "candidates": [{ "id": "…", "type": "semantic", "content": "…", "relevance": 0.71, ... }] }
+Agent: "engram_forget({ ids: ['…'] })"
+Result: { "forgotten": [{ "id": "…", "type": "semantic" }], "notFound": [], "outOfScope": [], "notForgettable": [] }
 ```
+
+A tombstone hides a memory from every recall path and stays in storage, so it is reversible there.
 
 #### engram_consolidate
 Run consolidation cycles manually.
