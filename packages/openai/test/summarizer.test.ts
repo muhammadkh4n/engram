@@ -380,6 +380,11 @@ describe('OpenAISummarizer', () => {
         .toEqual(['Alice', 'Bob', 'a', 'b', 'c'])
     })
 
+    it('finds the array when the surrounding prose carries its own brackets', async () => {
+      expect(await expand('Variants [JSON]: ["Alice Bob"]')).toEqual(['Alice Bob'])
+      expect(await expand('["a"] (see [1])')).toEqual(['a'])
+    })
+
     it('returns [] for a non-array reply', async () => {
       expect(await expand('{"terms": "Alice"}')).toEqual([])
       expect(await expand('Alice, Bob, meeting')).toEqual([])

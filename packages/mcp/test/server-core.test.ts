@@ -138,30 +138,38 @@ describe('recallOptionsFromArgs', () => {
 })
 
 describe('parseChatReasoningEnv', () => {
+  const HOST = { ENGRAM_CHAT_BASE_URL: 'https://openrouter.ai/api/v1' }
+
+  it('refuses a reasoning mode without a chat base URL, naming both variables', () => {
+    for (const env of [{ ENGRAM_CHAT_REASONING: 'off' }, { ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_BASE_URL: ' ' }]) {
+      expect(() => parseChatReasoningEnv(env)).toThrow(/ENGRAM_CHAT_REASONING requires ENGRAM_CHAT_BASE_URL/)
+    }
+  })
+
   it('returns nothing when neither variable is set, so request bodies stay unchanged', () => {
     expect(parseChatReasoningEnv({})).toEqual({})
     expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: '  ' })).toEqual({})
   })
 
   it('accepts off and default', () => {
-    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'off' })).toEqual({ chatReasoning: 'off' })
-    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: ' default ' })).toEqual({ chatReasoning: 'default' })
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'off', ...HOST })).toEqual({ chatReasoning: 'off' })
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: ' default ', ...HOST })).toEqual({ chatReasoning: 'default' })
   })
 
   it('accepts a positive integer headroom', () => {
-    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: '4096' }))
+    expect(parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: '4096', ...HOST }))
       .toEqual({ chatReasoning: 'default', chatReasoningHeadroom: 4096 })
   })
 
   it('rejects any other reasoning value', () => {
     for (const v of ['low', 'high', 'none', 'OFFF', 'true']) {
-      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: v })).toThrow(/ENGRAM_CHAT_REASONING/)
+      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: v, ...HOST })).toThrow(/ENGRAM_CHAT_REASONING/)
     }
   })
 
   it('rejects a non-positive or non-integer headroom', () => {
     for (const v of ['0', '-5', '1.5', 'abc', '2048tokens']) {
-      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v }))
+      expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v, ...HOST }))
         .toThrow(/ENGRAM_CHAT_REASONING_HEADROOM/)
     }
   })

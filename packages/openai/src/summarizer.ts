@@ -867,14 +867,31 @@ function parseExpansionTerms(raw: string): string[] {
   const start = raw.indexOf('[')
   const end = raw.lastIndexOf(']')
   if (start === -1 || end <= start) return []
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1))
-  } catch {
-    return []
+  const whole = tryParseArray(raw.slice(start, end + 1))
+  if (whole) return cleanExpansionTerms(whole)
+  // Prose around the array can carry its own brackets ("Variants [JSON]: [...]",
+  // "[...] (see [1])"), which breaks the outermost span. Try every bracketed
+  // span in order and take the first array holding at least one string.
+  for (let s = start; s !== -1; s = raw.indexOf('[', s + 1)) {
+    for (let e = raw.indexOf(']', s + 1); e !== -1; e = raw.indexOf(']', e + 1)) {
+      const arr = tryParseArray(raw.slice(s, e + 1))
+      if (arr && arr.some((item) => typeof item === 'string')) return cleanExpansionTerms(arr)
+    }
   }
-  if (!Array.isArray(parsed)) return []
-  return parsed
+  return []
+}
+
+function tryParseArray(text: string): unknown[] | null {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function cleanExpansionTerms(items: unknown[]): string[] {
+  return items
     .filter((item): item is string => typeof item === 'string')
     .map((item) => item.trim())
     .filter((item) => item.length > 0)

@@ -86,6 +86,14 @@ async function callEverySite(s: OpenAISummarizer): Promise<Array<Record<string, 
   await s.extractSalience('a turn that is long enough to classify for salience', { turnRole: 'user' })
   mockChatCreate.mockResolvedValueOnce(chatReply(SUMMARY_JSON))
   await s.summarize('content', { mode: 'preserve_details', targetTokens: 100 })
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"items":[]}'))
+  await s.selectEvidence('when did Alice call', [{ index: 0, text: 'Alice called on Monday' }], { mode: 'temporal' })
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"scores":[{"id":"a","score":0.9},{"id":"b","score":0.1}]}'))
+  await s.rerank('Alice', [{ id: 'a', content: 'Alice note' }, { id: 'b', content: 'Bob note' }])
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"entities":[]}'))
+  await s.extractEntities('Alice met Bob at the Lisbon office on Monday morning.')
+  mockChatCreate.mockResolvedValueOnce(chatReply('[]'))
+  await s.extractKnowledge('Alice prefers tea over coffee.')
   return mockChatCreate.mock.calls.map((c) => c[0] as Record<string, unknown>)
 }
 
@@ -97,13 +105,9 @@ describe('chat reasoning control', () => {
 
   it('unset: no reasoning key and the historical caps', async () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k' }))
-    expect(bodies).toHaveLength(5)
+    expect(bodies).toHaveLength(9)
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies[0]!['max_tokens']).toBe(100)
-    expect(bodies[1]!['max_tokens']).toBe(180)
-    expect(bodies[2]!['max_tokens']).toBe(80)
-    expect(bodies[3]!['max_tokens']).toBe(400)
-    expect(bodies[4]!['max_tokens']).toBe(500)
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 1000])
   })
 
   it("'off': sends reasoning effort none on every call site, caps unchanged, provider still merged", async () => {
@@ -111,19 +115,18 @@ describe('chat reasoning control', () => {
     const bodies = await callEverySite(
       new OpenAISummarizer({ apiKey: 'k', reasoning: 'off', providerPrefs: prefs }),
     )
-    expect(bodies).toHaveLength(5)
+    expect(bodies).toHaveLength(9)
     for (const b of bodies) {
       expect(b['reasoning']).toEqual({ effort: 'none' })
       expect(b['provider']).toEqual(prefs)
     }
-    expect(bodies[0]!['max_tokens']).toBe(100)
-    expect(bodies[2]!['max_tokens']).toBe(80)
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 1000])
   })
 
   it("'default': every cap raised by the default 2048-token headroom, no reasoning key", async () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k', reasoning: 'default' }))
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548, 2448, 2448, 2548, 3048])
   })
 
   it("'default': honours a configured headroom", async () => {

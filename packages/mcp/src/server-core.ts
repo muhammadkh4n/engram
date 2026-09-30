@@ -186,6 +186,13 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
     if (mode !== 'off' && mode !== 'default') {
       throw new Error(`ENGRAM_CHAT_REASONING must be "off" or "default", got "${mode}"`)
     }
+    // `reasoning` is an OpenRouter request field; the default OpenAI endpoint
+    // may reject it, and chat failures are swallowed by recall and ingest.
+    if (!env['ENGRAM_CHAT_BASE_URL']?.trim()) {
+      throw new Error(
+        'ENGRAM_CHAT_REASONING requires ENGRAM_CHAT_BASE_URL to point at an OpenRouter-compatible host',
+      )
+    }
     out.chatReasoning = mode
   }
   const headroom = env['ENGRAM_CHAT_REASONING_HEADROOM']?.trim()
