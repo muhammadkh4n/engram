@@ -231,8 +231,9 @@ import type { RecallMode, RecallStrategy } from '../types.js'
 export function classifyMode(message: string): RecallMode {
   const trimmed = message.trim()
 
-  // skip: short acks, greetings, emoji-only
-  if (trimmed.length < 10) return 'skip'
+  // skip: empty text, acks, greetings, emoji-only. No length floor: short
+  // queries are often ticket keys, names or hosts, the highest-signal lookups.
+  if (trimmed.length === 0) return 'skip'
   if (/^(hi|hey|hello|thanks|thank you|ok|okay|sure|yes|no|yep|nope|lol|haha|hmm|ah|oh|done|got it)\s*[.!]?$/i.test(trimmed)) return 'skip'
   if (/^[\p{Emoji}\s]+$/u.test(trimmed)) return 'skip'
 
