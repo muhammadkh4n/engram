@@ -82,5 +82,7 @@ Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on t
 
 **Score scale:** each model's sigmoid output sits on its own scale (on the same recalls, 69.7% of gte scores are ≥ 0.5 vs 6.4% for large-v1). Scores only order candidates within one model; nothing may gate on an absolute rerank score.
 
+**Upgrading:** an install that sets `ENGRAM_RERANK_LOCAL=true` without `ENGRAM_RERANK_LOCAL_MODEL` moves from `mxbai-rerank-large-v1` to `gte-reranker-modernbert-base`. The first rerank after the upgrade downloads the new q8 weights, and relevance values shift to the new scale. To keep the previous model, set `ENGRAM_RERANK_LOCAL_MODEL=mixedbread-ai/mxbai-rerank-large-v1`.
+
 > **In the MCP server (`@engram-mem/mcp`):** just set `ENGRAM_RERANK_LOCAL=true` in the server's env — the MCP startup will dynamically import this package and spread its `rerank` over the openaiIntelligence adapter automatically. Pick the model via `ENGRAM_RERANK_LOCAL_MODEL` (default: `Alibaba-NLP/gte-reranker-modernbert-base`).
 
