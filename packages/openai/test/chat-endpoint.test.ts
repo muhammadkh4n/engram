@@ -137,6 +137,15 @@ describe('chat reasoning control', () => {
     expect(bodies[2]!['max_tokens']).toBe(1080)
   })
 
+  it('rejects a headroom that is not a non-negative integer, accepts 0', () => {
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(() => new OpenAISummarizer({ apiKey: 'k', reasoning: 'default', reasoningHeadroom: bad })).toThrow(
+        /reasoningHeadroom must be a non-negative integer/,
+      )
+    }
+    expect(() => new OpenAISummarizer({ apiKey: 'k', reasoning: 'default', reasoningHeadroom: 0 })).not.toThrow()
+  })
+
   it('openaiIntelligence forwards chatReasoning and chatReasoningHeadroom', async () => {
     mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
     const intel = openaiIntelligence({ apiKey: 'k', chatReasoning: 'default', chatReasoningHeadroom: 10 })

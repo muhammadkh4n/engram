@@ -213,7 +213,13 @@ export class OpenAISummarizer {
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
     this.reasoning = opts.reasoning
-    this.reasoningHeadroom = opts.reasoningHeadroom ?? DEFAULT_REASONING_HEADROOM
+    // The headroom is added to every request cap; NaN or a negative value would
+    // send an invalid max_tokens that the API rejects on every call.
+    const headroom = opts.reasoningHeadroom ?? DEFAULT_REASONING_HEADROOM
+    if (!Number.isInteger(headroom) || headroom < 0) {
+      throw new Error(`reasoningHeadroom must be a non-negative integer, got ${String(opts.reasoningHeadroom)}`)
+    }
+    this.reasoningHeadroom = headroom
   }
 
   /** Single point through which every chat call goes: merges the optional
