@@ -257,6 +257,12 @@ describe('scrubSecrets — secretlint formats replace the value only', () => {
   })
 
   it('keeps an AWS account id', async () => {
+  it('leaves no performance marks behind, so repeated scans accumulate no state', async () => {
+    const before = performance.getEntriesByType('mark').length
+    for (let i = 0; i < 200; i++) await secretlintSpans(`DB_PASSWORD=value${i}`)
+    expect(performance.getEntriesByType('mark').length).toBe(before)
+  })
+
     const input = 'aws_account_id = 123456789012'
     expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
   })

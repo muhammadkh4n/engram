@@ -6,7 +6,16 @@
  */
 
 import { lintSource } from '@secretlint/core'
+import { secretLintProfiler } from '@secretlint/profiler'
 import { rules as recommendRules } from '@secretlint/secretlint-rule-preset-recommend'
+
+// @secretlint/core reports every scan to a process-wide profiler that keeps
+// each performance mark forever (in its own arrays and in Node's performance
+// timeline) and scans all earlier marks on every new one. In a long-running
+// process that is unbounded memory and a per-scan cost that grows with the
+// number of scans, so marks are dropped: the profiler only feeds secretlint's
+// CLI timing output, which nothing here reads.
+secretLintProfiler.mark = () => {}
 
 export interface DetectedSpan {
   start: number
