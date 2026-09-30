@@ -34,6 +34,7 @@ const intel: IntelligenceAdapter = {
 
 const DEPLOY = 'the staging deploy key must be rotated every monday'
 const BILLING = 'the billing cron job runs at midnight nightly'
+const NEIGHBOUR = 'rotate the staging deploy key before the monday release'
 
 describe('forget() tombstone', () => {
   let storage: SqliteStorageAdapter
@@ -78,11 +79,15 @@ describe('forget() tombstone', () => {
     expect(await recallHas('when does the billing cron run?', 'billing cron')).toBe(true)
   })
 
-  it('forget(confirm=true) removes matched content from recall', async () => {
+  it('forgetByIds removes the approved memory from recall', async () => {
     expect(await recallHas('what is the deploy key rotation policy?', 'deploy key')).toBe(true)
-    const res = await mem.forget('deploy key rotation', { confirm: true })
-    expect(res.count).toBeGreaterThanOrEqual(1)
+    const id = await deployEpisodeId()
+
+    const res = await mem.forgetByIds([id])
+
+    expect(res.forgotten).toEqual([{ id, type: 'episode' }])
     expect(await recallHas('what is the deploy key rotation policy?', 'deploy key')).toBe(false)
+    expect(await recallHas('when does the billing cron run?', 'billing cron')).toBe(true)
   })
 
   it('markForgotten does NOT touch access_count (the inversion regression)', async () => {
@@ -94,16 +99,39 @@ describe('forget() tombstone', () => {
     expect(after).toBe(before) // old recordAccess would have bumped this by 1
   })
 
-  it('confirm=false is a preview no-op', async () => {
-    const preview = await mem.forget('deploy key rotation') // confirm defaults false
-    expect(preview.count).toBeGreaterThanOrEqual(1)
+  it('a preview is a no-op: nothing tombstoned, no access recorded', async () => {
+    const id = await deployEpisodeId()
+    const before = (await storage.episodes.getByIds([id]))[0]!.accessCount
+
+    const preview = await mem.forget('deploy key rotation')
+
+    expect(preview.candidates.map((c) => c.id)).toContain(id)
+    expect((await storage.episodes.getByIds([id]))[0]!.accessCount).toBe(before)
     expect(await recallHas('what is the deploy key rotation policy?', 'deploy key')).toBe(true)
   })
 
-  it('is idempotent — re-forgetting a tombstoned memory is a no-op', async () => {
-    await mem.forget('deploy key rotation', { confirm: true })
-    const second = await mem.forget('deploy key rotation', { confirm: true })
-    expect(second.count).toBe(0) // already gated out of recall, nothing left to match
+  it('tombstones only the approved candidate; a higher-scoring neighbour stays recallable', async () => {
+    await mem.ingest({ role: 'user', content: NEIGHBOUR })
+    await mem.flushPendingWrites?.()
+    const preview = await mem.forget('staging deploy key rotation')
+    const deploy = preview.candidates.filter((c) => /deploy key/.test(c.content))
+    expect(deploy).toHaveLength(2)
+    const [higher, lower] = [...deploy].sort((a, b) => b.relevance - a.relevance)
+
+    const res = await mem.forgetByIds([lower!.id])
+
+    expect(res.forgotten).toEqual([{ id: lower!.id, type: 'episode' }])
+    const after = await mem.recall('what is the staging deploy key rotation policy?')
+    const ids = after.memories.map((m) => m.id)
+    expect(ids).toContain(higher!.id)
+    expect(ids).not.toContain(lower!.id)
+  })
+
+  it('is idempotent — re-forgetting a tombstoned memory reports it forgotten again', async () => {
+    const id = await deployEpisodeId()
+    await mem.forgetByIds([id])
+    const second = await mem.forgetByIds([id])
+    expect(second.forgotten).toEqual([{ id, type: 'episode' }])
     expect(await recallHas('what is the deploy key rotation policy?', 'deploy key')).toBe(false)
   })
 

@@ -1,4 +1,4 @@
-import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, RetrievedMemory, SynthesizeOpts } from './types.js'
+import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, SynthesizeOpts, MemoryType, TypedMemory, ForgettableType, ForgetCandidate, ForgetPreview, ForgetByIdsResult } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -106,12 +106,36 @@ export interface SessionHandle {
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SESSION_ID = 'default'
-// Minimum relevance required for a memory to count as "affected" by forget().
-// computeScore() sums cosine similarity + bm25 boost + recency + access + role
-// bumps; a typical strong match lands around 0.6–1.1, weak semantic adjacency
-// around 0.25–0.45, and pure gibberish rarely clears 0.35. 0.5 keeps the
-// targeted-prune ergonomic without false-positives on unrelated content.
-const DEFAULT_FORGET_MIN_RELEVANCE = 0.5
+/** Upper bound on ids per forgetByIds call: a forget approves a reviewed
+ *  handful of memories, never a bulk purge. */
+export const MAX_FORGET_IDS = 50
+const FORGET_LOOKUP_TYPES: readonly MemoryType[] = ['episode', 'semantic', 'procedural', 'digest']
+
+function isForgettableType(type: MemoryType): type is ForgettableType {
+  return type === 'episode' || type === 'semantic' || type === 'procedural'
+}
+
+/** Validate and de-duplicate forgetByIds input; throws on anything else. */
+function normalizeForgetIds(ids: unknown): string[] {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('forgetByIds: ids must be a non-empty array of memory ids')
+  }
+  const unique: string[] = []
+  const seen = new Set<string>()
+  for (const raw of ids) {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw new Error('forgetByIds: every id must be a non-empty string')
+    }
+    const id = raw.trim()
+    if (seen.has(id)) continue
+    seen.add(id)
+    unique.push(id)
+  }
+  if (unique.length > MAX_FORGET_IDS) {
+    throw new Error(`forgetByIds: at most ${MAX_FORGET_IDS} ids per call, got ${unique.length}`)
+  }
+  return unique
+}
 
 /**
  * Build the contextual text the embedding model sees for a single message.
@@ -920,27 +944,19 @@ export class Memory {
   // ---------------------------------------------------------------------------
 
   /**
-   * Forget memories — tombstones them (forgotten_at) so they are excluded
-   * from every recall path while retained for audit/undo. Lossless and
-   * idempotent. Returns a preview by default; pass confirm=true to apply.
+   * Preview what a forget query matches. Never writes: the caller reviews the
+   * candidates and passes the ids it approves to forgetByIds(). No relevance
+   * threshold filters the list, because a score scale depends on the active
+   * reranker and must never decide what gets deleted.
    */
-  async forget(
-    query: string,
-    opts?: { tier?: string; confirm?: boolean; minRelevance?: number }
-  ): Promise<{ count: number; previewed: RetrievedMemory[] }> {
+  async forget(query: string, opts?: { tier?: string }): Promise<ForgetPreview> {
     this.assertInitialized()
 
-    const confirm = opts?.confirm ?? false
-    // Forget needs narrower targeting than recall. Recall's 'deep' mode is
-    // designed to cast a wide net (15 base + 2-hop associations), which for
-    // forget means a gibberish query still matches 70–90+ memories — a foot-
-    // gun with confirm=true. Default to the 'light' strategy (no association
-    // expansion, 8 results) and add a minimum-relevance gate on top.
-    const minRelevance = opts?.minRelevance ?? DEFAULT_FORGET_MIN_RELEVANCE
-
-    // Embed query so vector search can find matches. Without this, forget()
-    // returns no results because engineRecall's vector path requires a
-    // non-empty embedding and text-only fallback is narrower.
+    // The light strategy (no association expansion, 8 results) keeps the
+    // preview to what the query plainly matches. Deep recall casts a 2-hop
+    // net and lists dozens of loosely related memories for any query.
+    // Embed the query so the vector path runs; without an embedding only the
+    // narrower text path can match.
     let embedding: number[] = []
     if (this.intelligence?.embed) {
       try {
@@ -956,65 +972,112 @@ export class Memory {
       intelligence: this.intelligence,
       graph: this._graph,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
-      // forget can delete what it matches, so a scoped instance keeps its
-      // candidates to its own project and untagged memories.
-      // No project boost either: the delete gate below must compare the
-      // same relevance an unscoped forget would see.
+      // A scoped instance only lists its own project's and untagged memories,
+      // the same rows forgetByIds lets it tombstone.
+      // No project boost: the relevance shown is the query match alone.
       ...(this._projectId ? { projectId: this._projectId, projectStrict: true } : {}),
       ...(this._projectId || this._defaultProject ? { projectUnboosted: true } : {}),
+      reconsolidate: false,
     })
 
-    // Score-gate: only memories whose relevance clears the threshold are
-    // considered "affected". Without this, forget returns the entire scan
-    // pool and confirm=true would carpet-bomb the store on a weak query.
-    const allMemories = [...result.memories, ...result.associations]
-      .filter(m => m.relevance >= minRelevance)
+    const seen = new Set<string>()
+    const candidates: ForgetCandidate[] = []
+    for (const memory of [...result.memories, ...result.associations]) {
+      if (!isForgettableType(memory.type)) continue
+      if (opts?.tier && memory.type !== opts.tier) continue
+      const key = `${memory.type}:${memory.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      candidates.push({
+        id: memory.id,
+        type: memory.type,
+        content: memory.content,
+        relevance: memory.relevance,
+        projectId: memory.projectId ?? null,
+      })
+    }
+    return { count: candidates.length, candidates }
+  }
 
-    // Filter by tier if specified
-    const filtered = opts?.tier
-      ? allMemories.filter(m => m.type === opts.tier)
-      : allMemories
+  /**
+   * Tombstone exactly the given memory ids (forgotten_at). Tombstoned rows are
+   * excluded from every recall path but retained for audit/undo.
+   *
+   * A scoped instance (projectId set) may only forget rows tagged with its
+   * own project or untagged; any other row is reported out of scope and left
+   * untouched. Re-forgetting a tombstoned id reports it forgotten again.
+   * Throws on an empty list, a non-string or blank id, or more than
+   * MAX_FORGET_IDS distinct ids.
+   */
+  async forgetByIds(ids: string[]): Promise<ForgetByIdsResult> {
+    this.assertInitialized()
+    const requested = normalizeForgetIds(ids)
 
-    if (!confirm) {
-      return { count: filtered.length, previewed: filtered }
+    // An id carries no tier, so look it up in every table. Rows are keyed by
+    // the type the adapter returns, not the type asked for.
+    const rows = await this.storage.getByIds(
+      requested.flatMap((id) => FORGET_LOOKUP_TYPES.map((type) => ({ id, type }))),
+    )
+    const rowsById = new Map<string, TypedMemory[]>()
+    for (const row of rows) {
+      const matches = rowsById.get(row.data.id) ?? []
+      if (!matches.some((m) => m.type === row.type)) matches.push(row)
+      rowsById.set(row.data.id, matches)
     }
 
-    // Apply forgetting: tombstone the matched memories (forgotten_at). They are
-    // excluded from every recall path but retained for audit/undo. Idempotent.
-    // Deliberately does NOT touch access_count or confidence: the old behavior
-    // called recordAccess/recordAccessAndBoost, which incremented access_count —
-    // a term recall ranking REWARDS — so forgetting an episode raised its recall
-    // rank, and the floored confidence was a value no recall path ever read.
-    const idsByType: Record<'episode' | 'semantic' | 'procedural', string[]> = {
-      episode: [], semantic: [], procedural: [],
-    }
-    for (const memory of filtered) {
-      if (memory.type === 'episode' || memory.type === 'semantic' || memory.type === 'procedural') {
-        idsByType[memory.type].push(memory.id)
+    const result: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [], notForgettable: [] }
+    const idsByType: Record<ForgettableType, string[]> = { episode: [], semantic: [], procedural: [] }
+    for (const id of requested) {
+      const matches = rowsById.get(id) ?? []
+      const forgettable = matches.filter((m) => isForgettableType(m.type))
+      if (matches.length === 0) {
+        result.notFound.push(id)
+        continue
+      }
+      if (forgettable.length === 0) {
+        result.notForgettable.push(id)
+        continue
+      }
+      const inScope = forgettable.filter((m) => this.isInForgetScope(m.data.projectId))
+      if (inScope.length === 0) {
+        result.outOfScope.push(id)
+        continue
+      }
+      for (const match of inScope) {
+        const type = match.type as ForgettableType
+        idsByType[type].push(id)
+        result.forgotten.push({ id, type })
       }
     }
+
+    // Tombstone only; access_count and confidence stay untouched. Bumping
+    // access_count (as recordAccess does) raises a memory's recall rank.
     if (idsByType.semantic.length > 0) await this.storage.semantic.markForgotten(idsByType.semantic)
     if (idsByType.procedural.length > 0) await this.storage.procedural.markForgotten(idsByType.procedural)
     if (idsByType.episode.length > 0) await this.storage.episodes.markForgotten(idsByType.episode)
 
-    // Also tombstone the Neo4j Memory nodes so forget cannot leak back through
-    // the graph association channel: spreading activation gates traversal on
-    // coalesce(forgottenAt, deletedAt) IS NULL. SQL remains the source of truth —
-    // a graph hiccup (or absent Neo4j) must never fail the forget. Capability-
-    // guarded because forgetMemories is optional on GraphPort.
+    // Also tombstone the Neo4j Memory nodes so a forgotten memory cannot leak
+    // back through spreading activation, which gates traversal on
+    // coalesce(forgottenAt, deletedAt) IS NULL. SQL stays the source of truth:
+    // a graph failure (or absent Neo4j) must never fail the forget.
     const graph = this._graph
-    if (graph && typeof graph.forgetMemories === 'function') {
-      const forgottenIds = [...idsByType.episode, ...idsByType.semantic, ...idsByType.procedural]
-      if (forgottenIds.length > 0) {
-        try {
-          await graph.forgetMemories(forgottenIds)
-        } catch (err) {
-          console.warn('[engram] forget: graph tombstone failed (non-fatal):', err)
-        }
+    const forgottenIds = [...idsByType.episode, ...idsByType.semantic, ...idsByType.procedural]
+    if (graph && typeof graph.forgetMemories === 'function' && forgottenIds.length > 0) {
+      try {
+        await graph.forgetMemories(forgottenIds)
+      } catch (err) {
+        console.warn('[engram] forget: graph tombstone failed (non-fatal):', err)
       }
     }
 
-    return { count: filtered.length, previewed: filtered }
+    return result
+  }
+
+  /** Same rule as the strict project filter: own project or untagged. */
+  private isInForgetScope(rowProjectId: string | null | undefined): boolean {
+    if (!this._projectId) return true
+    const project = rowProjectId ?? null
+    return project === null || project === this._projectId
   }
 
   // ---------------------------------------------------------------------------

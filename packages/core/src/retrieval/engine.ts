@@ -124,6 +124,13 @@ export interface RecallOpts {
    *  question date; servers may pass request time). Wall-clock is NEVER
    *  assumed when absent — now-relative lines are simply omitted. */
   now?: Date
+  /**
+   * Record access, co-recalled edges and graph edge strengthening for the
+   * returned memories. Default true. A read-only lookup (a forget preview)
+   * passes false: counting it as a use would raise the rank of the very
+   * memories the caller is about to forget.
+   */
+  reconsolidate?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -701,8 +708,10 @@ export async function recall(
 
   // Stage 4: Reconsolidation — fire-and-forget
   // Wave 2: also strengthens traversed Neo4j edges when graph is non-null.
-  const manager = new AssociationManager(storage.associations)
-  stageReconsolidate(memories, associations, storage, manager, graph)
+  if (opts.reconsolidate !== false) {
+    const manager = new AssociationManager(storage.associations)
+    stageReconsolidate(memories, associations, storage, manager, graph)
+  }
 
   // Wave 5: Extract community summaries from activated community nodes.
   // Community nodes get nodeType='Community' from the updated spreadActivation().

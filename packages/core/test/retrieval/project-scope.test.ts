@@ -186,54 +186,101 @@ describe('forget on a project-scoped instance', () => {
     dimensions: (): number => DUMMY_EMBEDDING.length,
   }
 
-  async function forgetFromAlpha(storage: StorageAdapter): Promise<string[]> {
-    const memory = createMemory({ storage, intelligence, projectId: 'alpha' })
-    await memory.initialize()
-    const result = await memory.forget('release notes', { confirm: true, minRelevance: 0 })
-    await memory.dispose()
-    return result.previewed.map((m) => m.id)
+  // Storage returns every project's rows, as the recall SQL does now that it
+  // no longer filters by project; the scope guard must live in core.
+  function storageOf(rows: Array<[Episode, number]>): StorageAdapter {
+    const storage = createMockStorage({ vectorSearchResults: hits(rows), textBoostResults: [] })
+    const byId = new Map(rows.map(([e]) => [e.id, e]))
+    vi.mocked(storage.getByIds).mockImplementation(async (refs) =>
+      refs.flatMap((r): TypedMemory[] => {
+        const e = r.type === 'episode' ? byId.get(r.id) : undefined
+        return e ? [{ type: 'episode', data: e }] : []
+      }),
+    )
+    return storage
   }
 
-  it("never tombstones another project's memory, even when it is the closest match", async () => {
-    // Storage returns every project's rows, as the recall SQL does now that
-    // it no longer filters by project; the guard must live in core.
-    const storage = createMockStorage({
-      vectorSearchResults: hits([
-        [episode('theirs', 'beta', 0), 0.95],
-        [episode('mine', 'alpha', 1), 0.6],
-        [episode('shared', null, 2), 0.6],
-      ]),
-      textBoostResults: [],
-    })
-
-    const affected = await forgetFromAlpha(storage)
-
-    expect(affected).not.toContain('theirs')
-    expect(affected).toEqual(expect.arrayContaining(['mine', 'shared']))
-    const tombstoned = vi.mocked(storage.episodes.markForgotten).mock.calls.flatMap((c) => c[0])
-    expect(tombstoned).not.toContain('theirs')
-    expect(tombstoned).toEqual(expect.arrayContaining(['mine', 'shared']))
-  })
-
-  // Unscoped relevance here is similarity + 0.054 (recency, salience, access
-  // terms of the fused score), so 0.44 scores ~0.494 and 0.46 ~0.514.
-  async function forgetAtDefaultGate(similarity: number): Promise<string[]> {
-    const storage = createMockStorage({
-      vectorSearchResults: hits([[episode('mine', 'alpha', 0), similarity]]),
-      textBoostResults: [],
-    })
-    const memory = createMemory({ storage, intelligence, projectId: 'alpha' })
-    await memory.initialize()
-    await memory.forget('release notes', { confirm: true })
-    await memory.dispose()
+  function tombstoned(storage: StorageAdapter): string[] {
     return vi.mocked(storage.episodes.markForgotten).mock.calls.flatMap((c) => c[0])
   }
 
-  it('does not let the same-project boost lift a match under the default gate', async () => {
-    expect(await forgetAtDefaultGate(0.44)).not.toContain('mine')
+  async function scoped(storage: StorageAdapter, graph?: GraphPort) {
+    const memory = createMemory({ storage, intelligence, projectId: 'alpha', ...(graph ? { graph } : {}) })
+    await memory.initialize()
+    return memory
+  }
+
+  const ROWS: Array<[Episode, number]> = [
+    [episode('theirs', 'beta', 0), 0.95],
+    [episode('neighbour', 'alpha', 1), 0.9],
+    [episode('mine', 'alpha', 2), 0.3],
+    [episode('shared', null, 3), 0.6],
+  ]
+
+  it("previews its own and untagged matches with their relevance, never another project's, and writes nothing", async () => {
+    const storage = storageOf(ROWS)
+    const memory = await scoped(storage)
+
+    const preview = await memory.forget('release notes')
+    await memory.dispose()
+
+    const ids = preview.candidates.map((c) => c.id)
+    expect(ids).not.toContain('theirs')
+    expect(ids).toEqual(expect.arrayContaining(['neighbour', 'mine', 'shared']))
+    const mine = preview.candidates.find((c) => c.id === 'mine')!
+    expect(mine).toMatchObject({ type: 'episode', projectId: 'alpha' })
+    // No relevance gate: a weak match is listed for the caller to judge.
+    expect(mine.relevance).toBeLessThan(0.5)
+    expect(tombstoned(storage)).toEqual([])
+    // A preview is not a use: no access bump, no co-recalled edges.
+    expect(storage.episodes.recordAccess).not.toHaveBeenCalled()
+    expect(storage.associations.upsertCoRecalled).not.toHaveBeenCalled()
+    expect(storage.associations.insert).not.toHaveBeenCalled()
   })
 
-  it('tombstones an own-project match just over the default gate', async () => {
-    expect(await forgetAtDefaultGate(0.46)).toContain('mine')
+  it('tombstones only the approved id, not a higher-scoring neighbour from the same preview', async () => {
+    const storage = storageOf(ROWS)
+    const forgetMemories = vi.fn().mockResolvedValue(1)
+    const graph = { isAvailable: async () => true, forgetMemories } as unknown as GraphPort
+    const memory = await scoped(storage, graph)
+
+    const preview = await memory.forget('release notes')
+    const relevanceOf = (id: string): number => preview.candidates.find((c) => c.id === id)!.relevance
+    expect(relevanceOf('neighbour')).toBeGreaterThan(relevanceOf('mine'))
+
+    const result = await memory.forgetByIds(['mine'])
+    await memory.dispose()
+
+    expect(result.forgotten).toEqual([{ id: 'mine', type: 'episode' }])
+    expect(tombstoned(storage)).toEqual(['mine'])
+    expect(forgetMemories).toHaveBeenCalledWith(['mine'])
+  })
+
+  it("refuses another project's id and tombstones its own and an untagged one", async () => {
+    const storage = storageOf(ROWS)
+    const memory = await scoped(storage)
+
+    const result = await memory.forgetByIds(['theirs', 'mine', 'shared'])
+    await memory.dispose()
+
+    expect(result.outOfScope).toEqual(['theirs'])
+    expect(result.forgotten).toEqual([
+      { id: 'mine', type: 'episode' },
+      { id: 'shared', type: 'episode' },
+    ])
+    expect(tombstoned(storage)).not.toContain('theirs')
+    expect(tombstoned(storage)).toEqual(expect.arrayContaining(['mine', 'shared']))
+  })
+
+  it('lets an unscoped instance tombstone any project\'s id', async () => {
+    const storage = storageOf(ROWS)
+    const memory = createMemory({ storage, intelligence })
+    await memory.initialize()
+
+    const result = await memory.forgetByIds(['theirs'])
+    await memory.dispose()
+
+    expect(result.forgotten).toEqual([{ id: 'theirs', type: 'episode' }])
+    expect(tombstoned(storage)).toEqual(['theirs'])
   })
 })
