@@ -425,8 +425,6 @@ const TOOLS = [
 
 const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'rerank', 'graph'] as const
 
-/** One-line recall latency summary. Absent stages are omitted, not zeroed, so
- *  a missing key means the stage never ran for that query. */
 /**
  * Recall options from memory_recall arguments. The project id is normalised
  * exactly as memory_ingest normalises it, so a padded id or a shared alias
@@ -440,6 +438,8 @@ export function recallOptionsFromArgs(args: Record<string, unknown>): { projectI
   }
 }
 
+/** One-line recall latency summary. Absent stages are omitted, not zeroed, so
+ *  a missing key means the stage never ran for that query. */
 export function formatRecallTimingLine(
   timings: Record<string, number>,
   items: number,

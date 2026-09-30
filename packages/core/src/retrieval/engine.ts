@@ -100,6 +100,12 @@ export interface RecallOpts {
    */
   projectStrict?: boolean
   /**
+   * Score without the project and group boosts. For callers that gate a
+   * destructive action on relevance: a boost orders results for reading and
+   * must not lift a weak match over the gate.
+   */
+  projectUnboosted?: boolean
+  /**
    * Return memories valid at this point in time. When set:
    * - Semantic: uses searchAtTime instead of search
    * - Episodes/digests: passes beforeDate to SearchOptions
@@ -380,7 +386,10 @@ export async function recall(
   const graph: GraphPort | null = opts.graph ?? null
   const project = opts.projectId ?? opts.project
   const projectStrict = opts.projectStrict === true
-  const ranking: ProjectRanking | null = project ? projectRankingFromEnv(project, process.env, projectStrict) : null
+  const envRanking: ProjectRanking | null = project ? projectRankingFromEnv(project, process.env, projectStrict) : null
+  const ranking: ProjectRanking | null = envRanking && opts.projectUnboosted === true
+    ? { ...envRanking, projectBoost: 0, groupBoost: 0 }
+    : envRanking
   // A project reaches storage and the graph as a filter only under strict
   // scoping; otherwise it only ranks, so a mis-tagged memory stays reachable.
   const projectId = projectStrict ? project : undefined

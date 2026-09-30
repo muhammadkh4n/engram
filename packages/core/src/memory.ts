@@ -955,7 +955,10 @@ export class Memory {
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
       // forget can delete what it matches, so a scoped instance keeps its
       // candidates to its own project and untagged memories.
+      // No project boost either: the delete gate below must compare the
+      // same relevance an unscoped forget would see.
       ...(this._projectId ? { projectId: this._projectId, projectStrict: true } : {}),
+      ...(this._projectId || this._defaultProject ? { projectUnboosted: true } : {}),
     })
 
     // Score-gate: only memories whose relevance clears the threshold are

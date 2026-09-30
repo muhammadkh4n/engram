@@ -214,4 +214,26 @@ describe('forget on a project-scoped instance', () => {
     expect(tombstoned).not.toContain('theirs')
     expect(tombstoned).toEqual(expect.arrayContaining(['mine', 'shared']))
   })
+
+  // Unscoped relevance here is similarity + 0.054 (recency, salience, access
+  // terms of the fused score), so 0.44 scores ~0.494 and 0.46 ~0.514.
+  async function forgetAtDefaultGate(similarity: number): Promise<string[]> {
+    const storage = createMockStorage({
+      vectorSearchResults: hits([[episode('mine', 'alpha', 0), similarity]]),
+      textBoostResults: [],
+    })
+    const memory = createMemory({ storage, intelligence, projectId: 'alpha' })
+    await memory.initialize()
+    await memory.forget('release notes', { confirm: true })
+    await memory.dispose()
+    return vi.mocked(storage.episodes.markForgotten).mock.calls.flatMap((c) => c[0])
+  }
+
+  it('does not let the same-project boost lift a match under the default gate', async () => {
+    expect(await forgetAtDefaultGate(0.44)).not.toContain('mine')
+  })
+
+  it('tombstones an own-project match just over the default gate', async () => {
+    expect(await forgetAtDefaultGate(0.46)).toContain('mine')
+  })
 })
