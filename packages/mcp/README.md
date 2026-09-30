@@ -274,6 +274,7 @@ The package includes CLI utilities for advanced use cases:
 - `engram-session-summary` — Summarize a session
 - `engram-git-setup` — Set up git hooks for automatic ingestion
 - `engram-shell-setup` — Set up shell hooks
+- `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
 
 ## Troubleshooting
 
