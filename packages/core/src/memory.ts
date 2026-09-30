@@ -10,7 +10,7 @@ import { SensoryBuffer } from './systems/sensory-buffer.js'
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
 import { recall as engineRecall } from './retrieval/engine.js'
-import { classifyMode, RECALL_STRATEGIES } from './intent/intents.js'
+import { selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
 import { dreamCycle } from './consolidation/dream-cycle.js'
@@ -98,7 +98,7 @@ export interface MemoryOptions {
 export interface SessionHandle {
   readonly sessionId: string
   ingest(message: Omit<Message, 'sessionId'>): Promise<void>
-  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy> }) : Promise<RecallResult>
+  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean }) : Promise<RecallResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +629,10 @@ export class Memory {
       synthesize?: boolean | SynthesizeOpts
       /** Anchor for now-relative temporal arithmetic in synthesis. */
       now?: Date
+      /** Skip acknowledgements, greetings and emoji-only text instead of
+       *  searching. For callers that recall on every conversation turn;
+       *  explicit lookups leave it off so any non-empty query is searched. */
+      skipTrivial?: boolean
     }
   ): Promise<RecallResult> {
     this.assertInitialized()
@@ -638,8 +642,7 @@ export class Memory {
     // projects per request without constructing a new instance each time.
     const effectiveProjectId = opts?.projectId ?? this._projectId
 
-    // Classify intent using new 3-mode system
-    const mode = classifyMode(query)
+    const mode = selectRecallMode(query, { skipTrivial: opts?.skipTrivial })
     const strategy: RecallStrategy = opts?.strategyOverride
       ? { ...RECALL_STRATEGIES[mode], ...opts.strategyOverride }
       : RECALL_STRATEGIES[mode]
@@ -1027,7 +1030,7 @@ export class Memory {
       ingest: (message: Omit<Message, 'sessionId'>) => {
         return this.ingest({ ...message, sessionId: sid })
       },
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string }) => {
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean }) => {
         return this.recall(query, opts)
       },
     }

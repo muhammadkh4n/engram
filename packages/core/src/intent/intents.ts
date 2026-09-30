@@ -227,14 +227,31 @@ export const STRATEGY_TABLE: Record<IntentType, RetrievalStrategy> = {
 
 import type { RecallMode, RecallStrategy } from '../types.js'
 
-/** Classify a message into one of 3 recall modes. */
+// Whole-message acknowledgements and continuations. Anchored at both ends so a
+// sentence that starts with one of these words ("continue the migration") is
+// still a query.
+const TRIVIAL_TURN_PATTERN =
+  /^(hi|hey|hello|thanks|thank you|ok|okay|sure|yes|no|yep|nope|lol|haha|hmm|ah|oh|done|got it|continue|go ahead|go on|do it|lgtm|yeah|yup|cool|k|kk|yes please|sounds good|nice|great|perfect|proceed)\s*[.!]*$/i
+
+// Pictographs only. \p{Emoji} also matches the digits 0-9, '#' and '*'
+// (they can start keycap sequences), which would swallow queries such as a
+// tenant id or a PR number.
+const EMOJI_ONLY_PATTERN =
+  /^[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200D\uFE0F\s]+$/u
+
+/** Classify a message into one of 3 recall modes.
+ *
+ *  This is the full classifier: acknowledgements, greetings and emoji-only
+ *  messages classify as `'skip'`. Callers that recall on every conversation
+ *  turn want that; an explicit lookup does not (see `selectRecallMode`). */
 export function classifyMode(message: string): RecallMode {
   const trimmed = message.trim()
 
-  // skip: short acks, greetings, emoji-only
-  if (trimmed.length < 10) return 'skip'
-  if (/^(hi|hey|hello|thanks|thank you|ok|okay|sure|yes|no|yep|nope|lol|haha|hmm|ah|oh|done|got it)\s*[.!]?$/i.test(trimmed)) return 'skip'
-  if (/^[\p{Emoji}\s]+$/u.test(trimmed)) return 'skip'
+  // skip: empty text, acks, greetings, emoji-only. No length floor: short
+  // queries are often ticket keys, names or hosts, the highest-signal lookups.
+  if (trimmed.length === 0) return 'skip'
+  if (TRIVIAL_TURN_PATTERN.test(trimmed)) return 'skip'
+  if (EMOJI_ONLY_PATTERN.test(trimmed)) return 'skip'
 
   // deep: question mark or recall keywords
   if (/\?/.test(trimmed)) return 'deep'
@@ -242,6 +259,22 @@ export function classifyMode(message: string): RecallMode {
 
   // everything else: light
   return 'light'
+}
+
+/** Pick the recall mode for a recall call.
+ *
+ *  An explicit recall (a tool call, an API caller, a benchmark) is a lookup
+ *  the caller asked for, so only empty text is skipped: "ok" or "1933" may be
+ *  exactly the string being searched for. `skipTrivial` is for callers that
+ *  recall on every conversation turn, where acknowledgements and emoji carry
+ *  no query and the full classifier applies. */
+export function selectRecallMode(
+  query: string,
+  opts: { skipTrivial?: boolean } = {},
+): RecallMode {
+  const mode = classifyMode(query)
+  if (mode !== 'skip' || opts.skipTrivial === true) return mode
+  return query.trim().length === 0 ? 'skip' : 'light'
 }
 
 /** Strategy table for the 3 recall modes.
