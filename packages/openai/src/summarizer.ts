@@ -323,7 +323,12 @@ export class OpenAISummarizer {
       max_tokens: 180,
       temperature: 0.7,
     })
-    return response.choices[0].message.content ?? query
+    const doc = response.choices[0]?.message?.content ?? ''
+    // An empty reply or a restated question is not a hypothetical document:
+    // embedding it would re-run the direct search and fuse a duplicate pass.
+    // An empty string tells the retrieval engine to skip HyDE.
+    if (doc.trim() === '' || normalizeForEcho(doc) === normalizeForEcho(query)) return ''
+    return doc
   }
 
   async expandQuery(query: string): Promise<string[]> {
@@ -373,18 +378,7 @@ export class OpenAISummarizer {
       temperature: 0.5,
     })
 
-    const raw = response.choices[0]?.message?.content ?? '[]'
-    try {
-      const parsed: unknown = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        return parsed
-          .filter((item): item is string => typeof item === 'string')
-          .slice(0, 5)
-      }
-    } catch {
-      // parse failed — return empty
-    }
-    return []
+    return parseExpansionTerms(response.choices[0]?.message?.content ?? '')
   }
 
   /**
@@ -860,4 +854,36 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
       return []
     }
   }
+}
+
+const MAX_EXPANSION_TERMS = 5
+
+/**
+ * Chat models often wrap the requested JSON array in prose or a ```json
+ * fence. The array is the span from the first `[` to the last `]`; anything
+ * that does not parse to an array yields no terms.
+ */
+function parseExpansionTerms(raw: string): string[] {
+  const start = raw.indexOf('[')
+  const end = raw.lastIndexOf(']')
+  if (start === -1 || end <= start) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, MAX_EXPANSION_TERMS)
+}
+
+function normalizeForEcho(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s\p{P}`]+|[\s\p{P}`]+$/gu, '')
 }
