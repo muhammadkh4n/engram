@@ -3,13 +3,13 @@
  * does a key reliably say what its value holds. A text that parses whole as
  * JSON, or whose every non-empty line is a `KEY=VALUE` assignment (an env
  * file, `export` lines), is read as that structure, and the value under each
- * secret-named key is redacted whatever it looks like. Free text never goes
+ * credential-named key is redacted whatever it looks like. Free text never goes
  * through this rule: there `password:` is as often prose, a type annotation
  * or a lookup as it is a credential.
  */
 
 import { isOnlyPlaceholders } from './placeholder.js'
-import { isPublicKey, isPublishableValue, isStructuredSecretKey } from './secret-keys.js'
+import { isCredentialKey, isPublicKey, isPublishableValue } from './secret-keys.js'
 import type { DetectedSpan } from './secretlint-spans.js'
 import { isShellReference, quotedValueEnd, shellWordEnd } from './value-extent.js'
 
@@ -24,11 +24,12 @@ const SOPS_ENCRYPTED_RE = /^ENC\[[A-Za-z0-9_]+,data:[^\]]*\]$/
 
 /**
  * Whether a value stored under this key in structured data is a credential:
- * the key's last word names one, the key is not public by design, and the
- * value is a literal (not empty, not a shell reference, not already redacted).
+ * the key names a credential term (isCredentialKey), the key is not public by
+ * design, and the value is a literal (not empty, not a shell reference, not
+ * already redacted).
  */
 export function isSecretUnderKey(name: string, value: string, isLiteralQuoted = false): boolean {
-  if (!isStructuredSecretKey(name) || isPublicKey(name)) return false
+  if (!isCredentialKey(name) || isPublicKey(name)) return false
   const trimmed = value.trim()
   if (trimmed === '' || isOnlyPlaceholders(value) || isPublishableValue(trimmed) || SOPS_ENCRYPTED_RE.test(trimmed)) return false
   return isLiteralQuoted || !isShellReference(trimmed)

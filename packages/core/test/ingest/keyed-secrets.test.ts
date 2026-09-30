@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, it, expect } from 'vitest'
-import { isCandidateSecretKey, isPublicKey, isStructuredSecretKey } from '../../src/ingest/secret-keys.js'
+import { isCandidateSecretKey, isCredentialKey, isPublicKey, isStructuredSecretKey } from '../../src/ingest/secret-keys.js'
 import { findSecretCandidates } from '../../src/ingest/secret-candidates.js'
 import { scrubSecrets } from '../../src/ingest/scrub-secrets.js'
 import { scrubMessage } from '../../src/ingest/scrub-message.js'
@@ -41,6 +41,27 @@ describe('isCandidateSecretKey — the last word of the key decides', () => {
   it('in structured data a bare pass and only the core data words before KEY decide', () => {
     for (const name of ['pass', 'PASS', 'project_key', 'issue_key', 'NO_AUTH_TOKEN', 'NEO4J_PASSWORD']) expect(isStructuredSecretKey(name)).toBe(true)
     for (const name of ['cacheKey', 'sort_key', 'translation_key', 'TOKEN_LIMIT', 'PWD']) expect(isStructuredSecretKey(name)).toBe(false)
+  })
+
+  it('in text, a key needs a credential term: data keys ending in KEY do not qualify', () => {
+    const credential = [
+      'password', 'DB_PASSWORD', 'PGPASSWORD', 'passwd', 'MYSQL_PWD', 'pass', 'DB_PASS', 'GPG_PASSPHRASE', 'CLIENT_SECRET',
+      'clientsecret', 'SESSION_SECRET', 'token', 'authToken', 'GITHUB_TOKEN', 'csrftoken', 'XSRF-TOKEN', '_csrf', 'auth',
+      'basicAuth', 'Authorization', 'Proxy-Authorization', 'credentials', 'GOOGLE_CREDENTIALS', 'cookie', 'Set-Cookie',
+      'SENTRY_DSN', 'COOKIE_SIGNING_SALT', 'api_key', 'apiKey', 'APIKEY', 'X-Api-Key', 'OPENAI_API_KEY', 'private_key',
+      'privateKey', 'PRIVATEKEY', 'STRIPE_SECRET_KEY_LIVE', 'AWS_SECRET_ACCESS_KEY', 'accessKey', 'JWT_SIGNING_KEY',
+      'DATA_ENCRYPTION_KEY', 'SECRET_KEY_BASE', 'DB_PASSWORD_PROD', 'API_KEY_V2', 'session', 'sessionid', 'PHPSESSID',
+      'connect.sid', 'user_session', 'NO_AUTH_TOKEN',
+    ]
+    const data = [
+      'issue_key', 'ISSUE_KEY', 'COLUMN_KEY', 'CatalogKey', 'project_key', 'PROJECT_KEY', 'versionKey', 'stepKey', 'cacheKey',
+      'sort_key', 'PRIMARY_KEY', 'LICENSE_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TOKEN_LIMIT', 'MAX_TOKENS', 'input_tokens',
+      'token_type', 'AUTH_ENABLED', 'PASSWORD_MIN_LENGTH', 'DEFAULT_API_KEY_ENV', 'NEO4J_PASSWORD_FILE', 'ACCESS_KEY_ID',
+      'sessionId', 'session_id', 'locomoSession', 'lmeSessionId', 'x_forwarded_for', 'PWD', 'OLDPWD', 'passwordHash',
+      'key', 'Access-Control-Allow-Credentials',
+    ]
+    for (const name of credential) expect(isCredentialKey(name), name).toBe(true)
+    for (const name of data) expect(isCredentialKey(name), name).toBe(false)
   })
 
   it('treats browser-exposed and publishable keys as public', () => {
@@ -163,6 +184,15 @@ describe('scrubMessage — structured walks', () => {
   it('redacts numbers under secret-named keys and keeps other numbers', async () => {
     const { message } = await scrubMessage({ role: 'user', content: 'x', metadata: { pin_password: 12345678, port: 5432 } })
     expect(message.metadata).toEqual({ pin_password: '[REDACTED:pin_password]', port: 5432 })
+  })
+
+  it('keeps data under keys that end in KEY or name a session', async () => {
+    const metadata = { issue_key: 'ACA-2331', COLUMN_KEY: 'PRI', project_key: 'ENG', locomoSession: 'session_3', sessionId: '3f2b8c1e' }
+    const content = [{ type: 'tool_use', id: 't', name: 'jira', input: { issue_key: 'ENG-7', versionKey: 'v2' } }]
+    const { message, redactions } = await scrubMessage({ role: 'user', content, metadata })
+    expect(redactions).toEqual([])
+    expect(message.metadata).toBe(metadata)
+    expect(message.content).toBe(content)
   })
 
   it('replaces whatever lies past the depth limit instead of storing it unscrubbed', async () => {

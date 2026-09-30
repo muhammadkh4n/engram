@@ -27,7 +27,8 @@ const JWT =
   '.' +
   'dGhpcy1pcy1ub3QtYS1yZWFsLXNpZ25hdHVyZQ'
 const HIGH_ENTROPY = 'Zx8Kq2Lr7Vm4Tn9Wp3Ys6Hd1Jf5Gb0Ce'
-const PEM_BODY = ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASC', 'bm90IGEgcmVhbCBrZXkgbWF0ZXJpYWw=']
+// PEM body lines are 64 characters, the last one shorter.
+const PEM_BODY = ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASC' + mixed(32), 'bm90IGEgcmVhbCBrZXkgbWF0ZXJpYWw=']
 // Long enough, and with the ASN.1 magic bytes, for secretlint to treat it as key material.
 const PEM_FULL_BODY = ['MIIEvQIBADANBgkqhkiG9w0BAQEFAASC' + mixed(32), mixed(64), mixed(40) + '==']
 
@@ -119,8 +120,9 @@ describe('scrubSecrets — Authorization header values', () => {
     [`curl -s -H "Authorization: Bearer ${OPENAI_KEY}" https://api.example.com/v1/models`, 'curl -s -H "Authorization: Bearer [REDACTED:authorization]" https://api.example.com/v1/models'],
     ['Authorization: Bearer SUPER_SECRET_PW', 'Authorization: Bearer [REDACTED:authorization]'],
     ['GET / HTTP/1.1\nAuthorization: Basic dXNlcjpwYSBzcw==\nAccept: */*', 'GET / HTTP/1.1\nAuthorization: Basic [REDACTED:authorization]\nAccept: */*'],
-    ['fetch(u, {"headers": {"Authorization": "Bearer tok with \\"quote"}})', 'fetch(u, {"headers": {"Authorization": "Bearer [REDACTED:authorization]"}})'],
-    ["fetch(url, { headers: { authorization: 'bearer a b c' } })", "fetch(url, { headers: { authorization: 'bearer [REDACTED:authorization]' } })"],
+    ['fetch(u, {"headers": {"Authorization": "Bearer abc123XYZ789"}})', 'fetch(u, {"headers": {"Authorization": "Bearer [REDACTED:authorization]"}})'],
+    ["fetch(url, { headers: { authorization: 'bearer ya29.a0AfH6SMBx-Q7xk' } })", "fetch(url, { headers: { authorization: 'bearer [REDACTED:authorization]' } })"],
+    ['Authorization: Bearer abc123XYZ789 was rejected with 401', 'Authorization: Bearer [REDACTED:authorization] was rejected with 401'],
     ['then send Proxy-Authorization: Basic Zm9vOmJhcg== upstream', 'then send Proxy-Authorization: Basic [REDACTED:authorization] upstream'],
   ]
   for (const [input, expected] of cases) {
@@ -135,6 +137,9 @@ describe('scrubSecrets — Authorization header values', () => {
     "headers: { Authorization: 'Bearer ' + token }",
     'Authorization: Bearer <token>',
     'The Authorization header carries a bearer token.',
+    '- Authorization: Bearer tokens must be rotated monthly',
+    '- Authorization: Basic authentication is disabled on the admin API',
+    "fetch(url, { headers: { authorization: 'bearer a b c' } })",
   ]
   for (const input of kept) {
     it(`keeps ${input.slice(0, 40)}`, async () => {
@@ -186,9 +191,30 @@ describe('scrubSecrets — known credential formats anywhere in text', () => {
     for (const line of PEM_BODY) expect(text).not.toContain(line)
   })
 
-  it('redacts a truncated PEM block to the end of the text', async () => {
-    const { text } = await scrubSecrets(`key:\n-----BEGIN RSA PRIVATE KEY-----\n${PEM_BODY[0]}`)
-    expect(text).toBe('key:\n[REDACTED:private-key]')
+  it('redacts a truncated PEM block through its last base64 line', async () => {
+    expect((await scrubSecrets(`key:\n-----BEGIN RSA PRIVATE KEY-----\n${PEM_BODY[0]}`)).text).toBe('key:\n[REDACTED:private-key]')
+    const cut = `-----BEGIN RSA PRIVATE KEY-----\n${PEM_BODY[0]}\n${mixed(64)}\nThe output was cut here, so the key is incomplete.`
+    expect((await scrubSecrets(cut)).text).toBe('[REDACTED:private-key]\nThe output was cut here, so the key is incomplete.')
+  })
+
+  it('redacts an encrypted PEM block with Proc-Type and DEK-Info headers', async () => {
+    const pem = ['-----BEGIN RSA PRIVATE KEY-----', 'Proc-Type: 4,ENCRYPTED', 'DEK-Info: AES-128-CBC,0A1B2C3D4E5F60718293A4B5C6D7E8F9', '', ...PEM_BODY, '-----END RSA PRIVATE KEY-----'].join('\n')
+    const { text } = await scrubSecrets(`saved as:\n${pem}\nok`)
+    expect(text).toBe('saved as:\n[REDACTED:private-key]\nok')
+  })
+
+  it('redacts a PEM block written on one line, as env files carry it', async () => {
+    const { text } = await scrubSecrets(`the value is -----BEGIN PRIVATE KEY----- ${PEM_BODY.join(' ')} -----END PRIVATE KEY----- in one line`)
+    expect(text).toBe('the value is [REDACTED:private-key] in one line')
+  })
+
+  it('leaves a bare PEM header in prose alone', async () => {
+    const inputs = [
+      'The file must start with -----BEGIN OPENSSH PRIVATE KEY----- and end with the matching END line, otherwise ssh-add rejects it with "invalid format".\nCheck the permissions next.',
+      'grep -l "-----BEGIN RSA PRIVATE KEY-----" ~/.ssh/*\n-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----',
+      '```\n-----BEGIN EC PRIVATE KEY-----\n<base64 body>\n-----END EC PRIVATE KEY-----\n```',
+    ]
+    for (const input of inputs) expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
   })
 
   it('redacts only the password of a postgres URL', async () => {
@@ -343,7 +369,9 @@ describe('scrubSecrets — in structured text a literal under a secret-named key
     ['{"NEO4J_PASSWORD": "..."}', '{"NEO4J_PASSWORD": "[REDACTED:NEO4J_PASSWORD]"}', 'NEO4J_PASSWORD'],
     ['DB_PASS=hunter2', 'DB_PASS=[REDACTED:DB_PASS]', 'DB_PASS'],
     ['pass=hunter2', 'pass=[REDACTED:pass]', 'pass'],
-    ['PROJECT_KEY=abcdef', 'PROJECT_KEY=[REDACTED:PROJECT_KEY]', 'PROJECT_KEY'],
+    ['{"client_secret": "abcdef123456", "grant_type": "client_credentials"}', '{"client_secret": "[REDACTED:client_secret]", "grant_type": "client_credentials"}', 'client_secret'],
+    ['JWT_SIGNING_KEY=abcdef123456', 'JWT_SIGNING_KEY=[REDACTED:JWT_SIGNING_KEY]', 'JWT_SIGNING_KEY'],
+    ['{"PHPSESSID": "abcdef123456"}', '{"PHPSESSID": "[REDACTED:PHPSESSID]"}', 'PHPSESSID'],
     ['DB_PASSWORD=true', 'DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
   ]
 
@@ -371,6 +399,21 @@ describe('scrubSecrets — in structured text a literal under a secret-named key
     'const tokenName = "GITHUB_TOKEN"',
     'const auth = `Bearer ${token}`',
   ]
+
+  // Keys that name data, not a credential: redacting them erases the
+  // identifiers (ticket ids, schema facts) recall depends on.
+  const dataKeys: string[] = [
+    '{"issue_key":"ACA-2331","summary":"Vulnerability drilldown","project_key":"ACA"}',
+    '[{"COLUMN_NAME":"id","COLUMN_TYPE":"int","COLUMN_KEY":"PRI"},{"COLUMN_NAME":"tenant","COLUMN_KEY":"MUL"}]',
+    '{"CatalogKey": "sam-core", "versionKey": "v5.1.4", "sessionId": "3f2b8c1e", "session_id": "9d4a4e6b"}',
+    'PROJECT_KEY=ENG\nISSUE_KEY=ENG-1234\nLICENSE_KEY_FILE=/etc/app/license',
+  ]
+
+  for (const input of dataKeys) {
+    it(`keeps data under ${input.slice(0, 40)}`, async () => {
+      expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
+    })
+  }
 
   for (const input of references) {
     it(`keeps the reference ${input.trim()}`, async () => {

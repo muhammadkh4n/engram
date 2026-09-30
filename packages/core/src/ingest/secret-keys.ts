@@ -1,9 +1,16 @@
 /**
  * Decides from a key's name alone whether the value assigned to it is a
  * credential. The key is split into words (snake, kebab, camel, dot) and its
- * last word decides: `NEO4J_PASSWORD`, `authToken` and `X-Api-Key` hold
+ * last words decide: `NEO4J_PASSWORD`, `authToken` and `X-Api-Key` hold
  * secrets; `TOKEN_LIMIT`, `MAX_TOKENS`, `AUTH_ENABLED`, `ACCESS_KEY_ID` and
  * `DEFAULT_API_KEY_ENV` name a setting or another variable.
+ *
+ * Two rules, by where the key is found:
+ *   - isCredentialKey, for keys inside stored text and messages: only a
+ *     positive list of credential terms qualifies;
+ *   - isStructuredSecretKey, for choosing which values of a secret store to
+ *     register: any `<word>_KEY` but a few data words qualifies, since a
+ *     secrets file holds credentials by construction.
  */
 
 const CREDENTIAL_WORDS = new Set([
@@ -136,12 +143,57 @@ export function isCandidateSecretKey(name: string): boolean {
 }
 
 /**
- * The same last-word rule for keys in structured data (env, ini, JSON and
- * YAML files), where a key names its value reliably: a bare `pass` is a
- * credential, and only the core data-structure words exempt `<word>_KEY`.
+ * The same last-word rule for keys of a configured secret store (env, ini,
+ * JSON and YAML files), where a key names its value reliably: a bare `pass`
+ * is a credential, and only the core data-structure words exempt
+ * `<word>_KEY`. Decides which store values are registered, never what is
+ * redacted from text by key name (see isCredentialKey).
  */
 export function isStructuredSecretKey(name: string): boolean {
   return judgeKey(name, STRUCTURED_RULE)
+}
+
+// Credential terms from sentry-python's DEFAULT_DENYLIST
+// (sentry_sdk/scrubber.py, MIT), plus pwd, passphrase, dsn, salt and pass.
+// `<word>_KEY` counts only with a qualifier that names a credential.
+const CREDENTIAL_TERMS: ReadonlyArray<readonly string[]> = [
+  'password', 'passwd', 'pwd', 'pass', 'passphrase', 'secret', 'token', 'auth', 'authorization', 'credentials',
+  'cookie', 'csrf', 'dsn', 'salt',
+  'api key', 'apikey', 'private key', 'privatekey', 'secret key', 'secretkey', 'access key', 'accesskey',
+  'signing key', 'signingkey', 'encryption key', 'encryptionkey',
+].map((term) => term.split(' '))
+
+// Session-cookie names from the same list. They match only as the whole key:
+// as a trailing word `session` names a conversation in this data
+// (`locomoSession`, `session_id`), not a cookie.
+const WHOLE_KEY_CREDENTIAL_TERMS = new Set([
+  'session', 'sessionid', 'phpsessid', 'connect_sid', 'aiohttp_session', 'user_session', 'symfony', 'xsrf',
+])
+
+// Fused spellings of a credential noun: `PGPASSWORD`, `clientsecret`, `csrftoken`.
+const FUSED_CREDENTIAL_SUFFIXES = ['password', 'passwd', 'secret', 'token', 'pwd']
+
+/**
+ * Whether a key found inside stored text (a JSON document, an env block,
+ * message metadata, a tool input) names a credential. A positive list, never
+ * "any `_KEY`": in tool output `issue_key` holds a Jira id, `COLUMN_KEY`
+ * MySQL's PRI/MUL and `versionKey` a version, and redacting them erases the
+ * identifiers recall depends on. Terms match as the key's last words, after
+ * variant qualifiers (`_PROD`, `_V2`) are stripped, so `TOKEN_LIMIT` and
+ * `PASSWORD_MIN_LENGTH` still name settings.
+ */
+export function isCredentialKey(name: string): boolean {
+  if (WORKDIR_KEYS.has(name) || NON_SECRET_KEYS.has(name.toLowerCase())) return false
+  const all = keyWords(name)
+  if (WHOLE_KEY_CREDENTIAL_TERMS.has(all.join('_'))) return true
+  const words = withoutQualifiers(all)
+  const last = words[words.length - 1]
+  if (last === undefined) return false
+  return (
+    CREDENTIAL_TERMS.some((term) => endsWithSequence(words, term)) ||
+    SECRET_WORD_SEQUENCES.some((seq) => endsWithSequence(words, seq)) ||
+    FUSED_CREDENTIAL_SUFFIXES.some((suffix) => last.endsWith(suffix))
+  )
 }
 
 /** Keys whose values are public by design, whatever their last word says. */

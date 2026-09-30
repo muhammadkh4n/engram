@@ -6,11 +6,12 @@
  * Only rules that are right whenever they fire redact:
  *   - values registered from this machine's secret files, in any spelling (secret-registry.ts)
  *   - known token formats, private keys and connection strings (secretlint)
- *   - self-identifying formats: PEM private-key blocks (including truncated
- *     ones), JWTs, OpenRouter keys, Anthropic OAuth/admin tokens,
- *     `Authorization: Bearer|Basic` header values and URL userinfo passwords
- *   - values under secret-named keys, only when the whole text is structured
- *     data (JSON, an env block; see structured-text.ts)
+ *   - self-identifying formats: PEM private-key blocks with a base64 body
+ *     (including truncated ones), JWTs, OpenRouter keys, Anthropic
+ *     OAuth/admin tokens, the credential of an `Authorization: Bearer|Basic`
+ *     header and URL userinfo passwords
+ *   - values under credential-named keys, only when the whole text is
+ *     structured data (JSON, an env block; see structured-text.ts)
  * Guesses from free-text key names and entropy only flag review candidates
  * (secret-candidates.ts) and never change text.
  *
@@ -22,13 +23,12 @@
  * placeholder, so scrubbing already-scrubbed text is a no-op.
  */
 
-import { PLACEHOLDER_PREFIX, placeholder } from './placeholder.js'
+import { placeholder } from './placeholder.js'
 import { defaultSecretRegistry } from './secret-registry.js'
 import { secretlintSpans } from './secretlint-spans.js'
 import type { DetectedSpan } from './secretlint-spans.js'
 import { STRUCTURED_RANK, structuredSpans } from './structured-text.js'
 import { DOC_PLACEHOLDER_RE, urlPasswords } from './url-userinfo.js'
-import { Lines, isQuote, isShellReference, quotedValueEnd, shellWordEnd } from './value-extent.js'
 
 export interface SecretRedaction {
   kind: string
@@ -59,14 +59,48 @@ function knownValueSpans(text: string): DetectedSpan[] {
 }
 
 // Also covers blocks the secretlint rule leaves out: truncated ones (no END
-// line), short bodies, and types such as ENCRYPTED PRIVATE KEY.
-const PEM_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$(?![\s\S]))/g
+// line), short bodies, and types such as ENCRYPTED PRIVATE KEY. A header is
+// key material only when base64 body lines follow it; a bare header is prose
+// ("the file must start with -----BEGIN … PRIVATE KEY-----").
+const PEM_BEGIN_RE = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/g
+const PEM_END = String.raw`-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----`
+// A line break as written: real, or escaped inside a (possibly nested) JSON
+// or JS string. Body lines may be indented, as in a YAML block scalar.
+const PEM_LINE_BREAK = String.raw`(?:\r?\n|\\+r\\+n|\\+n)[ \t]*`
+// Env files often carry the whole block on one line, space-separated.
+const PEM_BREAK = String.raw`(?:${PEM_LINE_BREAK}|[ \t]+)`
+// RFC 1421 encapsulated headers of a legacy encrypted key, then a blank line.
+const PEM_HEADERS_RE = new RegExp(String.raw`(?:${PEM_LINE_BREAK}(?:Proc-Type|DEK-Info):[^\r\n\\]*)+(?:${PEM_LINE_BREAK}(?=${PEM_LINE_BREAK}))?`, 'y')
+// Body lines are 64 (PEM) or 70 (OpenSSH) characters; the first one must be a full line.
+const PEM_FULL_LINE_RE = new RegExp(String.raw`${PEM_BREAK}[A-Za-z0-9+/=]{40,}`, 'y')
+// The shorter last line: before the END line, or where a cut-off block ends
+// with the text or its string. A short line followed by more prose is prose.
+const PEM_SHORT_LINE_RE = new RegExp(String.raw`${PEM_BREAK}[A-Za-z0-9+/]+={0,2}(?=(?:${PEM_BREAK})?${PEM_END}|\s*$|["'\x60\\])`, 'y')
+const PEM_END_RE = new RegExp(String.raw`(?:${PEM_BREAK})?${PEM_END}`, 'y')
+
+/** Advances past a sticky match at `from`, or stays put. */
+function skip(re: RegExp, text: string, from: number): number {
+  re.lastIndex = from
+  return re.exec(text) ? re.lastIndex : from
+}
+
+function pemBlockEnd(text: string, headerEnd: number): number | null {
+  const bodyStart = skip(PEM_HEADERS_RE, text, headerEnd)
+  let end = skip(PEM_FULL_LINE_RE, text, bodyStart)
+  if (end === bodyStart) return null
+  for (let next = skip(PEM_FULL_LINE_RE, text, end); next !== end; next = skip(PEM_FULL_LINE_RE, text, end)) end = next
+  end = skip(PEM_SHORT_LINE_RE, text, end)
+  return skip(PEM_END_RE, text, end)
+}
 
 function pemSpans(text: string): DetectedSpan[] {
-  return [...text.matchAll(PEM_RE)].map((m) => {
+  const spans: DetectedSpan[] = []
+  for (const m of text.matchAll(PEM_BEGIN_RE)) {
     const start = m.index ?? 0
-    return { start, end: start + m[0].length, kind: 'private-key', rank: OWN_RANK }
-  })
+    const end = pemBlockEnd(text, start + m[0].length)
+    if (end !== null) spans.push({ start, end, kind: 'private-key', rank: OWN_RANK })
+  }
+  return spans
 }
 
 function urlPasswordSpans(text: string): DetectedSpan[] {
@@ -94,56 +128,24 @@ function knownFormatSpans(text: string): DetectedSpan[] {
 }
 
 // `Authorization: Bearer <token>` in a raw header, a curl `-H "…"`, JSON or
-// a JS object. The token's extent comes from the syntax around the header:
-// the string it sits in, the quoted value, the line of a raw header, or one
-// shell word mid-line. `Proxy-Authorization` carries the same credential.
-const AUTH_HEADER_RE = /(?<![\w-])(?:proxy-)?authorization(["'`]?)[ \t]*[:=][ \t]*/gi
-const AUTH_SCHEME_RE = /^(?:bearer|basic)[ \t]+/i
-const LINE_LEADING_RE = /^[ \t]*(?:[-*+>][ \t]*)?$/
-
-type Range = readonly [number, number]
-
-function quotedContent(text: string, open: number, lineEnd: number): Range {
-  const close = quotedValueEnd(text, open, lineEnd)
-  return [open + 1, close === -1 ? lineEnd : close]
-}
-
-function authValueRange(text: string, lines: Lines, nameStart: number, keyQuote: string, from: number): Range {
-  const lineEnd = lines.endOf(from)
-  if (isQuote(text.charAt(from))) return quotedContent(text, from, lineEnd)
-  const before = text.charAt(nameStart - 1)
-  if (!keyQuote && isQuote(before)) return [from, quotedContent(text, nameStart - 1, lineEnd)[1]]
-  if (LINE_LEADING_RE.test(text.slice(lines.startOf(nameStart), nameStart))) return [from, lineEnd]
-  const scheme = AUTH_SCHEME_RE.exec(text.slice(from, lineEnd))
-  return [from, shellWordEnd(text, from + (scheme?.[0].length ?? 0), lineEnd)]
-}
-
-/** In a JS template (`` `Bearer ${token}` ``) `${…}` is interpolation, elsewhere it is literal text. */
-function isReferenceOrPlaceholder(token: string, isTemplate: boolean): boolean {
-  return (
-    token === '' ||
-    (isTemplate && token.includes('${')) ||
-    isShellReference(token) ||
-    token.startsWith(PLACEHOLDER_PREFIX) ||
-    DOC_PLACEHOLDER_RE.test(token)
-  )
-}
+// a JS object; `Proxy-Authorization` carries the same credential. Only the
+// RFC 7235 token68 credential after the scheme is redacted, never the rest
+// of the line, and only when it is at least 8 characters and not a plain
+// word: "Authorization: Bearer tokens must be rotated" and "Authorization:
+// Basic authentication is off" are prose. A reference (`$TOKEN`, `${token}`,
+// `' + token`) or a placeholder (`<token>`) starts with a character token68
+// does not allow, so it yields no credential.
+const AUTH_CREDENTIAL_RE = /(?<![\w-])(?:proxy-)?authorization["'`]?[ \t]*[:=][ \t]*["'`]?(?:bearer|basic)[ \t]+([A-Za-z0-9\-._~+/]+=*)/gi
+const MIN_CREDENTIAL_LENGTH = 8
+const PLAIN_WORD_RE = /^[A-Za-z][a-z]*$/
 
 function authorizationSpans(text: string): DetectedSpan[] {
-  const lines = new Lines(text)
   const spans: DetectedSpan[] = []
-  for (const m of text.matchAll(AUTH_HEADER_RE)) {
-    const nameStart = m.index ?? 0
-    const valueFrom = nameStart + m[0].length
-    const isTemplate = text.charAt(valueFrom) === '`' || text.charAt(nameStart - 1) === '`'
-    const [from, end] = authValueRange(text, lines, nameStart, m[1] ?? '', valueFrom)
-    const value = text.slice(from, end)
-    const scheme = AUTH_SCHEME_RE.exec(value)
-    if (!scheme) continue
-    const token = value.slice(scheme[0].length).trimEnd()
-    if (isReferenceOrPlaceholder(token.trim(), isTemplate)) continue
-    const start = from + scheme[0].length
-    spans.push({ start, end: start + token.length, kind: 'authorization', rank: OWN_RANK })
+  for (const m of text.matchAll(AUTH_CREDENTIAL_RE)) {
+    const token = m[1] ?? ''
+    if (token.length < MIN_CREDENTIAL_LENGTH || PLAIN_WORD_RE.test(token) || DOC_PLACEHOLDER_RE.test(token)) continue
+    const end = (m.index ?? 0) + m[0].length
+    spans.push({ start: end - token.length, end, kind: 'authorization', rank: OWN_RANK })
   }
   return spans
 }

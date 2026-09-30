@@ -3,7 +3,8 @@
  *   - a value registered from the machine's secret files is masked in every
  *     syntax it can be written in, down to the last 4-character piece;
  *   - an unregistered value is guaranteed only where its syntax identifies it
- *     as a credential (JWT, Authorization header, URL userinfo). Anywhere else
+ *     as a credential (JWT, the token68 credential of an Authorization header,
+ *     URL userinfo). Anywhere else
  *     an unregistered password is left for the review list: that is the known
  *     gap of redacting only what is certain, and it is not asserted here.
  */
@@ -67,6 +68,7 @@ const yamlValue = (s: string): string => (YAML_PLAIN_RE.test(s) ? s : JSON.strin
 const flagValue = (flag: string, s: string): string => (s.startsWith('-') ? `${flag}=${shellQuote(s)}` : `${flag} ${shellQuote(s)}`)
 const xmlText = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 const b64url = (s: string): string => Buffer.from(s, 'utf8').toString('base64url')
+const b64 = (s: string): string => Buffer.from(s, 'utf8').toString('base64')
 
 interface Syntax {
   name: string
@@ -118,8 +120,21 @@ const SYNTAXES: Syntax[] = [
 ]
 
 /** Syntaxes that identify a credential by themselves: the value must redact even when nobody registered it. */
+// An Authorization credential is an RFC 7235 token68 (base64-like), so the
+// password travels base64-encoded: Basic encodes `user:password`, and the
+// Bearer case stands for any opaque token.
 const SELF_IDENTIFYING: Syntax[] = [
-  ...SYNTAXES.filter((s) => ['curl Authorization: Bearer', 'raw Authorization header', 'URL userinfo'].includes(s.name)),
+  ...SYNTAXES.filter((s) => s.name === 'URL userinfo'),
+  {
+    name: 'Authorization: Basic',
+    render: (pw) => `GET /v1/models HTTP/1.1\nHost: api.example.com\nAuthorization: Basic ${b64(`engram:${pw}`)}\nAccept: */*`,
+    keys: ['Host: api.example.com', 'Authorization: Basic ', 'Accept: */*'],
+  },
+  {
+    name: 'curl Authorization: Bearer (token68)',
+    render: (pw) => `curl -s -H "Authorization: Bearer ${b64url(pw)}" https://api.example.com/v1/models`,
+    keys: ['"Authorization: Bearer ', ' https://api.example.com/v1/models'],
+  },
   {
     name: 'JWT',
     render: (pw) => `session cookie: ${b64url('{"alg":"HS256","typ":"JWT"}')}.${b64url(JSON.stringify({ sub: pw }))}.${b64url(pw + pw)} expires soon`,
@@ -127,11 +142,13 @@ const SELF_IDENTIFYING: Syntax[] = [
   },
 ]
 
-/** The JWT syntax writes the password only in base64url; its pieces are what must not survive. */
-const encodingsOf = (syntax: Syntax, pw: string): string[] =>
-  syntax.name === 'JWT'
-    ? [b64url(JSON.stringify({ sub: pw })), b64url(pw + pw)]
-    : [encodeURIComponent(pw), JSON.stringify(pw), JSON.stringify(JSON.stringify(pw)), xmlText(pw)]
+/** Syntaxes that write the password only base64-encoded: those pieces are what must not survive. */
+function encodingsOf(syntax: Syntax, pw: string): string[] {
+  if (syntax.name === 'JWT') return [b64url(JSON.stringify({ sub: pw })), b64url(pw + pw)]
+  if (syntax.name === 'Authorization: Basic') return [b64(`engram:${pw}`)]
+  if (syntax.name === 'curl Authorization: Bearer (token68)') return [b64url(pw)]
+  return [encodeURIComponent(pw), JSON.stringify(pw), JSON.stringify(JSON.stringify(pw)), xmlText(pw)]
+}
 
 function windows(s: string): string[] {
   const out: string[] = []
@@ -205,7 +222,12 @@ describe('scrubSecrets — unregistered random passwords in self-identifying syn
   }, 60_000)
 })
 
-// Hook-shaped text with credential-adjacent words and no credential values.
+// Hook-shaped text that must pass through unchanged. Most entries hold
+// credential-adjacent words and no credential value; a few hold
+// credential-shaped values on purpose (`password: hunter2`, `curl -u
+// admin:pa55word`, `-pS3cret`) in free text with nothing registered: only
+// known values and self-identifying formats redact, so these stay, and the
+// review list (findSecretCandidates) is where they surface.
 const NEGATIVE_CORPUS: string[] = [
   'TOKEN_LIMIT=4096\nMAX_TOKENS=8192\nAUTH_ENABLED=true\nPASSWORD_MIN_LENGTH=12',
   'ACCESS_KEY_ID_ENV=AWS_ACCESS_KEY_ID\nCLIENT_ID=engram-web\nDEFAULT_API_KEY_ENV=OPENAI_API_KEY',
