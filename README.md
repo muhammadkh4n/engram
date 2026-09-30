@@ -141,7 +141,7 @@ node examples/demo.mjs
 | `@engram-mem/postgrest` | PostgREST storage | PostgreSQL + pgvector via any PostgREST endpoint (Supabase, self-hosted, EnterpriseDB cloud) — uses bare `@supabase/postgrest-js` |
 | `@engram-mem/supabase` | _Deprecated shim_ | Re-exports `@engram-mem/postgrest` for backward compat (will be removed in v0.5.0) |
 | `@engram-mem/openai` | Intelligence | OpenAI embeddings, summarization, reranking, contextualization |
-| `@engram-mem/rerank-onnx` | Local reranker | mxbai-rerank-large/base/xsmall-v1 via ONNX Runtime — zero per-query cost, opt-in via `ENGRAM_RERANK_LOCAL=true` |
+| `@engram-mem/rerank-onnx` | Local reranker | gte-reranker-modernbert-base (default) or mxbai-rerank-large/base/xsmall-v1 via ONNX Runtime — zero per-query cost, opt-in via `ENGRAM_RERANK_LOCAL=true` |
 | `@engram-mem/graph` | Neural graph | Neo4j spreading activation, community detection, pattern completion |
 | `@engram-mem/openclaw` | Framework integration | OpenClaw ContextEngine plugin, 4 memory tools, auto-consolidation |
 | `@engram-mem/mcp` | Claude integration | MCP server (stdio + Streamable HTTP), 13 bin CLIs, Claude Code hooks |
@@ -174,7 +174,7 @@ Run automatically or manually:
 | 0 | SQLite + BM25 | Heuristic | Manual | Fast, local, zero-cost. Good for testing. |
 | 1 | SQLite | OpenAI embeddings | Manual | Add vector search. Still fully local DB. |
 | 2 | PostgREST (Supabase or self-hosted) | OpenAI embeddings | Manual | Share memory between agents over HTTP. |
-| 3 | PostgREST + Neo4j graph | OpenAI + local mxbai-rerank | Auto | Full cognitive engine with $0 marginal rerank. |
+| 3 | PostgREST + Neo4j graph | OpenAI + local ONNX rerank | Auto | Full cognitive engine with $0 marginal rerank. |
 
 Pick a level. Start at 0. Upgrade anytime.
 
@@ -201,7 +201,7 @@ const memory = createMemory({
 import { NeuralGraph } from '@engram-mem/graph'
 import { createOnnxReranker } from '@engram-mem/rerank-onnx'
 
-const onnx = createOnnxReranker()  // mxbai-rerank-large-v1 by default
+const onnx = createOnnxReranker()  // gte-reranker-modernbert-base by default
 const memory = createMemory({
   storage: new PostgRestStorageAdapter({ url: '...', key: '...' }),
   intelligence: {
@@ -321,7 +321,7 @@ Add to your `~/.claude/settings.json`:
   "NEO4J_PASSWORD": "...",
 
   "ENGRAM_RERANK_LOCAL": "true",                // swap LLM rerank for local ONNX cross-encoder
-  "ENGRAM_RERANK_LOCAL_MODEL": "mixedbread-ai/mxbai-rerank-base-v1",   // optional: pick variant (default: large-v1, ~1-1.5GB RAM)
+  "ENGRAM_RERANK_LOCAL_MODEL": "mixedbread-ai/mxbai-rerank-base-v1",   // optional: pick model (default: gte-reranker-modernbert-base)
 
   "ENGRAM_INGEST_CONTEXTUAL": "true"            // Anthropic-style contextual preamble per turn
 }

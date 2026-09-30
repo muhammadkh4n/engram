@@ -1,6 +1,7 @@
 // Local cross-encoder reranker for Engram.
 //
-// Runs an mxbai-rerank (DeBERTa-v2) model via ONNX Runtime through
+// Runs a single-logit cross-encoder (gte-reranker-modernbert-base by default,
+// or an mxbai-rerank-v1 DeBERTa-v2 model) via ONNX Runtime through
 // @huggingface/transformers. No network calls at query time — weights are
 // downloaded on first use and cached under the HF cache directory.
 //
@@ -22,12 +23,20 @@ export type OnnxDType = 'fp32' | 'fp16' | 'q8' | 'q4'
 
 export interface OnnxRerankerOptions {
   /**
-   * HuggingFace model id. Default: 'mixedbread-ai/mxbai-rerank-large-v1'.
+   * HuggingFace model id. Default: 'Alibaba-NLP/gte-reranker-modernbert-base'.
    *
-   * Tradeoffs (all mxbai-rerank-v1 variants have ONNX weights):
-   *   - 'mixedbread-ai/mxbai-rerank-large-v1' : best quality, ~113MB @ q8, slower
-   *   - 'mixedbread-ai/mxbai-rerank-base-v1'  : 3x faster, small quality drop
-   *   - 'mixedbread-ai/mxbai-rerank-xsmall-v1': fastest, further quality drop
+   * Any cross-encoder with ONNX weights and a single relevance logit works:
+   *   - 'Alibaba-NLP/gte-reranker-modernbert-base' (default): ModernBERT, 149M
+   *     params. Matched large-v1 within judge noise on LongMemEval and led it
+   *     on real recall queries, with about 4x faster rerank and ~1.2GB less
+   *     RSS on a CPU host.
+   *   - 'mixedbread-ai/mxbai-rerank-large-v1': previous default. DeBERTa-v2,
+   *     435M params, higher RSS and about 4x slower rerank.
+   *   - 'mixedbread-ai/mxbai-rerank-base-v1'  : smaller mxbai, small quality drop
+   *   - 'mixedbread-ai/mxbai-rerank-xsmall-v1': fastest mxbai, further quality drop
+   *
+   * Scores are not comparable across models: each model's sigmoid output sits
+   * on its own scale, so nothing may gate on an absolute rerank score.
    */
   model?: string
   /** ONNX weight dtype. 'q8' is ~4x smaller than fp32 with small quality loss. Default: 'q8'. */
@@ -60,7 +69,7 @@ export interface OnnxReranker {
   dispose(): Promise<void>
 }
 
-const DEFAULT_MODEL = 'mixedbread-ai/mxbai-rerank-large-v1'
+export const DEFAULT_RERANK_MODEL = 'Alibaba-NLP/gte-reranker-modernbert-base'
 const DEFAULT_DTYPE: OnnxDType = 'q8'
 const DEFAULT_BATCH_SIZE = 8
 const DEFAULT_MAX_CANDIDATES = 25
@@ -68,7 +77,7 @@ const DEFAULT_MAX_LENGTH = 512
 const DEFAULT_MAX_DOC_CHARS = 1200
 
 export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReranker {
-  const model = options.model ?? DEFAULT_MODEL
+  const model = options.model ?? DEFAULT_RERANK_MODEL
   const dtype = options.dtype ?? DEFAULT_DTYPE
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE
   const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES
@@ -121,9 +130,17 @@ export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReran
     if (!logits?.data) {
       throw new Error('reranker returned unexpected output shape')
     }
+    // Both supported families (gte-reranker-modernbert, mxbai-rerank-v1) emit
+    // one relevance logit per pair. A multi-label head would flatten to
+    // several values per pair and silently misalign scores with documents.
+    if (logits.data.length !== docs.length) {
+      throw new Error(
+        `reranker model ${model} returned ${logits.data.length} logits for ${docs.length} pairs; expected one logit per pair`,
+      )
+    }
 
-    // mxbai-rerank returns a single regression-style logit per pair.
-    // Sigmoid maps it to [0, 1]; higher is more relevant.
+    // Sigmoid maps the logit to [0, 1]; higher is more relevant. The scale
+    // is model-specific, so scores only order candidates within one model.
     return Array.from(logits.data, (x: number) => sigmoid(Number(x)))
   }
 

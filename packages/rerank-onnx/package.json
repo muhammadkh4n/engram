@@ -1,7 +1,7 @@
 {
   "name": "@engram-mem/rerank-onnx",
   "version": "0.6.4",
-  "description": "Local cross-encoder reranker for Engram — runs mxbai-rerank-v1 via ONNX Runtime (no API calls)",
+  "description": "Local cross-encoder reranker for Engram — runs gte-reranker-modernbert-base or mxbai-rerank-v1 via ONNX Runtime (no API calls)",
   "keywords": [
     "memory",
     "rag",

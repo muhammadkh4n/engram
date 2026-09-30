@@ -61,13 +61,19 @@ function requireEnv(name: string): string {
  * When `ENGRAM_RERANK_LOCAL=true`, dynamically loads `@engram-mem/rerank-onnx`
  * and spreads its `rerank` over the provided intelligence adapter.
  *
- * Model variant is selected via `ENGRAM_RERANK_LOCAL_MODEL`:
- *   - `mixedbread-ai/mxbai-rerank-large-v1`  (default) — best quality, ~113MB
- *     q8 weights, ~1-1.5GB peak RAM at load, ~80ms per (query, doc) pair.
- *   - `mixedbread-ai/mxbai-rerank-base-v1`   — 3× faster, ~50-70MB, small
- *     quality drop. Good default for memory-constrained boxes (<8GB RAM).
- *   - `mixedbread-ai/mxbai-rerank-xsmall-v1` — fastest, ~30MB, further drop.
- *     Last resort if base still OOMs.
+ * Model is selected via `ENGRAM_RERANK_LOCAL_MODEL`:
+ *   - `Alibaba-NLP/gte-reranker-modernbert-base` (default) — matched
+ *     large-v1 within judge noise on LongMemEval and led it on real recall
+ *     queries; on a CPU host rerank p50 3.6s vs 17.2s and RSS 1.66GB vs
+ *     2.84GB against large-v1.
+ *   - `mixedbread-ai/mxbai-rerank-large-v1` — previous default; higher RSS
+ *     and about 4× slower rerank on the same host.
+ *   - `mixedbread-ai/mxbai-rerank-base-v1`   — smaller mxbai, small quality
+ *     drop, for memory-constrained boxes.
+ *   - `mixedbread-ai/mxbai-rerank-xsmall-v1` — fastest mxbai, further drop.
+ *
+ * Rerank scores are not comparable across models (each sits on its own
+ * sigmoid scale), so nothing may gate on an absolute rerank score.
  *
  * Weights are downloaded on first use and cached under the HF cache dir.
  * `.load()` is fired fire-and-forget at startup so the cache warm-up
@@ -91,7 +97,7 @@ async function maybeWithLocalRerank(
       const msg = err instanceof Error ? err.message : String(err)
       console.warn(`[engram-mcp] rerank-onnx warmup failed (will retry on first call): ${msg}`)
     })
-    const modelLabel = model ?? 'mixedbread-ai/mxbai-rerank-large-v1 (default)'
+    const modelLabel = model ?? `${mod.DEFAULT_RERANK_MODEL} (default)`
     console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
       ...intelligence,
@@ -255,7 +261,7 @@ export async function getMemory(): Promise<Memory> {
     ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
     ...chatReasoning,
   })
-  // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local mxbai-rerank
+  // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local ONNX
   // cross-encoder over the openaiIntelligence adapter so the rerank stage
   // uses ONNX CPU inference (~$0 per query) instead of gpt-4o-mini pointwise.
   // Dynamic import keeps the 113MB ONNX dep out of the cold-start path for
