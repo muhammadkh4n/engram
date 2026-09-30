@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
+  assertRowsInSelection,
   diffRunIdentity,
+  formatCheckpointText,
   formatHeaderLine,
   formatRowLine,
   idListSha256,
@@ -89,7 +91,29 @@ describe('parsePartial', () => {
   })
 })
 
+describe('checkpoint rewrite on resume', () => {
+  it('survives a second resume after a truncated last line', () => {
+    const killed =
+      formatHeaderLine(identity) + formatRowLine({ question_id: 'q1' }) + '{"question_id":"q2","rec'
+    const first = parsePartial(killed)
+    const rewritten = formatCheckpointText(first.header, first.rows)
+    const appended = rewritten + formatRowLine({ question_id: 'q2' }) + formatRowLine({ question_id: 'q3' })
+    const second = parsePartial(appended)
+    expect(second.header).toEqual(identity)
+    expect(second.rows.map((r) => r.question_id)).toEqual(['q1', 'q2', 'q3'])
+  })
+
+  it('writes a header-only file when no rows survive', () => {
+    expect(formatCheckpointText(identity, [])).toBe(formatHeaderLine(identity))
+  })
+})
+
 describe('resume filter and final order', () => {
+  it('accepts checkpoint rows inside the selection and refuses others before any run', () => {
+    expect(() => assertRowsInSelection(qs, [{ question_id: 'q2' }])).not.toThrow()
+    expect(() => assertRowsInSelection(qs, [{ question_id: 'q9' }])).toThrow(/q9/)
+  })
+
   it('skips questions whose ids are already done', () => {
     const pending = pendingQuestions(qs, new Set(['q1', 'q3']))
     expect(pending.map((q) => q.question_id)).toEqual(['q2', 'q4'])

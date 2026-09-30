@@ -65,6 +65,15 @@ export function formatRowLine<R extends QuestionRef>(row: R): string {
   return JSON.stringify(row) + '\n'
 }
 
+/**
+ * The whole checkpoint as text: header plus one line per row. A resume writes
+ * this back before appending, so a truncated tail from a killed run is gone
+ * from disk and the next append starts on a fresh line.
+ */
+export function formatCheckpointText(header: RunIdentity, rows: readonly QuestionRef[]): string {
+  return formatHeaderLine(header) + rows.map((r) => formatRowLine(r)).join('')
+}
+
 /** The first identity field whose value differs, or null when the runs match. */
 export function diffRunIdentity(recorded: RunIdentity, current: RunIdentity): keyof RunIdentity | null {
   for (const field of IDENTITY_FIELDS) {
@@ -110,14 +119,20 @@ export function pendingQuestions<Q extends QuestionRef>(questions: readonly Q[],
   return questions.filter((q) => !doneIds.has(q.question_id))
 }
 
-/** Rows in the order their questions appear in the selected dataset slice. */
-export function orderRowsByDataset<R extends QuestionRef>(questions: readonly QuestionRef[], rows: readonly R[]): R[] {
-  const position = new Map(questions.map((q, i) => [q.question_id, i]))
+/** Refuse checkpoint rows whose questions are not in this run's selection. */
+export function assertRowsInSelection(questions: readonly QuestionRef[], rows: readonly QuestionRef[]): void {
+  const selected = new Set(questions.map((q) => q.question_id))
   for (const r of rows) {
-    if (!position.has(r.question_id)) {
+    if (!selected.has(r.question_id)) {
       throw new Error(`row for question_id "${r.question_id}" is not in the selected questions`)
     }
   }
+}
+
+/** Rows in the order their questions appear in the selected dataset slice. */
+export function orderRowsByDataset<R extends QuestionRef>(questions: readonly QuestionRef[], rows: readonly R[]): R[] {
+  assertRowsInSelection(questions, rows)
+  const position = new Map(questions.map((q, i) => [q.question_id, i]))
   return [...rows].sort((a, b) => position.get(a.question_id)! - position.get(b.question_id)!)
 }
 

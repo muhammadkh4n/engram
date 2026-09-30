@@ -49,7 +49,9 @@ import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
 import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
 import {
+  assertRowsInSelection,
   diffRunIdentity,
+  formatCheckpointText,
   formatHeaderLine,
   formatRowLine,
   idListSha256,
@@ -128,6 +130,7 @@ async function main(): Promise<void> {
   const partialPath = partialPathFor(args.output)
   const identity = buildRunIdentity(args, selection?.sha256)
   const resumedRows = openCheckpoint(partialPath, identity, args.resume === true)
+  exitOnError(() => assertRowsInSelection(questions, resumedRows))
   const todo = pendingQuestions(questions, new Set(resumedRows.map((r) => r.question_id)))
   if (args.resume) console.log(`Resuming: ${resumedRows.length} rows from ${partialPath}, ${todo.length} to run`)
 
@@ -204,11 +207,12 @@ async function main(): Promise<void> {
 
     const qDur = ((Date.now() - qStart) / 1000).toFixed(1)
     if ((i + 1) % 10 === 0 || i + 1 === todo.length) {
-      const r5 = newRows.filter((r) => r.recall_at_k[5]).length
-      const r10 = newRows.filter((r) => r.recall_at_k[10]).length
-      const r30 = newRows.filter((r) => r.recall_at_k[30]).length
+      const doneRows = [...resumedRows, ...newRows]
+      const r5 = doneRows.filter((r) => r.recall_at_k[5]).length
+      const r10 = doneRows.filter((r) => r.recall_at_k[10]).length
+      const r30 = doneRows.filter((r) => r.recall_at_k[30]).length
       console.log(
-        `  Q ${i + 1}/${todo.length}  r@5=${r5}  r@10=${r10}  r@30=${r30}  (last Q: ${qDur}s)`,
+        `  Q ${i + 1}/${todo.length}  r@5=${r5}/${doneRows.length}  r@10=${r10}/${doneRows.length}  r@30=${r30}/${doneRows.length}  (last Q: ${qDur}s)`,
       )
     }
   }
@@ -251,6 +255,8 @@ async function main(): Promise<void> {
       K_values: K_VALUES,
       total_questions: rows.length,
       total_seconds: parseFloat(totalDur),
+      eval_seconds_all_rows: sumSeconds(rows, (r) => r.eval_ms),
+      ingest_seconds_all_rows: sumSeconds(rows, (r) => r.ingest_ms),
       generated_at: new Date().toISOString(),
       ...(args.resume ? { resumed_rows: resumedRows.length } : {}),
       ...(selection ? { question_ids_file: args.questionIds, question_ids_sha256: selection.sha256 } : {}),
@@ -350,7 +356,17 @@ function openCheckpoint(partialPath: string, identity: RunIdentity, resume: bool
     )
     process.exit(1)
   }
+  // Rewrite before any append so a truncated tail left by a kill cannot glue
+  // onto the next row. The rename is atomic within a directory: a kill here
+  // leaves either the old file or the new one.
+  const tmpPath = `${partialPath}.tmp`
+  fs.writeFileSync(tmpPath, formatCheckpointText(partial.header, partial.rows))
+  fs.renameSync(tmpPath, partialPath)
   return partial.rows as unknown as SweepRow[]
+}
+
+function sumSeconds(rows: readonly SweepRow[], ms: (r: SweepRow) => number): number {
+  return parseFloat((rows.reduce((acc, r) => acc + ms(r), 0) / 1000).toFixed(1))
 }
 
 function validateEnv(_args: SweepArgs): void {
