@@ -5,7 +5,7 @@
  *
  * Every rule reads the original text and reports spans:
  *   - known token formats, private keys and connection strings (secretlint)
- *   - values assigned to secret-named keys (`NAME=value`, `NAME: value`, JSON)
+ *   - values assigned to secret-named keys and CLI password arguments (keyed-secrets.ts)
  *   - PEM private-key blocks, including truncated ones
  *   - passwords inside URL userinfo, for any scheme
  *   - formats secretlint lacks (JWTs, OpenRouter keys, Anthropic OAuth/admin tokens)
@@ -18,8 +18,11 @@
  * placeholder, so scrubbing already-scrubbed text is a no-op.
  */
 
+import { KEYED_RANK, keyedSpans } from './keyed-secrets.js'
+import { PLACEHOLDER_PREFIX, placeholder } from './placeholder.js'
 import { SECRETLINT_RANK, secretlintSpans } from './secretlint-spans.js'
 import type { DetectedSpan } from './secretlint-spans.js'
+import { isShellReference } from './value-extent.js'
 
 export interface SecretRedaction {
   kind: string
@@ -31,185 +34,20 @@ export interface ScrubResult {
   redactions: SecretRedaction[]
 }
 
-const PLACEHOLDER_PREFIX = '[REDACTED:'
-const PLACEHOLDER_RE = /\[REDACTED:[^\]\n]*\]/g
-
-function placeholder(label: string): string {
-  return `${PLACEHOLDER_PREFIX}${label}]`
-}
-
-// AUTH matches AUTHORIZATION but not AUTHOR, so `Author:` lines in git output
-// are left alone. TOKENS / TOKENIZER name LLM token counts and settings
-// (`max_tokens`, `approx_tokens`), never a credential.
-const SECRET_WORD = String.raw`(?:SECRET|TOKEN(?!S|IZ)|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTH(?!OR(?!IZ)))`
-// Key names, values and URL schemes are length-bounded so that a long
-// identifier-like run (base64, minified code) costs linear time, not quadratic.
-const SECRET_KEY = String.raw`(?=[A-Za-z_])[\w.-]{0,64}?${SECRET_WORD}[\w.-]{0,64}`
-const VALUE_CHARS = String.raw`[^\s'"\`,;(){}\[\]<>&]`
-const VALUE_END = String.raw`(?=$|[\s'"\`,;)}\]&])`
-const AUTH_SCHEME = String.raw`(?:Bearer|Basic|Token|Digest)[ \t]+`
-
-// The optional spaces after the separator refuse to run into another `KEY=`
-// (the regex is case-insensitive), so `OPENAI_API_KEY= NEO4J_PASSWORD=x` keeps
-// both names and attributes the value to the key it belongs to.
-const ASSIGNMENT_RE = new RegExp(
-  String.raw`(?<![\w.$])(["']?)(${SECRET_KEY})\1` +
-    String.raw`([ \t]*[=:](?:[ \t]+(?![A-Z][A-Z0-9_]*=))?)(?![=:])` +
-    String.raw`(?:"([^"\n]*)"|'([^'\n]*)'|\`([^\`\n]*)\`|(${AUTH_SCHEME})?(?!${AUTH_SCHEME})(${VALUE_CHARS}{1,1024})${VALUE_END})`,
-  'gimd',
-)
-
-const LITERAL_VALUES = new Set([
-  'true', 'false', 'null', 'nil', 'none', 'undefined', 'yes', 'no', 'on', 'off',
-  'string', 'number', 'boolean', 'unknown', 'any', 'never', 'object', 'void', 'bigint', 'symbol',
-])
-
-function isOnlyPlaceholders(value: string): boolean {
-  return value.includes(PLACEHOLDER_PREFIX) && value.replace(PLACEHOLDER_RE, '').replace(/\\n|\s/g, '') === ''
-}
-
-// Counts and amounts: `4096`, `~99K`, `$0.05`, `30%`. Exempt only under a
-// qualified name (`TOKEN_LIMIT`, `AUTH_TIMEOUT_MS`); `DB_PASSWORD=12345678` is a PIN.
-const NAME_ENDS_IN_SECRET_WORD_RE = new RegExp(`${SECRET_WORD}$`, 'i')
-const QUANTITY_RE = /^[~<>]?[$€£]?-?\d[\d,.]*[KkMmGg%]?$/
-// Documentation placeholders: `...`, `sk-...`, `<pwd>`, `xxxx`, `****`.
-const DOC_PLACEHOLDER_RE = /(?:\.\.\.|…)$|^<[^>]*>$|^(?:x{3,}|\*{3,})$/i
-// `$VAR`, `${VAR}`, `$(cmd)`, `%VAR%`: resolved elsewhere, not a literal secret.
-const INDIRECTION_RE = /^\$[{(]?[A-Za-z_]|^%[A-Za-z_]+%$/
-// `process.env.X!`, `opts.token`, `resp.usage?.prompt_tokens`: a code reference.
-const MEMBER_PATH_RE = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+!?$/
-// `ANSWER_MAX_TOKENS`: the name of a constant.
-const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/
-// `openaiKey`: a camelCase variable passed by name in code.
-const CAMEL_IDENTIFIER_RE = /^[a-z]+(?:[A-Z][a-z]+)+$/
-// Keys that say where a secret is found rather than holding it:
-// `DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'`, `TOKEN_FILE=/run/secrets/token`, `passwordPath`.
-const VARIABLE_KEY_RES = [/[_.-](?:ENV|NAME|VAR|FILE|PATH)$/i, /[a-z0-9](?:Env|Name|Var|File|Path)$/]
-
-function isVariableKey(name: string): boolean {
-  return VARIABLE_KEY_RES.some((re) => re.test(name))
-}
-
-/** Values that cannot be a credential whatever syntax surrounds them. */
-function isInertValue(value: string, name: string): boolean {
-  if (value === '' || isOnlyPlaceholders(value)) return true
-  if (QUANTITY_RE.test(value)) return !NAME_ENDS_IN_SECRET_WORD_RE.test(name)
-  return LITERAL_VALUES.has(value.toLowerCase()) || DOC_PLACEHOLDER_RE.test(value)
-}
-
-/**
- * A quoted value is a literal in every language, so its shape proves nothing: a
- * password can look like a constant or a camelCase word. Only shell expansion
- * inside double quotes and template interpolation make it a reference.
- */
-function isQuotedReference(value: string, quote: string): boolean {
-  if (quote === '"') return INDIRECTION_RE.test(value)
-  return quote === '`' && value.includes('${')
-}
-
-/** Identifier shapes, exempt only where the syntax shows the value is a code expression. */
-function isCodeReference(value: string): boolean {
-  return [MEMBER_PATH_RE, CONSTANT_NAME_RE, CAMEL_IDENTIFIER_RE].some((re) => re.test(value))
-}
-
-function isEnvStyleKey(name: string): boolean {
-  return /[_.-]/.test(name) || name === name.toUpperCase()
-}
-
-function isAtLineStart(text: string, offset: number): boolean {
-  const lineStart = text.lastIndexOf('\n', offset - 1) + 1
-  return /^[ \t]*(?:-[ \t]+)?$/.test(text.slice(lineStart, offset))
-}
-
-function restOfLine(text: string, offset: number): string {
-  const lineEnd = text.indexOf('\n', offset)
-  return text.slice(offset, lineEnd === -1 ? text.length : lineEnd)
-}
-
-/**
- * Whether an unquoted value sits in data syntax (its text is the value) or in
- * code syntax (it may name a variable). Data: a tight `NAME=value` (env line,
- * `export`, CLI flag, query string), an auth-scheme header, a `key: value`
- * inside a string, or a line-leading `key: value` with nothing code-like after
- * it (YAML, env dumps, HTTP headers). Everything else is code: a mid-line
- * assignment or a line-leading pair followed by `,` `;` `(` or `{`.
- */
-function isDataSyntax(text: string, offset: number, keyQuote: string, sep: string, valueEnd: number): boolean {
-  if (sep === '=') return true
-  if (!keyQuote && /["']/.test(text.charAt(offset - 1))) return true
-  if (!isAtLineStart(text, offset)) return false
-  return !/^\s*[,;({]|[,;({]\s*$/.test(restOfLine(text, valueEnd))
-}
-
-/**
- * A plain word after a code-style key (`password: see the runbook`,
- * `const token = await …`) is prose or code, not a credential.
- */
-function isProseOrCode(name: string, separator: string, value: string, lineLeading: boolean): boolean {
-  if (!/^[A-Za-z]+$/.test(value) || isEnvStyleKey(name) || lineLeading) return false
-  const trimmed = separator.trim()
-  return trimmed === ':' || separator !== trimmed
-}
-
-interface BarePair {
-  offset: number
+/** One redaction and the range of the original text it replaces. */
+export interface DetectedSecret extends SecretRedaction {
+  start: number
   end: number
-  keyQuote: string
-  name: string
-  sep: string
-  hasScheme: boolean
-  value: string
 }
 
-function isExemptBareValue(text: string, pair: BarePair): boolean {
-  const { offset, end, keyQuote, name, sep, hasScheme, value } = pair
-  if (INDIRECTION_RE.test(value)) return true
-  if (hasScheme || isDataSyntax(text, offset, keyQuote, sep, end)) return false
-  return isCodeReference(value) || isProseOrCode(name, sep, value, isAtLineStart(text, offset))
-}
+// Documentation placeholders inside a URL: `...`, `<pwd>`, `xxxx`, `****`.
+// `<` and `>` cannot appear unencoded in a URL, so `<pwd>` is never a password.
+const DOC_PLACEHOLDER_RE = /(?:\.\.\.|…)$|^<[^>]*>$|^(?:x{3,}|\*{3,})$/i
 
 // Equally wide overlapping spans take the label of the lowest rank: the key
 // name first, then our format rules, then secretlint, then the entropy guess.
-const KEYED_RANK = 0
-const OWN_RANK = 1
+const OWN_RANK = KEYED_RANK + 1
 const HIGH_ENTROPY_RANK = SECRETLINT_RANK + 1
-
-// Capture groups of ASSIGNMENT_RE holding the value, by syntax.
-const DOUBLE_QUOTED = 4
-const SINGLE_QUOTED = 5
-const BACKTICKED = 6
-const AUTH_SCHEME_GROUP = 7
-const BARE = 8
-
-function keyedSpan(text: string, m: RegExpMatchArray): DetectedSpan | null {
-  const offset = m.index ?? 0
-  const keyQuote = m[1] ?? ''
-  const name = m[2] ?? ''
-  const sep = m[3] ?? ''
-  if (isVariableKey(name)) return null
-  const quote = m[DOUBLE_QUOTED] !== undefined ? '"' : m[SINGLE_QUOTED] !== undefined ? "'" : m[BACKTICKED] !== undefined ? '`' : ''
-  const group = quote === '"' ? DOUBLE_QUOTED : quote === "'" ? SINGLE_QUOTED : quote === '`' ? BACKTICKED : BARE
-  const value = m[group] ?? ''
-  const range = m.indices?.[group]
-  if (!range || isInertValue(value, name)) return null
-  if (quote) {
-    if (isQuotedReference(value, quote)) return null
-  } else {
-    const hasScheme = m[AUTH_SCHEME_GROUP] !== undefined
-    const pair = { offset, end: offset + m[0].length, keyQuote, name, sep, hasScheme, value }
-    if (isExemptBareValue(text, pair)) return null
-  }
-  return { start: range[0], end: range[1], kind: 'named-secret', name, rank: KEYED_RANK }
-}
-
-function assignmentSpans(text: string): DetectedSpan[] {
-  const spans: DetectedSpan[] = []
-  for (const m of text.matchAll(ASSIGNMENT_RE)) {
-    const span = keyedSpan(text, m)
-    if (span) spans.push(span)
-  }
-  return spans
-}
 
 // Also covers blocks the secretlint rule leaves out: truncated ones (no END
 // line), short bodies, and types such as ENCRYPTED PRIVATE KEY.
@@ -222,7 +60,11 @@ function pemSpans(text: string): DetectedSpan[] {
   })
 }
 
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]{0,31}):\/\/([^\s:@\/'"]*):([^\s@\/'"]+)@/gid
+// The authority runs from `//` to the first `/`, `?`, `#` or whitespace; its
+// userinfo ends at the last `@` and the password follows the first `:`.
+// Characters a password may contain are not restricted: URL syntax alone
+// delimits it. Authorities are length-bounded to keep the scan linear.
+const URL_AUTHORITY_RE = /\b([a-z][a-z0-9+.-]{0,31}):\/\/([^\s/?#]{1,2048})/gi
 
 function urlKind(scheme: string): string {
   const s = scheme.toLowerCase()
@@ -238,14 +80,31 @@ interface UrlPassword {
   isPlaceholder: boolean
 }
 
+/**
+ * A URL wrapped in quotes (`'postgres://u:p@h'`) ends at the matching quote,
+ * so the authority cannot run on into the text after it.
+ */
+function authorityWithinQuotes(text: string, schemeStart: number, authority: string): string {
+  const quote = text.charAt(schemeStart - 1)
+  if (quote !== '"' && quote !== "'" && quote !== '`') return authority
+  const close = authority.indexOf(quote)
+  return close === -1 ? authority : authority.slice(0, close)
+}
+
 function urlPasswords(text: string, from: number, to: number): UrlPassword[] {
   const found: UrlPassword[] = []
-  for (const m of text.slice(from, to).matchAll(URL_USERINFO_RE)) {
-    const password = m[3] ?? ''
-    const range = m.indices?.[3]
-    if (!range) continue
-    const isPlaceholder = password.startsWith(PLACEHOLDER_PREFIX) || DOC_PLACEHOLDER_RE.test(password)
-    found.push({ start: from + range[0], end: from + range[1], kind: urlKind(m[1] ?? ''), isPlaceholder })
+  for (const m of text.slice(from, to).matchAll(URL_AUTHORITY_RE)) {
+    const schemeStart = from + (m.index ?? 0)
+    const authorityStart = schemeStart + (m[1] ?? '').length + 3
+    const authority = authorityWithinQuotes(text, schemeStart, m[2] ?? '')
+    const at = authority.lastIndexOf('@')
+    const colon = at === -1 ? -1 : authority.indexOf(':')
+    if (colon === -1 || colon > at) continue
+    const password = authority.slice(colon + 1, at)
+    if (password === '') continue
+    const isPlaceholder =
+      password.startsWith(PLACEHOLDER_PREFIX) || DOC_PLACEHOLDER_RE.test(password) || isShellReference(password)
+    found.push({ start: authorityStart + colon + 1, end: authorityStart + at, kind: urlKind(m[1] ?? ''), isPlaceholder })
   }
   return found
 }
@@ -363,24 +222,29 @@ function mergeSpans(spans: DetectedSpan[]): MergedSpan[] {
   return merged
 }
 
-export async function scrubSecrets(text: string): Promise<ScrubResult> {
-  if (text === '') return { text, redactions: [] }
+/** Detect mode: the spans scrubSecrets would replace, in text order, without replacing them. */
+export async function detectSecrets(text: string): Promise<DetectedSecret[]> {
+  if (text === '') return []
   const spans = [
     ...narrowUrlSpans(text, await secretlintSpans(text)),
-    ...assignmentSpans(text),
+    ...keyedSpans(text),
     ...pemSpans(text),
     ...urlPasswordSpans(text),
     ...knownFormatSpans(text),
     ...highEntropySpans(text),
   ]
-  const merged = mergeSpans(spans)
-  const redactions: SecretRedaction[] = merged.map(({ label }) =>
-    label.name !== undefined ? { kind: label.kind, name: label.name } : { kind: label.kind },
+  return mergeSpans(spans).map(({ start, end, label }) =>
+    label.name !== undefined ? { start, end, kind: label.kind, name: label.name } : { start, end, kind: label.kind },
   )
+}
+
+export async function scrubSecrets(text: string): Promise<ScrubResult> {
+  const detected = await detectSecrets(text)
   let out = text
-  for (let i = merged.length - 1; i >= 0; i--) {
-    const { start, end, label } = merged[i]!
-    out = out.slice(0, start) + placeholder(label.name ?? label.kind) + out.slice(end)
+  for (let i = detected.length - 1; i >= 0; i--) {
+    const { start, end, kind, name } = detected[i]!
+    out = out.slice(0, start) + placeholder(name ?? kind) + out.slice(end)
   }
+  const redactions: SecretRedaction[] = detected.map(({ kind, name }) => (name !== undefined ? { kind, name } : { kind }))
   return { text: out, redactions }
 }

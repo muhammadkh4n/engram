@@ -79,7 +79,7 @@ describe('scrubSecrets — named assignments keep the key name', () => {
     expect(text).toContain("OPENAI_API_KEY: '[REDACTED:OPENAI_API_KEY]',")
     expect(text).toContain("OPENROUTER_API_KEY: '[REDACTED:OPENROUTER_API_KEY]',")
     expect(text).toContain("NEO4J_PASSWORD: '[REDACTED:NEO4J_PASSWORD]',")
-    expect(text).toContain("SUPABASE_SERVICE_ROLE_KEY: '[REDACTED:jwt]',")
+    expect(text).toContain("SUPABASE_SERVICE_ROLE_KEY: '[REDACTED:SUPABASE_SERVICE_ROLE_KEY]',")
     expect(text).toContain("DATABASE_URL: 'postgresql://engram:[REDACTED:postgres-url]@db.internal:5432/engram',")
     expect(text).toContain("ENGRAM_AUTH_TOKEN: '[REDACTED:ENGRAM_AUTH_TOKEN]',")
     expect(text).toContain("name: 'engram-mcp-http',")
@@ -91,6 +91,7 @@ describe('scrubSecrets — named assignments keep the key name', () => {
       'OPENAI_API_KEY',
       'OPENROUTER_API_KEY',
       'NEO4J_PASSWORD',
+      'SUPABASE_SERVICE_ROLE_KEY',
       'ENGRAM_AUTH_TOKEN',
     ])
   })
@@ -256,13 +257,13 @@ describe('scrubSecrets — secretlint formats replace the value only', () => {
     expect((await scrubSecrets(input)).text).toBe('// secretlint-disable\nI pasted [REDACTED:openai] here')
   })
 
-  it('keeps an AWS account id', async () => {
   it('leaves no performance marks behind, so repeated scans accumulate no state', async () => {
     const before = performance.getEntriesByType('mark').length
     for (let i = 0; i < 200; i++) await secretlintSpans(`DB_PASSWORD=value${i}`)
     expect(performance.getEntriesByType('mark').length).toBe(before)
   })
 
+  it('keeps an AWS account id', async () => {
     const input = 'aws_account_id = 123456789012'
     expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
   })
@@ -270,13 +271,13 @@ describe('scrubSecrets — secretlint formats replace the value only', () => {
 
 describe('scrubSecrets — high-entropy values under unrecognised keys', () => {
   it('redacts a 32+ char mixed-class value after "="', async () => {
-    const { text, redactions } = await scrubSecrets(`COOKIE_SIGNING_SALT=${HIGH_ENTROPY}`)
-    expect(text).toBe('COOKIE_SIGNING_SALT=[REDACTED:high-entropy]')
+    const { text, redactions } = await scrubSecrets(`COOKIE_SIGNING_SEED=${HIGH_ENTROPY}`)
+    expect(text).toBe('COOKIE_SIGNING_SEED=[REDACTED:high-entropy]')
     expect(redactions).toEqual([{ kind: 'high-entropy' }])
   })
 
   it('redacts a quoted 32+ char mixed-class value after ":"', async () => {
-    expect((await scrubSecrets(`signingSalt: "${HIGH_ENTROPY}"`)).text).toBe('signingSalt: "[REDACTED:high-entropy]"')
+    expect((await scrubSecrets(`signingSeed: "${HIGH_ENTROPY}"`)).text).toBe('signingSeed: "[REDACTED:high-entropy]"')
   })
 })
 
@@ -305,10 +306,7 @@ describe('scrubSecrets — leaves non-secrets alone', () => {
     ['a variable passed by name', 'const client = createClient({\n  apiKey: openaiKey,\n})'],
     ['an env var name as the value', "export const DEFAULT_API_KEY_ENV = 'OPENAI_API_KEY'"],
     ['command substitution', '-e POSTGRES_PASSWORD="$(openssl rand -hex 24)"'],
-    [
-      'documentation placeholders',
-      'export OPENAI_API_KEY=sk-...\n"NEO4J_PASSWORD": "...",\nDB_URI=postgresql://engram:<pwd>@db:5432/engram',
-    ],
+    ['a documentation placeholder in a URL', 'DB_URI=postgresql://engram:<pwd>@db:5432/engram'],
     ['cost estimates in comments', 'consol: ~2x passes x ~99K tokens  = ~$0.05'],
   ]
 
@@ -336,6 +334,9 @@ describe('scrubSecrets — a literal under a secret-named key is redacted whatev
     ['docker run -e NEO4J_PASSWORD=correctHorse neo4j', 'docker run -e NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD] neo4j', 'NEO4J_PASSWORD'],
     ['curl -H "X-Api-Key: myApiKey" https://api.example.com', 'curl -H "X-Api-Key: [REDACTED:X-Api-Key]" https://api.example.com', 'X-Api-Key'],
     ['Authorization: Bearer SUPER_SECRET_PW', 'Authorization: Bearer [REDACTED:Authorization]', 'Authorization'],
+    ['export OPENAI_API_KEY=sk-...', 'export OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]', 'OPENAI_API_KEY'],
+    ['"NEO4J_PASSWORD": "...",', '"NEO4J_PASSWORD": "[REDACTED:NEO4J_PASSWORD]",', 'NEO4J_PASSWORD'],
+    ['DB_PASSWORD=true', 'DB_PASSWORD=[REDACTED:DB_PASSWORD]', 'DB_PASSWORD'],
   ]
 
   for (const [input, expected, name] of redacted) {

@@ -5,6 +5,8 @@
  */
 
 import type { Message } from '../types.js'
+import { isSecretForKey } from './keyed-secrets.js'
+import { placeholder } from './placeholder.js'
 import { scrubSecrets } from './scrub-secrets.js'
 import type { SecretRedaction } from './scrub-secrets.js'
 
@@ -31,19 +33,15 @@ async function scrubText(text: string, redactions: SecretRedaction[]): Promise<s
 }
 
 /**
- * A structured `{ password: "hunter2hunter2" }` carries no `NAME=` shape inside
- * the value itself, so the key is judged the same way the scrubber judges a
- * JSON pair in text. Values the scrubber would keep under that key (empty,
- * booleans, `$VAR` references, keys naming a variable) are kept here too.
+ * A structured `{ password: '…' }` carries no `NAME=` shape inside the value
+ * itself, so the object key decides: a string under a secret-named key is a
+ * literal and is replaced whole, whatever characters it holds. Other strings
+ * are scrubbed as free text.
  */
 async function scrubKeyedText(key: string, value: string, redactions: SecretRedaction[]): Promise<string> {
-  if (!value.includes('"') && !value.includes('\n')) {
-    const asPair = await scrubSecrets(`"${key}": "${value}"`)
-    const named = asPair.redactions.find((r) => r.kind === 'named-secret' && r.name === key)
-    if (named) {
-      redactions.push(named)
-      return `[REDACTED:${key}]`
-    }
+  if (isSecretForKey(key, value)) {
+    redactions.push({ kind: 'named-secret', name: key })
+    return placeholder(key)
   }
   return scrubText(value, redactions)
 }
