@@ -40,8 +40,8 @@ Add Engram to your `~/.claude/settings.json`:
 
 **Optional v0.4.x env flags:**
 
-- `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for the local mxbai-rerank cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
-- `ENGRAM_RERANK_LOCAL_MODEL` — pick the mxbai variant. Default: `mixedbread-ai/mxbai-rerank-large-v1` (~1-1.5 GB peak RAM at load). For memory-constrained boxes try `mixedbread-ai/mxbai-rerank-base-v1` (~50-70 MB) or `mixedbread-ai/mxbai-rerank-xsmall-v1` (smaller still).
+- `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for a local cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
+- `ENGRAM_RERANK_LOCAL_MODEL` — pick the model. Default: `Alibaba-NLP/gte-reranker-modernbert-base` (rerank p50 3.6 s, RSS 1.66 GB on a CPU host). `mixedbread-ai/mxbai-rerank-large-v1` is the previous default (about 4× slower rerank, RSS 2.84 GB); `mixedbread-ai/mxbai-rerank-base-v1` and `mixedbread-ai/mxbai-rerank-xsmall-v1` are smaller mxbai variants. Rerank scores are not comparable across models.
 - `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
 - `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
