@@ -136,8 +136,9 @@ Cells differ only by their weights:
 - each recall passes `{ strategyOverride: { fusion }, reconsolidate: false }`, so no cell records access
   or edges for the next;
 - a per-question memo wraps the intelligence adapter: `embed`, `expandQuery` and
-  `generateHypotheticalDoc` by input text, `rerank` by (query, document id). Every cell reads the same
-  model outputs and rerank scores, and a failure is memoised too;
+  `generateHypotheticalDoc` by input text, `rerank` by (query, ordered document ids). A repeated slate
+  reuses that call's scores; any other slate goes to the reranker whole, as a direct recall does, so the
+  candidate cap, the single-document guard and the batching match production. A failure is memoised too;
 - the memory's sensory buffer (primed topics, working items, active intent) is reset to its post-ingest
   state before each cell, because a recall primes topics that boost the next one;
 - pending writes are flushed after ingest, so the first cell does not recall over a half-built store.

@@ -152,8 +152,8 @@ Fusion config (`ENGRAM_RECALL_FUSION`). The weights, thresholds and candidate co
 | Key | Default | Range | Meaning |
 |---|---|---|---|
 | `lexicalWeight` | `0.15` | [0, 1] | weight of the lexical boost added to a candidate's score |
-| `lexicalCandidateFactor` | `5` | integer ≥ 1 | lexical candidates requested per result slot (`maxResults × factor`) |
-| `vectorCandidateFactor` | `4` | integer ≥ 1 | vector candidates requested per result slot |
+| `lexicalCandidateFactor` | `5` | integer 1–50 | lexical candidates requested per result slot (`maxResults × factor`) |
+| `vectorCandidateFactor` | `4` | integer 1–50 | vector candidates requested per result slot |
 | `recencyDecayHours` | `720` | > 0 | time constant of the recency term, `recencyBias × exp(-ageHours / this)` |
 | `accessBoostPerAccess` | `0.01` | [0, 1] | score added per recorded access |
 | `accessBoostCap` | `0.1` | [0, 1] | upper bound of the summed access boost |

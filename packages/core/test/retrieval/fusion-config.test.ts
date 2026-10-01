@@ -62,6 +62,12 @@ describe('resolveFusionConfig', () => {
     }, 'test')).not.toThrow()
   })
 
+  for (const key of ['lexicalCandidateFactor', 'vectorCandidateFactor'] as const) {
+    it(`accepts ${key} at its upper bound of 50`, () => {
+      expect(validateFusionOverride({ [key]: 50 }, 'strategy.fusion')).toEqual({ [key]: 50 })
+    })
+  }
+
   describe('validation', () => {
     const cases: Array<[string, unknown, RegExp]> = [
       ['an unknown key', { lexicalWieght: 0.2 }, /unknown fusion key "lexicalWieght"/],
@@ -75,8 +81,10 @@ describe('resolveFusionConfig', () => {
       ['a rerank weight above 1', { rerankWeightMultiHop: 1.2 }, /"rerankWeightMultiHop" must be in \[0, 1\]/],
       ['a zero half-life', { recencyDecayHours: 0 }, /"recencyDecayHours" must be greater than 0/],
       ['a negative trigger', { hydeTopScoreBelow: -0.1 }, /"hydeTopScoreBelow" must be at least 0/],
-      ['a fractional candidate factor', { lexicalCandidateFactor: 2.5 }, /"lexicalCandidateFactor" must be an integer of at least 1/],
-      ['a zero candidate factor', { vectorCandidateFactor: 0 }, /"vectorCandidateFactor" must be an integer of at least 1/],
+      ['a fractional candidate factor', { lexicalCandidateFactor: 2.5 }, /"lexicalCandidateFactor" must be an integer from 1 to 50/],
+      ['a zero candidate factor', { vectorCandidateFactor: 0 }, /"vectorCandidateFactor" must be an integer from 1 to 50/],
+      ['lexicalCandidateFactor just past 50', { lexicalCandidateFactor: 51 }, /"lexicalCandidateFactor" must be an integer from 1 to 50/],
+      ['vectorCandidateFactor just past 50', { vectorCandidateFactor: 51 }, /"vectorCandidateFactor" must be an integer from 1 to 50/],
       ['an array', [0.1], /must be a JSON object/],
       ['null', null, /must be a JSON object/],
     ]

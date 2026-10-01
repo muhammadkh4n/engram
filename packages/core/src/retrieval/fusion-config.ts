@@ -68,7 +68,13 @@ type Range = { readonly check: (v: number) => boolean; readonly describe: string
 const UNIT: Range = { check: (v) => v >= 0 && v <= 1, describe: 'in [0, 1]' }
 const POSITIVE: Range = { check: (v) => v > 0, describe: 'greater than 0' }
 const NON_NEGATIVE: Range = { check: (v) => v >= 0, describe: 'at least 0' }
-const COUNT_FACTOR: Range = { check: (v) => Number.isInteger(v) && v >= 1, describe: 'an integer of at least 1' }
+// Each factor multiplies maxResults into a per-recall row limit, so an
+// unbounded value would turn a config typo into an unbounded query.
+const MAX_COUNT_FACTOR = 50
+const COUNT_FACTOR: Range = {
+  check: (v) => Number.isInteger(v) && v >= 1 && v <= MAX_COUNT_FACTOR,
+  describe: `an integer from 1 to ${MAX_COUNT_FACTOR}`,
+}
 
 const RANGES: Readonly<Record<keyof FusionConfig, Range>> = {
   lexicalWeight: UNIT,
