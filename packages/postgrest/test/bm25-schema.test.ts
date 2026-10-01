@@ -201,6 +201,18 @@ describe('bm25.sql stays optional and plain SQL', () => {
     expect(schema).not.toMatch(/USING bm25/)
   })
 
+  it('ties engram_bm25_match to the extension so DROP EXTENSION removes it', () => {
+    // A LANGUAGE sql body records no dependency on to_bm25query or <@>, so
+    // without this the function outlives the extension and every call to it
+    // fails with "function to_bm25query does not exist".
+    expect(bm25).toMatch(
+      /ALTER FUNCTION public\.engram_bm25_match\(text\[\], integer, text, text\) DEPENDS ON EXTENSION pg_textsearch;/,
+    )
+    expect(bm25.indexOf('DEPENDS ON EXTENSION')).toBeGreaterThan(
+      bm25.indexOf('CREATE OR REPLACE FUNCTION public.engram_bm25_match'),
+    )
+  })
+
   it('holds no psql meta-commands', () => {
     const metaLines = bm25
       .split('\n')

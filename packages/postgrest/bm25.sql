@@ -137,3 +137,9 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
   ORDER BY rank_score DESC
   LIMIT p_match_count
 $$;
+
+-- A LANGUAGE sql body records no dependency on to_bm25query or <@>, so this
+-- declares one: DROP EXTENSION pg_textsearch then removes the function too,
+-- and the service falls back to engram_text_match instead of finding a
+-- function whose every call fails. Re-applying adds no second dependency.
+ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text) DEPENDS ON EXTENSION pg_textsearch;
