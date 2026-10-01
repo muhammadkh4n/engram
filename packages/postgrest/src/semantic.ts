@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { orIlikeOperand, orOperand } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -292,7 +292,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     let query = this.client
       .from('memory_semantic')
       .select('*')
-      .or(`topic.eq.${sanitizeIlike(topic)},topic.ilike.%${sanitizeIlike(topic)}%`)
+      .or(`topic.eq.${orOperand(topic)},topic.ilike.${orIlikeOperand(topic)}`)
       .order('created_at', { ascending: true })
 
     if (opts?.fromDate) {

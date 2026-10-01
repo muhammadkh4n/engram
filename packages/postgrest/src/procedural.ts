@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { orIlikeOperand, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -89,7 +89,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
     const { data, error } = await this.client
       .from('memory_procedural')
       .select('*')
-      .or(`trigger_text.ilike.%${sanitizeIlike(query)}%,procedure.ilike.%${sanitizeIlike(query)}%`)
+      .or(`trigger_text.ilike.${orIlikeOperand(query)},procedure.ilike.${orIlikeOperand(query)}`)
       .is('forgotten_at', null)
       .limit(limit)
 
