@@ -119,4 +119,53 @@ describe('SqliteSemanticStorage', () => {
     expect(oldRow.superseded_by).toBe(newer.id)
     expect(newRow.supersedes).toBe(old.id)
   })
+
+  describe('gradient decay and getUnaccessed skip inactive rows', () => {
+    async function insertStale(content: string, confidence: number) {
+      const mem = await store.insert({
+        topic: 'fact', content,
+        confidence, sourceDigestIds: [], sourceEpisodeIds: [],
+        decayRate: 0.02, supersedes: null, supersededBy: null,
+        embedding: null, metadata: {},
+      })
+      db.prepare(`UPDATE semantic SET last_accessed = julianday('now') - 60 WHERE id = ?`).run(mem.id)
+      return mem
+    }
+
+    function confidenceOf(id: string): number {
+      return (db.prepare('SELECT confidence FROM semantic WHERE id = ?').get(id) as { confidence: number }).confidence
+    }
+
+    it('keeps tombstoned and superseded confidence and floors a live row at 0.05', async () => {
+      const forgotten = await insertStale('Tombstoned fact', 0.8)
+      const superseded = await insertStale('Superseded fact', 0.8)
+      const replacement = await insertStale('Replacement fact', 0.9)
+      const live = await insertStale('Live fact near the floor', 0.06)
+      await store.markForgotten([forgotten.id])
+      await store.markSuperseded(superseded.id, replacement.id)
+
+      const decayed = await store.batchDecayGradient([
+        { id: forgotten.id, effectiveDecayRate: 0.5, daysThreshold: 30 },
+        { id: superseded.id, effectiveDecayRate: 0.5, daysThreshold: 30 },
+        { id: live.id, effectiveDecayRate: 0.5, daysThreshold: 30 },
+      ])
+
+      expect(decayed).toBe(1)
+      expect(confidenceOf(forgotten.id)).toBeCloseTo(0.8, 5)
+      expect(confidenceOf(superseded.id)).toBeCloseTo(0.8, 5)
+      expect(confidenceOf(live.id)).toBeCloseTo(0.05, 5)
+    })
+
+    it('getUnaccessed excludes tombstoned and superseded rows', async () => {
+      const forgotten = await insertStale('Tombstoned fact', 0.8)
+      const superseded = await insertStale('Superseded fact', 0.8)
+      const replacement = await insertStale('Replacement fact', 0.9)
+      await store.markForgotten([forgotten.id])
+      await store.markSuperseded(superseded.id, replacement.id)
+
+      const ids = (await store.getUnaccessed(30)).map((m) => m.id)
+
+      expect(ids).toEqual([replacement.id])
+    })
+  })
 })

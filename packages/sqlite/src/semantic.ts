@@ -122,6 +122,8 @@ export class SqliteSemanticStorage implements SemanticStorage {
       .prepare(
         `SELECT * FROM semantic
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .all(days) as SemanticRow[]
@@ -174,10 +176,12 @@ export class SqliteSemanticStorage implements SemanticStorage {
   ): Promise<number> {
     const stmt = this.db.prepare(`
       UPDATE semantic
-      SET confidence = MAX(0.0, confidence - ?)
+      SET confidence = MAX(0.05, confidence - ?)
       WHERE id = ?
-        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+        AND confidence > 0.05
+        AND forgotten_at IS NULL
         AND superseded_by IS NULL
+        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
     `)
     let total = 0
     const txn = this.db.transaction(() => {

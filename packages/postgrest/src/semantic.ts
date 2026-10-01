@@ -6,6 +6,9 @@ import { sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
+/** Rows per decay RPC call; keeps each request body and UPDATE bounded. */
+const GRADIENT_CHUNK_SIZE = 500
+
 export class PostgRestSemanticStorage implements SemanticStorage {
   constructor(private readonly client: PostgrestClient) {}
 
@@ -114,6 +117,8 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       .from('memory_semantic')
       .select('*')
       .gt('confidence', 0.05)
+      .is('forgotten_at', null)
+      .is('superseded_by', null)
       .or(`last_accessed.is.null,last_accessed.lt.${cutoff}`)
     if (error) throw new Error(`Semantic getUnaccessed failed: ${error.message}`)
     return ((data ?? []) as SemanticRow[]).map(rowToSemantic)
@@ -180,25 +185,23 @@ export class PostgRestSemanticStorage implements SemanticStorage {
   async batchDecayGradient(
     updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>,
   ): Promise<number> {
+    if (updates.length === 0) return 0
+    const days = updates[0]!.daysThreshold
+    if (updates.some((u) => u.daysThreshold !== days)) {
+      throw new Error('Semantic batchDecayGradient failed: updates must share one daysThreshold')
+    }
+    // An RPC error throws and writes nothing: a fallback value here would land
+    // on every row of the batch, which is worse than skipping one decay run.
     let total = 0
-    for (const u of updates) {
-      const { error } = await this.client.rpc('engram_decay_semantic_single', {
-        p_id: u.id,
-        p_decay_rate: u.effectiveDecayRate,
-        p_days_threshold: u.daysThreshold,
+    for (let start = 0; start < updates.length; start += GRADIENT_CHUNK_SIZE) {
+      const chunk = updates.slice(start, start + GRADIENT_CHUNK_SIZE)
+      const { data, error } = await this.client.rpc('engram_decay_semantic_gradient', {
+        p_ids: chunk.map((u) => u.id),
+        p_rates: chunk.map((u) => u.effectiveDecayRate),
+        p_days: days,
       })
-      // RPC may not exist yet — fall back silently
-      if (error) {
-        // If the RPC doesn't exist, do a direct update
-        const { count } = await this.client
-          .from('memory_semantic')
-          .update({ confidence: 0.05 }) // floor — can't do math in Supabase client
-          .eq('id', u.id)
-          .is('superseded_by', null)
-        total += count ?? 0
-        continue
-      }
-      total++
+      if (error) throw new Error(`Semantic batchDecayGradient failed: ${error.message}`)
+      total += typeof data === 'number' ? data : 0
     }
     return total
   }
