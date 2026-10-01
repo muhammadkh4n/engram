@@ -221,3 +221,64 @@ describe('isRecallFailureNoise', () => {
     )
   })
 })
+
+describe('unifiedSearch — failed lexical leg', () => {
+  function failingTextBoost(message: string) {
+    const storage = createMockStorage()
+    storage.textBoost = vi.fn().mockRejectedValue(new Error(message))
+    return storage
+  }
+
+  it('returns the vector hits, logs the error and reports it', async () => {
+    const storage = failingTextBoost('Could not find the function public.engram_text_match')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onLexicalError = vi.fn()
+    try {
+      const result = await unifiedSearch({
+        query: 'TypeScript strict mode',
+        embedding: [0.1, 0.2, 0.3],
+        strategy: LIGHT_STRATEGY,
+        storage,
+        sensory: new SensoryBuffer(),
+        onLexicalError,
+      })
+
+      expect(result.length).toBeGreaterThan(0)
+      expect(storage.vectorSearch).toHaveBeenCalled()
+      expect(onLexicalError).toHaveBeenCalledTimes(1)
+      expect(errSpy).toHaveBeenCalledWith(
+        '[engram] lexical leg failed: Could not find the function public.engram_text_match',
+      )
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('logs each distinct message once per process but reports every failure', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onLexicalError = vi.fn()
+    const run = (message: string) =>
+      unifiedSearch({
+        query: 'TypeScript strict mode',
+        embedding: [0.1, 0.2, 0.3],
+        strategy: LIGHT_STRATEGY,
+        storage: failingTextBoost(message),
+        sensory: new SensoryBuffer(),
+        onLexicalError,
+      })
+    try {
+      await run('relation "episodes" does not exist')
+      await run('relation "episodes" does not exist')
+      await run('connection reset by peer')
+
+      const lines = errSpy.mock.calls.map((c) => c[0])
+      expect(lines).toEqual([
+        '[engram] lexical leg failed: relation "episodes" does not exist',
+        '[engram] lexical leg failed: connection reset by peer',
+      ])
+      expect(onLexicalError).toHaveBeenCalledTimes(3)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+})

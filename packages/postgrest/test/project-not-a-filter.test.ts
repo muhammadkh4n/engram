@@ -18,7 +18,13 @@ function definition(name: string): { signature: string; body: string } {
   return { signature: m[1]!, body: m[2]! }
 }
 
-const RECALL_FUNCTIONS = ['engram_hybrid_recall', 'engram_recall', 'engram_text_boost', 'engram_vector_search']
+const RECALL_FUNCTIONS = [
+  'engram_hybrid_recall',
+  'engram_recall',
+  'engram_text_boost',
+  'engram_text_match',
+  'engram_vector_search',
+]
 
 describe('schema.sql recall functions treat project as a ranking signal', () => {
   it.each(RECALL_FUNCTIONS)('%s never filters on p_project_id', (name) => {

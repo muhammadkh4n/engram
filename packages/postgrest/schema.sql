@@ -392,6 +392,9 @@ DROP FUNCTION IF EXISTS public.engram_text_boost(text, integer, text);
 
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
+-- Superseded by engram_text_match below and kept unchanged: a deploy applies
+-- this schema before the service restarts, and the build still running until
+-- then calls engram_text_boost.
 CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
@@ -426,6 +429,70 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
       ts_rank_cd(mp.fts, to_tsquery('english', p_query_terms))::float
     FROM memory_procedural mp
     WHERE mp.fts @@ to_tsquery('english', p_query_terms)
+      AND mp.forgotten_at IS NULL
+  ) combined
+  ORDER BY rank_score DESC
+  LIMIT p_match_count
+$$;
+
+
+--
+-- Name: engram_text_match(text[], integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Lexical match over the raw query terms. Each term becomes its own
+-- phraseto_tsquery: that parser runs the term through the same 'english'
+-- configuration to_tsvector used at index time, so the lexemes and their
+-- positions match what was indexed ('aca-2613' -> 'aca' <-> '-2613',
+-- 'gpt-4o' -> 'gpt-4o' <-> 'gpt' <-> '4o'), and it parses no operator syntax,
+-- so a term like '--force' cannot become a negation inside the OR. Terms that
+-- reduce to no lexemes (stop words, punctuation) are dropped; when none is
+-- left the query is NULL and no row matches. p_project_id is accepted for
+-- caller compatibility and filters nothing: a project tag only ranks rows (in
+-- the client), it never excludes them.
+CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'public'
+    AS $$
+  WITH term_queries AS (
+    SELECT phraseto_tsquery('english', t) AS q
+    FROM unnest(p_terms) AS t
+  ),
+  match_query AS (
+    SELECT string_agg('(' || q::text || ')', ' | ')::tsquery AS q
+    FROM term_queries
+    WHERE numnode(q) > 0
+  )
+  SELECT id, memory_type, rank_score FROM (
+    SELECT me.id, 'episode'::text AS memory_type,
+      ts_rank_cd(me.fts, mq.q)::float AS rank_score
+    FROM memory_episodes me, match_query mq
+    WHERE me.fts @@ mq.q
+      AND me.forgotten_at IS NULL
+      AND (p_session_id IS NULL OR me.session_id = p_session_id)
+
+    UNION ALL
+
+    SELECT md.id, 'digest'::text,
+      ts_rank_cd(md.fts, mq.q)::float
+    FROM memory_digests md, match_query mq
+    WHERE md.fts @@ mq.q
+
+    UNION ALL
+
+    SELECT ms.id, 'semantic'::text,
+      ts_rank_cd(ms.fts, mq.q)::float
+    FROM memory_semantic ms, match_query mq
+    WHERE ms.fts @@ mq.q
+      AND ms.superseded_by IS NULL
+      AND ms.forgotten_at IS NULL
+
+    UNION ALL
+
+    SELECT mp.id, 'procedural'::text,
+      ts_rank_cd(mp.fts, mq.q)::float
+    FROM memory_procedural mp, match_query mq
+    WHERE mp.fts @@ mq.q
       AND mp.forgotten_at IS NULL
   ) combined
   ORDER BY rank_score DESC
@@ -1281,11 +1348,12 @@ BEGIN
   PERFORM public.engram_recall(v_unit, NULL, 1);
   PERFORM public.engram_hybrid_recall('smoke', v_unit, 1);
   PERFORM public.engram_text_boost('smoke', 1);
+  PERFORM public.engram_text_match(ARRAY['smoke', 'aca-2613'], 1);
   PERFORM public.engram_vector_search(v_unit, 1);
   v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
-  RAISE NOTICE 'engram schema smoke OK: 4 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live';
+  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live';
 END;
 $smoke$;
 

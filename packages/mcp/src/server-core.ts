@@ -566,7 +566,8 @@ export function recallOptionsFromArgs(args: Record<string, unknown>): { projectI
 }
 
 /** One-line recall latency summary. Absent stages are omitted, not zeroed, so
- *  a missing key means the stage never ran for that query. */
+ *  a missing key means the stage never ran for that query. A failed lexical
+ *  leg (vector-only recall) is printed as lexical=error. */
 export function formatRecallTimingLine(
   timings: Record<string, number>,
   items: number,
@@ -575,7 +576,8 @@ export function formatRecallTimingLine(
   const parts = RECALL_TIMING_STAGES
     .filter(stage => timings[stage] !== undefined)
     .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
-  return ['[recall]', ...parts, `items=${items}`, `chars=${chars}`].join(' ')
+  const lexical = timings['lexicalError'] !== undefined ? ['lexical=error'] : []
+  return ['[recall]', ...parts, ...lexical, `items=${items}`, `chars=${chars}`].join(' ')
 }
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }

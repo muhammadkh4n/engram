@@ -377,6 +377,12 @@ function stageEnd(timings: StageTimings, stage: string, start: number): void {
   timings[stage] = (timings[stage] ?? 0) + (performance.now() - start)
 }
 
+/** Flag a failed lexical leg; the recall line prints it as lexical=error. */
+function markLexicalError(timings: StageTimings): void {
+  if (timings === null) return
+  timings['lexicalError'] = 1
+}
+
 function finishTimings(timings: StageTimings, recallStart: number): { timings?: Record<string, number> } {
   if (timings === null) return {}
   return { timings: { ...timings, total: performance.now() - recallStart } }
@@ -455,6 +461,7 @@ export async function recall(
     expandedTerms,
     projectId,
     ...(ranking ? { projectRanking: ranking } : {}),
+    onLexicalError: () => markLexicalError(timings),
   })
   stageEnd(timings, 'search', searchStart)
 
@@ -491,6 +498,7 @@ export async function recall(
           expandedTerms,
           projectId,
           ...(ranking ? { projectRanking: ranking } : {}),
+          onLexicalError: () => markLexicalError(timings),
         })
 
         memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)

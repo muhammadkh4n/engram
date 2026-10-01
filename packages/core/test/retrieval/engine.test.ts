@@ -323,6 +323,50 @@ describe('recall engine — empty HyDE document', () => {
   })
 })
 
+describe('recall engine — failed lexical leg', () => {
+  const originalTiming = process.env['ENGRAM_RECALL_TIMING']
+
+  afterEach(() => {
+    if (originalTiming === undefined) delete process.env['ENGRAM_RECALL_TIMING']
+    else process.env['ENGRAM_RECALL_TIMING'] = originalTiming
+  })
+
+  it('keeps the vector hits and flags the lexical error in the stage timings', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const storage = createMockStorage()
+    storage.textBoost = vi.fn().mockRejectedValue(new Error('engram_text_match is not in the schema cache'))
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const result = await recall(
+        'deployment strategy',
+        storage,
+        new SensoryBuffer(),
+        makeOpts({ strategy: RECALL_STRATEGIES.light }),
+      )
+
+      expect(result.memories.length).toBeGreaterThan(0)
+      expect(result.timings?.['lexicalError']).toBe(1)
+      expect(errSpy).toHaveBeenCalledWith(
+        '[engram] lexical leg failed: engram_text_match is not in the schema cache',
+      )
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('does not flag the timings when the lexical leg succeeds', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const result = await recall(
+      'deployment strategy',
+      createMockStorage(),
+      new SensoryBuffer(),
+      makeOpts({ strategy: RECALL_STRATEGIES.light }),
+    )
+
+    expect(result.timings).not.toHaveProperty('lexicalError')
+  })
+})
+
 describe('recall engine — cross-encoder reranking', () => {
   it('reranks memories when intelligence.rerank is provided', async () => {
     const storage = createMockStorage()
