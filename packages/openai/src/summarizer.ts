@@ -246,6 +246,16 @@ const TRANSCRIPT_DIGEST_PARAMS: Record<
 
 /** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
  *  without a MEMORY: marker is kept whole as memory. */
+/**
+ * Chat models other than OpenAI's often wrap a requested JSON object in a
+ * ```json (or bare ```) fence despite the instruction; the fenced span is the
+ * payload. Text without a fence is returned unchanged.
+ */
+function stripJsonFence(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
+  return fenced?.[1] ?? raw
+}
+
 function parsePreCompactDigest(output: string): { memory: string; context: string } {
   const memoryMatch = output.match(/MEMORY:\s*([\s\S]*?)(?=CONTEXT:|$)/)
   const contextMatch = output.match(/CONTEXT:\s*([\s\S]*)$/)
@@ -628,7 +638,7 @@ export class OpenAISummarizer {
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(raw)
+      parsed = JSON.parse(stripJsonFence(raw))
     } catch (err) {
       throw new Error(
         `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
@@ -873,8 +883,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
-      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw]
-      const parsed: unknown = JSON.parse(jsonMatch[1] ?? raw)
+      const parsed: unknown = JSON.parse(stripJsonFence(raw))
 
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('Not a plain object')
@@ -907,8 +916,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
     try {
-      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw]
-      const parsed: unknown = JSON.parse(jsonMatch[1] ?? raw)
+      const parsed: unknown = JSON.parse(stripJsonFence(raw))
 
       if (!Array.isArray(parsed)) {
         return []

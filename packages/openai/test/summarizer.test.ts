@@ -517,7 +517,28 @@ describe('OpenAISummarizer.extractSalience failures', () => {
   })
 
   it.each([
+    ['a ```json fence', (j: string) => `\n  \`\`\`json\n${j}\n\`\`\`  \n`],
+    ['a bare fence', (j: string) => ` \`\`\`\n${j}\n\`\`\`\n`],
+  ])('parses a reply wrapped in %s like the unfenced reply', async (_label, wrap) => {
+    const reply = JSON.stringify({
+      store: true,
+      category: 'decision',
+      confidence: 0.8,
+      distilled: 'The ingest worker runs from a systemd timer, not pm2 cron.',
+      reason: 'infra decision',
+    })
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const plain = await s.extractSalience(TURN, { turnRole: 'user' })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(wrap(reply)))
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toEqual(plain)
+    expect(plain).toMatchObject({ store: true, category: 'decision', confidence: 0.8 })
+  })
+
+  it.each([
     ['unparseable text', 'not json at all'],
+    ['fenced prose with no JSON', '```\nI think this should be stored.\n```'],
     ['an empty reply', ''],
     ['a JSON array', '[true]'],
     ['an object without a store verdict', '{"category":"noise"}'],

@@ -25,6 +25,7 @@ export const CAPTURE_KEY_MAX_CHARS = 128
 export const CAPTURE_SESSION_ID_MAX_CHARS = 256
 export const CAPTURE_META_MAX_KEYS = 8
 export const CAPTURE_META_VALUE_MAX_CHARS = 512
+export const CAPTURE_META_KEY_MAX_CHARS = 128
 
 const SOURCE_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 const ROLES = ['user', 'assistant', 'system'] as const
@@ -89,6 +90,9 @@ function parseMeta(v: unknown): Parsed<Record<string, string> | undefined> {
     return { error: `meta allows at most ${CAPTURE_META_MAX_KEYS} keys, got ${entries.length}` }
   }
   for (const [k, val] of entries) {
+    if (k.length > CAPTURE_META_KEY_MAX_CHARS) {
+      return { error: `meta key names are limited to ${CAPTURE_META_KEY_MAX_CHARS} characters` }
+    }
     if (typeof val !== 'string') return { error: `meta.${k} must be a string` }
     if (val.length > CAPTURE_META_VALUE_MAX_CHARS) {
       return { error: `meta.${k} exceeds ${CAPTURE_META_VALUE_MAX_CHARS} characters` }
@@ -143,7 +147,12 @@ export function parseCaptureRequest(body: unknown): CaptureRequest | { error: st
   const meta = parseMeta(body['meta'])
   if ('error' in meta) return meta
 
-  const project = normalizeProjectId(body['project_id']) ?? null
+  // A malformed project_id must not silently store the capture shared.
+  const rawProject = body['project_id']
+  if (rawProject !== undefined && rawProject !== null && typeof rawProject !== 'string') {
+    return { error: 'project_id must be a string' }
+  }
+  const project = normalizeProjectId(rawProject) ?? null
   const common = {
     content: content.value,
     source,

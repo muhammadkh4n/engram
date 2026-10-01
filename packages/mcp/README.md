@@ -119,13 +119,13 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 | `source` | string, required | Lowercase slug naming the caller, e.g. `git-commit` |
 | `role` | `"user"` \| `"assistant"` \| `"system"` | Required unless `derive` is set |
 | `session_id` | string | At most 256 characters |
-| `project_id` | string | Project tag; omitted means shared |
+| `project_id` | string | Project tag; omitted or `null` means shared; any other non-string is a 400 |
 | `gate` | boolean, default `true` | Run the salience classifier; `false` stores without it |
 | `dedup` | boolean, default `true` | Skip near-duplicates of recent memories |
 | `derive` | `"session-summary"` \| `"pre-compact"` | `content` is a transcript; the server digests it first |
 | `dry_run` | boolean, default `false` | Classify but store nothing |
-| `key` | string | Idempotency key, at most 128 characters; a repeat returns `replayed` |
-| `meta` | object of strings | At most 8 keys, values at most 512 characters |
+| `key` | string | Idempotency key, at most 128 characters; a repeat within the same `session_id` returns `replayed` |
+| `meta` | object of strings | At most 8 keys, key names at most 128 characters, values at most 512 characters |
 
 **Response:** always a JSON outcome:
 
@@ -134,6 +134,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 ```
 
 - `outcome`: `stored`, `rejected` (with `reason`), `deduped` (with `duplicateOf`, `similarity`), `replayed`, `dry_run` or `error`.
+- A `key` is only checked against captures in the same session. A capture with a `key` and no `session_id` is stored under session `default` and is not idempotent: only the dedup check can catch a repeat.
 - `pre-compact` derives also return `context`, the text to re-inject.
 - Status: 200 for every pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 500 failure after validation (`retryable: true`); 405 for methods other than POST.
 

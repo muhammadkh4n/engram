@@ -12,6 +12,8 @@ interface Harness {
   url: string
   mcp: ReturnType<typeof vi.fn>
   captureDeps: ReturnType<typeof vi.fn>
+  logError: ReturnType<typeof vi.fn>
+  port: number
   close: () => Promise<void>
 }
 
@@ -33,8 +35,9 @@ async function startServer(): Promise<Harness> {
     captureModel: 'test-chat-model',
   }) as unknown as CaptureDeps)
   const capture: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps }
+  const logError = vi.fn()
   const server = http.createServer(
-    createRequestListener(config, { mcp, capture, captureBodyMaxBytes: BODY_CAP, logError: () => {} }),
+    createRequestListener(config, { mcp, capture, captureBodyMaxBytes: BODY_CAP, logError }),
   )
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
@@ -42,6 +45,8 @@ async function startServer(): Promise<Harness> {
     url: `http://127.0.0.1:${port}`,
     mcp,
     captureDeps,
+    logError,
+    port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
 }
@@ -92,6 +97,40 @@ describe('POST /capture', () => {
     const res = await post(`${h.url}/capture`, payload)
     expect(res.status).toBe(413)
     expect(await res.json()).toMatchObject({ outcome: 'error', retryable: false, model: 'test-chat-model' })
+    expect(h.captureDeps).not.toHaveBeenCalled()
+  })
+
+  it('answers 413 to a chunked body with no content-length once it crosses the cap', async () => {
+    const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port: h.port, path: '/capture', method: 'POST',
+          headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' } },
+        (r) => {
+          let data = ''
+          r.on('data', (c: Buffer) => (data += c.toString()))
+          r.on('end', () => resolve({ status: r.statusCode ?? 0, body: data }))
+        },
+      )
+      req.on('error', reject)
+      expect(req.getHeader('content-length')).toBeUndefined()
+      for (let i = 0; i < 4; i++) req.write('a'.repeat(BODY_CAP / 2))
+      req.end()
+    })
+    expect(res.status).toBe(413)
+    expect(JSON.parse(res.body)).toMatchObject({ outcome: 'error', retryable: false })
+    expect(h.captureDeps).not.toHaveBeenCalled()
+  })
+
+  it('rejects the read cleanly when the client aborts mid-body', async () => {
+    const req = http.request({
+      host: '127.0.0.1', port: h.port, path: '/capture', method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'content-length': '1000' },
+    })
+    req.on('error', () => {})
+    req.write('{"source":"git",')
+    await new Promise((r) => setTimeout(r, 50))
+    req.destroy()
+    await vi.waitFor(() => expect(h.logError).toHaveBeenCalledTimes(1))
     expect(h.captureDeps).not.toHaveBeenCalled()
   })
 

@@ -91,6 +91,8 @@ describe('runCaptureRequest validation', () => {
     ['a key over 128 chars', { key: 'k'.repeat(129) }],
     ['a missing role on a turn', { role: undefined }],
     ['an unknown field', { dryRun: true }],
+    ['a numeric project_id', { project_id: 123 }],
+    ['a meta key name over 128 chars', { meta: { ['m'.repeat(129)]: 'v' } }],
   ]
 
   it.each(invalid)('refuses %s with a permanent error and never opens the stores', async (_label, overrides) => {
