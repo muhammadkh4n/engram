@@ -282,6 +282,29 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
   LIMIT p_match_count
 $$;
 
+-- engram_bm25_match is SECURITY DEFINER and PostgREST serves public to the
+-- anon role, so the default EXECUTE grant to PUBLIC (and, on Supabase, the
+-- default grants to anon and authenticated) would let a request without a
+-- JWT run it. Clients authenticate with the service-role key: EXECUTE is
+-- revoked from those roles and granted to service_role explicitly, as
+-- schema.sql does for its RPC functions.
+REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) FROM PUBLIC;
+
+DO $$
+DECLARE
+  role_name name;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) FROM %I', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) TO service_role;
+
 -- A LANGUAGE sql body records no dependency on to_bm25query or <@>, so this
 -- declares one: DROP EXTENSION pg_textsearch then removes the function too,
 -- and the service falls back to engram_text_match instead of finding a

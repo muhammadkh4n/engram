@@ -187,8 +187,11 @@ describe("bm25.sql revokes EXECUTE on pg_textsearch's own functions", () => {
     expect(block).toContain("EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM %I', fn, role_name);")
   })
 
-  it('grants EXECUTE back to no role', () => {
-    expect(bm25).not.toMatch(/\bGRANT\b/)
+  it('grants EXECUTE back to no role; the only grant is engram_bm25_match to service_role', () => {
+    const grants = bm25.match(/^.*\bGRANT\b.*$/gm) ?? []
+    expect(grants).toEqual([
+      'GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) TO service_role;',
+    ])
   })
 
   it('names the revoke among the statements that make re-applying safe', () => {
