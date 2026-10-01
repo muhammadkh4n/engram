@@ -6,6 +6,9 @@
 // identity; a resume is only sound when every field that changes a row's
 // content matches, otherwise the final file would mix rows from two configs.
 import { createHash } from 'node:crypto'
+import * as path from 'node:path'
+import type { EmbedBackend, RerankerBackend } from '../../types.js'
+import { buildModelMeta, resolveEmbedSettings } from './reranker-meta-lib.js'
 
 /** Every setting that changes which questions run or what a row contains. */
 export interface RunIdentity {
@@ -23,6 +26,10 @@ export interface RunIdentity {
   output_emit_k: number | null
   output_token_budget: number | null
   output_faint: boolean
+  /** Embedder backend, resolved model id and the width the vectors are built at. */
+  embed_backend: string
+  embed_model: string
+  embed_dims: number
 }
 
 /** Structural mirror of core's RecallOutputPolicy. */
@@ -47,6 +54,55 @@ export function outputPolicyRecord(policy: OutputPolicyInput): OutputPolicyRecor
   }
 }
 
+/** The sweep arguments a run identity is derived from. */
+export interface RunIdentityArgs {
+  data: string
+  limit: number
+  maxResults: number
+  noConsolidate: boolean
+  noGraph: boolean
+  noRerank: boolean
+  rerankerBackend?: RerankerBackend
+  onnxRerankerModel?: string
+  embedBackend?: EmbedBackend
+  embedModel?: string
+  embedDims?: number
+  vectorMode?: 'full' | 'engine'
+  synthesize: boolean
+  contextMode: string
+}
+
+export function buildRunIdentity(
+  args: RunIdentityArgs,
+  idsSha256: string | undefined,
+  outputPolicy: OutputPolicyRecord,
+  embedDims: number,
+): RunIdentity {
+  const backend: RerankerBackend = args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')
+  const questionSelection = idsSha256 !== undefined
+    ? `ids:${idsSha256}`
+    : args.limit > 0 ? `limit:${args.limit}` : 'all'
+  const embed = resolveEmbedSettings(args, embedDims)
+  return {
+    data: path.resolve(args.data),
+    context_mode: args.contextMode,
+    reranker_backend: backend,
+    reranker_model: buildModelMeta(backend, args.onnxRerankerModel).rerankModel,
+    graph: !args.noGraph,
+    consolidate: !args.noConsolidate,
+    vector_mode: args.vectorMode ?? 'full',
+    max_results: args.maxResults,
+    synthesize: args.synthesize,
+    question_selection: questionSelection,
+    output_emit_k: outputPolicy.emit_k,
+    output_token_budget: outputPolicy.token_budget,
+    output_faint: outputPolicy.faint,
+    embed_backend: embed.backend,
+    embed_model: embed.model,
+    embed_dims: embed.dims,
+  }
+}
+
 const IDENTITY_FIELDS: readonly (keyof RunIdentity)[] = [
   'data',
   'context_mode',
@@ -61,6 +117,9 @@ const IDENTITY_FIELDS: readonly (keyof RunIdentity)[] = [
   'output_emit_k',
   'output_token_budget',
   'output_faint',
+  'embed_backend',
+  'embed_model',
+  'embed_dims',
 ]
 
 export interface CheckpointRow {

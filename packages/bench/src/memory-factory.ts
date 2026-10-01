@@ -2,9 +2,16 @@ import { SqliteStorageAdapter } from '@engram-mem/sqlite'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { createMemory } from '@engram-mem/core'
 import type { IntelligenceAdapter, StorageAdapter } from '@engram-mem/core'
-import { createOnnxReranker, type OnnxReranker } from '@engram-mem/rerank-onnx'
+import {
+  createOnnxEmbedder,
+  createOnnxReranker,
+  DEFAULT_EMBED_MODEL,
+  type OnnxEmbedder,
+  type OnnxReranker,
+} from '@engram-mem/rerank-onnx'
 import { withRecallEngine, recallEngineOf } from '@engram-mem/recall-engine'
-import type { BenchmarkOpts } from './types.js'
+import type { BenchmarkOpts, EmbedBackend } from './types.js'
+import { openaiEmbedDims } from './embed-dims.js'
 import { tryCreateBenchGraph } from './bench-graph.js'
 import type { BenchMemoryHandle } from './bench-memory-handle.js'
 
@@ -32,6 +39,12 @@ export { requireGraph } from './bench-memory-handle.js'
  *   so benchmarks can't accidentally write into the live graph that engram-mcp
  *   serves from. Operators wire bench against a separate Neo4j container.
  *
+ * Embedding backend (opts.embedBackend):
+ *     'openai' (default) → openaiIntelligence, with embedModel/embedDims passed
+ *                          as embeddingModel/embeddingDimensions when given
+ *     'onnx'             → embed, embedBatch, embedQuery and dimensions come
+ *                          from one local ONNX embedder per process
+ *
  * Reranker backend:
  *     'openai' (default when noRerank is false) → LLM pointwise via gpt-4o-mini
  *     'onnx'                                    → local mxbai-rerank ONNX model
@@ -57,10 +70,13 @@ export async function createBenchMemory(opts?: BenchmarkOpts, hooks?: BenchMemor
     : sqlite
 
   const apiKey = opts?.openaiApiKey ?? process.env['OPENAI_API_KEY']
-  const fullIntelligence = apiKey ? openaiIntelligence({ apiKey }) : undefined
+  const embedBackend: EmbedBackend = opts?.embedBackend ?? 'openai'
+  const fullIntelligence = apiKey ? openaiIntelligence(openaiOptions(apiKey, embedBackend, opts)) : undefined
 
   const backend = resolveBackend(opts)
-  const composed = await composeIntelligence(fullIntelligence, backend, opts?.onnxRerankerModel)
+  const embedded = await composeEmbedding(fullIntelligence, embedBackend, opts)
+  if (useEngine && embedded) assertEngineDims(embedded)
+  const composed = await composeIntelligence(embedded, backend, opts?.onnxRerankerModel)
   const intelligence = composed && hooks?.wrapIntelligence ? hooks.wrapIntelligence(composed) : composed
 
   // Honor opts.graph — previously plumbed but ignored. Bench Neo4j is opt-in
@@ -139,5 +155,93 @@ async function composeIntelligence(
   return {
     ...base,
     rerank: (query, documents) => onnx.rerank(query, documents),
+  }
+}
+
+// The recall engine's quantized codec is built for 1536-dim vectors and takes
+// no dims override, so any other width cannot be measured in engine mode.
+const RECALL_ENGINE_DIMS = 1536
+
+function assertEngineDims(intelligence: IntelligenceAdapter): void {
+  const dims = intelligence.dimensions?.()
+  if (dims !== undefined && dims !== RECALL_ENGINE_DIMS) {
+    throw new Error(
+      `[engram-bench] vectorMode="engine" needs ${RECALL_ENGINE_DIMS}-dim embeddings, but the embedder produces ${dims}.`,
+    )
+  }
+}
+
+function openaiOptions(
+  apiKey: string,
+  embedBackend: EmbedBackend,
+  opts: BenchmarkOpts | undefined,
+): Parameters<typeof openaiIntelligence>[0] {
+  // Under onnx the embedding fields belong to the local model; the OpenAI
+  // embedder is never called, so it keeps its defaults.
+  if (embedBackend !== 'openai') return { apiKey }
+  return {
+    apiKey,
+    ...(opts?.embedModel !== undefined ? { embeddingModel: opts.embedModel } : {}),
+    ...(opts?.embedDims !== undefined ? { embeddingDimensions: opts.embedDims } : {}),
+  }
+}
+
+// One embedder per process, like the reranker: the bench builds a fresh
+// Memory per question and the model load dominates otherwise. Keyed by model
+// id so a process never serves one model's vectors under another's name.
+let sharedOnnxEmbedder: { model: string; embedder: OnnxEmbedder } | null = null
+
+async function loadSharedEmbedder(model: string): Promise<OnnxEmbedder> {
+  if (sharedOnnxEmbedder && sharedOnnxEmbedder.model !== model) {
+    await sharedOnnxEmbedder.embedder.dispose()
+    sharedOnnxEmbedder = null
+  }
+  if (!sharedOnnxEmbedder) {
+    const embedder = createOnnxEmbedder({ model })
+    await embedder.load()
+    sharedOnnxEmbedder = { model, embedder }
+  }
+  return sharedOnnxEmbedder.embedder
+}
+
+/**
+ * The width this run's vectors are built at: for openai the requested width or
+ * the service default, for onnx the loaded model's hidden size (which a
+ * requested width must equal). Loads the shared onnx embedder.
+ */
+export async function resolveEmbedDims(opts: BenchmarkOpts | undefined): Promise<number> {
+  if ((opts?.embedBackend ?? 'openai') === 'openai') return openaiEmbedDims(opts?.embedDims)
+  const model = opts?.embedModel ?? DEFAULT_EMBED_MODEL
+  return checkedOnnxDims(model, await loadSharedEmbedder(model), opts?.embedDims)
+}
+
+function checkedOnnxDims(model: string, embedder: OnnxEmbedder, requested: number | undefined): number {
+  const dims = embedder.dimensions()
+  if (requested !== undefined && requested !== dims) {
+    throw new Error(
+      `[engram-bench] --embed-dims ${requested} does not match ${model}, which produces ${dims}-dim embeddings.`,
+    )
+  }
+  return dims
+}
+
+async function composeEmbedding(
+  base: IntelligenceAdapter | undefined,
+  embedBackend: EmbedBackend,
+  opts: BenchmarkOpts | undefined,
+): Promise<IntelligenceAdapter | undefined> {
+  if (embedBackend === 'openai') return base
+
+  const model = opts?.embedModel ?? DEFAULT_EMBED_MODEL
+  const embedder = await loadSharedEmbedder(model)
+  const dims = checkedOnnxDims(model, embedder, opts?.embedDims)
+  // A local embedder needs no API key, so it still wires when the base
+  // adapter is absent; recall then runs on embeddings alone.
+  return {
+    ...(base ?? {}),
+    embed: (text) => embedder.embed(text),
+    embedBatch: (texts) => embedder.embedBatch(texts),
+    embedQuery: (text) => embedder.embedQuery(text),
+    dimensions: () => dims,
   }
 }

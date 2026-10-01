@@ -25,6 +25,9 @@
  *     [--no-consolidate] [--no-graph] [--no-rerank]
  *     [--reranker openai|onnx|none]  # default openai (none under --no-rerank)
  *     [--onnx-model <hf id>]      # with --reranker onnx; default mixedbread-ai/mxbai-rerank-large-v1
+ *     [--embed-backend openai|onnx]  # default openai; onnx embeds locally (Qwen3-Embedding-0.6B q8 by default)
+ *     [--embed-model <id>]        # openai default text-embedding-3-small; onnx default onnx-community/Qwen3-Embedding-0.6B-ONNX
+ *     [--embed-dims N]            # openai: requested width; onnx: must equal the model's width
  *     [--vector-mode full|engine]  # 'engine' wraps sqlite with RecallEngine
  *     [--synthesize]              # record per-row RecallResult.synthesis (now = question_date, evidence capped to top-5 sessions)
  *     [--context-mode sessions|formatted]  # formatted: recall as the MCP memory_recall tool does and
@@ -41,15 +44,16 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
-import { createBenchMemory } from '../../memory-factory.js'
+import { createBenchMemory, resolveEmbedDims } from '../../memory-factory.js'
 import { parseContextMode, runSweepRecall, type ContextMode, type FormattedContextFields } from './context-modes.js'
 import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
 import { parseEventDate, recallOutputPolicyFromEnv } from '@engram-mem/core'
-import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
+import { parseRerankerArgs, buildModelMeta, parseEmbedArgs, resolveEmbedSettings } from './reranker-meta-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
-import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
+import type { BenchmarkOpts, EmbedBackend, RerankerBackend } from '../../types.js'
 import {
   assertRowsInSelection,
+  buildRunIdentity,
   diffRunIdentity,
   formatCheckpointText,
   formatHeaderLine,
@@ -62,7 +66,6 @@ import {
   partialPathFor,
   pendingQuestions,
   selectQuestions,
-  type OutputPolicyRecord,
   type RunIdentity,
 } from './sweep-checkpoint-lib.js'
 
@@ -75,6 +78,9 @@ interface SweepArgs {
   noRerank: boolean
   rerankerBackend?: RerankerBackend
   onnxRerankerModel?: string
+  embedBackend?: EmbedBackend
+  embedModel?: string
+  embedDims?: number
   vectorMode?: 'full' | 'engine'
   synthesize: boolean
   contextMode: ContextMode
@@ -116,8 +122,6 @@ async function main(): Promise<void> {
   const questions = exitOnError(() => selectQuestions(allQs, { limit: args.limit, ...(selection ? { ids: selection.ids } : {}) }))
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
   console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}, contextMode=${args.contextMode}`)
-  console.log(`K values: ${K_VALUES.join(', ')}`)
-  console.log()
 
   const benchOpts: BenchmarkOpts = {
     consolidate: !args.noConsolidate,
@@ -127,12 +131,23 @@ async function main(): Promise<void> {
     ...(args.rerankerBackend ? { rerankerBackend: args.rerankerBackend } : {}),
     ...(args.onnxRerankerModel ? { onnxRerankerModel: args.onnxRerankerModel } : {}),
     ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
+    ...(args.embedBackend ? { embedBackend: args.embedBackend } : {}),
+    ...(args.embedModel ? { embedModel: args.embedModel } : {}),
+    ...(args.embedDims !== undefined ? { embedDims: args.embedDims } : {}),
   }
+
+  // Resolved before the identity so a resume compares the width the vectors
+  // are actually built at, not the raw flag.
+  const embedDims = await resolveEmbedDims(benchOpts)
+  const embed = resolveEmbedSettings(args, embedDims)
+  console.log(`Embedding: ${embed.backend} ${embed.model} @${embed.dims}`)
+  console.log(`K values: ${K_VALUES.join(', ')}`)
+  console.log()
 
   // Recall reads the same env per call, so this is the policy every row was assembled under.
   const outputPolicy = exitOnError(() => outputPolicyRecord(recallOutputPolicyFromEnv(process.env)))
   const partialPath = partialPathFor(args.output)
-  const identity = buildRunIdentity(args, selection?.sha256, outputPolicy)
+  const identity = buildRunIdentity(args, selection?.sha256, outputPolicy, embedDims)
   const resumedRows = openCheckpoint(partialPath, identity, args.resume === true)
   exitOnError(() => assertRowsInSelection(questions, resumedRows))
   const todo = pendingQuestions(questions, new Set(resumedRows.map((r) => r.question_id)))
@@ -255,7 +270,9 @@ async function main(): Promise<void> {
   const output = {
     meta: {
       args: args as unknown as Record<string, unknown>,
-      ...buildModelMeta(resolvedBackend, args.onnxRerankerModel),
+      ...buildModelMeta(resolvedBackend, args.onnxRerankerModel, embed.model),
+      embedBackend: embed.backend,
+      embedDims: embed.dims,
       output_policy: outputPolicy,
       K_values: K_VALUES,
       total_questions: rows.length,
@@ -316,28 +333,6 @@ function loadSelection(args: SweepArgs): { ids: string[]; sha256: string } | und
     const ids = parseQuestionIdList(fs.readFileSync(file, 'utf8'))
     return { ids, sha256: idListSha256(ids) }
   })
-}
-
-function buildRunIdentity(args: SweepArgs, idsSha256: string | undefined, outputPolicy: OutputPolicyRecord): RunIdentity {
-  const backend: RerankerBackend = args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')
-  const questionSelection = idsSha256 !== undefined
-    ? `ids:${idsSha256}`
-    : args.limit > 0 ? `limit:${args.limit}` : 'all'
-  return {
-    data: path.resolve(args.data),
-    context_mode: args.contextMode,
-    reranker_backend: backend,
-    reranker_model: buildModelMeta(backend, args.onnxRerankerModel).rerankModel,
-    graph: !args.noGraph,
-    consolidate: !args.noConsolidate,
-    vector_mode: args.vectorMode ?? 'full',
-    max_results: args.maxResults,
-    synthesize: args.synthesize,
-    question_selection: questionSelection,
-    output_emit_k: outputPolicy.emit_k,
-    output_token_budget: outputPolicy.token_budget,
-    output_faint: outputPolicy.faint,
-  }
 }
 
 /**
@@ -401,9 +396,11 @@ function parseArgs(argv: string[]): SweepArgs {
     process.exit(1)
   }
   let reranker: ReturnType<typeof parseRerankerArgs>
+  let embedArgs: ReturnType<typeof parseEmbedArgs>
   let contextMode: ContextMode
   try {
     reranker = parseRerankerArgs(argv)
+    embedArgs = parseEmbedArgs(argv)
     contextMode = parseContextMode(argv)
   } catch (err) {
     console.error(`Error: ${(err as Error).message}`)
@@ -422,6 +419,7 @@ function parseArgs(argv: string[]): SweepArgs {
     noGraph: has('no-graph'),
     noRerank: has('no-rerank'),
     ...reranker,
+    ...embedArgs,
     ...(vectorModeRaw !== undefined ? { vectorMode: vectorModeRaw } : {}),
     synthesize: has('synthesize'),
     contextMode,

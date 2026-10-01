@@ -844,6 +844,89 @@ describe('Memory — forget()', () => {
   })
 })
 
+describe('Memory — query-side embedding', () => {
+  const DIM = 8
+  const QUERY = 'when did we rotate the staging deploy key'
+  const HYPO_DOC = 'The staging deploy key was rotated last monday.'
+
+  function vec(axis: number): number[] {
+    const v = new Array(DIM).fill(0)
+    v[axis] = 1
+    return v
+  }
+
+  function makeAdapter(withEmbedQuery: boolean) {
+    const embed = vi.fn(async (_text: string) => vec(0))
+    const embedBatch = vi.fn(async (texts: string[]) => texts.map(() => vec(0)))
+    const embedQuery = vi.fn(async (_text: string) => vec(1))
+    const generateHypotheticalDoc = vi.fn(async (_query: string) => HYPO_DOC)
+    const intelligence: IntelligenceAdapter = {
+      embed,
+      embedBatch,
+      dimensions: () => DIM,
+      generateHypotheticalDoc,
+      ...(withEmbedQuery ? { embedQuery } : {}),
+    }
+    return { intelligence, embed, embedBatch, embedQuery, generateHypotheticalDoc }
+  }
+
+  const batch = [
+    { role: 'user' as const, content: 'the staging deploy key rotates every monday', sessionId: 'qe' },
+    { role: 'assistant' as const, content: 'billing invoices go out on the first', sessionId: 'qe' },
+    { role: 'user' as const, content: 'the release train leaves on thursdays', sessionId: 'qe' },
+    { role: 'assistant' as const, content: 'on-call handover happens at noon', sessionId: 'qe' },
+  ]
+
+  it('embeds recall and forget-preview queries with embedQuery, stored content and HyDE documents with embed/embedBatch', async () => {
+    const a = makeAdapter(true)
+    const memory = createMemory({ storage: makeStorage(), intelligence: a.intelligence })
+    await memory.initialize()
+
+    await memory.ingest({ role: 'user', content: 'a single ingested turn', sessionId: 'qe' })
+    expect(a.embed).toHaveBeenCalledWith('a single ingested turn')
+    await memory.ingestBatch(batch)
+    expect(a.embedBatch).toHaveBeenCalledOnce()
+    expect(a.embedQuery).not.toHaveBeenCalled()
+
+    a.embed.mockClear()
+    await memory.recall(QUERY)
+    expect(a.embedQuery).toHaveBeenCalledWith(QUERY)
+    expect(a.embed).not.toHaveBeenCalledWith(QUERY)
+    // A hypothetical answer is a document, so it takes the document side.
+    expect(a.generateHypotheticalDoc).toHaveBeenCalled()
+    expect(a.embed).toHaveBeenCalledWith(HYPO_DOC)
+    expect(a.embedQuery).not.toHaveBeenCalledWith(HYPO_DOC)
+
+    a.embed.mockClear()
+    a.embedQuery.mockClear()
+    await memory.forget(QUERY)
+    expect(a.embedQuery).toHaveBeenCalledWith(QUERY)
+    expect(a.embed).not.toHaveBeenCalledWith(QUERY)
+
+    await memory.dispose()
+  })
+
+  it('embeds queries with embed when the adapter has no embedQuery', async () => {
+    const a = makeAdapter(false)
+    const memory = createMemory({ storage: makeStorage(), intelligence: a.intelligence })
+    await memory.initialize()
+    await memory.ingestBatch(batch)
+    expect(a.embedBatch).toHaveBeenCalledOnce()
+
+    a.embed.mockClear()
+    await memory.recall(QUERY)
+    expect(a.embed).toHaveBeenCalledWith(QUERY)
+    expect(a.embed).toHaveBeenCalledWith(HYPO_DOC)
+
+    a.embed.mockClear()
+    await memory.forget(QUERY)
+    expect(a.embed).toHaveBeenCalledWith(QUERY)
+    expect(a.embedQuery).not.toHaveBeenCalled()
+
+    await memory.dispose()
+  })
+})
+
 describe('Memory — forgetByIds() graph tombstone', () => {
   function graphWith(forgetMemories: (ids: string[]) => Promise<number>): GraphPort {
     return { isAvailable: async () => true, forgetMemories } as unknown as GraphPort

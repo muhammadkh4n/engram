@@ -1,14 +1,80 @@
-// Pure helpers for the recall sweep and judge: reranker flag parsing and the
-// model-id block written into result `meta`. No runtime imports beyond types,
-// so tests exercise them without loading ONNX weights or touching the network.
-import type { RerankerBackend } from '../../types.js'
+// Pure helpers for the recall sweep and judge: reranker and embedder flag
+// parsing and the model-id block written into result `meta`. No runtime
+// imports beyond types, so tests exercise them without loading ONNX weights or
+// touching the network.
+import type { EmbedBackend, RerankerBackend } from '../../types.js'
 
 /** createOnnxReranker's default model id when no --onnx-model is given. */
 export const DEFAULT_ONNX_RERANK_MODEL = 'mixedbread-ai/mxbai-rerank-large-v1'
 /** The OpenAI summarizer's default chat model, which does pointwise rerank. */
 export const OPENAI_RERANK_MODEL = 'gpt-4o-mini'
-/** createBenchMemory builds openaiIntelligence without an embeddingModel override. */
+/** The OpenAI embedder's default model, used when no --embed-model is given. */
 export const BENCH_EMBED_MODEL = 'text-embedding-3-small'
+/** createOnnxEmbedder's default model id, mirrored here to keep this module free of runtime imports. */
+export const DEFAULT_ONNX_EMBED_MODEL = 'onnx-community/Qwen3-Embedding-0.6B-ONNX'
+
+const EMBED_BACKENDS: readonly EmbedBackend[] = ['openai', 'onnx']
+
+export interface EmbedArgs {
+  embedBackend?: EmbedBackend
+  embedModel?: string
+  embedDims?: number
+}
+
+/** Resolved embedder settings; dims is the width the vectors are built at. */
+export interface EmbedSettings {
+  backend: EmbedBackend
+  model: string
+  dims: number
+}
+
+/**
+ * Parse `--embed-backend openai|onnx`, `--embed-model <id>` and
+ * `--embed-dims N`. Each field is set only when its flag is given, so a plain
+ * run's args are unchanged. Throws on an invalid value; the caller prints the
+ * message and exits 1.
+ */
+export function parseEmbedArgs(argv: readonly string[]): EmbedArgs {
+  const valueOf = (flag: string): string | undefined => {
+    const i = argv.indexOf(flag)
+    if (i === -1) return undefined
+    const next = argv[i + 1]
+    return next !== undefined && !next.startsWith('--') ? next : ''
+  }
+
+  const rawBackend = valueOf('--embed-backend')
+  if (rawBackend !== undefined && !EMBED_BACKENDS.includes(rawBackend as EmbedBackend)) {
+    throw new Error(`--embed-backend must be one of openai|onnx, got ${JSON.stringify(rawBackend)}`)
+  }
+  const embedModel = valueOf('--embed-model')
+  if (embedModel === '') throw new Error('--embed-model requires a model id')
+
+  const rawDims = valueOf('--embed-dims')
+  let embedDims: number | undefined
+  if (rawDims !== undefined) {
+    embedDims = /^[1-9][0-9]*$/.test(rawDims) ? Number(rawDims) : NaN
+    if (!Number.isSafeInteger(embedDims)) {
+      throw new Error(`--embed-dims must be a positive integer, got ${JSON.stringify(rawDims)}`)
+    }
+  }
+
+  return {
+    ...(rawBackend !== undefined ? { embedBackend: rawBackend as EmbedBackend } : {}),
+    ...(embedModel !== undefined ? { embedModel } : {}),
+    ...(embedDims !== undefined ? { embedDims } : {}),
+  }
+}
+
+/**
+ * The backend, model and dims a run embeds with, defaults applied. `dims` is
+ * the width the vectors are built at, resolved by the caller from the wired
+ * embedder (this module stays free of runtime imports).
+ */
+export function resolveEmbedSettings(args: EmbedArgs, dims: number): EmbedSettings {
+  const backend = args.embedBackend ?? 'openai'
+  const model = args.embedModel ?? (backend === 'onnx' ? DEFAULT_ONNX_EMBED_MODEL : BENCH_EMBED_MODEL)
+  return { backend, model, dims }
+}
 
 const BACKENDS: readonly RerankerBackend[] = ['openai', 'onnx', 'none']
 

@@ -20,9 +20,56 @@
  * OPENAI_API_KEY. `openaiApiKey: ''` on both handles additionally forces
  * `createBenchMemory` to skip constructing a real intelligence adapter.
  */
-import { describe, it, expect, afterEach } from 'vitest'
-import type { StorageAdapter } from '@engram-mem/core'
-import { createBenchMemory } from '../src/memory-factory.js'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import type { IntelligenceAdapter, StorageAdapter } from '@engram-mem/core'
+
+// The OpenAI adapter and the ONNX embedder are replaced with recording fakes:
+// no network and no model weights in any test here.
+const fakes = vi.hoisted(() => {
+  const openaiCalls: Array<Record<string, unknown>> = []
+  const embedderModels: string[] = []
+  let embedderLoads = 0
+  let embedderDims = 1024
+  return {
+    openaiCalls,
+    embedderModels,
+    loads: () => embedderLoads,
+    setEmbedderDims: (d: number) => { embedderDims = d },
+    openaiIntelligence(opts: Record<string, unknown>) {
+      openaiCalls.push(opts)
+      const dims = (opts['embeddingDimensions'] as number | undefined) ?? 1536
+      return {
+        embed: async () => [0.1, 0.2],
+        embedBatch: async (texts: string[]) => texts.map(() => [0.1, 0.2]),
+        dimensions: () => dims,
+        summarize: async () => 'openai summary',
+      }
+    },
+    createOnnxEmbedder(opts: { model: string }) {
+      embedderModels.push(opts.model)
+      let dims: number | null = null
+      return {
+        embed: async (t: string) => [1, t.length],
+        embedBatch: async (ts: string[]) => ts.map((t) => [2, t.length]),
+        embedQuery: async (t: string) => [3, t.length],
+        dimensions: () => {
+          if (dims === null) throw new Error('not loaded')
+          return dims
+        },
+        get isReady() { return dims !== null },
+        load: async () => { embedderLoads++; dims = embedderDims },
+        dispose: async () => { dims = null },
+      }
+    },
+  }
+})
+
+vi.mock('@engram-mem/openai', () => ({ openaiIntelligence: fakes.openaiIntelligence }))
+vi.mock('@engram-mem/rerank-onnx', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@engram-mem/rerank-onnx')>()),
+  createOnnxEmbedder: fakes.createOnnxEmbedder,
+}))
+import { createBenchMemory, resolveEmbedDims } from '../src/memory-factory.js'
 import type { BenchMemoryHandle } from '../src/bench-memory-handle.js'
 
 // Must match the recall-engine codec's DEFAULT_DIMS
@@ -153,5 +200,91 @@ describe('createBenchMemory: vectorMode', () => {
     for (let i = 0; i < fullResults.length; i++) {
       expect(engineResults[i]!.similarity).toBeCloseTo(fullResults[i]!.similarity, 6)
     }
+  })
+})
+
+function intelligenceOf(handle: BenchMemoryHandle): IntelligenceAdapter | undefined {
+  return (handle.memory as unknown as { intelligence?: IntelligenceAdapter }).intelligence
+}
+
+async function makeEmbedHandle(opts: Parameters<typeof createBenchMemory>[0]): Promise<BenchMemoryHandle> {
+  const handle = await createBenchMemory({ graph: false, noRerank: true, openaiApiKey: 'test-key', ...opts })
+  handles.push(handle)
+  return handle
+}
+
+describe('createBenchMemory: embedding backend', () => {
+  it('builds the OpenAI adapter with only the API key when no embed option is set', async () => {
+    fakes.openaiCalls.length = 0
+    const handle = await makeEmbedHandle({})
+    expect(fakes.openaiCalls).toEqual([{ apiKey: 'test-key' }])
+    const intelligence = intelligenceOf(handle)!
+    expect(intelligence.embedQuery).toBeUndefined()
+    expect(intelligence.dimensions!()).toBe(1536)
+  })
+
+  it('passes embedModel and embedDims to the OpenAI adapter as embeddingModel and embeddingDimensions', async () => {
+    fakes.openaiCalls.length = 0
+    const handle = await makeEmbedHandle({ embedModel: 'text-embedding-3-large', embedDims: 1536 })
+    expect(fakes.openaiCalls).toEqual([
+      { apiKey: 'test-key', embeddingModel: 'text-embedding-3-large', embeddingDimensions: 1536 },
+    ])
+    expect(intelligenceOf(handle)!.dimensions!()).toBe(1536)
+  })
+
+  it('routes embed, embedBatch, embedQuery and dimensions to one shared ONNX embedder and keeps the rest', async () => {
+    fakes.openaiCalls.length = 0
+    fakes.setEmbedderDims(1024)
+    const loadsBefore = fakes.loads()
+    const first = await makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-a' })
+    const second = await makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-a' })
+
+    expect(fakes.loads() - loadsBefore).toBe(1)
+    expect(fakes.embedderModels.at(-1)).toBe('org/embed-a')
+    // The OpenAI embedder is not the one measured, so it gets no embed options.
+    expect(fakes.openaiCalls).toEqual([{ apiKey: 'test-key' }, { apiKey: 'test-key' }])
+
+    for (const handle of [first, second]) {
+      const intelligence = intelligenceOf(handle)!
+      expect(await intelligence.embed!('abc')).toEqual([1, 3])
+      expect(await intelligence.embedBatch!(['a', 'bb'])).toEqual([[2, 1], [2, 2]])
+      expect(await intelligence.embedQuery!('abcd')).toEqual([3, 4])
+      expect(intelligence.dimensions!()).toBe(1024)
+      expect(await intelligence.summarize!('x', {} as never)).toBe('openai summary')
+    }
+  })
+
+  it('loads the default Qwen3 model when no embedModel is given', async () => {
+    fakes.setEmbedderDims(1024)
+    await makeEmbedHandle({ embedBackend: 'onnx' })
+    expect(fakes.embedderModels.at(-1)).toBe('onnx-community/Qwen3-Embedding-0.6B-ONNX')
+  })
+
+  it('wires the ONNX embedder without an OpenAI key', async () => {
+    fakes.setEmbedderDims(1024)
+    const handle = await makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-b', openaiApiKey: '' })
+    const intelligence = intelligenceOf(handle)!
+    expect(await intelligence.embedQuery!('q')).toEqual([3, 1])
+    expect(intelligence.summarize).toBeUndefined()
+  })
+
+  it('resolves the onnx width from the loaded model and refuses a different requested width', async () => {
+    await expect(resolveEmbedDims({ embedBackend: 'onnx', embedModel: 'org/embed-c' })).resolves.toBe(1024)
+    await expect(resolveEmbedDims({ embedBackend: 'onnx', embedModel: 'org/embed-c', embedDims: 768 }))
+      .rejects.toThrow(/produces 1024/)
+  })
+
+  it('refuses embedDims that differ from the ONNX model width', async () => {
+    fakes.setEmbedderDims(1024)
+    await expect(makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-c', embedDims: 768 }))
+      .rejects.toThrow(/--embed-dims 768 does not match org\/embed-c, which produces 1024-dim/)
+    await expect(makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-c', embedDims: 1024 })).resolves.toBeDefined()
+  })
+
+  it('refuses engine vector mode for embeddings that are not 1536-dim', async () => {
+    fakes.setEmbedderDims(1024)
+    await expect(makeEmbedHandle({ embedBackend: 'onnx', embedModel: 'org/embed-d', vectorMode: 'engine' }))
+      .rejects.toThrow(/needs 1536-dim embeddings, but the embedder produces 1024/)
+    await expect(makeEmbedHandle({ embedDims: 512, vectorMode: 'engine' })).rejects.toThrow(/produces 512/)
   })
 })
