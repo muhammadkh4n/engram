@@ -42,9 +42,9 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 5 after all migrations', () => {
+  it('sets schema version to 6 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(5)
+    expect(getSchemaVersion(db)).toBe(6)
   })
 
   it('v5 adds forgotten_at to the recallable memory tables', () => {
@@ -55,21 +55,24 @@ describe('SQLite migrations', () => {
     }
   })
 
-  it('creates episode_parts table (dual-storage architecture)', () => {
+  it('drops the unused episode_parts table and its index', () => {
     runMigrations(db)
 
-    const tables = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    const objects = db
+      .prepare("SELECT name FROM sqlite_master WHERE name IN ('episode_parts', 'idx_episode_parts_episode')")
       .pluck()
       .all() as string[]
 
-    expect(tables).toContain('episode_parts')
+    expect(objects).toEqual([])
   })
 
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(5)
+    expect(getSchemaVersion(db)).toBe(6)
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name = 'episode_parts'").pluck().all(),
+    ).toEqual([])
   })
 
   it('enforces foreign keys on memories table', () => {

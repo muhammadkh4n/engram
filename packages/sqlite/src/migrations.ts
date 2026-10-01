@@ -364,4 +364,14 @@ export function runMigrations(db: Database.Database): void {
     }
     db.pragma('user_version = 5')
   }
+
+  if (currentVersion < 6) {
+    // V6: episode_parts never gained a reader or writer. V2 stays as written
+    // because migrations are append-only, so a fresh DB creates it and drops it here.
+    db.exec(`
+      DROP INDEX IF EXISTS idx_episode_parts_episode;
+      DROP TABLE IF EXISTS episode_parts;
+    `)
+    db.pragma('user_version = 6')
+  }
 }
