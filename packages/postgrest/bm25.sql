@@ -15,7 +15,10 @@
 -- the function once at startup and keeps that lexical mode until restarted.
 --
 -- Idempotent and safe to re-apply: CREATE EXTENSION IF NOT EXISTS,
--- CREATE INDEX IF NOT EXISTS, CREATE OR REPLACE FUNCTION.
+-- CREATE INDEX IF NOT EXISTS, CREATE OR REPLACE FUNCTION, and a revoke of
+-- EXECUTE on pg_textsearch's own functions from PUBLIC and every other role
+-- except their owner. Re-applying repeats the revoke, so it also covers the
+-- functions a newer pg_textsearch adds after ALTER EXTENSION ... UPDATE.
 --
 -- Like schema.sql, this file contains no psql meta-commands, so any psql
 -- client version and SQL editors can run it as plain SQL.
@@ -38,6 +41,52 @@
 --
 
 CREATE EXTENSION IF NOT EXISTS pg_textsearch;
+
+-- pg_textsearch installs its functions in public. Some of them keep the
+-- default EXECUTE grant to PUBLIC. Where default privileges grant EXECUTE on
+-- new functions to a role such as service_role, that role receives every
+-- one of them, including the index maintenance, cache and test scaffolds
+-- the extension itself revokes from PUBLIC. PostgREST serves public, so any
+-- of these a role may execute is callable as /rpc/<name> with that role's
+-- JWT, or with none by the anon role. Only some guard themselves:
+-- bm25_force_merge and bm25_spill_index require the index owner, the dump
+-- and tombstone functions a superuser, while others such as
+-- bm25_test_memtable_append and bm25_cache_evict_largest check nothing.
+-- EXECUTE is therefore revoked from PUBLIC and from every role except each
+-- function's owner, and granted back to none: engram_bm25_match is SECURITY
+-- DEFINER and reaches the operators and scoring functions it uses as its
+-- owner, and index writes need no EXECUTE because the server calls the
+-- access method. The functions are found through pg_depend, not listed by
+-- name, so re-applying this file covers the functions a newer version adds.
+DO $$
+DECLARE
+  fn regprocedure;
+  role_name name;
+BEGIN
+  FOR fn IN
+    SELECT d.objid::regprocedure
+    FROM pg_depend d
+    JOIN pg_extension e ON e.oid = d.refobjid
+    WHERE d.refclassid = 'pg_extension'::regclass
+      AND d.classid = 'pg_proc'::regclass
+      AND d.deptype = 'e'
+      AND e.extname = 'pg_textsearch'
+  LOOP
+    EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM PUBLIC', fn);
+    FOR role_name IN
+      SELECT DISTINCT r.rolname
+      FROM pg_proc p
+      CROSS JOIN LATERAL aclexplode(p.proacl) acl
+      JOIN pg_roles r ON r.oid = acl.grantee
+      WHERE p.oid = fn::oid
+        AND acl.privilege_type = 'EXECUTE'
+        AND acl.grantee <> p.proowner
+    LOOP
+      EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM %I', fn, role_name);
+    END LOOP;
+  END LOOP;
+END
+$$;
 
 
 --

@@ -10,6 +10,10 @@
  *   it only scores rows and never selects them;
  * - each tier scores a bounded number of rows, selects the bare <@> score
  *   once per row, and leaves the rank_score filter outside the tiers;
+ * - pg_textsearch's own functions are executable by no role but their
+ *   owner, since PostgREST serves public and would expose them as /rpc
+ *   endpoints; they are found through pg_depend, so a newer extension
+ *   version's functions are covered when the file is re-applied;
  * - removal is documented as explicit drops, never CASCADE.
  */
 import { describe, it, expect } from 'vitest'
@@ -148,6 +152,49 @@ describe('bm25.sql BM25 indexes', () => {
     for (const tier of Object.values(TIERS)) {
       expect(tier.expr.replace(/[()]/g, '')).toBe(ftsSource(tier.table))
     }
+  })
+})
+
+describe("bm25.sql revokes EXECUTE on pg_textsearch's own functions", () => {
+  /** The DO block between CREATE EXTENSION and the first BM25 index, squashed; '' when absent. */
+  function revokeBlock(): string {
+    const start = bm25.search(/^CREATE EXTENSION IF NOT EXISTS pg_textsearch;$/m)
+    const end = bm25.search(/^CREATE INDEX IF NOT EXISTS/m)
+    if (start < 0 || end < 0) return ''
+    const m = bm25.slice(start, end).match(/^DO \$\$\n([\s\S]*?)\n\$\$;$/m)
+    return m ? squash(m[1]!) : ''
+  }
+
+  it('runs right after CREATE EXTENSION, before any BM25 index is built', () => {
+    expect(revokeBlock()).not.toBe('')
+  })
+
+  it('finds the functions through pg_depend on the pg_textsearch extension row, not by name', () => {
+    const block = revokeBlock()
+    expect(block).toContain('SELECT d.objid::regprocedure FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid')
+    expect(block).toContain(
+      "WHERE d.refclassid = 'pg_extension'::regclass AND d.classid = 'pg_proc'::regclass " +
+        "AND d.deptype = 'e' AND e.extname = 'pg_textsearch'",
+    )
+    expect(block).not.toMatch(/bm25_\w+\(/)
+  })
+
+  it('revokes EXECUTE from PUBLIC and from every other grantee except the owner', () => {
+    const block = revokeBlock()
+    expect(block).toContain("EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM PUBLIC', fn);")
+    expect(block).toContain('CROSS JOIN LATERAL aclexplode(p.proacl) acl')
+    expect(block).toContain("AND acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner")
+    expect(block).toContain("EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM %I', fn, role_name);")
+  })
+
+  it('grants EXECUTE back to no role', () => {
+    expect(bm25).not.toMatch(/\bGRANT\b/)
+  })
+
+  it('names the revoke among the statements that make re-applying safe', () => {
+    const header = bm25.slice(0, bm25.search(/^CREATE EXTENSION IF NOT EXISTS/m))
+    const reapply = squash(header.slice(header.indexOf('-- Idempotent and safe to re-apply')).replace(/^--\s*/gm, ''))
+    expect(reapply).toMatch(/^Idempotent and safe to re-apply: [^.]*\brevoke of EXECUTE on pg_textsearch's own functions/)
   })
 })
 
