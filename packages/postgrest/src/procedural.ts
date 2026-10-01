@@ -90,6 +90,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
       .from('memory_procedural')
       .select('*')
       .or(`trigger_text.ilike.%${sanitizeIlike(query)}%,procedure.ilike.%${sanitizeIlike(query)}%`)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Procedural search (text) failed: ${error.message}`)
@@ -145,6 +146,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
       .from('memory_procedural')
       .select('*')
       .ilike('trigger_text', `%${sanitizeIlike(activity)}%`)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Procedural searchByTrigger failed: ${error.message}`)

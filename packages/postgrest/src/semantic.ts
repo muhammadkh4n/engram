@@ -98,6 +98,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       .select('*')
       .or(`topic.ilike.%${safe}%,content.ilike.%${safe}%`)
       .is('superseded_by', null)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Semantic search (text) failed: ${error.message}`)

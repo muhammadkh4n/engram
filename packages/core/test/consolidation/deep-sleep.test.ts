@@ -639,6 +639,34 @@ describe('deepSleep', () => {
       )
     })
 
+    it('deduplicates on an exact text hit when findNearest returns nothing', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I always run tests before pushing code.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      // The adapter's text path returns only live rows, so a text hit here is
+      // a live procedure the vector leg did not surface.
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        proceduralSearchResults: [
+          makeProceduralSearchResult('existing-proc-1', 'habit', 'run tests before pushing code.', 0.5),
+        ],
+        proceduralNearestResults: [],
+      })
+
+      const embed = vi.fn(async (_text: string) => [0.4, 0.5, 0.6])
+
+      await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(storage.procedural.findNearest).toHaveBeenCalledWith([0.4, 0.5, 0.6], 3)
+      expect(storage.procedural.incrementObservation).toHaveBeenCalledWith('existing-proc-1')
+      expect(storage.procedural.insert).not.toHaveBeenCalledWith(
+        expect.objectContaining({ procedure: 'run tests before pushing code.' })
+      )
+    })
+
     it('inserts without an embedding when a high-scoring search hit has other text', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'My workflow is to start with types.' }),
