@@ -64,6 +64,29 @@ describe('community membership stamping (Cypher)', () => {
     expect(write.mock.calls[1][1]).toEqual({ generatedAt: 'g2', projectId: null })
     write.mockRestore()
   })
+
+  it('trims only the listed communities and never deletes a Community node', async () => {
+    const write = vi.spyOn(graph, 'runCypherWrite').mockResolvedValue({ records: [] } as never)
+
+    await graph.trimCommunityMemberships({ generatedAt: 'g2', communityIds: ['community:global:0'] })
+
+    expect(write).toHaveBeenCalledOnce()
+    const [query, params] = write.mock.calls[0]
+    expect(query).toContain('c.id IN $communityIds')
+    expect(query).not.toMatch(/DELETE c\b/)
+    expect(params).toEqual({ generatedAt: 'g2', communityIds: ['community:global:0'] })
+    write.mockRestore()
+  })
+
+  it('makes no write for an empty community list', async () => {
+    const write = vi.spyOn(graph, 'runCypherWrite').mockResolvedValue({ records: [] } as never)
+
+    const result = await graph.trimCommunityMemberships({ generatedAt: 'g2', communityIds: [] })
+
+    expect(write).not.toHaveBeenCalled()
+    expect(result).toEqual({ membershipsRemoved: 0 })
+    write.mockRestore()
+  })
 })
 
 describe.skipIf(!neo4jReady)('community membership replacement (integration)', () => {
@@ -131,5 +154,21 @@ describe.skipIf(!neo4jReady)('community membership replacement (integration)', (
     await graph.replaceCommunityMemberships({ generatedAt: 'g2', projectId: 'proj-a' })
 
     expect((await memberships()).map((m) => m.community)).toEqual(['community:proj-b:0', 'community:proj-a:3'])
+  })
+
+  it('a trim removes stale memberships of the rewritten communities and keeps every other community whole', async () => {
+    await graph.upsertCommunityNode(communityProps({ generatedAt: 'g1', memberNodeIds: ['ep-0', 'ep-1', 'ep-2'] }))
+    await graph.upsertCommunityNode(communityProps({ id: 'community:global:5', communityId: '5', generatedAt: 'g1', memberNodeIds: ['ep-3'] }))
+    await graph.upsertCommunityNode(communityProps({ generatedAt: 'g2', memberNodeIds: ['ep-0'] }))
+
+    const result = await graph.trimCommunityMemberships({ generatedAt: 'g2', communityIds: ['community:global:0'] })
+
+    expect(result.membershipsRemoved).toBe(2)
+    expect(await memberships()).toEqual([
+      { member: 'ep-0', community: 'community:global:0', generatedAt: 'g2' },
+      { member: 'ep-3', community: 'community:global:5', generatedAt: 'g1' },
+    ])
+    const left = await graph.runCypher('MATCH (c:Community) RETURN count(c) AS n')
+    expect(countOf(left.records[0].get('n'))).toBe(2)
   })
 })

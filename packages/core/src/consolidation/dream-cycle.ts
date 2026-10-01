@@ -246,6 +246,7 @@ export async function dreamCycle(
       // by this run carry it, and the replacement below removes the rest.
       const runGeneratedAt = new Date().toISOString()
       let summariesCompleted = false
+      const rewrittenCommunityIds: string[] = []
       try {
         const allCommunities = await graph.getCommunityMembers!({
           minSize: minCommunitySize,
@@ -333,6 +334,7 @@ export async function dreamCycle(
             projectId: opts?.projectId ?? null,
             memberNodeIds,
           })
+          rewrittenCommunityIds.push(communityNodeId)
 
           await writeCommunityCache(storage, {
             communityId: communityNodeId,
@@ -362,11 +364,32 @@ export async function dreamCycle(
       // partial, and replacing then would delete the memberships and
       // Community nodes of every community the run never reached (typically
       // the small ones of a paused project). A partial run replaces nothing.
+      //
+      // A capped run still trims the communities it did rewrite: each was
+      // restamped with this run's generatedAt, so its members carrying another
+      // stamp belong to an earlier assignment. Without the trim, a graph whose
+      // community count stays above the cap would never replace, and those
+      // stale memberships would pile up run after run.
       if (louvainSucceeded && !summariesCompleted && cappedAt !== undefined) {
         console.warn(
           `[dream-cycle] Community membership replacement skipped: summary loop stopped at ${cappedAt}` +
           ` after ${communitySummariesGenerated} communities; previous memberships kept`,
         )
+        if (rewrittenCommunityIds.length > 0 && typeof graph.trimCommunityMemberships === 'function') {
+          try {
+            const trimmed = await graph.trimCommunityMemberships({
+              generatedAt: runGeneratedAt,
+              communityIds: rewrittenCommunityIds,
+            })
+            console.log(
+              `[dream-cycle] Community trim: memberships=${trimmed.membershipsRemoved}` +
+              ` communities=${rewrittenCommunityIds.length}`,
+            )
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.warn(`[dream-cycle] Community membership trim failed: ${msg}`)
+          }
+        }
       }
       if (louvainSucceeded && summariesCompleted && typeof graph.replaceCommunityMemberships === 'function') {
         try {

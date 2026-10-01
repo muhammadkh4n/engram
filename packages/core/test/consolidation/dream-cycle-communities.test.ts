@@ -54,6 +54,10 @@ function makeCommunityGraph(opts: MockGraphOptions = {}) {
       calls.push('replace')
       return { membershipsRemoved: 4, communitiesRemoved: 1 }
     }),
+    trimCommunityMemberships: vi.fn(async () => {
+      calls.push('trim')
+      return { membershipsRemoved: 3 }
+    }),
   }
   return { graph: graph as unknown as GraphPort, mocks: graph, calls }
 }
@@ -117,31 +121,65 @@ describe('dreamCycle community membership replacement', () => {
     expect(mocks.replaceCommunityMemberships).not.toHaveBeenCalled()
   })
 
-  it('keeps every existing membership and Community when the community-count cap stops the loop', async () => {
+  it('a community-count cap trims stale memberships only of the communities it rewrote', async () => {
     const { graph, mocks, calls } = makeCommunityGraph()
 
     await dreamCycle(makeMockStorage(), { replaySeeds: 0, maxCommunities: 1 }, graph)
 
-    expect(calls).toEqual(['louvain', 'upsert'])
+    expect(calls).toEqual(['louvain', 'upsert', 'trim'])
     expect(mocks.replaceCommunityMemberships).not.toHaveBeenCalled()
+    const stamp = (mocks.upsertCommunityNode.mock.calls[0] as unknown as [{ generatedAt: string }])[0].generatedAt
+    expect(mocks.trimCommunityMemberships).toHaveBeenCalledWith({
+      generatedAt: stamp,
+      communityIds: ['community:global:7'],
+    })
     const writes = mocks.runCypherWrite.mock.calls.map((c) => (c as unknown as [string])[0])
     expect(writes.some((q) => /\bDELETE\b/i.test(q))).toBe(false)
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('membership replacement skipped'))
   })
 
-  it('keeps every existing membership and Community when the LLM cost cap stops the loop', async () => {
+  it('an LLM cost cap trims stale memberships only of the communities it rewrote', async () => {
     const { graph, mocks } = makeCommunityGraph()
     const intelligence = { summarize: vi.fn(async () => ({ text: 'Auth token rotation work' })) }
 
     const result = await dreamCycle(
       makeMockStorage(),
-      { replaySeeds: 0, maxLlmCallsUsd: 0.0000001 },
+      { replaySeeds: 0, maxLlmCallsUsd: 0.0000001, projectId: 'proj-a' },
       graph,
       intelligence as never,
     )
 
     expect(result.communitySummariesGenerated).toBe(1)
     expect(mocks.replaceCommunityMemberships).not.toHaveBeenCalled()
+    expect(mocks.trimCommunityMemberships).toHaveBeenCalledOnce()
+    const [arg] = mocks.trimCommunityMemberships.mock.calls[0] as unknown as [{ communityIds: string[] }]
+    expect(arg.communityIds).toEqual(['community:proj-a:7'])
+  })
+
+  it('a capped run whose trim fails still completes', async () => {
+    const { graph, mocks } = makeCommunityGraph()
+    mocks.trimCommunityMemberships.mockRejectedValueOnce(new Error('deadlock'))
+
+    const result = await dreamCycle(makeMockStorage(), { replaySeeds: 0, maxCommunities: 1 }, graph)
+
+    expect(result.communitySummariesGenerated).toBe(1)
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('trim failed: deadlock'))
+  })
+
+  it('a complete run replaces and does not trim', async () => {
+    const { graph, mocks } = makeCommunityGraph()
+
+    await dreamCycle(makeMockStorage(), { replaySeeds: 0 }, graph)
+
+    expect(mocks.trimCommunityMemberships).not.toHaveBeenCalled()
+  })
+
+  it('a loop that throws part-way trims nothing', async () => {
+    const { graph, mocks } = makeCommunityGraph({ upsertFailsAt: 2 })
+
+    await dreamCycle(makeMockStorage(), { replaySeeds: 0 }, graph)
+
+    expect(mocks.trimCommunityMemberships).not.toHaveBeenCalled()
   })
 
   it('replaces when the loop reaches every community exactly at the count cap', async () => {

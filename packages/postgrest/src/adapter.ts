@@ -10,6 +10,10 @@ import { PostgRestConsolidationRunStorage } from './consolidation-runs.js'
 import { parseVector } from './parse-vector.js'
 import { isUuid } from './uuid.js'
 
+const TOMBSTONE_PAGE_SIZE = 1000
+
+type TombstoneQuery = ReturnType<ReturnType<PostgrestClient['from']>['select']>
+
 export interface PostgRestAdapterOptions {
   url: string
   key: string
@@ -420,12 +424,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     const seen = new Set<string>()
     const results: Array<{ id: string; type: MemoryType }> = []
 
-    const collect = (rows: Array<{ id: string }> | null, type: MemoryType): void => {
-      for (const row of rows ?? []) {
-        const key = `${type}:${row.id}`
+    const collect = (ids: string[], type: MemoryType): void => {
+      for (const id of ids) {
+        const key = `${type}:${id}`
         if (seen.has(key)) continue
         seen.add(key)
-        results.push({ id: row.id, type })
+        results.push({ id, type })
       }
     }
 
@@ -437,27 +441,44 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     // memory_digests: no forgotten_at column, never superseded — intentionally omitted.
 
     for (const [type, table] of forgottenTables) {
-      const { data, error } = await this.client
-        .from(table)
-        .select('id')
-        .gte('forgotten_at', sinceIso)
-      if (error) throw new Error(`listTombstonesSince(${type}) failed: ${error.message}`)
-      collect(data as Array<{ id: string }> | null, type)
+      collect(await this.pageTombstoneIds(table, type, (q) => q.gte('forgotten_at', sinceIso)), type)
     }
 
     // Semantic supersession is a distinct tombstone reason from forget() —
     // `collect`'s seen-set dedupes a row that happens to be both.
-    const { data: supersededData, error: supersededError } = await this.client
-      .from('memory_semantic')
-      .select('id')
-      .gte('updated_at', sinceIso)
-      .not('superseded_by', 'is', null)
-    if (supersededError) {
-      throw new Error(`listTombstonesSince(semantic superseded) failed: ${supersededError.message}`)
-    }
-    collect(supersededData as Array<{ id: string }> | null, 'semantic')
+    collect(
+      await this.pageTombstoneIds('memory_semantic', 'semantic superseded', (q) =>
+        q.gte('updated_at', sinceIso).not('superseded_by', 'is', null)),
+      'semantic',
+    )
 
     return results
+  }
+
+  /**
+   * PostgREST truncates every response at the server's max-rows setting
+   * without signalling it, so one unpaged select returns at most that many
+   * tombstones. Walking the primary key until an empty page reads every
+   * matching row whatever the cap; a short page does not end the walk, since
+   * it may just be the cap.
+   */
+  private async pageTombstoneIds(
+    table: string,
+    label: string,
+    filter: (query: TombstoneQuery) => TombstoneQuery,
+  ): Promise<string[]> {
+    const ids: string[] = []
+    let after: string | null = null
+    for (;;) {
+      let query = filter(this.client.from(table).select('id'))
+      if (after !== null) query = query.gt('id', after)
+      const { data, error } = await query.order('id', { ascending: true }).limit(TOMBSTONE_PAGE_SIZE)
+      if (error) throw new Error(`listTombstonesSince(${label}) failed: ${error.message}`)
+      const page = (data ?? []) as Array<{ id: string }>
+      if (page.length === 0) return ids
+      for (const row of page) ids.push(row.id)
+      after = page[page.length - 1]!.id
+    }
   }
 
   private assertInitialized(): void {

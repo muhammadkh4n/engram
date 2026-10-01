@@ -39,6 +39,7 @@ export interface DecayPassOptions {
 
 const TOMBSTONE_SYNC_BATCH = 1000
 const DAY_MS = 24 * 60 * 60 * 1000
+const SYNC_OVERLAP_MS = DAY_MS
 
 /**
  * Decay Pass — Ebbinghaus forgetting curve over SQL confidence.
@@ -69,7 +70,7 @@ export async function decayPass(
   const graphAvailable = graph?.runCypher && graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
   const gdsAvailable = graphAvailable && graph?.isGdsAvailable ? await graph.isGdsAvailable().catch(() => false) : false
 
-  const graphTombstonesSynced = await syncTombstones(storage, graph, opts?.tombstoneSyncDays ?? 8)
+  const tombstoneSync = await syncTombstones(storage, graph, opts?.tombstoneSyncDays ?? 8)
 
   let semanticDecayed = 0
   let proceduralDecayed = 0
@@ -134,42 +135,63 @@ export async function decayPass(
     cycle: 'decay',
     semanticDecayed,
     proceduralDecayed,
-    ...(graphTombstonesSynced !== undefined ? { graphTombstonesSynced } : {}),
+    ...(tombstoneSync?.synced !== undefined ? { graphTombstonesSynced: tombstoneSync.synced } : {}),
+    ...(tombstoneSync?.syncedThrough !== undefined
+      ? { graphTombstonesSyncedThrough: tombstoneSync.syncedThrough }
+      : {}),
   }
+}
+
+interface TombstoneSyncOutcome {
+  /** Graph nodes newly stamped; undefined when the sync failed. */
+  synced?: number
+  /** ISO instant up to which tombstones are known stamped. */
+  syncedThrough?: string
 }
 
 /**
  * forgetByIds stamps the graph online, but a bulk SQL tombstoning or a failed
  * graph write never reaches it, leaving forgotten memories reachable through
- * spreading activation. Each pass re-stamps every tombstone since the last
- * completed decay run, minus a day of overlap, so a skipped or late week is
- * still covered; without a recorded run it falls back to a fixed window.
+ * spreading activation. Each pass re-stamps every tombstone since the point
+ * the last completed decay run recorded as synced, minus a day of overlap, so
+ * a skipped or late week is still covered. A failed sync records the old point
+ * again rather than this run's time, so the window it missed is re-read by the
+ * next run. Without a recorded point it falls back to a fixed window.
  * forgetMemories is idempotent, so overlap is harmless.
  */
 async function syncTombstones(
   storage: StorageAdapter,
   graph: GraphPort | null | undefined,
   fallbackDays: number,
-): Promise<number | undefined> {
+): Promise<TombstoneSyncOutcome | undefined> {
   if (!storage.listTombstonesSince || !graph?.forgetMemories) return undefined
+  let since: Date | undefined
   try {
-    const since = await tombstoneSyncStart(storage, fallbackDays)
+    since = await tombstoneSyncStart(storage, fallbackDays)
+    const readStartedAt = new Date()
     const ids = (await storage.listTombstonesSince(since)).map((t) => t.id)
     let stamped = 0
     for (let i = 0; i < ids.length; i += TOMBSTONE_SYNC_BATCH) {
       stamped += await graph.forgetMemories(ids.slice(i, i + TOMBSTONE_SYNC_BATCH))
     }
-    return stamped
+    return { synced: stamped, syncedThrough: readStartedAt.toISOString() }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(`[decay-pass] tombstone sync failed: ${msg}`)
-    return undefined
+    return since ? { syncedThrough: new Date(since.getTime() + SYNC_OVERLAP_MS).toISOString() } : undefined
   }
 }
 
 async function tombstoneSyncStart(storage: StorageAdapter, fallbackDays: number): Promise<Date> {
   const lastRun = await storage.consolidationRuns?.getLastRun('decay')
-  if (lastRun?.completedAt) return new Date(lastRun.completedAt.getTime() - DAY_MS)
+  const recorded = lastRun?.result?.graphTombstonesSyncedThrough
+  const recordedMs = recorded ? Date.parse(recorded) : NaN
+  if (Number.isFinite(recordedMs)) return new Date(recordedMs - SYNC_OVERLAP_MS)
+  // A run that reports a synced count but no point predates the recorded
+  // point; its sync succeeded, so it covered tombstones up to its completion.
+  if (lastRun?.completedAt && typeof lastRun.result?.graphTombstonesSynced === 'number') {
+    return new Date(lastRun.completedAt.getTime() - SYNC_OVERLAP_MS)
+  }
   return new Date(Date.now() - fallbackDays * DAY_MS)
 }
 
