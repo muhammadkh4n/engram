@@ -165,6 +165,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 | `spool.flushing.<pid>.<claimedAtMs>.<rand>.jsonl` | A flush claims the spool by renaming it, so two hooks firing together never send one entry twice. A claim older than 10 minutes (by the timestamp in its name) belongs to a dead flusher and is taken over. A flush stops before a post could outlive its claim and appends the rest back to the spool. |
 | `spool.dead.jsonl` | Captures the server refused permanently: `{"v":1,"at":"<ISO>","status":422,"message":"…","payload":{…}}` (`status` absent when there was none). Unreadable spool lines land here as `{"v":1,"at":…,"message":"unreadable spool line","raw":"…"}`. Nothing resends them. |
 | `capture-state.json` | Rewritten atomically after every attempt; health checks read it. Schema below. |
+| `spool.lock` | Advisory lock (`O_CREAT\|O_EXCL`) held only for the file operations on the spool, the dead-letter file and `capture-state.json`, never across a post, so an append cannot land in a claim the flusher already read and two state rewrites cannot drop each other's update. A lock older than 30 s belongs to a dead process and is taken over. A writer that cannot take it within 2 s appends or rewrites anyway (a flush is skipped instead) and logs a `[capture-client] spool.lock held …` line to `hook.log`. |
 | `hook.log` | One summary line per capture: `[label] mode=server source=… outcome=… ms=… spool=<entries left>`. |
 
 `capture-state.json`:

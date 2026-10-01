@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { promises as fs } from 'node:fs'
@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   captureEndpoint,
+  LOCK_STALE_MS,
+  LOCK_WAIT_MS,
   postCapture,
   sendCapture,
   SPOOL_FLUSH_MAX,
@@ -100,6 +102,18 @@ async function prefillSpool(keys: readonly string[]): Promise<void> {
 
 async function claimFiles(): Promise<string[]> {
   return (await fs.readdir(engram)).filter((n) => n.startsWith('spool.flushing.'))
+}
+
+async function hookLog(): Promise<string> {
+  try {
+    return await fs.readFile(join(engram, 'hook.log'), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function sentKeys(): string[] {
@@ -320,5 +334,130 @@ describe('sendCapture', () => {
     const result = await sendCapture(turn('k-own'), envFor(stub.url), { flushBudgetMs: 0, label: 'engram-pre-compact' })
     expect(sentKeys()).toEqual(['k-own'])
     expect(result.line).toMatch(/^\[engram-pre-compact\] .* spool=1$/)
+  })
+})
+
+describe('spool lock', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('never loses an append that opened the spool before a flush claimed it', async () => {
+    const realOpen = fs.open.bind(fs)
+    const realReadFile = fs.readFile.bind(fs)
+    let markOpened = (): void => {}
+    const opened = new Promise<void>((resolve) => (markOpened = resolve))
+    let markClaimRead = (): void => {}
+    const claimRead = new Promise<void>((resolve) => (markClaimRead = resolve))
+    let isHeld = false
+    // The appender stalls between opening spool.jsonl and writing to it until
+    // the flusher has read its claim (or 300 ms pass): the window in which an
+    // unguarded append lands in a claim file that is about to be deleted.
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen(...args)
+      if (!isHeld && String(args[0]).endsWith('spool.jsonl')) {
+        isHeld = true
+        markOpened()
+        await Promise.race([claimRead, delay(300)])
+      }
+      return handle
+    }) as typeof fs.open)
+    vi.spyOn(fs, 'readFile').mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+      const out = await realReadFile(...args)
+      if (String(args[0]).includes('spool.flushing.')) markClaimRead()
+      return out
+    }) as typeof fs.readFile)
+    await prefillSpool(['s1'])
+    stub.delayMs = 50
+    const down = envFor(await closedPortUrl())
+
+    const racer = sendCapture(turn('k-racer'), down)
+    await opened
+    const flusher = sendCapture(turn('k-own'), envFor(stub.url))
+    await Promise.all([racer, flusher])
+
+    const delivered = [...sentKeys(), ...(await spoolKeys())]
+    expect(delivered).toContain('k-racer')
+    expect(delivered).toContain('s1')
+    expect(await claimFiles()).toEqual([])
+  })
+
+  it('keeps both sources when two runs record their state at the same time', async () => {
+    const realReadFile = fs.readFile.bind(fs)
+    // Every state read takes 50 ms, so two unguarded read-modify-writes overlap.
+    vi.spyOn(fs, 'readFile').mockImplementation((async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]).endsWith('capture-state.json')) await delay(50)
+      return realReadFile(...args)
+    }) as typeof fs.readFile)
+    const env = envFor(stub.url)
+
+    await Promise.all([
+      sendCapture(turn('k-a'), env, { flushBudgetMs: 0 }),
+      sendCapture({ ...turn('k-b'), source: 'claude-code-stop' }, env, { flushBudgetMs: 0 }),
+    ])
+
+    const state = JSON.parse(await fs.readFile(join(engram, 'capture-state.json'), 'utf8'))
+    expect(Object.keys(state.sources).sort()).toEqual(['claude-code-stop', 'git-commit'])
+    expect(state.sources['git-commit'].lastOkAt).toEqual(expect.any(String))
+    expect(state.sources['claude-code-stop'].lastOkAt).toEqual(expect.any(String))
+  })
+
+  it('takes over a lock left for longer than the stale limit', async () => {
+    const lock = join(engram, 'spool.lock')
+    await fs.writeFile(lock, '424242 0 deadbeef\n', { mode: 0o600 })
+    const past = new Date(Date.now() - LOCK_STALE_MS - 1_000)
+    await fs.utimes(lock, past, past)
+    const down = envFor(await closedPortUrl())
+
+    const startMs = Date.now()
+    const result = await sendCapture(turn('k-stale'), down)
+
+    expect(Date.now() - startMs).toBeLessThan(LOCK_WAIT_MS)
+    expect(result.disposition).toBe('spooled')
+    expect(await spoolKeys()).toEqual(['k-stale'])
+    expect(await hookLog()).toBe('')
+    await expect(fs.stat(lock)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await fs.readdir(engram)).filter((n) => n.startsWith('spool.lock'))).toEqual([])
+  })
+
+  it('still spools behind a live lock after the bounded wait and logs it', async () => {
+    const lock = join(engram, 'spool.lock')
+    await fs.writeFile(lock, '434343 0 cafef00d\n', { mode: 0o600 })
+
+    const result = await sendCapture(turn('k-held'), envFor(await closedPortUrl()))
+
+    expect(result.disposition).toBe('spooled')
+    expect(await spoolKeys()).toEqual(['k-held'])
+    expect(await hookLog()).toMatch(/spool\.lock .*spool\.jsonl/)
+    expect(await fs.readFile(lock, 'utf8')).toBe('434343 0 cafef00d\n')
+  }, 15_000)
+
+  it('leaves the backlog alone while a live lock is held', async () => {
+    await prefillSpool(['s1'])
+    await fs.writeFile(join(engram, 'spool.lock'), '434343 0 cafef00d\n', { mode: 0o600 })
+
+    const result = await sendCapture(turn('k-own'), envFor(stub.url))
+
+    expect(sentKeys()).toEqual(['k-own'])
+    expect(result).toMatchObject({ disposition: 'sent', flushed: 0, spooled: 1 })
+    expect(await spoolKeys()).toEqual(['s1'])
+    expect(await claimFiles()).toEqual([])
+    expect(await hookLog()).toMatch(/spool\.lock .*flush/)
+  }, 15_000)
+
+  it('creates the lock with mode 0600 and removes it after each run', async () => {
+    const realOpen = fs.open.bind(fs)
+    const lockModes: number[] = []
+    vi.spyOn(fs, 'open').mockImplementation((async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen(...args)
+      if (String(args[0]).endsWith('spool.lock')) lockModes.push((await handle.stat()).mode & 0o777)
+      return handle
+    }) as typeof fs.open)
+
+    await sendCapture(turn('k-mode'), envFor(await closedPortUrl()))
+
+    expect(lockModes.length).toBeGreaterThan(0)
+    expect(new Set(lockModes)).toEqual(new Set([0o600]))
+    expect((await fs.readdir(engram)).filter((n) => n.startsWith('spool.lock'))).toEqual([])
   })
 })
