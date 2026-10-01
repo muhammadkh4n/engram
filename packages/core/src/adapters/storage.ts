@@ -123,6 +123,15 @@ export interface ProceduralStorage {
   ): Promise<ProceduralMemory>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
   searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
+  /**
+   * The `limit` live (not forgotten), embedded memories nearest to
+   * `embedding`, with `similarity` = cosine similarity, sorted descending.
+   * Unlike `search`, whose hybrid scores are fused ranks, the scores here are
+   * comparable to a fixed cosine threshold. PostgREST items carry only the
+   * recall-row fields (procedure, confidence, timestamps; no category,
+   * trigger, source episodes or embedding).
+   */
+  findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]>
   recordAccess(id: string): Promise<void>
   /**
    * Tombstone the given memories (sets forgotten_at). Excluded from recall,

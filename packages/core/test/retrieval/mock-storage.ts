@@ -224,6 +224,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     insert: vi.fn(),
     search: vi.fn().mockResolvedValue(proceduralResults),
     searchByTrigger: vi.fn().mockResolvedValue([]),
+    findNearest: vi.fn().mockResolvedValue([]),
     recordAccess: vi.fn().mockResolvedValue(undefined),
     markForgotten: vi.fn().mockResolvedValue(0),
     incrementObservation: vi.fn().mockResolvedValue(undefined),

@@ -544,7 +544,7 @@ describe('deepSleep', () => {
   // -------------------------------------------------------------------------
 
   describe('increments observation for existing similar procedures', () => {
-    it('calls incrementObservation when similar procedure found (similarity > 0.85)', async () => {
+    it('calls incrementObservation when the same procedure is found', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I always run tests before pushing code.' }),
         makeDigest({ summary: 'Filler content.' }),
@@ -552,7 +552,7 @@ describe('deepSleep', () => {
       ]
 
       const proceduralSearchResults = [
-        makeProceduralSearchResult('existing-proc-1', 'habit', 'run tests before pushing code', 0.9),
+        makeProceduralSearchResult('existing-proc-1', 'habit', 'run tests before pushing code.', 0.9),
       ]
 
       const storage = makeMockStorage({
@@ -573,7 +573,7 @@ describe('deepSleep', () => {
       ]
 
       const proceduralSearchResults = [
-        makeProceduralSearchResult('existing-proc-1', 'workflow', 'start with types', 0.92),
+        makeProceduralSearchResult('existing-proc-1', 'workflow', 'to start with types.', 0.92),
       ]
 
       const storage = makeMockStorage({
@@ -584,6 +584,105 @@ describe('deepSleep', () => {
       await deepSleep(storage, undefined, { minDigests: 3 })
 
       expect(storage.procedural.insert).not.toHaveBeenCalled()
+    })
+
+    it('deduplicates on findNearest cosine above 0.88 when an embedding is available', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'My workflow is to start with types.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        proceduralNearestResults: [
+          makeProceduralSearchResult('existing-proc-1', 'workflow', 'begin by writing the types', 0.89),
+        ],
+      })
+
+      const embed = vi.fn(async (_text: string) => [0.4, 0.5, 0.6])
+
+      await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(embed).toHaveBeenCalledTimes(1)
+      expect(storage.procedural.findNearest).toHaveBeenCalledWith([0.4, 0.5, 0.6], 3)
+      expect(storage.procedural.incrementObservation).toHaveBeenCalledWith('existing-proc-1')
+      expect(storage.procedural.insert).not.toHaveBeenCalled()
+    })
+
+    it('inserts when only the search score is high and the nearest cosine is low', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'My workflow is to start with types.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      // A search score of 1.0 is a rank or BM25 artefact; the cosine to the
+      // candidate is 0.5.
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        proceduralSearchResults: [
+          makeProceduralSearchResult('existing-proc-1', 'workflow', 'deploy on fridays', 1.0),
+        ],
+        proceduralNearestResults: [
+          makeProceduralSearchResult('existing-proc-1', 'workflow', 'deploy on fridays', 0.5),
+        ],
+      })
+
+      const embed = vi.fn(async (_text: string) => [0.4, 0.5, 0.6])
+
+      await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(storage.procedural.incrementObservation).not.toHaveBeenCalled()
+      expect(storage.procedural.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ procedure: 'to start with types.', embedding: [0.4, 0.5, 0.6] })
+      )
+    })
+
+    it('inserts without an embedding when a high-scoring search hit has other text', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'My workflow is to start with types.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        proceduralSearchResults: [
+          makeProceduralSearchResult('existing-proc-1', 'workflow', 'start with tests', 0.99),
+        ],
+      })
+
+      await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(storage.procedural.findNearest).not.toHaveBeenCalled()
+      expect(storage.procedural.incrementObservation).not.toHaveBeenCalled()
+      expect(storage.procedural.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ procedure: 'to start with types.' })
+      )
+    })
+
+    it('deduplicates without an embedding on a procedure equal after normalisation', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I always run tests before pushing code.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        proceduralSearchResults: [
+          makeProceduralSearchResult('existing-proc-1', 'habit', '  Run tests before pushing code. ', 0.5),
+        ],
+      })
+
+      await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(storage.procedural.findNearest).not.toHaveBeenCalled()
+      expect(storage.procedural.incrementObservation).toHaveBeenCalledWith('existing-proc-1')
+      expect(storage.procedural.insert).not.toHaveBeenCalledWith(
+        expect.objectContaining({ procedure: 'run tests before pushing code.' })
+      )
     })
   })
 

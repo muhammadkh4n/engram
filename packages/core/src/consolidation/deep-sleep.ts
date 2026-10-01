@@ -395,13 +395,6 @@ export async function deepSleep(
   const proceduralCandidates = allCandidates.filter(c => c.kind === 'procedural')
   for (const candidate of proceduralCandidates) {
     const searchQuery = `${candidate.trigger ?? candidate.topic} ${candidate.content}`
-    const existing = await storage.procedural.searchByTrigger(searchQuery, { limit: 3 })
-    const match = existing.find(e => e.similarity > 0.85)
-
-    if (match) {
-      await storage.procedural.incrementObservation(match.item.id)
-      continue
-    }
 
     // Embed the same trigger+procedure text that FTS indexes and the
     // embed-backfill CLI use, so stored vectors stay comparable across
@@ -414,6 +407,23 @@ export async function deepSleep(
       } catch {
         // fall through — insert without embedding
       }
+    }
+
+    // Same rule as the semantic tier: search()/searchByTrigger() scores are
+    // fused ranks, a constant or a max-normalised BM25, never a cosine, so the
+    // paraphrase check uses findNearest's raw cosine and the lexical fallback
+    // is an exact procedure match after normalisation.
+    const nearest = proceduralEmbedding
+      ? await storage.procedural.findNearest(proceduralEmbedding, 3)
+      : []
+    const textHits = await storage.procedural.search(candidate.content, { limit: 3 })
+    const match =
+      nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
+      textHits.find(e => sameContent(e.item.procedure, candidate.content))
+
+    if (match) {
+      await storage.procedural.incrementObservation(match.item.id)
+      continue
     }
 
     const proceduralRecord = await storage.procedural.insert({
