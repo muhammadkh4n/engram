@@ -246,7 +246,6 @@ export function makeMockAssociationStorage(
 
     upsertCoRecalled: vi.fn(async () => {}),
 
-    pruneWeak: vi.fn(async () => 3),
 
     discoverTopicalEdges: vi.fn(async () => discoveredEdges),
   }

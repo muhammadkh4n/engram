@@ -61,6 +61,13 @@ export interface SemanticStorage {
   ): Promise<SemanticMemory>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]>
   getUnaccessed(days: number): Promise<SemanticMemory[]>
+  /**
+   * Ids of every live (not tombstoned, not superseded) semantic memory above
+   * the confidence floor and not accessed within `days`: the rows the
+   * gradient decay pass may lower. Must return every qualifying row, not a
+   * server-capped first page. Falls back to getUnaccessed when not implemented.
+   */
+  listDecayCandidateIds?(days: number): Promise<string[]>
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
   markSuperseded(id: string, supersededBy: string): Promise<void>
   /**
@@ -120,7 +127,6 @@ export interface AssociationStorage {
     targetId: string,
     targetType: MemoryType
   ): Promise<void>
-  pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number>
   discoverTopicalEdges(opts: {
     daysLookback: number
     maxNew: number

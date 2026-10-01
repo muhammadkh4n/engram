@@ -1383,11 +1383,44 @@ export class NeuralGraph {
                       r.traversalCount = 0,
                       r.createdAt = $now,
                       r.lastTraversed = null
+        SET r.generatedAt = $generatedAt
       `, {
         communityId: props.id,
         memberIds: props.memberNodeIds,
         now: new Date().toISOString(),
+        generatedAt: props.generatedAt,
       })
+    }
+  }
+
+  /**
+   * Remove the community memberships and Community nodes that a completed
+   * community run did not regenerate. Every membership and Community node the
+   * run wrote carries its generatedAt; anything else in scope belongs to an
+   * earlier Louvain assignment, whose community ids no longer mean anything.
+   *
+   * Edges leave the graph only as replaced memberships or with a purged node;
+   * age is never evidence against an edge. Scoped to one project when
+   * projectId is set, otherwise over every Community node.
+   */
+  async replaceCommunityMemberships(opts: {
+    generatedAt: string
+    projectId: string | null
+  }): Promise<{ membershipsRemoved: number; communitiesRemoved: number }> {
+    const result = await this.runCypherWrite(`
+      MATCH (c:Community)
+      WHERE $projectId IS NULL OR c.projectId = $projectId
+      OPTIONAL MATCH ()-[r:MEMBER_OF]->(c)
+      WHERE r.generatedAt IS NULL OR r.generatedAt <> $generatedAt
+      DELETE r
+      WITH DISTINCT c
+      WHERE c.generatedAt IS NULL OR c.generatedAt <> $generatedAt
+      DETACH DELETE c
+    `, { generatedAt: opts.generatedAt, projectId: opts.projectId })
+    const counters = result.summary?.counters?.updates?.()
+    return {
+      membershipsRemoved: counters?.relationshipsDeleted ?? 0,
+      communitiesRemoved: counters?.nodesDeleted ?? 0,
     }
   }
 

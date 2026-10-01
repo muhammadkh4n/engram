@@ -233,7 +233,6 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     insert: vi.fn(),
     walk: vi.fn().mockResolvedValue(walkResults),
     upsertCoRecalled: vi.fn().mockResolvedValue(undefined),
-    pruneWeak: vi.fn().mockResolvedValue(0),
     discoverTopicalEdges: vi.fn().mockResolvedValue([] as DiscoveredEdge[]),
   }
 

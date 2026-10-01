@@ -182,6 +182,7 @@ export class SqliteProceduralStorage implements ProceduralStorage {
         `UPDATE procedural
          SET confidence = MAX(0.05, confidence - ?)
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .run(opts.decayRate, opts.daysThreshold)

@@ -125,16 +125,41 @@ CREATE OR REPLACE FUNCTION public.engram_decay_pass(p_semantic_decay_rate double
 DECLARE v_s int; v_p int; v_e int;
 BEGIN
   UPDATE memory_semantic SET confidence = GREATEST(0.05, confidence - p_semantic_decay_rate), updated_at = now()
-  WHERE confidence > 0.05 AND (last_accessed IS NULL OR last_accessed < now() - (p_semantic_days || ' days')::interval);
+  WHERE confidence > 0.05 AND forgotten_at IS NULL AND superseded_by IS NULL
+    AND (last_accessed IS NULL OR last_accessed < now() - (p_semantic_days || ' days')::interval);
   GET DIAGNOSTICS v_s = ROW_COUNT;
   UPDATE memory_procedural SET confidence = GREATEST(0.05, confidence - p_procedural_decay_rate), updated_at = now()
-  WHERE confidence > 0.05 AND (last_accessed IS NULL OR last_accessed < now() - (p_procedural_days || ' days')::interval);
+  WHERE confidence > 0.05 AND forgotten_at IS NULL
+    AND (last_accessed IS NULL OR last_accessed < now() - (p_procedural_days || ' days')::interval);
   GET DIAGNOSTICS v_p = ROW_COUNT;
   DELETE FROM memory_associations WHERE strength < p_edge_prune_strength
     AND (last_activated IS NULL OR last_activated < now() - (p_edge_prune_days || ' days')::interval)
     AND edge_type != 'derives_from';
   GET DIAGNOSTICS v_e = ROW_COUNT;
   RETURN QUERY SELECT v_s, v_p, v_e;
+END; $$;
+
+
+--
+-- Name: engram_decay_semantic_gradient(uuid[], double precision[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Per-row decay rates (PageRank-weighted) applied in one set-based UPDATE.
+-- p_ids and p_rates are parallel arrays; the floor and the live-row gates
+-- match the flat semantic decay in engram_decay_pass.
+CREATE OR REPLACE FUNCTION public.engram_decay_semantic_gradient(p_ids uuid[], p_rates double precision[], p_days integer) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE v_n int;
+BEGIN
+  UPDATE memory_semantic s SET confidence = GREATEST(0.05, s.confidence - u.rate), updated_at = now()
+  FROM unnest(p_ids, p_rates) AS u(id, rate)
+  WHERE s.id = u.id AND s.confidence > 0.05
+    AND s.forgotten_at IS NULL AND s.superseded_by IS NULL
+    AND (s.last_accessed IS NULL OR s.last_accessed < now() - make_interval(days => p_days));
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  RETURN v_n;
 END; $$;
 
 
