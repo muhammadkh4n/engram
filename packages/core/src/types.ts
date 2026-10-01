@@ -395,6 +395,8 @@ export interface ConsolidateResult {
   bridgeNodesFound?: number
   replayEdgesCreated?: number
   causalEdgesCreated?: number
+  /** Graph nodes newly stamped forgotten from recent SQL tombstones. */
+  graphTombstonesSynced?: number
   // Wave 5 additions:
   communitySummariesGenerated?: number
   // v0.3.12 additions — consolidation observability + cost ceilings:

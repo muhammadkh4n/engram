@@ -30,7 +30,11 @@ export interface DecayPassOptions {
   proceduralDecayRate?: number
   semanticDaysThreshold?: number
   proceduralDaysThreshold?: number
+  /** Look-back window for carrying SQL tombstones into the graph. */
+  tombstoneSyncDays?: number
 }
+
+const TOMBSTONE_SYNC_BATCH = 1000
 
 /**
  * Decay Pass — Ebbinghaus forgetting curve over SQL confidence.
@@ -60,6 +64,8 @@ export async function decayPass(
 
   const graphAvailable = graph?.runCypher && graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
   const gdsAvailable = graphAvailable && graph?.isGdsAvailable ? await graph.isGdsAvailable().catch(() => false) : false
+
+  const graphTombstonesSynced = await syncTombstones(storage, graph, opts?.tombstoneSyncDays ?? 8)
 
   let semanticDecayed = 0
   let proceduralDecayed = 0
@@ -122,6 +128,35 @@ export async function decayPass(
     cycle: 'decay',
     semanticDecayed,
     proceduralDecayed,
+    ...(graphTombstonesSynced !== undefined ? { graphTombstonesSynced } : {}),
+  }
+}
+
+/**
+ * forgetByIds stamps the graph online, but a bulk SQL tombstoning or a failed
+ * graph write never reaches it, leaving forgotten memories reachable through
+ * spreading activation. Re-stamping a window of recent tombstones each pass
+ * repairs that; forgetMemories is idempotent, so overlap is harmless. The
+ * default window is one weekly decay interval plus a day of overlap.
+ */
+async function syncTombstones(
+  storage: StorageAdapter,
+  graph: GraphPort | null | undefined,
+  days: number,
+): Promise<number | undefined> {
+  if (!storage.listTombstonesSince || !graph?.forgetMemories) return undefined
+  try {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    const ids = (await storage.listTombstonesSince(since)).map((t) => t.id)
+    let stamped = 0
+    for (let i = 0; i < ids.length; i += TOMBSTONE_SYNC_BATCH) {
+      stamped += await graph.forgetMemories(ids.slice(i, i + TOMBSTONE_SYNC_BATCH))
+    }
+    return stamped
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[decay-pass] tombstone sync failed: ${msg}`)
+    return undefined
   }
 }
 

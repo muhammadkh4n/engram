@@ -184,3 +184,66 @@ describe('decayPass graph writes', () => {
     expect(result).not.toHaveProperty('isolatedNodesDeprioritized')
   })
 })
+
+describe('decayPass tombstone sync', () => {
+  beforeEach(() => {
+    resetIdCounter()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function tombstones(n: number) {
+    return Array.from({ length: n }, (_, i) => ({ id: `t-${i}`, type: 'semantic' as const }))
+  }
+
+  it('stamps tombstones in batches of 1000 and sums the newly stamped counts', async () => {
+    const storage = makeMockStorage()
+    const listTombstonesSince = vi.fn(async () => tombstones(2500))
+    Object.assign(storage, { listTombstonesSince })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    const forgetMemories = vi.fn(async (ids: string[]) => ids.length - 1)
+    Object.assign(graph, { forgetMemories })
+
+    const result = await decayPass(storage, {}, graph)
+
+    expect(forgetMemories).toHaveBeenCalledTimes(3)
+    expect(forgetMemories.mock.calls.map((c) => c[0].length)).toEqual([1000, 1000, 500])
+    expect(result.graphTombstonesSynced).toBe(2497)
+    const since = listTombstonesSince.mock.calls[0][0] as Date
+    const days = (Date.now() - since.getTime()) / 86_400_000
+    expect(days).toBeGreaterThan(7.99)
+    expect(days).toBeLessThan(8.01)
+  })
+
+  it('makes no call and leaves the field undefined without listTombstonesSince', async () => {
+    const storage = makeMockStorage()
+    delete (storage as { listTombstonesSince?: unknown }).listTombstonesSince
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    const forgetMemories = vi.fn(async () => 0)
+    Object.assign(graph, { forgetMemories })
+
+    const result = await decayPass(storage, {}, graph)
+
+    expect(forgetMemories).not.toHaveBeenCalled()
+    expect(result.graphTombstonesSynced).toBeUndefined()
+  })
+
+  it('still returns decay counts when forgetMemories throws', async () => {
+    const storage = makeMockStorage()
+    Object.assign(storage, { listTombstonesSince: vi.fn(async () => tombstones(3)) })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    Object.assign(graph, { forgetMemories: vi.fn(async () => { throw new Error('neo4j down') }) })
+
+    const result = await decayPass(storage, {}, graph)
+
+    expect(result.cycle).toBe('decay')
+    expect(typeof result.semanticDecayed).toBe('number')
+    expect(typeof result.proceduralDecayed).toBe('number')
+    expect(result.graphTombstonesSynced).toBeUndefined()
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('[decay-pass] tombstone sync failed: neo4j down'))
+  })
+})
