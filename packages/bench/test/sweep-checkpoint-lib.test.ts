@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { recallOutputPolicyFromEnv } from '@engram-mem/core'
 import {
   assertRowsInSelection,
   diffRunIdentity,
@@ -7,6 +8,7 @@ import {
   formatRowLine,
   idListSha256,
   orderRowsByDataset,
+  outputPolicyRecord,
   parsePartial,
   parseQuestionIdList,
   pendingQuestions,
@@ -26,6 +28,15 @@ const identity: RunIdentity = {
   max_results: 30,
   synthesize: false,
   question_selection: 'all',
+  output_emit_k: null,
+  output_token_budget: null,
+  output_faint: true,
+}
+
+// The identity fields a sweep derives from its ENGRAM_RECALL_* env.
+function policyFields(env: NodeJS.ProcessEnv): Pick<RunIdentity, 'output_emit_k' | 'output_token_budget' | 'output_faint'> {
+  const p = outputPolicyRecord(recallOutputPolicyFromEnv(env))
+  return { output_emit_k: p.emit_k, output_token_budget: p.token_budget, output_faint: p.faint }
 }
 
 const qs = [
@@ -52,9 +63,32 @@ describe('run identity header', () => {
     expect(diffRunIdentity(identity, { ...identity, question_selection: 'limit:50' })).toBe('question_selection')
   })
 
+  it('refuses a resume whose output token budget differs, naming the field', () => {
+    const recorded = { ...identity, ...policyFields({ ENGRAM_RECALL_TOKEN_BUDGET: '1500' }) }
+    const current = { ...identity, ...policyFields({}) }
+    expect(diffRunIdentity(recorded, current)).toBe('output_token_budget')
+    expect(diffRunIdentity(current, { ...identity, ...policyFields({ ENGRAM_RECALL_TOKEN_BUDGET: '' }) })).toBeNull()
+  })
+
+  it('refuses a resume whose emit cap or faint switch differs', () => {
+    expect(diffRunIdentity(identity, { ...identity, ...policyFields({ ENGRAM_RECALL_EMIT_K: '5' }) })).toBe('output_emit_k')
+    expect(diffRunIdentity(identity, { ...identity, ...policyFields({ ENGRAM_RECALL_FAINT: 'off' }) })).toBe('output_faint')
+  })
+
   it('treats a field missing from an older header as a difference', () => {
     const { synthesize: _s, ...older } = identity
     expect(diffRunIdentity(older as unknown as RunIdentity, identity)).toBe('synthesize')
+  })
+})
+
+describe('outputPolicyRecord', () => {
+  it('records unset limits as null', () => {
+    expect(outputPolicyRecord(recallOutputPolicyFromEnv({}))).toEqual({ emit_k: null, token_budget: null, faint: true })
+  })
+
+  it('records the resolved env policy', () => {
+    const env = { ENGRAM_RECALL_EMIT_K: '8', ENGRAM_RECALL_TOKEN_BUDGET: '2000', ENGRAM_RECALL_FAINT: 'off' }
+    expect(outputPolicyRecord(recallOutputPolicyFromEnv(env))).toEqual({ emit_k: 8, token_budget: 2000, faint: false })
   })
 })
 

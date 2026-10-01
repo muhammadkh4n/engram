@@ -19,6 +19,32 @@ export interface RunIdentity {
   max_results: number
   synthesize: boolean
   question_selection: string
+  /** Recall output policy (ENGRAM_RECALL_*): it decides which items the payload holds. Null = no limit. */
+  output_emit_k: number | null
+  output_token_budget: number | null
+  output_faint: boolean
+}
+
+/** Structural mirror of core's RecallOutputPolicy. */
+export interface OutputPolicyInput {
+  emitK?: number
+  tokenBudget?: number
+  faint: boolean
+}
+
+export interface OutputPolicyRecord {
+  emit_k: number | null
+  token_budget: number | null
+  faint: boolean
+}
+
+/** The resolved output policy as recorded in the run identity and meta; unset limits are null. */
+export function outputPolicyRecord(policy: OutputPolicyInput): OutputPolicyRecord {
+  return {
+    emit_k: policy.emitK ?? null,
+    token_budget: policy.tokenBudget ?? null,
+    faint: policy.faint,
+  }
 }
 
 const IDENTITY_FIELDS: readonly (keyof RunIdentity)[] = [
@@ -32,6 +58,9 @@ const IDENTITY_FIELDS: readonly (keyof RunIdentity)[] = [
   'max_results',
   'synthesize',
   'question_selection',
+  'output_emit_k',
+  'output_token_budget',
+  'output_faint',
 ]
 
 export interface CheckpointRow {
