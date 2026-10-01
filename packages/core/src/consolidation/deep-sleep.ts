@@ -24,6 +24,18 @@ interface KnowledgeCandidate {
   trigger?: string
 }
 
+/**
+ * Cosine similarity above which a candidate restates an existing memory:
+ * on text-embedding-3-small, 0.88 is "same claim, different phrasing".
+ */
+const DUPLICATE_COSINE = 0.88
+
+/** Equal after trimming, lowercasing and collapsing whitespace. */
+function sameContent(a: string, b: string): boolean {
+  const norm = (t: string) => t.trim().toLowerCase().replace(/\s+/g, ' ')
+  return norm(a) === norm(b)
+}
+
 const SEMANTIC_PATTERNS: Array<{ pattern: RegExp; topic: string; confidence: number }> = [
   { pattern: /I prefer\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
   { pattern: /I like\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
@@ -225,11 +237,17 @@ export async function deepSleep(
     if (candidateEmbedding) searchOpts.embedding = candidateEmbedding
 
     const existing = await storage.semantic.search(candidate.content, searchOpts)
-    // Cosine threshold is lower than the previous BM25 threshold because
-    // the scales differ: 0.92 BM25 ≈ near-identical tokens; 0.88 cosine
-    // on text-embedding-3-small is "same claim, different phrasing".
-    const dedupThreshold = candidateEmbedding ? 0.88 : 0.92
-    const duplicate = existing.find(e => e.similarity > dedupThreshold)
+    // search() scores are not cosine: hybrid results are fused ranks (RRF on
+    // PostgREST, a BM25/cosine blend on SQLite) and text-only results are a
+    // constant or a max-normalised BM25, so no fixed threshold on them means
+    // "same claim". The paraphrase check uses findNearest's raw cosine; the
+    // lexical fallback is an exact match after normalisation.
+    const nearest = candidateEmbedding
+      ? await storage.semantic.findNearest(candidateEmbedding, 5)
+      : []
+    const duplicate =
+      nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
+      existing.find(e => sameContent(e.item.content, candidate.content))
 
     if (duplicate) {
       await storage.semantic.recordAccessAndBoost(duplicate.item.id, 0.1)
@@ -377,13 +395,6 @@ export async function deepSleep(
   const proceduralCandidates = allCandidates.filter(c => c.kind === 'procedural')
   for (const candidate of proceduralCandidates) {
     const searchQuery = `${candidate.trigger ?? candidate.topic} ${candidate.content}`
-    const existing = await storage.procedural.searchByTrigger(searchQuery, { limit: 3 })
-    const match = existing.find(e => e.similarity > 0.85)
-
-    if (match) {
-      await storage.procedural.incrementObservation(match.item.id)
-      continue
-    }
 
     // Embed the same trigger+procedure text that FTS indexes and the
     // embed-backfill CLI use, so stored vectors stay comparable across
@@ -396,6 +407,23 @@ export async function deepSleep(
       } catch {
         // fall through — insert without embedding
       }
+    }
+
+    // Same rule as the semantic tier: search()/searchByTrigger() scores are
+    // fused ranks, a constant or a max-normalised BM25, never a cosine, so the
+    // paraphrase check uses findNearest's raw cosine and the lexical fallback
+    // is an exact procedure match after normalisation.
+    const nearest = proceduralEmbedding
+      ? await storage.procedural.findNearest(proceduralEmbedding, 3)
+      : []
+    const textHits = await storage.procedural.search(candidate.content, { limit: 3 })
+    const match =
+      nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
+      textHits.find(e => sameContent(e.item.procedure, candidate.content))
+
+    if (match) {
+      await storage.procedural.incrementObservation(match.item.id)
+      continue
     }
 
     const proceduralRecord = await storage.procedural.insert({

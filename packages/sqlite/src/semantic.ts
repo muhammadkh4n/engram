@@ -3,7 +3,7 @@ import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/co
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate, dateToJulian } from './search.js'
-import { hybridSearch } from './vector-search.js'
+import { hybridSearch, nearestByCosine } from './vector-search.js'
 
 export class SqliteSemanticStorage implements SemanticStorage {
   constructor(private db: Database.Database) {}
@@ -115,6 +115,28 @@ export class SqliteSemanticStorage implements SemanticStorage {
         item: this.rowToSemantic(r),
         similarity: maxScore > 0 ? r.bm25_score / maxScore : 0,
       }))
+  }
+
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]> {
+    const nearest = nearestByCosine(
+      this.db,
+      `SELECT id, embedding FROM semantic
+       WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL`,
+      embedding,
+      limit,
+    )
+    if (nearest.length === 0) return []
+    const placeholders = nearest.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})`)
+      .all(...nearest.map((n) => n.id)) as SemanticRow[]
+    const rowById = new Map(rows.map((r) => [r.id, r]))
+    const results: SearchResult<SemanticMemory>[] = []
+    for (const n of nearest) {
+      const row = rowById.get(n.id)
+      if (row) results.push({ item: this.rowToSemantic(row), similarity: n.similarity })
+    }
+    return results
   }
 
   async getUnaccessed(days: number): Promise<SemanticMemory[]> {

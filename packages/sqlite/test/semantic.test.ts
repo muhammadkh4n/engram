@@ -193,4 +193,28 @@ describe('SqliteSemanticStorage', () => {
       expect(ids).toEqual([replacement.id])
     })
   })
+
+  it('findNearest returns live rows by exact cosine, skipping superseded and forgotten ones', async () => {
+    const insertWith = (content: string, embedding: number[]) =>
+      store.insert({
+        topic: 'fact', content, confidence: 0.8,
+        sourceDigestIds: [], sourceEpisodeIds: [],
+        decayRate: 0.02, supersedes: null, supersededBy: null,
+        embedding, metadata: {},
+      })
+    const exact = await insertWith('exact', [1, 0, 0])
+    const close = await insertWith('close', [0.8, 0.6, 0])
+    const orthogonal = await insertWith('orthogonal', [0, 1, 0])
+    const superseded = await insertWith('superseded', [1, 0, 0])
+    const forgotten = await insertWith('forgotten', [1, 0, 0])
+    await store.markSuperseded(superseded.id, orthogonal.id)
+    await store.markForgotten([forgotten.id])
+
+    const results = await store.findNearest([1, 0, 0], 2)
+
+    expect(results.map((r) => r.item.id)).toEqual([exact.id, close.id])
+    expect(results[0].similarity).toBeCloseTo(1.0, 5)
+    expect(results[1].similarity).toBeCloseTo(0.8, 5)
+    expect(results[0].item.content).toBe('exact')
+  })
 })

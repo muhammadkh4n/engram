@@ -31,8 +31,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
 
     // Build the row — legacy schema only has: id, session_id, role, content,
     // embedding, metadata, created_at. Full schema adds salience, access_count,
-    // last_accessed, consolidated_at, entities, searchable_content.
-    const searchableContent = (episode.metadata?.searchableContent as string) ?? null
+    // last_accessed, consolidated_at, entities, project_id.
 
     const row: Record<string, unknown> = {
       id,
@@ -49,7 +48,6 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       row.last_accessed = episode.lastAccessed?.toISOString() ?? null
       row.consolidated_at = episode.consolidatedAt?.toISOString() ?? null
       row.entities = episode.entities
-      row.searchable_content = searchableContent
       row.project_id = episode.projectId ?? null
     }
 

@@ -270,4 +270,22 @@ describe('SqliteProceduralStorage', () => {
     const decayed = await store.batchDecay({ daysThreshold: 0, decayRate: 0.1 })
     expect(decayed).toBeGreaterThanOrEqual(1)
   })
+
+  it('findNearest returns live rows by exact cosine, skipping forgotten ones', async () => {
+    const insertWith = (procedure: string, embedding: number[] | null) =>
+      store.insert({ ...BASE_MEMORY, procedure, embedding })
+    const exact = await insertWith('exact', [1, 0, 0])
+    const close = await insertWith('close', [0.8, 0.6, 0])
+    await insertWith('orthogonal', [0, 1, 0])
+    await insertWith('unembedded', null)
+    const forgotten = await insertWith('forgotten', [1, 0, 0])
+    await store.markForgotten([forgotten.id])
+
+    const results = await store.findNearest([1, 0, 0], 2)
+
+    expect(results.map((r) => r.item.id)).toEqual([exact.id, close.id])
+    expect(results[0].similarity).toBeCloseTo(1.0, 5)
+    expect(results[1].similarity).toBeCloseTo(0.8, 5)
+    expect(results[0].item.procedure).toBe('exact')
+  })
 })

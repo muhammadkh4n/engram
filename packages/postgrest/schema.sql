@@ -79,7 +79,6 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 --
 
 
-
 --
 -- Name: SCHEMA public; Type: COMMENT; Schema: -; Owner: -
 --
@@ -596,82 +595,9 @@ END;
 $$;
 
 
---
--- Name: match_knowledge(text, integer, double precision); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE OR REPLACE FUNCTION public.match_knowledge(query_embedding text, match_count integer DEFAULT 10, min_similarity double precision DEFAULT 0.3) RETURNS TABLE(id uuid, topic text, content text, confidence double precision, source_digest_ids uuid[], metadata jsonb, created_at timestamp with time zone, updated_at timestamp with time zone, similarity double precision)
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    k.id, k.topic, k.content, k.confidence::FLOAT, k.source_digest_ids, k.metadata, k.created_at, k.updated_at,
-    (1 - (k.embedding <=> query_embedding::vector))::FLOAT AS similarity
-  FROM memory_knowledge k
-  WHERE (1 - (k.embedding <=> query_embedding::vector)) >= min_similarity
-  ORDER BY k.embedding <=> query_embedding::vector
-  LIMIT match_count;
-END;
-$$;
-
-
 SET default_tablespace = '';
 
 SET default_table_access_method = heap;
-
---
--- Name: community_summaries; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE IF NOT EXISTS public.community_summaries (
-    community_id text NOT NULL,
-    project_id text,
-    label text NOT NULL,
-    member_count integer DEFAULT 0 NOT NULL,
-    top_entities jsonb DEFAULT '[]'::jsonb NOT NULL,
-    top_topics jsonb DEFAULT '[]'::jsonb NOT NULL,
-    top_persons jsonb DEFAULT '[]'::jsonb NOT NULL,
-    dominant_emotion text,
-    generated_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: consolidation_runs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE IF NOT EXISTS public.consolidation_runs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    cycle text NOT NULL,
-    started_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    status text DEFAULT 'running'::text NOT NULL,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    CONSTRAINT consolidation_runs_cycle_check CHECK ((cycle = ANY (ARRAY['light'::text, 'deep'::text, 'dream'::text, 'decay'::text]))),
-    CONSTRAINT consolidation_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'failed'::text])))
-);
-
-
---
--- Name: episode_parts; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE IF NOT EXISTS public.episode_parts (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    episode_id uuid NOT NULL,
-    ordinal integer NOT NULL,
-    part_type text NOT NULL,
-    text_content text,
-    tool_name text,
-    tool_input jsonb,
-    tool_output jsonb,
-    raw jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT episode_parts_part_type_check CHECK ((part_type = ANY (ARRAY['text'::text, 'tool_call'::text, 'tool_result'::text, 'reasoning'::text, 'image'::text, 'other'::text])))
-);
-
 
 --
 -- Name: memories; Type: TABLE; Schema: public; Owner: -
@@ -760,29 +686,10 @@ CREATE TABLE IF NOT EXISTS public.memory_episodes (
     last_accessed timestamp with time zone,
     consolidated_at timestamp with time zone,
     entities text[] DEFAULT '{}'::text[],
-    searchable_content text,
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, content)) STORED,
     project_id text,
     forgotten_at timestamp with time zone,
     CONSTRAINT memory_episodes_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
-);
-
-
---
--- Name: memory_knowledge; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE IF NOT EXISTS public.memory_knowledge (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    topic text NOT NULL,
-    content text NOT NULL,
-    confidence double precision DEFAULT 1.0,
-    embedding public.vector(1536),
-    source_digest_ids uuid[] DEFAULT '{}'::uuid[],
-    metadata jsonb DEFAULT '{}'::jsonb,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT memory_knowledge_confidence_check1 CHECK (((confidence >= (0)::double precision) AND (confidence <= (1)::double precision)))
 );
 
 
@@ -846,22 +753,6 @@ CREATE TABLE IF NOT EXISTS public.memory_semantic (
 
 
 --
--- Name: memory_write_buffer; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE IF NOT EXISTS public.memory_write_buffer (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tier text NOT NULL,
-    payload jsonb NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    retry_count integer DEFAULT 0,
-    created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT memory_write_buffer_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'done'::text, 'failed'::text]))),
-    CONSTRAINT memory_write_buffer_tier_check CHECK ((tier = ANY (ARRAY['episode'::text, 'digest'::text, 'knowledge'::text])))
-);
-
-
---
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -896,37 +787,33 @@ ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at times
 
 
 --
--- Name: community_summaries community_summaries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- memory_episodes.fts converge: older installs generated fts from a since-removed
+-- secondary text column (falling back to content). CREATE TABLE IF NOT EXISTS never
+-- rewrites an existing column, so an install whose generation expression differs
+-- from the declared content-only one gets fts dropped and re-added here (its GIN
+-- index goes with it and is recreated). A no-op when the expression already
+-- matches, so re-applying the file is safe. Runs before anything else in this
+-- file touches memory_episodes columns or indexes.
 --
 
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'community_summaries_pkey' AND conrelid = 'public.community_summaries'::regclass) THEN
-    ALTER TABLE ONLY public.community_summaries
-      ADD CONSTRAINT community_summaries_pkey PRIMARY KEY (community_id);
-  END IF;
-END $$;
+DO $$
+DECLARE
+  current_expr text;
+BEGIN
+  SELECT pg_get_expr(d.adbin, d.adrelid) INTO current_expr
+  FROM pg_attribute a
+  JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+  WHERE a.attrelid = 'public.memory_episodes'::regclass
+    AND a.attname = 'fts'
+    AND a.attgenerated = 's'
+    AND NOT a.attisdropped;
 
-
---
--- Name: consolidation_runs consolidation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'consolidation_runs_pkey' AND conrelid = 'public.consolidation_runs'::regclass) THEN
-    ALTER TABLE ONLY public.consolidation_runs
-      ADD CONSTRAINT consolidation_runs_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
---
--- Name: episode_parts episode_parts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'episode_parts_pkey' AND conrelid = 'public.episode_parts'::regclass) THEN
-    ALTER TABLE ONLY public.episode_parts
-      ADD CONSTRAINT episode_parts_pkey PRIMARY KEY (id);
+  IF current_expr IS NOT NULL
+     AND current_expr <> 'to_tsvector(''english''::regconfig, content)' THEN
+    ALTER TABLE public.memory_episodes DROP COLUMN fts;
+    ALTER TABLE public.memory_episodes
+      ADD COLUMN fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, content)) STORED;
+    CREATE INDEX IF NOT EXISTS idx_episodes_fts ON public.memory_episodes USING gin (fts);
   END IF;
 END $$;
 
@@ -1004,18 +891,6 @@ END $$;
 
 
 --
--- Name: memory_knowledge memory_knowledge_pkey1; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_knowledge_pkey1' AND conrelid = 'public.memory_knowledge'::regclass) THEN
-    ALTER TABLE ONLY public.memory_knowledge
-      ADD CONSTRAINT memory_knowledge_pkey1 PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
---
 -- Name: memory_procedural memory_procedural_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1023,18 +898,6 @@ DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_procedural_pkey' AND conrelid = 'public.memory_procedural'::regclass) THEN
     ALTER TABLE ONLY public.memory_procedural
       ADD CONSTRAINT memory_procedural_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
---
--- Name: memory_write_buffer memory_write_buffer_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_write_buffer_pkey' AND conrelid = 'public.memory_write_buffer'::regclass) THEN
-    ALTER TABLE ONLY public.memory_write_buffer
-      ADD CONSTRAINT memory_write_buffer_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -1090,20 +953,6 @@ CREATE INDEX IF NOT EXISTS idx_assoc_target_strength ON public.memory_associatio
 
 
 --
--- Name: idx_community_members; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_community_members ON public.community_summaries USING btree (member_count DESC);
-
-
---
--- Name: idx_community_project; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_community_project ON public.community_summaries USING btree (project_id);
-
-
---
 -- Name: idx_digests_created; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1148,13 +997,6 @@ CREATE INDEX IF NOT EXISTS idx_digests_project ON public.memory_digests USING bt
 --
 
 CREATE INDEX IF NOT EXISTS idx_digests_session ON public.memory_digests USING btree (session_id);
-
-
---
--- Name: idx_episode_parts_episode; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_episode_parts_episode ON public.episode_parts USING btree (episode_id);
 
 
 --
@@ -1305,20 +1147,6 @@ CREATE INDEX IF NOT EXISTS idx_semantic_project ON public.memory_semantic USING 
 
 
 --
--- Name: idx_write_buffer_created; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_write_buffer_created ON public.memory_write_buffer USING btree (created_at);
-
-
---
--- Name: idx_write_buffer_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX IF NOT EXISTS idx_write_buffer_status ON public.memory_write_buffer USING btree (status);
-
-
---
 -- forget() tombstone partial indexes: index only the (rare) tombstoned rows so
 -- forgotten-row enumeration (Phase 2 reclamation / audit) is cheap. The hot
 -- `forgotten_at IS NULL` recall predicate matches the majority of rows and is
@@ -1330,36 +1158,6 @@ CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON public.memory_episodes USIN
 CREATE INDEX IF NOT EXISTS idx_semantic_forgotten ON public.memory_semantic USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 
-
---
--- Name: episode_parts episode_parts_episode_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'episode_parts_episode_id_fkey' AND conrelid = 'public.episode_parts'::regclass) THEN
-    ALTER TABLE ONLY public.episode_parts
-      ADD CONSTRAINT episode_parts_episode_id_fkey FOREIGN KEY (episode_id) REFERENCES public.memory_episodes(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
---
--- Name: community_summaries; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.community_summaries ENABLE ROW LEVEL SECURITY;
-
---
--- Name: consolidation_runs; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.consolidation_runs ENABLE ROW LEVEL SECURITY;
-
---
--- Name: episode_parts; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.episode_parts ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
@@ -1404,40 +1202,10 @@ ALTER TABLE public.memory_procedural ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_semantic ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: memory_write_buffer; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.memory_write_buffer ENABLE ROW LEVEL SECURITY;
-
---
 -- Name: sensory_snapshots; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.sensory_snapshots ENABLE ROW LEVEL SECURITY;
-
---
--- Name: community_summaries service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-DROP POLICY IF EXISTS service_role_all ON public.community_summaries;
-CREATE POLICY service_role_all ON public.community_summaries TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: consolidation_runs service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-DROP POLICY IF EXISTS service_role_all ON public.consolidation_runs;
-CREATE POLICY service_role_all ON public.consolidation_runs TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: episode_parts service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-DROP POLICY IF EXISTS service_role_all ON public.episode_parts;
-CREATE POLICY service_role_all ON public.episode_parts TO service_role USING (true) WITH CHECK (true);
-
 
 --
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
@@ -1485,14 +1253,6 @@ CREATE POLICY service_role_all ON public.memory_procedural TO service_role USING
 
 DROP POLICY IF EXISTS service_role_all ON public.memory_semantic;
 CREATE POLICY service_role_all ON public.memory_semantic TO service_role USING (true) WITH CHECK (true);
-
-
---
--- Name: memory_write_buffer service_role_all; Type: POLICY; Schema: public; Owner: -
---
-
-DROP POLICY IF EXISTS service_role_all ON public.memory_write_buffer;
-CREATE POLICY service_role_all ON public.memory_write_buffer TO service_role USING (true) WITH CHECK (true);
 
 
 --

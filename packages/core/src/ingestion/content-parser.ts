@@ -14,7 +14,7 @@
 export interface ParsedContent {
   /** Clean human-readable text for episodes.content and embedding. */
   cleanText: string
-  /** Structured parts for full-fidelity storage (episode_parts table or metadata.parts). */
+  /** Structured parts for full-fidelity storage in metadata.parts. */
   parts: ParsedPart[]
 }
 

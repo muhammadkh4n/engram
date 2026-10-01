@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { orIlikeOperand, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -72,20 +72,13 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
       }
 
       // Embedding only — fall back to pure vector search
-      const { data, error } = await this.client.rpc('engram_recall', {
-        p_query_embedding: embedding,
-        p_session_id: null,
-        p_match_count: limit,
-        p_min_similarity: opts?.minScore ?? 0.15,
-        p_include_episodes: false,
-        p_include_digests: false,
-        p_include_semantic: false,
-        p_include_procedural: true,
-        p_project_id: opts?.projectId ?? null,
-      })
-      if (error) throw new Error(`Procedural search (vector) failed: ${error.message}`)
-
-      const rows = (data ?? []) as RecallRow[]
+      const rows = await this.vectorRecall(
+        embedding,
+        limit,
+        opts?.minScore ?? 0.15,
+        opts?.projectId ?? null,
+        'Procedural search (vector)',
+      )
       return rows.map((r) => ({
         item: recallRowToProcedural(r),
         similarity: r.similarity,
@@ -96,7 +89,8 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
     const { data, error } = await this.client
       .from('memory_procedural')
       .select('*')
-      .or(`trigger_text.ilike.%${sanitizeIlike(query)}%,procedure.ilike.%${sanitizeIlike(query)}%`)
+      .or(`trigger_text.ilike.${orIlikeOperand(query)},procedure.ilike.${orIlikeOperand(query)}`)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Procedural search (text) failed: ${error.message}`)
@@ -104,6 +98,39 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
       item: rowToProcedural(r),
       similarity: 0.5,
     }))
+  }
+
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]> {
+    // A floor of -1 admits every cosine value, so the nearest rows come back
+    // however far they are; the caller applies its own threshold.
+    const rows = await this.vectorRecall(embedding, limit, -1, null, 'Procedural findNearest')
+    // engram_recall orders each tier's leg but has no outer ORDER BY.
+    return rows
+      .map((r) => ({ item: recallRowToProcedural(r), similarity: r.similarity }))
+      .sort((a, b) => b.similarity - a.similarity)
+  }
+
+  /** Cosine-only procedural leg of engram_recall, across every session. */
+  private async vectorRecall(
+    embedding: number[],
+    limit: number,
+    minSimilarity: number,
+    projectId: string | null,
+    label: string,
+  ): Promise<RecallRow[]> {
+    const { data, error } = await this.client.rpc('engram_recall', {
+      p_query_embedding: embedding,
+      p_session_id: null,
+      p_match_count: limit,
+      p_min_similarity: minSimilarity,
+      p_include_episodes: false,
+      p_include_digests: false,
+      p_include_semantic: false,
+      p_include_procedural: true,
+      p_project_id: projectId,
+    })
+    if (error) throw new Error(`${label} failed: ${error.message}`)
+    return (data ?? []) as RecallRow[]
   }
 
   async searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]> {
@@ -119,6 +146,7 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
       .from('memory_procedural')
       .select('*')
       .ilike('trigger_text', `%${sanitizeIlike(activity)}%`)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Procedural searchByTrigger failed: ${error.message}`)
