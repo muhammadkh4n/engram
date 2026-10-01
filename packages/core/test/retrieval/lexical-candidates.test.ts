@@ -129,12 +129,15 @@ async function runRecall(intelligence?: IntelligenceAdapter) {
   })
 }
 
-// Output of the recall with no reranker, recorded before any change to the
-// candidate pipeline. Without a reranker the pipeline must stay byte-identical.
+// Output of the recall with no reranker, recorded once lexical-only candidates
+// were scored on their true cosine. Twelve key-bearing rows enter the result:
+// cosine plus the lexical boost now lets the strongest exact matches outrank
+// mid-list neighbours. Without a reranker the pipeline must stay byte-identical
+// from here on.
 const NO_RERANK_IDS: string[] = [
-  'nb-0', 'nb-6', 'nb-1', 'nb-2', 'nb-3', 'nb-4', 'nb-5', 'nb-7', 'nb-8', 'nb-9',
-  'nb-10', 'nb-11', 'nb-12', 'nb-13', 'nb-14', 'nb-15', 'nb-16', 'nb-17', 'nb-18', 'nb-19',
-  'nb-20', 'nb-21', 'nb-22', 'nb-23', 'nb-24', 'nb-25', 'nb-26', 'nb-27', 'nb-28', 'nb-29',
+  'key-0', 'nb-0', 'key-1', 'key-2', 'key-3', 'nb-1', 'key-4', 'key-5', 'key-6', 'nb-2',
+  'nb-3', 'nb-4', 'key-8', 'nb-5', 'key-9', 'nb-7', 'nb-8', 'nb-9', 'nb-10', 'nb-11',
+  'key-10', 'key-11', 'key-7', 'nb-6', 'nb-12', 'nb-13', 'nb-14', 'nb-15', 'nb-16', 'nb-17',
 ]
 
 const MMR_ENV = ['ENGRAM_MMR_PRE_RERANK', 'ENGRAM_MMR_LAMBDA', 'ENGRAM_MMR_MAX_CANDIDATES'] as const

@@ -6,6 +6,7 @@ import type {
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
+import { cosineSimilarity } from '../ingestion/near-duplicate.js'
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
@@ -208,6 +209,14 @@ async function lexicalLeg(
   }
 }
 
+/** Cosine of a lexical-only candidate to the query. A row without an
+ *  embedding, or with one of another dimension, has no vector evidence and
+ *  scores 0 on this term. */
+function rescueCosine(query: readonly number[], row: readonly number[] | null | undefined): number {
+  if (!row || query.length === 0 || row.length !== query.length) return 0
+  return cosineSimilarity(query, row)
+}
+
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
   const {
     query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
@@ -295,11 +304,18 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
 
     // BM25 rescue: add keyword-matched candidates that vector search missed.
-    // These have exact term matches but weak embedding similarity — the
-    // reranker will sort out true relevance.
+    // They are hydrated in one batched fetch (one round trip instead of one
+    // per row) and scored on their true cosine to the query, so an exact
+    // term match competes on the same footing as a vector neighbour.
+    const rescueRefs = boostResults
+      .filter((b) => !scoredIds.has(b.id))
+      .map((b) => ({ id: b.id, type: b.type }))
+    const rescued = rescueRefs.length > 0 ? await storage.getByIds(rescueRefs) : []
+    const rescuedById = new Map(rescued.map((t) => [t.data.id, t]))
+
     for (const b of boostResults) {
       if (scoredIds.has(b.id)) continue
-      const typed = await storage.getById(b.id, b.type)
+      const typed = rescuedById.get(b.id)
       if (!typed) continue
 
       const content = extractContent(typed)
@@ -310,7 +326,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       const primingBoost = sensory.getPrimingBoost(content)
 
       const finalScore = computeScore({
-        cosineSimilarity: 0,
+        cosineSimilarity: rescueCosine(embedding, typed.data.embedding),
         bm25Boost: b.boost,
         recencyBias: strategy.recencyBias,
         createdAt,
