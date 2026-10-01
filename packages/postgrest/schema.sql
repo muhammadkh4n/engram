@@ -198,6 +198,7 @@ DROP FUNCTION IF EXISTS public.engram_hybrid_recall(text, public.vector, integer
 CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_query_embedding public.vector, p_match_count integer DEFAULT 10, p_full_text_weight double precision DEFAULT 1.0, p_semantic_weight double precision DEFAULT 1.0, p_rrf_k integer DEFAULT 60, p_session_id text DEFAULT NULL::text, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.ef_search TO '150'
     SET hnsw.iterative_scan TO 'strict_order'
     SET hnsw.max_scan_tuples TO '20000'
     AS $$
@@ -313,6 +314,7 @@ DROP FUNCTION IF EXISTS public.engram_recall(public.vector, text, integer, doubl
 CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector, p_session_id text DEFAULT NULL::text, p_match_count integer DEFAULT 10, p_min_similarity double precision DEFAULT 0.3, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.ef_search TO '150'
     SET hnsw.iterative_scan TO 'strict_order'
     SET hnsw.max_scan_tuples TO '20000'
     AS $$
@@ -555,6 +557,10 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- RETURNS TABLE gained project_id (Wave 5) and then session_id (synthesis Stage 1), so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text, text);
 
+-- The HNSW settings below apply to every vector RPC: engram_vector_search,
+-- engram_recall and engram_hybrid_recall each pin the same three, for the
+-- reasons given here.
+--
 -- Each tier is its own nearest-N subquery, so the planner chooses the access
 -- path per tier: on a small tier it uses an exact sequential scan and sort; on
 -- a large one it drives the ORDER BY from the tier's HNSW index.
@@ -567,12 +573,13 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- so a selective post-filter can leave far fewer rows than the LIMIT asked
 -- for.
 --
--- `SET hnsw.ef_search TO '150'`: callers pass p_match_count up to 120 (core
--- recall's vector-search leg requests strategy.maxResults * 4, and
--- maxResults tops out at 30 for the deep-sleep/light-sleep intents; see
--- packages/core/src/retrieval/search.ts and packages/core/src/intent/
--- intents.ts). 150 covers the 120 ceiling with headroom for the unfiltered
--- case.
+-- `SET hnsw.ef_search TO '150'`: a vector RPC can be asked for up to 120
+-- rows per tier (core recall's vector-search leg requests
+-- strategy.maxResults * 4, and maxResults tops out at 30 for the
+-- deep-sleep/light-sleep intents; see packages/core/src/retrieval/search.ts
+-- and packages/core/src/intent/intents.ts). 150 covers the 120 ceiling with
+-- headroom for the unfiltered case. Without the pin a function runs at the
+-- server default of 40 and silently caps a plain scan below the LIMIT.
 --
 -- `SET hnsw.iterative_scan TO 'strict_order'`: when post-filters reject
 -- candidates, the scan keeps pulling further candidates from the graph until

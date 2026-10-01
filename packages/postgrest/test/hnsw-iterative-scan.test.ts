@@ -3,8 +3,8 @@
  * index predicate to the ef_search candidate window only, so a narrow filter
  * can return far fewer rows than the LIMIT asked for. The vector RPCs
  * therefore pin an iterative scan (keeps pulling until the LIMIT is filled
- * or max_scan_tuples is reached) in strict distance order; the vector-search
- * RPC also keeps its ef_search floor.
+ * or max_scan_tuples is reached) in strict distance order, and all of them
+ * keep an ef_search floor above the largest requested match count.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -42,6 +42,10 @@ describe('engram_vector_search HNSW settings', () => {
 for (const name of ['engram_recall', 'engram_hybrid_recall']) {
   describe(`${name} HNSW settings`, () => {
     const setLines = functionSetLines(name)
+
+    it('keeps the ef_search floor above the largest requested match count', () => {
+      expect(setLines).toContain("SET hnsw.ef_search TO '150'")
+    })
 
     it('scans iteratively in strict distance order', () => {
       expect(setLines).toContain("SET hnsw.iterative_scan TO 'strict_order'")
