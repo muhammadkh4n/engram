@@ -121,7 +121,7 @@ Vector indexes use HNSW (`m=16, ef_construction=64` defaults — tune for your s
 
 The keyword leg of recall runs in one of two modes, chosen once at startup and logged to stderr:
 
-- `[engram] lexical ranking: bm25 (pg_textsearch)` — `bm25.sql` is applied and `engram_bm25_match` ranks the rows `engram_text_match` matches with BM25 (k1=1.2, b=0.75), so rare terms weigh more than common ones.
+- `[engram] lexical ranking: bm25 (pg_textsearch)` — `bm25.sql` is applied and `engram_bm25_match` ranks the rows `engram_text_match` matches with BM25 (k1=1.2, b=0.4), so rare terms weigh more than common ones.
 - `[engram] lexical ranking: ts_rank_cd (pg_textsearch not installed)` — the default: `engram_text_match` ranks with `ts_rank_cd`, which has no inverse document frequency.
 
 The adapter probes for `engram_bm25_match` when it initializes and keeps that mode until the process restarts.
@@ -147,7 +147,16 @@ The adapter probes for `engram_bm25_match` when it initializes and keeps that mo
 - **Each row is scored on the terms it matches.** The BM25 score of a row sums only the terms it matches as phrases, each term weighted by its inverse document frequency. A row matched by a common word gets no credit for the parts of an identifier it does not hold.
 - **Statistics are per tier.** Each memory table (episodes, digests, semantic, procedural) has its own BM25 index, so document frequencies and lengths come from that tier alone. The tiers' results are merged by one sort on score, the same way the `ts_rank_cd` path merges them.
 - **At most 500 scored rows per tier.** Scoring outside a BM25 index scan tokenises the row again, about 0.2 ms for a 1.3 kB row, so a tier scores at most 500 of its matches. Each term ranks its own matches by `ts_rank_cd` divided by row length, and the 500 are taken round-robin across terms: every row of a rare term is kept, and common terms share the rest. On a 5,000-row match set the function returns in about 80 ms instead of about 1 s.
+- **Length normalisation `b = 0.4`.** pg_textsearch defaults to `b = 0.75`. Episodes average about 44 tokens while design records, audits and session summaries run to hundreds or thousands, and at `b = 0.75` a long row that holds the query terms scores far below a short row with the same terms and drops out of the lexical results. `b = 0.4` keeps part of the normalisation, so a short row that is mostly the query still ranks well. `k1` stays at the default 1.2.
 - **Memory.** `pg_textsearch.memory_limit` defaults to 2GB. Set it lower on small hosts, e.g. `-c pg_textsearch.memory_limit=256MB`.
+
+### Upgrading an existing install
+
+Re-apply `bm25.sql` (same flags as above), then reload PostgREST's schema cache. No service restart is needed: the function's name and signature do not change.
+
+pg_textsearch writes `k1` and `b` into each index's metapage when the index is built. `ALTER INDEX … SET (b = …)` only rewrites the stored options, and scores keep the old value until a rebuild. So before creating the indexes, `bm25.sql` drops any of the four whose stored options (`pg_class.reloptions`) are not exactly `text_config=english, k1=1.2, b=0.4`, and builds it again. While an index is rebuilt, writes to its table wait. An index that already has these options is kept, so applying the file again rebuilds nothing.
+
+To go back to the default `b`, drop the four BM25 indexes, then apply the earlier `bm25.sql`, which creates them with the default options.
 
 ### Rollback
 

@@ -19,6 +19,9 @@
 -- EXECUTE on pg_textsearch's own functions from PUBLIC and every other role
 -- except their owner. Re-applying repeats the revoke, so it also covers the
 -- functions a newer pg_textsearch adds after ALTER EXTENSION ... UPDATE.
+-- Re-applying also converges the BM25 indexes: an index whose stored options
+-- differ from the ones below is dropped and built again, and an index that
+-- already carries them is left as it is.
 --
 -- Like schema.sql, this file contains no psql meta-commands, so any psql
 -- client version and SQL editors can run it as plain SQL.
@@ -97,22 +100,61 @@ $$;
 -- (document count, document frequency, average length) are kept per index,
 -- so each index predicate equals the filter recall applies to that tier:
 -- tombstoned and superseded rows never inflate or dilute the statistics of
--- the rows recall can return. Default BM25 parameters (k1 = 1.2, b = 0.75).
+-- the rows recall can return.
 --
+-- Parameters: k1 = 1.2 (the default) and b = 0.4 (the default is 0.75).
+-- b sets how strongly a row's score is divided by its length relative to
+-- the tier's average. Episodes average about 44 tokens, while design
+-- records, audits and session summaries run to hundreds or thousands, so at
+-- b = 0.75 a long row holding the query terms scores far below a short row
+-- holding the same terms and drops out of the lexical results. b = 0.4
+-- keeps part of the normalisation, so a short row that is mostly the query
+-- still ranks well, while long matching rows stay in the results.
+--
+-- Changing an index's options. pg_textsearch writes k1 and b into the
+-- index metapage when the index is built, and every score reads them from
+-- there. ALTER INDEX ... SET (b = ...) is accepted, but it only rewrites
+-- pg_class.reloptions: the metapage, and so every score, keeps the old value
+-- until the index is rebuilt. CREATE INDEX IF NOT EXISTS skips an index that
+-- exists, whatever its options. So, for re-applying this file to move an
+-- existing install to the options below, this block drops each of the four
+-- indexes whose stored options are not exactly that set, and the CREATE
+-- statements that follow build it again. An index that already carries them
+-- is kept, so a second apply rebuilds nothing. engram_bm25_match names the
+-- indexes only as text inside to_bm25query, so no object depends on them;
+-- if one ever does, DROP INDEX fails and the transaction rolls back.
+DO $$
+DECLARE
+  target text[] := ARRAY['text_config=english', 'k1=1.2', 'b=0.4'];
+  index_name name;
+BEGIN
+  FOR index_name IN
+    SELECT c.relname
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'i'
+      AND c.relname IN ('idx_episodes_bm25', 'idx_digests_bm25', 'idx_semantic_bm25', 'idx_procedural_bm25')
+      AND NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)
+  LOOP
+    EXECUTE format('DROP INDEX public.%I', index_name);
+  END LOOP;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_episodes_bm25 ON public.memory_episodes
-  USING bm25 (content) WITH (text_config = 'english')
+  USING bm25 (content) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
   WHERE forgotten_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_digests_bm25 ON public.memory_digests
-  USING bm25 (summary) WITH (text_config = 'english');
+  USING bm25 (summary) WITH (text_config = 'english', k1 = 1.2, b = 0.4);
 
 CREATE INDEX IF NOT EXISTS idx_semantic_bm25 ON public.memory_semantic
-  USING bm25 ((topic || ' ' || content)) WITH (text_config = 'english')
+  USING bm25 ((topic || ' ' || content)) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
   WHERE forgotten_at IS NULL AND superseded_by IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_procedural_bm25 ON public.memory_procedural
-  USING bm25 ((trigger_text || ' ' || procedure)) WITH (text_config = 'english')
+  USING bm25 ((trigger_text || ' ' || procedure)) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
   WHERE forgotten_at IS NULL;
 
 
