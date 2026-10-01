@@ -80,7 +80,9 @@ function extractTerms(query: string, expandedTerms?: string[]): string[] {
 // ---------------------------------------------------------------------------
 
 interface ScoringInput {
-  cosineSimilarity: number
+  /** Cosine to the query vector, or the normalised lexical rank when the
+   *  recall has no query vector. */
+  base: number
   bm25Boost: number
   recencyBias: number
   createdAt: Date
@@ -129,7 +131,7 @@ export function isRecallFailureNoise(role: string | undefined, content: string):
 
 function computeScore(input: ScoringInput): number {
   const {
-    cosineSimilarity: baseSim,
+    base: baseSim,
     bm25Boost: rawBm25,
     recencyBias,
     createdAt,
@@ -181,6 +183,9 @@ export interface UnifiedSearchOpts {
   /** Hub-damping and semantic-confidence priors multiplied into every
    *  scored candidate before the cut. Default: both off. */
   rankPriors?: RankPriorSwitches
+  /** The query could not be embedded. Vector search is skipped even when an
+   *  embedding is passed, and candidates come from the lexical leg alone. */
+  vectorUnavailable?: boolean
 }
 
 /** Lexical-leg error messages already written to stderr by this process.
@@ -225,28 +230,68 @@ function rescueCosine(query: readonly number[], row: readonly number[] | null | 
   return cosineSimilarity(query, row)
 }
 
+/** A lexical score relative to the strongest hit of the same textBoost call,
+ *  so the best keyword match scores 1 whatever the adapter's rank scale. */
+function normalisedLexicalRank(boost: number, maxBoost: number): number {
+  return maxBoost > 0 ? boost / maxBoost : 0
+}
+
+/** One candidate scored with the shared formula: `base` is its cosine to
+ *  the query, or its normalised lexical rank when there is no query vector. */
+function scoreCandidate(
+  typed: TypedMemory,
+  base: number,
+  bm25Boost: number,
+  strategy: RecallStrategy,
+  sensory: SensoryBuffer,
+): RetrievedMemory {
+  const content = extractContent(typed)
+  const createdAt = extractCreatedAt(typed)
+  const relevance = computeScore({
+    base,
+    bm25Boost,
+    recencyBias: strategy.recencyBias,
+    createdAt,
+    accessCount: extractAccessCount(typed),
+    primingBoost: sensory.getPrimingBoost(content),
+    role: extractRole(typed),
+    content,
+  })
+  return {
+    id: typed.data.id,
+    type: typed.type,
+    content,
+    relevance,
+    source: 'recall',
+    metadata: { ...extractMetadata(typed), createdAt: createdAt.toISOString() },
+    projectId: typed.data.projectId ?? null,
+    sessionId: extractSessionId(typed),
+  }
+}
+
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
   const {
     query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
-    lexicalReserve = 0, rankPriors = RANK_PRIORS_OFF,
+    lexicalReserve = 0, rankPriors = RANK_PRIORS_OFF, vectorUnavailable = false,
   } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
   }
 
-  // Step 1: Vector search — primary retriever
-  // Guard: storage adapters that haven't implemented vectorSearch yet (e.g.
-  // SQLite before Task 10) degrade gracefully to text-only fallback.
+  // Storage adapters without vectorSearch, or without textBoost, degrade to
+  // the legacy per-tier text search below.
   const hasVectorSearch = typeof storage.vectorSearch === 'function'
   const hasTextBoost = typeof storage.textBoost === 'function'
+  const hasQueryVector = embedding.length > 0 && !vectorUnavailable
 
   // Vector and lexical candidates are fused into one scored list and cut to
   // maxResults. When a reranker follows, the lexical reserve joins that cut,
   // so exact-term matches outside the nearest neighbours still reach it.
   const vectorLimit = strategy.maxResults * 4
 
-  const vectorResults = hasVectorSearch && embedding.length > 0
+  // Step 1: Vector search — primary retriever when the query has a vector.
+  const vectorResults = hasVectorSearch && hasQueryVector
     ? await storage.vectorSearch(embedding, {
         limit: vectorLimit,
         sessionId,
@@ -280,92 +325,44 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const scoredIds = new Set<string>()
   const typedById = new Map<string, TypedMemory>()
 
-  if (vectorResults.length > 0) {
+  if (vectorResults.length > 0 || hasTextBoost) {
     // Primary path: score vector results with optional BM25 boost
     for (const { item: typed, similarity } of vectorResults) {
-      const content = extractContent(typed)
-      const metadata = extractMetadata(typed)
-      const createdAt = extractCreatedAt(typed)
-      const accessCount = extractAccessCount(typed)
-      const role = extractRole(typed)
-      const primingBoost = sensory.getPrimingBoost(content)
-      const bm25RawBoost = boostMap.get(typed.data.id) ?? 0
-
-      const finalScore = computeScore({
-        cosineSimilarity: similarity,
-        bm25Boost: bm25RawBoost,
-        recencyBias: strategy.recencyBias,
-        createdAt,
-        accessCount,
-        primingBoost,
-        role,
-        content,
-      })
-
-      scored.push({
-        id: typed.data.id,
-        type: typed.type,
-        content,
-        relevance: finalScore,
-        source: 'recall',
-        metadata: { ...metadata, createdAt: createdAt.toISOString() },
-        projectId: typed.data.projectId ?? null,
-        sessionId: extractSessionId(typed),
-      })
+      scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory))
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
     }
 
-    // BM25 rescue: add keyword-matched candidates that vector search missed.
-    // They are hydrated in one batched fetch (one round trip instead of one
-    // per row) and scored on their true cosine to the query, so an exact
-    // term match competes on the same footing as a vector neighbour.
-    const rescueRefs = boostResults
+    // Lexical candidates that vector search missed — every lexical hit when
+    // the query has no vector. They are hydrated in one batched fetch (one
+    // round trip instead of one per row) that skips tombstoned and
+    // superseded rows. With a query vector each is scored on its true cosine
+    // to the query, so an exact term match competes on the same footing as a
+    // vector neighbour. Without one, its normalised lexical rank takes the
+    // cosine's place and carries the ranking, with the same recency, access,
+    // priming and project factors.
+    const lexicalRefs = boostResults
       .filter((b) => !scoredIds.has(b.id))
       .map((b) => ({ id: b.id, type: b.type }))
-    const rescued = rescueRefs.length > 0 ? await storage.getByIds(rescueRefs) : []
-    const rescuedById = new Map(rescued.map((t) => [t.data.id, t]))
+    const hydrated = lexicalRefs.length > 0 ? await storage.getByIds(lexicalRefs) : []
+    const hydratedById = new Map(hydrated.map((t) => [t.data.id, t]))
+    const maxBoost = boostResults.reduce((max, b) => Math.max(max, b.boost), 0)
 
     for (const b of boostResults) {
       if (scoredIds.has(b.id)) continue
-      const typed = rescuedById.get(b.id)
+      const typed = hydratedById.get(b.id)
       if (!typed) continue
 
-      const content = extractContent(typed)
-      const metadata = extractMetadata(typed)
-      const createdAt = extractCreatedAt(typed)
-      const accessCount = extractAccessCount(typed)
-      const role = extractRole(typed)
-      const primingBoost = sensory.getPrimingBoost(content)
-
-      const finalScore = computeScore({
-        cosineSimilarity: rescueCosine(embedding, typed.data.embedding),
-        bm25Boost: b.boost,
-        recencyBias: strategy.recencyBias,
-        createdAt,
-        accessCount,
-        primingBoost,
-        role,
-        content,
-      })
-
-      scored.push({
-        id: typed.data.id,
-        type: typed.type,
-        content,
-        relevance: finalScore,
-        source: 'recall',
-        metadata: { ...metadata, createdAt: createdAt.toISOString() },
-        projectId: typed.data.projectId ?? null,
-        sessionId: extractSessionId(typed),
-      })
+      const candidate = hasQueryVector
+        ? scoreCandidate(typed, rescueCosine(embedding, typed.data.embedding), b.boost, strategy, sensory)
+        : scoreCandidate(typed, normalisedLexicalRank(b.boost, maxBoost), 0, strategy, sensory)
+      scored.push(candidate)
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
     }
   } else if (terms.length > 0) {
-    // Fallback: text-only search via per-tier .search() methods.
-    // Used when vectorSearch is not available (adapter not yet upgraded)
-    // or when no embedding was provided.
+    // Legacy fallback for storage without textBoost or vectorSearch: text-only
+    // search via the per-tier .search() methods.
     const limit = strategy.maxResults * 2
     const searchQuery = terms.join(' ')
 
@@ -398,34 +395,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
 
     for (const { typed, similarity } of textHits) {
-      const content = extractContent(typed)
-      const metadata = extractMetadata(typed)
-      const createdAt = extractCreatedAt(typed)
-      const accessCount = extractAccessCount(typed)
-      const role = extractRole(typed)
-      const primingBoost = sensory.getPrimingBoost(content)
-
-      const finalScore = computeScore({
-        cosineSimilarity: similarity,
-        bm25Boost: 0,
-        recencyBias: strategy.recencyBias,
-        createdAt,
-        accessCount,
-        primingBoost,
-        role,
-        content,
-      })
-
-      scored.push({
-        id: typed.data.id,
-        type: typed.type,
-        content,
-        relevance: finalScore,
-        source: 'recall',
-        metadata: { ...metadata, createdAt: createdAt.toISOString() },
-        projectId: typed.data.projectId ?? null,
-        sessionId: extractSessionId(typed),
-      })
+      scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory))
       typedById.set(typed.data.id, typed)
     }
   }

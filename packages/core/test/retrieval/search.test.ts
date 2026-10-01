@@ -541,3 +541,147 @@ describe('unifiedSearch — rank priors', () => {
     expect(withMethod.accessCountQuantile).not.toHaveBeenCalled()
   })
 })
+
+describe('unifiedSearch — no query vector', () => {
+  const NOW = new Date('2026-06-01T12:00:00Z')
+  const CREATED_AT = new Date(NOW.getTime() - 24 * 3_600_000)
+
+  function ep(id: string, content: string, embedding: number[] | null): Episode {
+    return {
+      id,
+      sessionId: `sess-${id}`,
+      role: 'user',
+      content,
+      salience: 0.5,
+      accessCount: 0,
+      lastAccessed: null,
+      consolidatedAt: null,
+      embedding,
+      entities: [],
+      metadata: {},
+      createdAt: CREATED_AT,
+      projectId: null,
+    }
+  }
+
+  /** User-role row, no access count, no priming, no failure-noise penalty. */
+  function expectedScore(base: number, recencyBias: number): number {
+    const ageHours = (NOW.getTime() - CREATED_AT.getTime()) / 3_600_000
+    return base + recencyBias * Math.exp(-ageHours / 720)
+  }
+
+  const target = ep('lex-target', 'renewal export for the billing worker lost its tax column', [0, 1, 0, 0])
+  const weaker = ep('lex-weak', 'billing worker restarted after the deploy', null)
+
+  function buildStorage() {
+    // Raw ranks on the adapter's own scale: the search normalises them.
+    const textBoostResults: Array<{ id: string; type: MemoryType; boost: number }> = [
+      { id: 'lex-target', type: 'episode', boost: 4.0 },
+      { id: 'lex-forgotten', type: 'episode', boost: 3.0 },
+      { id: 'lex-weak', type: 'episode', boost: 1.0 },
+    ]
+    const storage = createMockStorage({ textBoostResults })
+    // getByIds skips tombstoned rows, so the forgotten hit never hydrates.
+    const byId = new Map<string, TypedMemory>(
+      [target, weaker].map((e) => [e.id, { type: 'episode', data: e }]),
+    )
+    storage.getByIds = vi.fn(async (refs: Array<{ id: string; type: MemoryType }>) =>
+      refs.flatMap((r) => {
+        const m = byId.get(r.id)
+        return m ? [m] : []
+      }),
+    )
+    return storage
+  }
+
+  async function run(embedding: number[], extra: { vectorUnavailable?: boolean; projectId?: string } = {}) {
+    const storage = buildStorage()
+    const result = await unifiedSearch({
+      query: 'billing worker tax column',
+      embedding,
+      strategy: LIGHT_STRATEGY,
+      storage,
+      sensory: new SensoryBuffer(),
+      sessionId: 'sess-scope',
+      ...extra,
+    })
+    return { storage, result }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('takes candidates from the lexical leg and never calls the per-tier text search', async () => {
+    const { storage, result } = await run([])
+
+    expect(result.map((r) => r.id)).toEqual(['lex-target', 'lex-weak'])
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+    expect(storage.episodes.search).not.toHaveBeenCalled()
+    expect(storage.digests.search).not.toHaveBeenCalled()
+    expect(storage.semantic.search).not.toHaveBeenCalled()
+  })
+
+  it('makes the same textBoost call the vector path makes', async () => {
+    const { storage } = await run([], { projectId: 'engram' })
+
+    expect(storage.textBoost).toHaveBeenCalledTimes(1)
+    expect(storage.textBoost).toHaveBeenCalledWith(['billing', 'worker', 'tax', 'column'], {
+      limit: LIGHT_STRATEGY.maxResults * 5,
+      sessionId: 'sess-scope',
+      projectId: 'engram',
+    })
+  })
+
+  it('hydrates every lexical hit in one tombstone-aware getByIds call', async () => {
+    const { storage, result } = await run([])
+
+    expect(storage.getByIds).toHaveBeenCalledTimes(1)
+    expect(storage.getByIds).toHaveBeenCalledWith([
+      { id: 'lex-target', type: 'episode' },
+      { id: 'lex-forgotten', type: 'episode' },
+      { id: 'lex-weak', type: 'episode' },
+    ])
+    expect(storage.getById).not.toHaveBeenCalled()
+    expect(result.map((r) => r.id)).not.toContain('lex-forgotten')
+  })
+
+  it('scores each hit on its rank divided by the strongest rank, with no cosine', async () => {
+    const { result } = await run([])
+    const byId = new Map(result.map((r) => [r.id, r.relevance]))
+
+    // lex-target carries an embedding; without a query vector it earns no cosine.
+    expect(byId.get('lex-target')).toBeCloseTo(expectedScore(4.0 / 4.0, LIGHT_STRATEGY.recencyBias), 10)
+    expect(byId.get('lex-weak')).toBeCloseTo(expectedScore(1.0 / 4.0, LIGHT_STRATEGY.recencyBias), 10)
+  })
+
+  it('treats the vector-unavailable flag like an empty embedding', async () => {
+    const { storage, result } = await run([0, 1, 0, 0], { vectorUnavailable: true })
+
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+    expect(storage.episodes.search).not.toHaveBeenCalled()
+    expect(result.map((r) => r.id)).toEqual(['lex-target', 'lex-weak'])
+    expect(result[0]?.relevance).toBeCloseTo(expectedScore(1, LIGHT_STRATEGY.recencyBias), 10)
+  })
+
+  it('keeps the per-tier text search for storage without textBoost', async () => {
+    const storage = createMockStorage()
+    const withoutTextBoost = { ...storage, textBoost: undefined } as unknown as typeof storage
+
+    const result = await unifiedSearch({
+      query: 'typescript strict mode',
+      embedding: [],
+      strategy: LIGHT_STRATEGY,
+      storage: withoutTextBoost,
+      sensory: new SensoryBuffer(),
+    })
+
+    expect(storage.episodes.search).toHaveBeenCalledTimes(1)
+    expect(result.length).toBeGreaterThan(0)
+  })
+})

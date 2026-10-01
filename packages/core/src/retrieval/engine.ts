@@ -488,6 +488,7 @@ export async function recall(
     onLexicalError: () => markLexicalError(timings),
     lexicalReserve,
     rankPriors,
+    ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
   })
   stageEnd(timings, 'search', searchStart)
 

@@ -36,3 +36,12 @@ export function orIlikeOperand(value: string): string {
   const literal = value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_')
   return orOperand(`%${literal}%`)
 }
+
+/**
+ * `.or()` filter that keeps the rows of `projectId` and the untagged rows.
+ * Untagged rows are shared across projects, the rule strict scoping applies
+ * to every other candidate source.
+ */
+export function projectScopeFilter(projectId: string): string {
+  return `project_id.eq.${orOperand(projectId)},project_id.is.null`
+}
