@@ -120,6 +120,14 @@ export interface EvidenceSelection {
 export interface IntelligenceAdapter {
   embed?(text: string): Promise<number[]>
   embedBatch?(texts: string[]): Promise<number[][]>
+  /**
+   * Embed a search query. For asymmetric models that embed a query
+   * differently from a stored document (e.g. an instruction prefix on the
+   * query side only). Recall and the forget preview use it when present and
+   * fall back to `embed`; stored content, including HyDE's hypothetical
+   * document, always goes through `embed` / `embedBatch`.
+   */
+  embedQuery?(text: string): Promise<number[]>
   dimensions?(): number
   summarize?(content: string, opts: SummarizeOptions): Promise<SummaryResult>
   extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
