@@ -41,14 +41,15 @@
  *   --dry-run                      Classify and log only; do not write
  *   --verbose                      Emit classifier decision to stderr
  *
- * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY
+ * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY (`--raw --dry-run`
+ * reaches neither a model nor a store and needs none of them)
  * Optional env: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
  *               ENGRAM_SALIENCE_THRESHOLD, ENGRAM_SALIENCE_DISABLED
  */
 
 import { readFileSync } from 'node:fs'
 import { createMemory } from '@engram-mem/core'
-import type { Memory } from '@engram-mem/core'
+import type { IntelligenceAdapter, Memory } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
@@ -286,11 +287,16 @@ async function main(): Promise<void> {
   const detectedProject = resolveProject(args.project, process.cwd())
   log(args.verbose, `project: ${detectedProject ?? '<shared>'} (flag=${args.project})`)
 
-  const openaiKey = requireEnv('OPENAI_API_KEY')
-  const classifier = openaiIntelligence({
-    apiKey: openaiKey,
-    ...(args.classifierModel ? { summarizationModel: args.classifierModel } : {}),
-  })
+  // A raw dry run stops before the dedup embedding and the store, so it makes
+  // no model call and needs no key; every other path calls the model.
+  const needsModel = !(args.raw && args.dryRun)
+  const openaiKey = needsModel ? requireEnv('OPENAI_API_KEY') : ''
+  const classifier: IntelligenceAdapter = needsModel
+    ? openaiIntelligence({
+        apiKey: openaiKey,
+        ...(args.classifierModel ? { summarizationModel: args.classifierModel } : {}),
+      })
+    : {}
   if (!args.raw && !classifier.extractSalience) {
     process.stderr.write('[engram-ingest] intelligence adapter lacks extractSalience\n')
     process.exit(2)

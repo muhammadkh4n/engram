@@ -4,7 +4,8 @@
  * Models asked for "only JSON" still return it in several shapes: bare, inside
  * a ```json or bare ``` fence, a fence with prose before or after it, or a bare
  * object/array in the middle of prose. Every reply goes through the same three
- * steps, and the first candidate that parses (and that `accept` takes) wins:
+ * steps, and the first candidate that parses and has the shape `accept` asks
+ * for wins:
  *
  *   1. the trimmed reply as a whole;
  *   2. each fenced block, in order of appearance (markers pair up in order);
@@ -13,9 +14,12 @@
  *      backticks inside string values never end a span.
  *
  * Step 1 runs first so a valid reply whose string values contain fences or
- * brackets is never cut. Nothing parses → throws, naming why.
+ * brackets is never cut. The shape check is required because prose carries
+ * its own parseable brackets: a citation `[1]` or an example `[]` ahead of the
+ * verdict would otherwise be returned as the reply. No candidate parses with
+ * the right shape → throws, naming why.
  */
-export function extractJsonReply(raw: string, accept: (value: unknown) => boolean = () => true): unknown {
+export function extractJsonReply(raw: string, accept: (value: unknown) => boolean): unknown {
   const trimmed = raw.trim()
   if (trimmed.length === 0) throw new Error('empty reply, no JSON value')
 
@@ -24,7 +28,7 @@ export function extractJsonReply(raw: string, accept: (value: unknown) => boolea
     if (parsed.ok && accept(parsed.value)) return parsed.value
   }
   throw new Error(
-    `no JSON value in reply (${trimmed.length} chars): not JSON as a whole, no fenced block parses, no balanced {…}/[…] span parses`,
+    `no JSON value of the expected shape in reply (${trimmed.length} chars): not as a whole, in no fenced block, in no balanced {…}/[…] span`,
   )
 }
 

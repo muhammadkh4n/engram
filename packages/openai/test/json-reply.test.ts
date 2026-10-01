@@ -38,6 +38,9 @@ const SHAPES: Array<[label: string, text: string, wrap: (j: string) => string]> 
     (j) => `First run:\n\`\`\`bash\necho [x]\n\`\`\`\nThen the result:\n\`\`\`json\n${j}\n\`\`\``,
   ],
   ['prose with a bare JSON value in the middle', BRACKETS, (j) => `Here is the result: ${j} and that is all.`],
+  // A parseable bracket in the prose ahead of the payload must not shadow it.
+  ['a citation [1] before the payload', PLAIN, (j) => `Per the rules [1], here is the verdict: ${j}`],
+  ['an empty example [] before the payload', PLAIN, (j) => `Example [] then ${j}`],
 ]
 
 const PROSE_ONLY = 'I think this one should be stored because it records a decision.'
@@ -108,13 +111,27 @@ describe.each(PARSERS)('$name reads every reply shape', (parser) => {
   })
 })
 
+const anyValue = (): boolean => true
+const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v)
+
 describe('extractJsonReply', () => {
   it('skips escaped quotes inside a string when scanning for the span', () => {
-    expect(extractJsonReply('Result: {"a": "say \\"}\\" now", "b": [1]} done')).toEqual({ a: 'say "}" now', b: [1] })
+    expect(extractJsonReply('Result: {"a": "say \\"}\\" now", "b": [1]} done', anyValue)).toEqual({
+      a: 'say "}" now',
+      b: [1],
+    })
   })
 
   it('takes the first span that parses when earlier brackets do not', () => {
-    expect(extractJsonReply('Options [a, b]: {"ok": true}')).toEqual({ ok: true })
+    expect(extractJsonReply('Options [a, b]: {"ok": true}', anyValue)).toEqual({ ok: true })
+  })
+
+  it('walks past parseable spans of the wrong shape to the first accepted one', () => {
+    expect(extractJsonReply('See [1] and [] then {"ok": true} or {"ok": false}', isObject)).toEqual({ ok: true })
+  })
+
+  it('throws when values parse but none has the accepted shape', () => {
+    expect(() => extractJsonReply('Per the rules [1] and [2].', isObject)).toThrow(/expected shape/)
   })
 
   it('passes over parsed values the caller does not accept', () => {
@@ -128,6 +145,6 @@ describe('extractJsonReply', () => {
     ['an unclosed object', '{"a": 1'],
     ['mismatched brackets', '{"a": [1}'],
   ])('throws on %s', (_label, raw) => {
-    expect(() => extractJsonReply(raw)).toThrow(/JSON value/)
+    expect(() => extractJsonReply(raw, anyValue)).toThrow(/JSON value/)
   })
 })

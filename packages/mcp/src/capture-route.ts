@@ -6,8 +6,8 @@
  * worth retrying: 400 = the request is invalid (`retryable: false`), 422 =
  * the classifier's reply for this content was unreadable twice
  * (`retryable: false`), 500 = anything else that failed after validation
- * (`retryable: true`), 200 = every other pipeline outcome, including
- * rejections.
+ * (`retryable: true`, with a generic message; the detail is logged), 200 =
+ * every other pipeline outcome, including rejections.
  */
 
 import {
@@ -26,31 +26,18 @@ import { normalizeProjectId } from './ingest/project-detect.js'
 export const CAPTURE_CONTENT_MAX_CHARS = 100_000
 export const CAPTURE_KEY_MAX_CHARS = 128
 export const CAPTURE_SESSION_ID_MAX_CHARS = 256
-export const CAPTURE_META_MAX_KEYS = 8
 export const CAPTURE_META_VALUE_MAX_CHARS = 512
-export const CAPTURE_META_KEY_MAX_CHARS = 128
 
 /**
- * Metadata the pipeline itself decides or that other code reads as a fact
- * about the row (provenance, scoping, row type, embedding inputs). A client
- * value under one of these names would be either silently overwritten or
- * mistaken for the pipeline's own, so the request is refused instead.
+ * The provenance keys a client may attach. Everything else in a row's
+ * metadata is decided by the pipeline or read by other code as a fact about
+ * the row, and a list of names to refuse can never cover what is added later,
+ * so only these are accepted.
  */
-const RESERVED_META_KEYS: ReadonlySet<string> = new Set([
-  'source',
-  'project',
-  'type',
-  'captureKey',
-  'captureModel',
-  'rawTurn',
-  'embedTextVersion',
-  'contextualPreamble',
-])
-const RESERVED_META_PREFIX = 'salience'
+export const CAPTURE_META_KEYS: readonly string[] = ['transcriptPath', 'trigger', 'cwd', 'capturedAt']
 
-function isReservedMetaKey(key: string): boolean {
-  return RESERVED_META_KEYS.has(key) || key.startsWith(RESERVED_META_PREFIX)
-}
+/** Sent on a 500 in place of the failure's own text, which stays in the server log. */
+export const CAPTURE_FAILED_MESSAGE = 'capture failed; retry later'
 
 const SOURCE_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 const ROLES = ['user', 'assistant', 'system'] as const
@@ -111,14 +98,10 @@ function parseMeta(v: unknown): Parsed<Record<string, string> | undefined> {
   if (v === undefined) return { value: undefined }
   if (!isPlainObject(v)) return { error: 'meta must be an object of strings' }
   const entries = Object.entries(v)
-  if (entries.length > CAPTURE_META_MAX_KEYS) {
-    return { error: `meta allows at most ${CAPTURE_META_MAX_KEYS} keys, got ${entries.length}` }
-  }
   for (const [k, val] of entries) {
-    if (k.length > CAPTURE_META_KEY_MAX_CHARS) {
-      return { error: `meta key names are limited to ${CAPTURE_META_KEY_MAX_CHARS} characters` }
+    if (!CAPTURE_META_KEYS.includes(k)) {
+      return { error: `meta.${k} is not an accepted key (accepted: ${CAPTURE_META_KEYS.join(', ')})` }
     }
-    if (isReservedMetaKey(k)) return { error: `meta.${k} is a reserved metadata key` }
     if (typeof val !== 'string') return { error: `meta.${k} must be a string` }
     if (val.length > CAPTURE_META_VALUE_MAX_CHARS) {
       return { error: `meta.${k} exceeds ${CAPTURE_META_VALUE_MAX_CHARS} characters` }
@@ -207,6 +190,11 @@ function errorOutcome(model: string, retryable: boolean, message: string): Captu
   return { outcome: 'error', model, retryable, message }
 }
 
+/** A failure after validation: 500, retryable, with the generic message. */
+export function failedCaptureResponse(captureModel: string): CaptureResponse {
+  return { status: 500, body: errorOutcome(captureModel, true, CAPTURE_FAILED_MESSAGE) }
+}
+
 /** A request that failed validation: 400 with a permanent error outcome. */
 export function invalidCaptureResponse(captureModel: string, message: string, status = 400): CaptureResponse {
   return { status, body: errorOutcome(captureModel, false, message) }
@@ -226,6 +214,6 @@ export async function runCaptureRequest(deps: CaptureRouteDeps, body: unknown): 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     deps.log?.(`capture failed (source=${request.input.source}): ${message}`)
-    return { status: 500, body: errorOutcome(deps.captureModel, true, message) }
+    return failedCaptureResponse(deps.captureModel)
   }
 }

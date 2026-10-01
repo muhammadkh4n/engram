@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { EventEmitter } from 'node:events'
 import type { AddressInfo } from 'node:net'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createRequestListener, loadHttpConfig, type HttpConfig } from '../src/http-app.js'
@@ -131,7 +132,44 @@ describe('POST /capture', () => {
     await new Promise((r) => setTimeout(r, 50))
     req.destroy()
     await vi.waitFor(() => expect(h.logError).toHaveBeenCalledTimes(1))
+    expect(h.logError.mock.calls[0]![0]).toContain('capture body read failed')
     expect(h.captureDeps).not.toHaveBeenCalled()
+  })
+
+  it('answers a failed body read with a retryable capture outcome, not a JSON-RPC body', async () => {
+    const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, allowedHosts: null }
+    const capture: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: vi.fn() }
+    const logError = vi.fn()
+    const listener = createRequestListener(config, { mcp: vi.fn(), capture, logError })
+    const req = Object.assign(new EventEmitter(), {
+      method: 'POST',
+      url: '/capture',
+      headers: { authorization: `Bearer ${TOKEN}`, host: '127.0.0.1' },
+    })
+    const sent: { status?: number; body?: string } = {}
+    const res = {
+      headersSent: false,
+      destroyed: false,
+      writeHead: (status: number) => {
+        sent.status = status
+      },
+      end: (body?: string) => {
+        sent.body = body
+      },
+    }
+
+    listener(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse)
+    req.emit('error', new Error('socket hang up'))
+
+    await vi.waitFor(() => expect(sent.body).toBeDefined())
+    expect(sent.status).toBe(500)
+    expect(JSON.parse(sent.body!)).toEqual({
+      outcome: 'error',
+      model: 'test-chat-model',
+      retryable: true,
+      message: 'capture failed; retry later',
+    })
+    expect(logError.mock.calls[0]![0]).toContain('socket hang up')
   })
 
   it('answers 400 to a body that is not JSON', async () => {

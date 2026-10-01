@@ -12,7 +12,13 @@
 import type http from 'node:http'
 import { Buffer } from 'node:buffer'
 import { timingSafeEqual } from 'node:crypto'
-import { invalidCaptureResponse, runCaptureRequest, type CaptureResponse, type CaptureRouteDeps } from './capture-route.js'
+import {
+  failedCaptureResponse,
+  invalidCaptureResponse,
+  runCaptureRequest,
+  type CaptureResponse,
+  type CaptureRouteDeps,
+} from './capture-route.js'
 
 /**
  * A capture carries at most 100,000 content chars plus small metadata. JSON
@@ -117,6 +123,7 @@ async function handleCapture(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   handlers: HttpHandlers,
+  logError: (line: string) => void,
 ): Promise<void> {
   const model = handlers.capture.captureModel
   if (req.method !== 'POST') {
@@ -126,7 +133,16 @@ async function handleCapture(
     return
   }
   const maxBytes = handlers.captureBodyMaxBytes ?? CAPTURE_BODY_MAX_BYTES
-  const read = await readBody(req, maxBytes)
+  let read: BodyRead
+  try {
+    read = await readBody(req, maxBytes)
+  } catch (err) {
+    // A capture client reads every answer as a capture outcome, so a broken
+    // upload is a retryable outcome too, not the MCP route's JSON-RPC error.
+    logError(`[engram-mcp-http] capture body read failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (!res.headersSent && !res.destroyed) sendCapture(res, failedCaptureResponse(model))
+    return
+  }
   if ('tooLarge' in read) {
     sendCapture(res, invalidCaptureResponse(model, `body exceeds ${maxBytes} bytes`, 413))
     return
@@ -146,6 +162,7 @@ async function route(
   res: http.ServerResponse,
   config: HttpConfig,
   handlers: HttpHandlers,
+  logError: (line: string) => void,
 ): Promise<void> {
   logRequest(req)
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/healthz')) {
@@ -179,7 +196,7 @@ async function route(
   }
 
   if (path === '/capture') {
-    await handleCapture(req, res, handlers)
+    await handleCapture(req, res, handlers, logError)
     return
   }
 
@@ -209,7 +226,7 @@ export function createRequestListener(
   return (req, res) => {
     void (async () => {
       try {
-        await route(req, res, config, handlers)
+        await route(req, res, config, handlers, logError)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         logError(`[engram-mcp-http] Request error: ${msg}`)

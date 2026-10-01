@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { Memory, SalienceClassification, StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import type { CaptureDeps } from '../src/ingest/capture.js'
 import { OpenAISummarizer } from '@engram-mem/openai'
-import { runCaptureRequest, CAPTURE_CONTENT_MAX_CHARS, type CaptureRouteDeps } from '../src/capture-route.js'
+import {
+  runCaptureRequest,
+  CAPTURE_CONTENT_MAX_CHARS,
+  CAPTURE_META_KEYS,
+  type CaptureRouteDeps,
+} from '../src/capture-route.js'
 
 const TURN =
   'We moved the ingest worker to a systemd timer; the old pm2 cron entry was removed from the ecosystem file.'
@@ -36,9 +41,11 @@ function makeHarness() {
     captureModel: 'test-chat-model',
   }
   const resolveDeps = vi.fn(async () => captureDeps)
-  const deps: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: resolveDeps }
+  const log = vi.fn()
+  const deps: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: resolveDeps, log }
   return {
     deps,
+    log,
     captureDeps,
     resolveDeps,
     extractSalience,
@@ -84,7 +91,6 @@ describe('runCaptureRequest validation', () => {
     ['a source outside the pattern', { source: 'Claude Code' }],
     ['a non-boolean gate', { gate: 'yes' }],
     ['an unknown derive kind', { derive: 'weekly-digest' }],
-    ['meta with 9 keys', { meta: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`k${i}`, 'v'])) }],
     ['a meta value that is not a string', { meta: { cwd: 42 } }],
     ['content over the cap', { content: 'x'.repeat(CAPTURE_CONTENT_MAX_CHARS + 1) }],
     ['empty content', { content: '   ' }],
@@ -92,7 +98,6 @@ describe('runCaptureRequest validation', () => {
     ['a missing role on a turn', { role: undefined }],
     ['an unknown field', { dryRun: true }],
     ['a numeric project_id', { project_id: 123 }],
-    ['a meta key name over 128 chars', { meta: { ['m'.repeat(129)]: 'v' } }],
   ]
 
   it.each(invalid)('refuses %s with a permanent error and never opens the stores', async (_label, overrides) => {
@@ -115,19 +120,30 @@ describe('runCaptureRequest validation', () => {
     'captureKey',
     'captureModel',
     'rawTurn',
-    'embedTextVersion',
-    'contextualPreamble',
     'salienceCategory',
-    'salienceAnything',
-  ])('refuses the reserved meta key %s with a 400 naming it', async (key) => {
+    'importance',
+    'branch',
+    'm'.repeat(200),
+  ])('refuses the meta key %s, which is not on the allowlist, with a 400 naming it', async (key) => {
     const h = makeHarness()
 
     const res = await runCaptureRequest(h.deps, body({ meta: { cwd: '/tmp', [key]: 'spoofed' } }))
 
     expect(res.status).toBe(400)
     expect(res.body).toMatchObject({ outcome: 'error', retryable: false })
-    expect(res.body.message).toContain(`meta.${key}`)
+    expect(res.body.message).toContain(`meta.${key} is not an accepted key`)
     expect(h.resolveDeps).not.toHaveBeenCalled()
+  })
+
+  it('accepts every allowlisted meta key and stores the values', async () => {
+    const h = makeHarness()
+    const meta = Object.fromEntries(CAPTURE_META_KEYS.map((k) => [k, `value-of-${k}`]))
+    expect(Object.keys(meta).sort()).toEqual(['capturedAt', 'cwd', 'transcriptPath', 'trigger'])
+
+    const res = await runCaptureRequest(h.deps, body({ meta }))
+
+    expect(res.status).toBe(200)
+    expect(ingestedMetadata(h.ingest)).toMatchObject(meta)
   })
 
   it('refuses a body that is not an object', async () => {
@@ -156,8 +172,9 @@ describe('runCaptureRequest turns', () => {
       outcome: 'error',
       model: 'test-chat-model',
       retryable: true,
-      message: 'chat endpoint returned 502',
+      message: 'capture failed; retry later',
     })
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining('chat endpoint returned 502'))
   })
 
   it('reports a failing chat model as a retryable error, not a rejection', async () => {
@@ -185,7 +202,8 @@ describe('runCaptureRequest turns', () => {
 
     expect(create).toHaveBeenCalledOnce()
     expect(res.status).toBe(500)
-    expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: '429 rate limited' })
+    expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: 'capture failed; retry later' })
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining('429 rate limited'))
     expect(onRejected).not.toHaveBeenCalled()
     expect(h.ingest).not.toHaveBeenCalled()
   })
@@ -251,7 +269,8 @@ describe('runCaptureRequest turns', () => {
     h.resolveDeps.mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
     const res = await runCaptureRequest(h.deps, body())
     expect(res.status).toBe(500)
-    expect(res.body).toMatchObject({ outcome: 'error', retryable: true })
+    expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: 'capture failed; retry later' })
+    expect(JSON.stringify(res.body)).not.toContain('ECONNREFUSED')
   })
 
   it('returns a gated rejection with its category and confidence', async () => {

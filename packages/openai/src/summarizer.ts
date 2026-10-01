@@ -630,21 +630,14 @@ export class OpenAISummarizer {
 
     let parsed: unknown
     try {
-      parsed = extractJsonReply(raw)
+      parsed = extractJsonReply(raw, isSalienceVerdict)
     } catch (err) {
       throw new UnclassifiableReplyError(
         `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
       )
     }
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new UnclassifiableReplyError('extractSalience: classifier output is not a JSON object')
-    }
     const obj = parsed as Record<string, unknown>
-    if (typeof obj['store'] !== 'boolean') {
-      throw new UnclassifiableReplyError('extractSalience: classifier output has no boolean "store" verdict')
-    }
-
-    const store = obj['store']
+    const store = obj['store'] === true
     const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
     const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
       ? (rawCategory as SalienceCategory)
@@ -875,13 +868,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
-      const parsed: unknown = extractJsonReply(raw)
-
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('Not a plain object')
-      }
-
-      const obj = parsed as Record<string, unknown>
+      const obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
 
       return {
         text: typeof obj['text'] === 'string' ? obj['text'] : originalContent.slice(0, 500),
@@ -908,11 +895,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
     try {
-      const parsed: unknown = extractJsonReply(raw)
-
-      if (!Array.isArray(parsed)) {
-        return []
-      }
+      const parsed = extractJsonReply(raw, isCandidateList) as unknown[]
 
       return parsed
         .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
@@ -939,6 +922,19 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
       return []
     }
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isSalienceVerdict(value: unknown): boolean {
+  return isPlainObject(value) && typeof value['store'] === 'boolean'
+}
+
+/** A list holding at least one object; `[]` and `[1]` in prose are not candidates. */
+function isCandidateList(value: unknown): boolean {
+  return Array.isArray(value) && value.some(isPlainObject)
 }
 
 const MAX_EXPANSION_TERMS = 5

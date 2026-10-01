@@ -228,6 +228,37 @@ describe('engram-ingest CLI', () => {
     const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
     expect(ingested.metadata['captureModel']).toBe('raw')
   })
+
+  it('runs a raw dry run with no OpenAI key and no store credentials', async () => {
+    delete process.env['OPENAI_API_KEY']
+    delete process.env['SUPABASE_URL']
+    delete process.env['SUPABASE_KEY']
+    process.argv = ['node', 'engram-ingest', '--raw', '--dry-run', '--content', 'feat: stream the transcript read', '--source', 'git-commit']
+
+    await import('../src/ingest/engram-ingest-cli.js')
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
+
+    expect(exitSpy).toHaveBeenCalledWith(0)
+    expect(exitSpy).not.toHaveBeenCalledWith(1)
+    expect(stderrLines.join('')).not.toContain('missing required env')
+    expect(h.memoryIngest).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['a gated dry run', ['--dry-run']],
+    ['a raw store', ['--raw']],
+  ])('still requires OPENAI_API_KEY for %s', async (_label, flags) => {
+    delete process.env['OPENAI_API_KEY']
+    process.argv = ['node', 'engram-ingest', ...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit']
+
+    await import('../src/ingest/engram-ingest-cli.js')
+    // process.exit is stubbed, so the run goes on past the missing key; wait
+    // for its final exit so nothing outlives the test.
+    await vi.waitFor(() => expect(exitSpy.mock.calls.length).toBeGreaterThanOrEqual(2))
+
+    expect(exitSpy.mock.calls[0]![0]).toBe(1)
+    expect(stderrLines.join('')).toContain('missing required env: OPENAI_API_KEY')
+  })
 })
 
 describe('session-summary CLI', () => {
