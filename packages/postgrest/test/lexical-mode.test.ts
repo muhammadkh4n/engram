@@ -56,7 +56,7 @@ describe('lexical ranking mode', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('selects bm25 when the probe succeeds, and logs it', async () => {
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter, rpc } = buildAdapter({})
 
     await adapter.initialize()
@@ -67,7 +67,7 @@ describe('lexical ranking mode', () => {
   })
 
   it('falls back to tsvector when the function is not in the schema cache, and logs it', async () => {
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter } = buildAdapter({ probe: { data: null, error: NOT_FOUND } })
 
     await adapter.initialize()
@@ -76,8 +76,20 @@ describe('lexical ranking mode', () => {
     expect(log).toHaveBeenCalledWith('[engram] lexical ranking: ts_rank_cd (pg_textsearch not installed)')
   })
 
+  it('writes nothing to stdout on the full schema, so hook JSON on stdout stays parseable', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const { adapter } = buildAdapter({})
+
+    await adapter.initialize()
+
+    expect(log).not.toHaveBeenCalled()
+    expect(write).not.toHaveBeenCalled()
+  })
+
   it('throws from initialize on any other probe error', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter } = buildAdapter({
       probe: { data: null, error: { code: '42704', message: 'index "idx_episodes_bm25" does not exist' } },
     })
@@ -87,14 +99,14 @@ describe('lexical ranking mode', () => {
   })
 
   it('throws on a probe error that carries no code', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter } = buildAdapter({ probe: { data: null, error: { message: 'fetch failed' } } })
 
     await expect(adapter.initialize()).rejects.toThrow(/fetch failed/)
   })
 
   it('never probes in legacy-schema mode', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter, rpc } = buildAdapter({ legacy: true })
 
     await adapter.initialize()
@@ -104,7 +116,7 @@ describe('lexical ranking mode', () => {
   })
 
   it('probes once across many textBoost calls', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter, rpc } = buildAdapter({})
 
     await adapter.initialize()
@@ -118,7 +130,7 @@ describe('lexical ranking mode', () => {
     ['bm25', undefined, 'engram_bm25_match'],
     ['tsvector', { data: null, error: NOT_FOUND }, 'engram_text_match'],
   ] as const)('%s mode routes textBoost to %s with identical args and normalisation', async (_mode, probe, fn) => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const { adapter, rpc } = buildAdapter({
       probe,
       boostRows: [

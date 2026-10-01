@@ -71,12 +71,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         throw new Error(`PostgREST connection failed: ${legacyError.message}`)
       }
       // Legacy mode: memories table absent, use compatibility wrappers.
-      console.log('[engram] legacy schema detected — running in compatibility mode (no memories pool table)')
+      console.error('[engram] legacy schema detected — running in compatibility mode (no memories pool table)')
       this._isLegacy = true
     } else {
       this._isLegacy = false
       this._lexicalMode = await this.probeLexicalMode()
-      console.log(
+      console.error(
         this._lexicalMode === 'bm25'
           ? '[engram] lexical ranking: bm25 (pg_textsearch)'
           : '[engram] lexical ranking: ts_rank_cd (pg_textsearch not installed)',
