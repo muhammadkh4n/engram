@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { EpisodeStorage } from '@engram-mem/core'
+import type { EpisodeStorage, LookupOptions } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 import { hybridSearch } from './vector-search.js'
 
@@ -129,11 +129,12 @@ export class SqliteEpisodeStorage implements EpisodeStorage {
       }))
   }
 
-  async getByIds(ids: string[]): Promise<Episode[]> {
+  async getByIds(ids: string[], opts?: LookupOptions): Promise<Episode[]> {
     if (ids.length === 0) return []
     const placeholders = ids.map(() => '?').join(',')
+    const notForgotten = opts?.includeInactive ? '' : ' AND forgotten_at IS NULL'
     const rows = this.db
-      .prepare(`SELECT * FROM episodes WHERE id IN (${placeholders})`)
+      .prepare(`SELECT * FROM episodes WHERE id IN (${placeholders})${notForgotten}`)
       .all(...ids) as EpisodeRow[]
     return rows.map((r) => this.rowToEpisode(r))
   }

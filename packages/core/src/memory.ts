@@ -1004,9 +1004,12 @@ export class Memory {
     const requested = normalizeForgetIds(ids)
 
     // An id carries no tier, so look it up in every table. Rows are keyed by
-    // the type the adapter returns, not the type asked for.
+    // the type the adapter returns, not the type asked for. Re-forgetting must
+    // find an already tombstoned row to report it forgotten, so the lookup
+    // includes inactive rows.
     const rows = await this.storage.getByIds(
       requested.flatMap((id) => FORGET_LOOKUP_TYPES.map((type) => ({ id, type }))),
+      { includeInactive: true },
     )
     const rowsById = new Map<string, TypedMemory[]>()
     for (const row of rows) {
