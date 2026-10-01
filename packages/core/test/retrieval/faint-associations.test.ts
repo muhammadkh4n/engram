@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { RetrievedMemory } from '../../src/types.js'
 import type { GraphPort } from '../../src/adapters/graph.js'
 import type { CompositeMemory } from '../../src/retrieval/spreading-activation.js'
@@ -83,5 +83,28 @@ describe('recall engine — faintAssociations', () => {
     const result = await recallDeep()
 
     expect(result).not.toHaveProperty('faintAssociations')
+  })
+
+  describe('with ENGRAM_RECALL_FAINT=off', () => {
+    const original = process.env['ENGRAM_RECALL_FAINT']
+
+    afterEach(() => {
+      if (original === undefined) delete process.env['ENGRAM_RECALL_FAINT']
+      else process.env['ENGRAM_RECALL_FAINT'] = original
+    })
+
+    it('drops both the section and the field', async () => {
+      process.env['ENGRAM_RECALL_FAINT'] = 'off'
+      const faint = [neighbour('faint-1', 0.05)]
+      activate.mockResolvedValue({ associations: [neighbour('primary-1', 0.4)], context: composite(faint) })
+
+      const result = await recallDeep()
+
+      expect(result).not.toHaveProperty('faintAssociations')
+      expect(result.formatted).not.toContain('### Faint Associations')
+      expect(result.formatted).not.toContain(faint[0]?.content)
+      expect(result.payload.emittedFaint).toBe(0)
+      expect(result.associations.map((a) => a.id)).toEqual(['primary-1'])
+    })
   })
 })
