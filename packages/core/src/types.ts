@@ -1,4 +1,5 @@
 import type { RecallPayload } from './retrieval/output-policy.js'
+import type { FusionConfig } from './retrieval/fusion-config.js'
 
 // === Memory Types ===
 
@@ -36,6 +37,9 @@ export interface RecallStrategy {
   associationHops: number
   expand: boolean
   recencyBias: number
+  /** Per-call fusion weights; keys here win over ENGRAM_RECALL_FUSION and
+   *  the defaults. Absent: the env value, else the defaults. */
+  fusion?: Partial<FusionConfig>
 }
 
 export interface Message {

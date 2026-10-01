@@ -106,6 +106,13 @@ export type {
 } from './retrieval/output-policy.js'
 export type { RecallOpts } from './retrieval/engine.js'
 export { unifiedSearch } from './retrieval/search.js'
+export {
+  DEFAULT_FUSION_CONFIG,
+  FUSION_ENV_VAR,
+  resolveFusionConfig,
+  validateFusionOverride,
+} from './retrieval/fusion-config.js'
+export type { FusionConfig } from './retrieval/fusion-config.js'
 export { rankSessions } from './retrieval/session-ordering.js'
 export { parseEventDate, resolveEventDate, isoDate } from './utils/event-date.js'
 export type { UnifiedSearchOpts } from './retrieval/search.js'

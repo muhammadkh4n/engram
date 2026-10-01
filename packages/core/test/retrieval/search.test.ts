@@ -8,6 +8,7 @@ import {
 } from './mock-storage.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
 import type { Episode, MemoryType, RecallStrategy, SearchResult, TypedMemory } from '../../src/types.js'
+import { DEFAULT_FUSION_CONFIG, type FusionConfig } from '../../src/retrieval/fusion-config.js'
 
 const LIGHT_STRATEGY: RecallStrategy = {
   mode: 'light',
@@ -748,5 +749,189 @@ describe('unifiedSearch — no query vector', () => {
 
     expect(storage.episodes.search).toHaveBeenCalledTimes(1)
     expect(result.length).toBeGreaterThan(0)
+  })
+})
+
+describe('unifiedSearch — fusion config', () => {
+  const NOW = new Date('2026-06-01T12:00:00Z')
+  const ENV = 'ENGRAM_RECALL_FUSION'
+  const originalEnv = process.env[ENV]
+
+  beforeEach(() => {
+    delete process.env[ENV]
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    if (originalEnv === undefined) delete process.env[ENV]
+    else process.env[ENV] = originalEnv
+  })
+
+  interface Row {
+    episode: Episode
+    similarity: number
+    boost: number
+  }
+
+  function row(
+    id: string,
+    opts: { role: 'user' | 'assistant'; content: string; similarity: number; boost: number; accessCount: number; ageHours: number },
+  ): Row {
+    return {
+      similarity: opts.similarity,
+      boost: opts.boost,
+      episode: {
+        id,
+        sessionId: `sess-${id}`,
+        role: opts.role,
+        content: opts.content,
+        salience: 0.5,
+        accessCount: opts.accessCount,
+        lastAccessed: null,
+        consolidatedAt: null,
+        embedding: null,
+        entities: [],
+        metadata: {},
+        createdAt: new Date(NOW.getTime() - opts.ageHours * 3_600_000),
+        projectId: null,
+      },
+    }
+  }
+
+  // Each row exercises a different subset of the scoring terms, so every key
+  // changes at least one row and leaves the rows without its term unchanged.
+  const ROWS: Row[] = [
+    row('lexical', { role: 'user', content: 'billing worker deploy runbook', similarity: 0.6, boost: 0.8, accessCount: 3, ageHours: 48 }),
+    row('assistant', { role: 'assistant', content: 'the billing worker deploys blue-green', similarity: 0.55, boost: 0, accessCount: 25, ageHours: 400 }),
+    row('noise', { role: 'assistant', content: "I can't find the billing worker notes.", similarity: 0.7, boost: 0.3, accessCount: 0, ageHours: 2000 }),
+    row('plain', { role: 'user', content: 'unrelated note about lunch', similarity: 0.5, boost: 0, accessCount: 0, ageHours: 10 }),
+  ]
+
+  /** The scoring formula, restated independently of the implementation. */
+  function expected(r: Row, cfg: FusionConfig, recencyBias: number): number {
+    const ageHours = (NOW.getTime() - r.episode.createdAt.getTime()) / 3_600_000
+    const sum = r.similarity
+      + r.boost * cfg.lexicalWeight
+      + recencyBias * Math.exp(-ageHours / cfg.recencyDecayHours)
+      + Math.min(cfg.accessBoostCap, r.episode.accessCount * cfg.accessBoostPerAccess)
+      + (r.episode.role === 'assistant' ? cfg.assistantRoleBoost : 0)
+    return isRecallFailureNoise(r.episode.role, r.episode.content) ? sum * cfg.recallFailurePenalty : sum
+  }
+
+  function fixtureStorage() {
+    return createMockStorage({
+      vectorSearchResults: ROWS.map((r) => ({ item: { type: 'episode' as const, data: r.episode }, similarity: r.similarity })),
+      textBoostResults: ROWS.filter((r) => r.boost > 0).map((r) => ({ id: r.episode.id, type: 'episode' as const, boost: r.boost })),
+    })
+  }
+
+  async function search(fusion?: Partial<FusionConfig>, storage = fixtureStorage()) {
+    const strategy: RecallStrategy = fusion === undefined ? LIGHT_STRATEGY : { ...LIGHT_STRATEGY, fusion }
+    const result = await unifiedSearch({ query: 'billing worker deploy', embedding: [0.1, 0.2], strategy, storage, sensory: new SensoryBuffer() })
+    return new Map(result.map((m) => [m.id, m.relevance]))
+  }
+
+  const SCORING_OVERRIDES: Array<[keyof FusionConfig, number]> = [
+    ['lexicalWeight', 0.4],
+    ['recencyDecayHours', 24],
+    ['accessBoostPerAccess', 0.002],
+    ['accessBoostCap', 0.3],
+    ['assistantRoleBoost', 0.2],
+    ['recallFailurePenalty', 0.9],
+  ]
+
+  it('scores every fixture row with the default formula when no override is set', async () => {
+    const scores = await search()
+    for (const r of ROWS) {
+      expect(scores.get(r.episode.id)).toBeCloseTo(expected(r, DEFAULT_FUSION_CONFIG, LIGHT_STRATEGY.recencyBias), 12)
+    }
+  })
+
+  for (const [key, value] of SCORING_OVERRIDES) {
+    it(`${key} moves its own term and leaves the other terms at their defaults`, async () => {
+      const base = await search()
+      const moved = await search({ [key]: value })
+      const cfg = { ...DEFAULT_FUSION_CONFIG, [key]: value }
+      let changedRows = 0
+      for (const r of ROWS) {
+        const id = r.episode.id
+        expect(moved.get(id)).toBeCloseTo(expected(r, cfg, LIGHT_STRATEGY.recencyBias), 12)
+        const unchanged = expected(r, cfg, LIGHT_STRATEGY.recencyBias) === expected(r, DEFAULT_FUSION_CONFIG, LIGHT_STRATEGY.recencyBias)
+        if (unchanged) expect(moved.get(id)).toBe(base.get(id))
+        else changedRows++
+      }
+      expect(changedRows).toBeGreaterThan(0)
+    })
+  }
+
+  it('lexicalCandidateFactor sets only the textBoost limit', async () => {
+    const storage = fixtureStorage()
+    await search({ lexicalCandidateFactor: 12 }, storage)
+    expect((storage.textBoost as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toEqual({ limit: 96, sessionId: undefined })
+    expect(storage.vectorSearch).toHaveBeenCalledWith([0.1, 0.2], { limit: 32, sessionId: undefined })
+  })
+
+  it('vectorCandidateFactor sets only the vectorSearch limit', async () => {
+    const storage = fixtureStorage()
+    await search({ vectorCandidateFactor: 7 }, storage)
+    expect(storage.vectorSearch).toHaveBeenCalledWith([0.1, 0.2], { limit: 56, sessionId: undefined })
+    expect((storage.textBoost as ReturnType<typeof vi.fn>).mock.calls[0]![1]).toEqual({ limit: 40, sessionId: undefined })
+  })
+
+  it('uses ENGRAM_RECALL_FUSION when the call sets no fusion, and the call key over the env key', async () => {
+    process.env[ENV] = JSON.stringify({ lexicalWeight: 0.4, assistantRoleBoost: 0.2 })
+    const fromEnv = await search()
+    const lexical = ROWS[0]!
+    const assistant = ROWS[1]!
+    const envCfg = { ...DEFAULT_FUSION_CONFIG, lexicalWeight: 0.4, assistantRoleBoost: 0.2 }
+    expect(fromEnv.get('lexical')).toBeCloseTo(expected(lexical, envCfg, LIGHT_STRATEGY.recencyBias), 12)
+
+    const mixed = await search({ lexicalWeight: 0 })
+    const mixedCfg = { ...envCfg, lexicalWeight: 0 }
+    expect(mixed.get('lexical')).toBeCloseTo(expected(lexical, mixedCfg, LIGHT_STRATEGY.recencyBias), 12)
+    expect(mixed.get('assistant')).toBeCloseTo(expected(assistant, mixedCfg, LIGHT_STRATEGY.recencyBias), 12)
+  })
+
+  it('prefers an explicitly resolved config over strategy.fusion and the env', async () => {
+    process.env[ENV] = JSON.stringify({ lexicalWeight: 0.4 })
+    const result = await unifiedSearch({
+      query: 'billing worker deploy',
+      embedding: [0.1, 0.2],
+      strategy: { ...LIGHT_STRATEGY, fusion: { lexicalWeight: 0.9 } },
+      storage: fixtureStorage(),
+      sensory: new SensoryBuffer(),
+      fusion: DEFAULT_FUSION_CONFIG,
+    })
+    const lexical = result.find((m) => m.id === 'lexical')!
+    expect(lexical.relevance).toBeCloseTo(expected(ROWS[0]!, DEFAULT_FUSION_CONFIG, LIGHT_STRATEGY.recencyBias), 12)
+  })
+
+  it('throws a key-naming error for an invalid per-call or env value before searching', async () => {
+    const storage = fixtureStorage()
+    await expect(search({ lexicalWeight: 1.5 }, storage)).rejects.toThrow(/lexicalWeight/)
+    process.env[ENV] = '{"recencyDecayHours":0}'
+    await expect(search(undefined, storage)).rejects.toThrow(/recencyDecayHours/)
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+  })
+
+  it('returns byte-identical results on the shared fixtures with defaults however they are given', async () => {
+    for (const strategy of [LIGHT_STRATEGY, DEEP_STRATEGY]) {
+      const run = (s: RecallStrategy) => unifiedSearch({
+        query: 'TypeScript strict mode', embedding: [0.1, 0.2], strategy: s, storage: createMockStorage(),
+        sensory: new SensoryBuffer(), expandedTerms: ['tsconfig'],
+      })
+      delete process.env[ENV]
+      const baseline = JSON.stringify(await run(strategy))
+      expect(JSON.parse(baseline).length).toBeGreaterThan(1)
+
+      expect(JSON.stringify(await run({ ...strategy, fusion: {} }))).toBe(baseline)
+      expect(JSON.stringify(await run({ ...strategy, fusion: { ...DEFAULT_FUSION_CONFIG } }))).toBe(baseline)
+      process.env[ENV] = '{}'
+      expect(JSON.stringify(await run(strategy))).toBe(baseline)
+      process.env[ENV] = JSON.stringify(DEFAULT_FUSION_CONFIG)
+      expect(JSON.stringify(await run(strategy))).toBe(baseline)
+    }
   })
 })
