@@ -18,6 +18,7 @@ import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
 import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
+import { resolveFusionConfig } from './fusion-config.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
@@ -269,17 +270,15 @@ export function renderRecallPayload(
 }
 
 /**
- * Share of the result size reserved for lexical matches that missed the fused
- * cut. A cross-encoder can judge an exact-term match whose embedding is not
- * among the nearest neighbours only if that match is in its input; half the
- * output size bounds the extra rerank work (15 more docs at 30).
+ * Lexical reserve for a recall: `share` of the result size, kept for lexical
+ * matches that missed the fused cut. A cross-encoder can judge an exact-term
+ * match whose embedding is not among the nearest neighbours only if that
+ * match is in its input; the default share of half the output size bounds the
+ * extra rerank work (15 more docs at 30). Without a reranker the reserve
+ * would only be cut again before it could change anything, so it is 0.
  */
-const LEXICAL_RESERVE_SHARE = 0.5
-
-/** Lexical reserve for a recall. Without a reranker the reserve would only be
- *  cut again before it could change anything, so it is 0. */
-function lexicalReserveFor(maxResults: number, hasReranker: boolean): number {
-  return hasReranker ? Math.ceil(maxResults * LEXICAL_RESERVE_SHARE) : 0
+function lexicalReserveFor(maxResults: number, hasReranker: boolean, share: number): number {
+  return hasReranker ? Math.ceil(maxResults * share) : 0
 }
 
 // ---------------------------------------------------------------------------
@@ -302,10 +301,10 @@ function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
 /**
  * Fuse two ranked memory lists via Reciprocal Rank Fusion.
  *
- * RRF score: Σ 1/(k + rank_i(d)) for each list d appears in.
- * k=60 is the standard from Cormack et al. 2009 — large enough that
- * rank 1 vs rank 2 contributes comparably (1/61 vs 1/62) but rank 50
- * barely registers (1/110). This is why RRF handles heterogeneous
+ * RRF score: Σ 1/(k + rank_i(d)) for each list d appears in, with
+ * k = fusion.rrfK. Its default, 60, is the standard from Cormack et al.
+ * 2009 — large enough that rank 1 vs rank 2 contributes comparably
+ * (1/61 vs 1/62) but rank 50 barely registers (1/110). This is why RRF handles heterogeneous
  * score scales gracefully: a BM25 score of 15 and a cosine of 0.82
  * can't be linearly combined, but their ranks always can.
  *
@@ -443,6 +442,8 @@ export async function recall(
   // value fails here, before any search work.
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
   const rankPriors = rankPriorSwitchesFromEnv(process.env)
+  // Per call for the same reason; an invalid override fails before searching.
+  const fusion = resolveFusionConfig(strategy.fusion, process.env)
   const vectorUnavailable = opts.vectorUnavailable
 
   // Skip mode — return immediately
@@ -487,7 +488,7 @@ export async function recall(
   // The slate is what the reranker sees: the fused cut plus the lexical
   // reserve. Every cut before the reranker keeps the slate; the output is
   // cut back to maxResults after it.
-  const lexicalReserve = lexicalReserveFor(strategy.maxResults, intelligence?.rerank !== undefined)
+  const lexicalReserve = lexicalReserveFor(strategy.maxResults, intelligence?.rerank !== undefined, fusion.lexicalReserveShare)
   const slateSize = strategy.maxResults + lexicalReserve
   const searchStart = stageStart(timings)
   let lexicalFailure: { err: unknown } | undefined
@@ -507,6 +508,7 @@ export async function recall(
     },
     lexicalReserve,
     rankPriors,
+    fusion,
     ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
   })
   stageEnd(timings, 'search', searchStart)
@@ -517,16 +519,17 @@ export async function recall(
   // while the full evidence chain lives elsewhere — HyDE expands the search
   // into embedding-space neighbors that share the hypothetical answer's shape.
   //
-  // Merge strategy: Reciprocal Rank Fusion (k=60, standard) instead of
-  // max-wins. RRF handles the case where HyDE surfaces a candidate at rank 3
-  // while vector search has it at rank 50 — both signals contribute without
-  // the stronger raw score overwriting the fused rank.
+  // Merge strategy: Reciprocal Rank Fusion with k = fusion.rrfK (default 60,
+  // the standard value) instead of max-wins. RRF handles the case where HyDE
+  // surfaces a candidate at rank 3 while vector search has it at rank 50 —
+  // both signals contribute without the stronger raw score overwriting the
+  // fused rank.
   const topScore = memories[0]?.relevance ?? 0
   const shouldFireHyDE =
     vectorUnavailable === undefined &&
     intelligence?.generateHypotheticalDoc !== undefined &&
     intelligence?.embed !== undefined &&
-    (topScore < 0.3 || signals.multiHop || signals.temporal)
+    (topScore < fusion.hydeTopScoreBelow || signals.multiHop || signals.temporal)
 
   if (shouldFireHyDE) {
     const hydeStart = stageStart(timings)
@@ -549,9 +552,10 @@ export async function recall(
           onLexicalError: () => markLexicalError(timings),
           lexicalReserve,
           rankPriors,
+          fusion,
         })
 
-        memories = fuseByReciprocalRank(memories, hydeMemories, slateSize)
+        memories = fuseByReciprocalRank(memories, hydeMemories, slateSize, fusion.rrfK)
       }
     } catch (err) {
       // HyDE failed — use direct results
@@ -561,12 +565,13 @@ export async function recall(
   }
 
   // Pattern completion fallback (Wave 5): triggered when RECALL_EXPLICIT query
-  // yields weak vector results (top score < 0.2) and graph is available.
+  // yields weak vector results (top score below fusion.patternTopScoreBelow,
+  // 0.2 by default) and graph is available.
   // Uses attribute-based spreading activation as an alternative retrieval path.
   const topScoreAfterHyDE = memories[0]?.relevance ?? 0
   const isRecallExplicit = /\b(remember|recall|what did|did we|last time|previously|have we|remind me)\b/i.test(query)
 
-  if (graph !== null && isRecallExplicit && topScoreAfterHyDE < 0.2 && typeof graph.findMatchingContextNodes === 'function') {
+  if (graph !== null && isRecallExplicit && topScoreAfterHyDE < fusion.patternTopScoreBelow && typeof graph.findMatchingContextNodes === 'function') {
     const patternStart = stageStart(timings)
     try {
       const queryEntities = extractEntities(query)
@@ -719,7 +724,7 @@ export async function recall(
       const docs = memories.map(m => ({ id: m.id, content: m.content }))
       const reranked = await intelligence.rerank(query, docs)
       const scoreMap = new Map(reranked.map(r => [r.id, r.score]))
-      const rerankWeight = signals.multiHop || signals.temporal ? 0.85 : 0.7
+      const rerankWeight = signals.multiHop || signals.temporal ? fusion.rerankWeightMultiHop : fusion.rerankWeight
       const originalWeight = 1 - rerankWeight
       // A reranker may return no score for some docs (an adapter cap, a
       // dropped row). A blended score and a raw fused score are on different

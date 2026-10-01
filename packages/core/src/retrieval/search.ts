@@ -8,6 +8,7 @@ import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
 import { cosineSimilarity } from '../ingestion/near-duplicate.js'
 import { applyRankPriors, RANK_PRIORS_OFF, type RankPriorSwitches } from './rank-priors.js'
+import { resolveFusionConfig, type FusionConfig } from './fusion-config.js'
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
@@ -90,6 +91,7 @@ interface ScoringInput {
   primingBoost: number
   role: string | undefined
   content: string
+  fusion: FusionConfig
 }
 
 /**
@@ -139,18 +141,19 @@ function computeScore(input: ScoringInput): number {
     primingBoost,
     role,
     content,
+    fusion,
   } = input
 
   const baseScore = baseSim
-  const bm25Boost = rawBm25 * 0.15
+  const bm25Boost = rawBm25 * fusion.lexicalWeight
   const ageHours = (Date.now() - createdAt.getTime()) / 3_600_000
-  const recencyScore = recencyBias * Math.exp(-ageHours / 720)
-  const accessBoost = Math.min(0.1, accessCount * 0.01)
-  const roleBoost = role === 'assistant' ? 0.05 : 0
+  const recencyScore = recencyBias * Math.exp(-ageHours / fusion.recencyDecayHours)
+  const accessBoost = Math.min(fusion.accessBoostCap, accessCount * fusion.accessBoostPerAccess)
+  const roleBoost = role === 'assistant' ? fusion.assistantRoleBoost : 0
 
   // Recall failure noise: assistant parroting "I can't find [topic]" has
-  // high similarity to the topic but zero information. 60% penalty.
-  const noisePenalty = isRecallFailureNoise(role, content) ? 0.4 : 1.0
+  // high similarity to the topic but zero information.
+  const noisePenalty = isRecallFailureNoise(role, content) ? fusion.recallFailurePenalty : 1.0
 
   return (baseScore + bm25Boost + recencyScore + accessBoost + primingBoost + roleBoost) * noisePenalty
 }
@@ -186,6 +189,9 @@ export interface UnifiedSearchOpts {
   /** The query could not be embedded. Vector search is skipped even when an
    *  embedding is passed, and candidates come from the lexical leg alone. */
   vectorUnavailable?: boolean
+  /** Resolved fusion config. Absent: resolved here from strategy.fusion and
+   *  ENGRAM_RECALL_FUSION over the defaults. */
+  fusion?: FusionConfig
 }
 
 /** Lexical-leg error messages already written to stderr by this process.
@@ -244,6 +250,7 @@ function scoreCandidate(
   bm25Boost: number,
   strategy: RecallStrategy,
   sensory: SensoryBuffer,
+  fusion: FusionConfig,
 ): RetrievedMemory {
   const content = extractContent(typed)
   const createdAt = extractCreatedAt(typed)
@@ -256,6 +263,7 @@ function scoreCandidate(
     primingBoost: sensory.getPrimingBoost(content),
     role: extractRole(typed),
     content,
+    fusion,
   })
   return {
     id: typed.data.id,
@@ -278,6 +286,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
   }
+  const fusion = opts.fusion ?? resolveFusionConfig(strategy.fusion, process.env)
 
   // Storage adapters without vectorSearch, or without textBoost, degrade to
   // the per-tier text search below.
@@ -288,7 +297,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   // Vector and lexical candidates are fused into one scored list and cut to
   // maxResults. When a reranker follows, the lexical reserve joins that cut,
   // so exact-term matches outside the nearest neighbours still reach it.
-  const vectorLimit = strategy.maxResults * 4
+  const vectorLimit = strategy.maxResults * fusion.vectorCandidateFactor
 
   // Step 1: Vector search — primary retriever when the query has a vector.
   const vectorResults = hasVectorSearch && hasQueryVector
@@ -301,7 +310,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
 
   // Step 2: BM25 — both boost AND independent candidate source
   const terms = extractTerms(query, expandedTerms)
-  const bm25Limit = strategy.maxResults * 5
+  const bm25Limit = strategy.maxResults * fusion.lexicalCandidateFactor
   const boostResults = terms.length > 0 && hasTextBoost
     ? await lexicalLeg(
         storage,
@@ -332,7 +341,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   if (vectorResults.length > 0 || boostResults.length > 0) {
     // Primary path: score vector results with optional BM25 boost
     for (const { item: typed, similarity } of vectorResults) {
-      scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory))
+      scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory, fusion))
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
     }
@@ -358,8 +367,8 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       if (!typed) continue
 
       const candidate = hasQueryVector
-        ? scoreCandidate(typed, rescueCosine(embedding, typed.data.embedding), b.boost, strategy, sensory)
-        : scoreCandidate(typed, normalisedLexicalRank(b.boost, maxBoost), 0, strategy, sensory)
+        ? scoreCandidate(typed, rescueCosine(embedding, typed.data.embedding), b.boost, strategy, sensory, fusion)
+        : scoreCandidate(typed, normalisedLexicalRank(b.boost, maxBoost), 0, strategy, sensory, fusion)
       scored.push(candidate)
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
@@ -399,7 +408,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
 
     for (const { typed, similarity } of textHits) {
-      scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory))
+      scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory, fusion))
       typedById.set(typed.data.id, typed)
     }
   }

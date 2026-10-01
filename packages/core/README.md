@@ -147,6 +147,27 @@ The prior is the product of the enabled factors. It multiplies each primary cand
 
 Access counts, co-recalled edges and graph edge weights are recorded only for the memories and associations the text emitted. `reconsolidate: false` records nothing, for measurement harnesses and previews that must not change those counts.
 
+Fusion config (`ENGRAM_RECALL_FUSION`). The weights, thresholds and candidate counts that merge the vector and lexical legs, trigger the HyDE and pattern-completion passes and blend in the reranker are one validated config, resolved per recall and per key from, highest precedence first: the call's `strategyOverride: { fusion }` (a `Partial<FusionConfig>`), the `ENGRAM_RECALL_FUSION` environment variable (a JSON object, read on every call; empty means unset), and the defaults (`DEFAULT_FUSION_CONFIG`). With neither override set, ranking is byte-identical to the built-in constants. An unknown key, a non-number or an out-of-range value throws an error naming the key. The env variable is meant only for adopting a config that a measured grid (`packages/bench`, `fusion-grid`) has shown to beat the defaults, not for hand tuning.
+
+| Key | Default | Range | Meaning |
+|---|---|---|---|
+| `lexicalWeight` | `0.15` | [0, 1] | weight of the lexical boost added to a candidate's score |
+| `lexicalCandidateFactor` | `5` | integer 1–50 | lexical candidates requested per result slot (`maxResults × factor`) |
+| `vectorCandidateFactor` | `4` | integer 1–50 | vector candidates requested per result slot |
+| `recencyDecayHours` | `720` | > 0 | time constant of the recency term, `recencyBias × exp(-ageHours / this)` |
+| `accessBoostPerAccess` | `0.01` | [0, 1] | score added per recorded access |
+| `accessBoostCap` | `0.1` | [0, 1] | upper bound of the summed access boost |
+| `assistantRoleBoost` | `0.05` | [0, 1] | score added to assistant-role memories |
+| `recallFailurePenalty` | `0.4` | [0, 1] | multiplier for an assistant message that only reports a failed recall |
+| `lexicalReserveShare` | `0.5` | [0, 1] | share of `maxResults` reserved for lexical hits that missed the fused cut (only when a reranker follows) |
+| `hydeTopScoreBelow` | `0.3` | ≥ 0 | HyDE fires when the top fused score is below this |
+| `patternTopScoreBelow` | `0.2` | ≥ 0 | pattern completion fires when the top score after HyDE is below this |
+| `rrfK` | `60` | ≥ 0 | k of the reciprocal-rank fusion of the direct and HyDE lists |
+| `rerankWeight` | `0.7` | [0, 1] | reranker share of the blended score, single-hop queries |
+| `rerankWeightMultiHop` | `0.85` | [0, 1] | reranker share of the blended score, multi-hop and temporal queries |
+
+Thresholds are bounded below only because fused scores are sums of several terms and can exceed 1.
+
 ##### Synthesize mode (v0.6)
 
 `synthesize: true` computes a **derived-from-memory block** over the recalled memories, returns it as `result.synthesis`, and appends its text to `formatted`. The `memories` array is byte-identical whether synthesis runs or not, and an explicit block header tells the answerer to verify against the memories above (abstention safety).

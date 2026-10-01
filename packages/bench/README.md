@@ -108,6 +108,54 @@ the source's `rerankerBackend`, `rerankModel` and `embedModel`, which the judge 
 Judge it with `judge.ts --context-mode formatted`. The budget is measured on the recorded text, which
 has the per-question session namespace removed.
 
+### Fusion weight grids with one ingest per question
+
+Fusion weights (`FusionConfig` in core, set per call as `strategyOverride.fusion`) act only at recall
+time. `src/longmemeval/forensics/fusion-grid.ts` therefore builds one store per question, ingests it once,
+and recalls once per grid cell:
+
+```bash
+npx tsx packages/bench/src/longmemeval/forensics/fusion-grid.ts \
+  --data ./data/longmemeval/longmemeval_s_cleaned.json \
+  --question-ids ./results/longmemeval/subset-150.json \
+  --grid ./grid.json \
+  --context-mode formatted \
+  --reranker onnx --onnx-model mixedbread-ai/mxbai-rerank-large-v1 \
+  [--embed-backend openai|onnx] [--embed-model <id>] [--embed-dims N] \
+  [--no-graph] \
+  --output-dir ./results/longmemeval/fusion-grid-1 \
+  [--resume]
+```
+
+The grid file is a JSON array of `{ "name": …, "fusion": { … } }`; it must hold
+`{ "name": "default", "fusion": {} }`, the shipped configuration. Every fusion object is checked with
+core's validator before any ingest, and names become file names. `ENGRAM_RECALL_FUSION` must be unset,
+because per-call keys merge over it.
+
+The `--embed-*` flags are the recall sweep's, parsed and wired the same way. Each cell's checkpoint
+header records `embed_backend`, `embed_model` and `embed_dims` (the width the wired embedder builds
+vectors at) through the sweep's own identity builder, `meta` records `embedBackend`, `embedModel` and
+`embedDims`, and `--resume` refuses a checkpoint whose embedding identity differs.
+
+Cells differ only by their weights:
+
+- each recall passes `{ strategyOverride: { fusion }, reconsolidate: false }`, so no cell records access
+  or edges for the next;
+- a per-question memo wraps the intelligence adapter: `embed`, `expandQuery` and
+  `generateHypotheticalDoc` by input text, `rerank` by (query, ordered document ids). A repeated slate
+  reuses that call's scores; any other slate goes to the reranker whole, as a direct recall does, so the
+  candidate cap, the single-document guard and the batching match production. A failure is memoised too;
+- the memory's sensory buffer (primed topics, working items, active intent) is reset to its post-ingest
+  state before each cell, because a recall primes topics that boost the next one;
+- pending writes are flushed after ingest, so the first cell does not recall over a half-built store.
+
+Each cell writes `<output-dir>/<name>.json` with recall-sweep's formatted row schema, so `judge.ts
+--context-mode formatted`, `mcnemar-judged` and `drift-compare` read it like a sweep. Its `meta` adds
+`cell`, `fusion`, `grid_file`, `grid_sha256` and `shared_ingest: true`; `ingest_ms` is the shared ingest
+time. Each cell checkpoints to `<name>.json.partial.jsonl`; `--resume` needs all of them with a matching
+run identity (including the grid sha256) and skips the questions present in every one. A question
+stopped part-way through its cells reruns in all of them.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)

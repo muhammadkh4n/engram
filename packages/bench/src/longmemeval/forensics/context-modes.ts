@@ -129,6 +129,18 @@ export interface SweepRecallConfig {
   synthesize: boolean
   /** Question date, the anchor for now-relative synthesis lines. */
   now?: Date | null
+  /**
+   * `formatted` mode only: fusion weights for this recall, passed as
+   * `strategyOverride.fusion`. No other strategy key is overridden, so the
+   * intent strategy's result cap and token budget still apply.
+   */
+  fusion?: Readonly<Record<string, number>>
+  /**
+   * `formatted` mode only: false keeps the recall from recording access,
+   * co-recall edges and graph weights, so several recalls over one store
+   * each see the store as ingested.
+   */
+  reconsolidate?: false
 }
 
 /** One payload item located in the recorded (namespace-rewritten) text. */
@@ -171,7 +183,16 @@ export interface SweepRecallOutcome {
 
 /** Options for one sweep recall call in the given mode. */
 export function sweepRecallOptions(cfg: SweepRecallConfig): Record<string, unknown> {
-  if (cfg.contextMode === 'formatted') return { ...productionRecallOptions() }
+  if (cfg.contextMode === 'formatted') {
+    return {
+      ...productionRecallOptions(),
+      ...(cfg.fusion !== undefined ? { strategyOverride: { fusion: { ...cfg.fusion } } } : {}),
+      ...(cfg.reconsolidate === false ? { reconsolidate: false } : {}),
+    }
+  }
+  if (cfg.fusion !== undefined || cfg.reconsolidate !== undefined) {
+    throw new Error('a fusion override and reconsolidate: false apply only to --context-mode formatted')
+  }
   return {
     strategyOverride: { maxResults: cfg.maxK },
     ...(cfg.synthesize

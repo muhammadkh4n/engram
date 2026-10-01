@@ -61,6 +61,8 @@ Ranking priors (read on every recall call; each is `on` or `off`, default `off`;
 
 The prior is the product of the enabled factors. It multiplies each primary candidate's score, and after reranking it multiplies the rerank component again: `blended = w · rerank · prior + (1 − w) · relevance`. Graph associations are unaffected. A memory whose prior is not 1 carries it as `rankPrior`.
 
+- `ENGRAM_RECALL_FUSION` — JSON object overriding recall fusion weights, thresholds and candidate counts (e.g. `{"lexicalWeight":0.2,"rerankWeight":0.8}`), read on every recall. Unset or empty means the built-in defaults and unchanged ranking; an unknown key, a non-number or an out-of-range value fails the recall with an error naming the key. Keys, defaults and ranges are listed in the `@engram-mem/core` README (Fusion config). Meant only for adopting a config a measured bench grid has shown to beat the defaults, not for hand tuning.
+
 The payload is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole, and a section heading is written only with its first item. Access counts, co-recall edges and graph weights are recorded only for the memories and associations the payload emitted.
 
 **Optional (enables Neo4j neural graph):**
