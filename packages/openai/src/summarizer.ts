@@ -244,18 +244,26 @@ const TRANSCRIPT_DIGEST_PARAMS: Record<
   'pre-compact': { prompt: PRE_COMPACT_SYSTEM_PROMPT, maxTokens: 600, temperature: 0.2 },
 }
 
-/** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
- *  without a MEMORY: marker is kept whole as memory. */
 /**
- * Chat models other than OpenAI's often wrap a requested JSON object in a
- * ```json (or bare ```) fence despite the instruction; the fenced span is the
- * payload. Text without a fence is returned unchanged.
+ * Parses a reply that should be one JSON value. Chat models other than
+ * OpenAI's often wrap the object in a ```json (or bare ```) fence despite the
+ * instruction, so a fence enclosing the whole reply is unwrapped when the reply
+ * itself is not JSON. Backticks inside a JSON string value are left alone.
+ * Anything else throws.
  */
-function stripJsonFence(raw: string): string {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-  return fenced?.[1] ?? raw
+function parseJsonReply(raw: string): unknown {
+  const trimmed = raw.trim()
+  try {
+    return JSON.parse(trimmed)
+  } catch (err) {
+    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/)
+    if (fenced?.[1] === undefined) throw err
+    return JSON.parse(fenced[1])
+  }
 }
 
+/** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
+ *  without a MEMORY: marker is kept whole as memory. */
 function parsePreCompactDigest(output: string): { memory: string; context: string } {
   const memoryMatch = output.match(/MEMORY:\s*([\s\S]*?)(?=CONTEXT:|$)/)
   const contextMatch = output.match(/CONTEXT:\s*([\s\S]*)$/)
@@ -638,7 +646,7 @@ export class OpenAISummarizer {
 
     let parsed: unknown
     try {
-      parsed = JSON.parse(stripJsonFence(raw))
+      parsed = parseJsonReply(raw)
     } catch (err) {
       throw new Error(
         `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
@@ -883,7 +891,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
-      const parsed: unknown = JSON.parse(stripJsonFence(raw))
+      const parsed: unknown = parseJsonReply(raw)
 
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('Not a plain object')
@@ -916,7 +924,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
     try {
-      const parsed: unknown = JSON.parse(stripJsonFence(raw))
+      const parsed: unknown = parseJsonReply(raw)
 
       if (!Array.isArray(parsed)) {
         return []

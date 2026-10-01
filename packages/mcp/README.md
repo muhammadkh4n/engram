@@ -135,10 +135,10 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 
 - `outcome`: `stored`, `rejected` (with `reason`), `deduped` (with `duplicateOf`, `similarity`), `replayed`, `dry_run` or `error`.
 - A `key` is only checked against captures in the same session. A capture with a `key` and no `session_id` is stored under session `default` and is not idempotent: only the dedup check can catch a repeat.
-- `pre-compact` derives also return `context`, the text to re-inject.
+- `pre-compact` derives also return `context`, the text to re-inject, whenever the model produced one, whether the memory was stored, deduped or rejected as `empty_digest`. A `replayed` retry returns no `context`: the digest is not re-run.
 - Status: 200 for every pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 500 failure after validation (`retryable: true`); 405 for methods other than POST.
 
-The ingest CLIs (git post-commit, pre-compact, session-summary) run the same pipeline in-process.
+Today only `engram-ingest` (git post-commit and the other local ingest callers) runs this pipeline in-process through `runCapture`. The pre-compact and session-summary hooks still use their own scripts; they switch to this route in a client follow-up.
 
 ### memory_forget
 

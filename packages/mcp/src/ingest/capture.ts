@@ -312,10 +312,14 @@ export async function runDerivedCapture(
   }
   const excerpt = await scrubModelInput(input.content, deps.logPrefix ?? '[engram-capture]')
   const digest = await deps.intelligence.digestTranscript(excerpt, { kind: input.derive })
+  // The pre-compact hook re-injects the context whatever happens to the
+  // memory half, so it rides on every outcome once the model produced one.
+  const context = input.derive === 'pre-compact' ? digest.context.trim() : ''
+  const withContext = (o: CaptureOutcome): CaptureOutcome => (context ? { ...o, context } : o)
   const digested = digest.memory.trim()
   if (!digested) {
     deps.log?.(`rejected: the ${input.derive} digest was empty`)
-    return { outcome: 'rejected', model, reason: 'empty_digest' }
+    return withContext({ outcome: 'rejected', model, reason: 'empty_digest' })
   }
 
   // The replay check above already covered this key; the digest was made
@@ -333,5 +337,5 @@ export async function runDerivedCapture(
     ...(input.key ? { key: input.key } : {}),
     meta: derivedMetadata(input.derive, input.meta),
   }, model)
-  return input.derive === 'pre-compact' ? { ...outcome, context: digest.context } : outcome
+  return withContext(outcome)
 }

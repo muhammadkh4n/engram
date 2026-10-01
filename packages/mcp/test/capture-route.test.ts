@@ -291,6 +291,21 @@ describe('runCaptureRequest derive', () => {
     expect(h.ingest).not.toHaveBeenCalled()
   })
 
+  it('returns the pre-compact context when the digest has no memory to store', async () => {
+    const h = makeHarness()
+    h.digestTranscript.mockResolvedValueOnce({ memory: '', context: 'Mid-refactor of the capture route.' })
+
+    const res = await runCaptureRequest(h.deps, body({ content: EXCERPT, derive: 'pre-compact' }))
+
+    expect(res.body).toEqual({
+      outcome: 'rejected',
+      model: 'test-chat-model',
+      reason: 'empty_digest',
+      context: 'Mid-refactor of the capture route.',
+    })
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
   it('answers a replayed derive key before paying for a digest', async () => {
     const h = makeHarness()
     h.findIdByCaptureKey.mockResolvedValueOnce('ep-7')

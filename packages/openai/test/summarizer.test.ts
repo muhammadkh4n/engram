@@ -119,6 +119,32 @@ describe('OpenAISummarizer', () => {
       expect(result.topics).toEqual(['a'])
     })
 
+    it('keeps backticks inside a JSON string value of an unfenced reply', async () => {
+      const payload = {
+        text: 'Use ```ts fences``` for code samples.',
+        topics: ['docs'],
+        entities: [],
+        decisions: [],
+      }
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify(payload)))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.summarize('content', defaultOpts)
+
+      expect(result.text).toBe(payload.text)
+      expect(result.topics).toEqual(['docs'])
+    })
+
+    it('handles JSON wrapped in a bare code fence', async () => {
+      const payload = { text: 'Bare fence.', topics: ['b'], entities: [], decisions: [] }
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(`\`\`\`\n${JSON.stringify(payload)}\n\`\`\``))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.summarize('content', defaultOpts)
+
+      expect(result.text).toBe('Bare fence.')
+    })
+
     it('handles bullet_points mode', async () => {
       mockChatCreate.mockResolvedValueOnce(
         makeChatResponse(JSON.stringify({ text: '• point one\n• point two', topics: [], entities: [], decisions: [] }))
@@ -536,9 +562,28 @@ describe('OpenAISummarizer.extractSalience failures', () => {
     expect(plain).toMatchObject({ store: true, category: 'decision', confidence: 0.8 })
   })
 
+  it('keeps backticks inside a JSON string value of an unfenced reply', async () => {
+    const reply = JSON.stringify({
+      store: true,
+      category: 'preference',
+      confidence: 0.85,
+      distilled: 'Wrap shell snippets in ```bash fences``` in answers.',
+      reason: 'formatting preference',
+    })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toMatchObject({
+      store: true,
+      category: 'preference',
+      distilled: 'Wrap shell snippets in ```bash fences``` in answers.',
+    })
+  })
+
   it.each([
     ['unparseable text', 'not json at all'],
     ['fenced prose with no JSON', '```\nI think this should be stored.\n```'],
+    ['prose around a fenced object', 'Here it is:\n```json\n{"store":true}\n```'],
     ['an empty reply', ''],
     ['a JSON array', '[true]'],
     ['an object without a store verdict', '{"category":"noise"}'],
