@@ -161,6 +161,13 @@ export interface ConsolidationRunStorage {
   getLastRun(cycle: 'light' | 'deep' | 'dream' | 'decay'): Promise<ConsolidationRun | null>
   /** Get recent runs across all cycles. */
   getRecent(limit?: number): Promise<ConsolidationRun[]>
+  /**
+   * The newest finished (completed or failed) runs of one cycle, newest
+   * first. The auto-consolidation worker counts the consecutive failures at
+   * the head of this list to back a failing cycle off; without it a failing
+   * cycle is retried on every worker tick.
+   */
+  getRecentFinished?(cycle: 'light' | 'deep' | 'dream' | 'decay', limit: number): Promise<ConsolidationRun[]>
 }
 
 export interface StorageAdapter {

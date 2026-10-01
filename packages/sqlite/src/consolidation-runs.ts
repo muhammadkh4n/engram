@@ -46,6 +46,19 @@ export class SqliteConsolidationRunStorage implements ConsolidationRunStorage {
     return row ? rowToRun(row) : null
   }
 
+  async getRecentFinished(
+    cycle: 'light' | 'deep' | 'dream' | 'decay',
+    limit: number,
+  ): Promise<ConsolidationRun[]> {
+    const rows = this.db.prepare(`
+      SELECT * FROM consolidation_runs
+      WHERE cycle = ? AND status IN ('completed', 'failed')
+      ORDER BY started_at DESC
+      LIMIT ?
+    `).all(cycle, limit) as RunRow[]
+    return rows.map(rowToRun)
+  }
+
   async getRecent(limit = 20): Promise<ConsolidationRun[]> {
     const rows = this.db.prepare(`
       SELECT * FROM consolidation_runs
