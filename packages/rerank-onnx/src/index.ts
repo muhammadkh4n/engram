@@ -43,7 +43,11 @@ export interface OnnxRerankerOptions {
   dtype?: OnnxDType
   /** Pairs per forward pass. Default: 8. */
   batchSize?: number
-  /** Max candidates reranked per call. Default: 25. */
+  /**
+   * Max candidates reranked per call; docs past the cap get no score.
+   * Default: 50, at least the largest slate the recall engine sends
+   * (30 fused candidates plus a 15-row lexical reserve).
+   */
   maxCandidates?: number
   /** Max token length per pair. Default: 512. */
   maxLength?: number
@@ -72,7 +76,7 @@ export interface OnnxReranker {
 export const DEFAULT_RERANK_MODEL = 'Alibaba-NLP/gte-reranker-modernbert-base'
 const DEFAULT_DTYPE: OnnxDType = 'q8'
 const DEFAULT_BATCH_SIZE = 8
-const DEFAULT_MAX_CANDIDATES = 25
+const DEFAULT_MAX_CANDIDATES = 50
 const DEFAULT_MAX_LENGTH = 512
 const DEFAULT_MAX_DOC_CHARS = 1200
 
