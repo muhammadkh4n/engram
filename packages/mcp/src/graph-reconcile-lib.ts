@@ -1,8 +1,11 @@
 /**
- * Pure planning for the SQL ↔ Neo4j memory reconcile. The SQL tables are the
+ * Planning for the SQL ↔ Neo4j memory reconcile. The SQL tables are the
  * source of truth; the graph is a derived index that drifts when a write to one
- * store succeeds and the other fails. Nothing here performs I/O.
+ * store succeeds and the other fails. `planReconcile` and the formatting are
+ * pure; `runReconcile` drives I/O only through the injected source and graph.
  */
+
+import { nextCursor, type PageCursor } from './ingest/embed-backfill-lib.js'
 
 export type SqlTier = 'episode' | 'digest' | 'semantic' | 'procedural'
 
@@ -200,4 +203,150 @@ export function formatReconcileReport(plan: ReconcilePlan): string {
     `live rows without node: ${SQL_TIERS.map((t) => `${t} ${plan.liveWithoutNode[t]}`).join(', ')}`,
   ]
   return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration over an injected SQL source and graph
+// ---------------------------------------------------------------------------
+
+/** One SQL row as read for the reconcile; tiers without a column leave it undefined. */
+export interface SqlSourceRow {
+  id: string
+  created_at: string
+  project_id: string | null
+  forgotten_at?: string | null
+  superseded_by?: string | null
+}
+
+export interface ReconcileSqlSource {
+  /** Rows of `tier` strictly after `cursor`, ordered by (created_at, id). */
+  fetchPage(tier: SqlTier, cursor: PageCursor | null, pageSize: number): Promise<SqlSourceRow[]>
+}
+
+export interface ReconcileGraph {
+  /** Memory nodes ordered by id. */
+  fetchNodePage(skip: number, limit: number): Promise<GraphMemoryNode[]>
+  /** Sets `forgottenAt` on nodes that lack it. */
+  forgetMemories(ids: string[]): Promise<number>
+  setProjects(rows: Array<{ id: string; projectId: string }>): Promise<void>
+  deleteNodes(ids: string[]): Promise<number>
+}
+
+export type UndoLine =
+  | { op: 'stamp'; id: string; at: string }
+  | { op: 'project'; id: string; before: string | null }
+  | { op: 'delete'; id: string; memoryType: string | null; projectId: string | null }
+
+export interface ReconcileDeps {
+  sql: ReconcileSqlSource
+  graph: ReconcileGraph
+  /** Must persist the lines before resolving: the batch they describe runs only afterwards. */
+  appendUndo(lines: readonly UndoLine[]): Promise<void>
+  log(line: string): void
+  now?: () => string
+  nodePageSize?: number
+}
+
+export interface ReconcileOutcome {
+  before: ReconcilePlan
+  after: ReconcilePlan | null
+  written: { stamped: number; projects: number; deleted: number }
+}
+
+export const DEFAULT_NODE_PAGE_SIZE = 5000
+
+export async function readSqlRows(
+  sql: ReconcileSqlSource,
+  pageSize: number,
+): Promise<SqlMemoryRow[]> {
+  const rows: SqlMemoryRow[] = []
+  for (const tier of SQL_TIERS) {
+    let cursor: PageCursor | null = null
+    // An empty page ends the tier: a short page may only mean the server capped the response.
+    for (;;) {
+      const page = await sql.fetchPage(tier, cursor, pageSize)
+      if (page.length === 0) break
+      for (const r of page) {
+        rows.push({
+          id: r.id,
+          tier,
+          projectId: r.project_id ?? null,
+          inactive: r.forgotten_at != null || r.superseded_by != null,
+        })
+      }
+      cursor = nextCursor(page)
+    }
+  }
+  return rows
+}
+
+export async function readGraphNodes(graph: ReconcileGraph, pageSize: number): Promise<GraphMemoryNode[]> {
+  const nodes: GraphMemoryNode[] = []
+  for (let skip = 0; ; skip += pageSize) {
+    const page = await graph.fetchNodePage(skip, pageSize)
+    nodes.push(...page)
+    if (page.length < pageSize) break
+  }
+  return nodes
+}
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+/** Delete targets, deduplicated, with every id whose SQL row is live removed. */
+function deleteTargets(plan: ReconcilePlan, args: ReconcileArgs, liveIds: ReadonlySet<string>): string[] {
+  const ids = new Map<string, string>()
+  if (args.deleteMissing) for (const id of plan.missing) ids.set(key(id), id)
+  if (args.deleteOrphans) for (const id of plan.deletableOrphans) ids.set(key(id), id)
+  for (const k of ids.keys()) {
+    if (liveIds.has(k)) throw new Error('refusing to delete the graph node of a live SQL row')
+  }
+  return [...ids.values()]
+}
+
+export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Promise<ReconcileOutcome> {
+  const now = deps.now ?? (() => new Date().toISOString())
+  const nodePageSize = deps.nodePageSize ?? DEFAULT_NODE_PAGE_SIZE
+
+  const rows = await readSqlRows(deps.sql, args.pageSize)
+  const nodes = await readGraphNodes(deps.graph, nodePageSize)
+  const before = planReconcile(rows, nodes)
+  deps.log(formatReconcileReport(before))
+
+  const written = { stamped: 0, projects: 0, deleted: 0 }
+  if (!args.apply) return { before, after: null, written }
+
+  for (const batch of chunks(before.stamp, args.batchSize)) {
+    const at = now()
+    await deps.appendUndo(batch.map((id) => ({ op: 'stamp', id, at })))
+    written.stamped += await deps.graph.forgetMemories(batch)
+  }
+
+  for (const batch of chunks(before.setProject, args.batchSize)) {
+    await deps.appendUndo(batch.map((c) => ({ op: 'project', id: c.id, before: c.before })))
+    await deps.graph.setProjects(batch.map((c) => ({ id: c.id, projectId: c.projectId })))
+    written.projects += batch.length
+  }
+
+  const liveIds = new Set(rows.filter((r) => !r.inactive).map((r) => key(r.id)))
+  const nodesById = new Map(nodes.map((n) => [key(n.id), n]))
+  for (const batch of chunks(deleteTargets(before, args, liveIds), args.batchSize)) {
+    await deps.appendUndo(
+      batch.map((id) => {
+        const n = nodesById.get(key(id))
+        return { op: 'delete', id, memoryType: n?.memoryType ?? null, projectId: n?.projectId ?? null }
+      }),
+    )
+    written.deleted += await deps.graph.deleteNodes(batch)
+  }
+
+  deps.log(
+    `written: stamped ${written.stamped}, projects ${written.projects}, deleted ${written.deleted}`,
+  )
+  const after = planReconcile(rows, await readGraphNodes(deps.graph, nodePageSize))
+  deps.log(formatReconcileReport(after))
+  return { before, after, written }
 }

@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatReconcileReport,
+  runReconcile,
+  type ReconcileGraph,
+  type ReconcileSqlSource,
+  type SqlSourceRow,
+  type SqlTier,
+  type UndoLine,
   parseReconcileArgs,
   planReconcile,
   ReconcileArgsError,
@@ -183,5 +189,190 @@ describe('formatReconcileReport', () => {
     expect(report).toContain('orphans:               live 0, inactive 1, missing 0')
     expect(report).toContain('deletable orphans:     1')
     expect(report).toContain('episode 1')
+  })
+})
+
+type Event = { kind: 'undo'; lines: UndoLine[] } | { kind: 'stamp' | 'project' | 'delete'; ids: string[] }
+
+function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = Infinity): ReconcileSqlSource {
+  return {
+    async fetchPage(tier, cursor, pageSize) {
+      const rows = [...(tables[tier] ?? [])].sort((a, b) =>
+        a.created_at === b.created_at ? a.id.localeCompare(b.id) : a.created_at.localeCompare(b.created_at),
+      )
+      const after = cursor
+        ? rows.filter(
+            (r) => r.created_at > cursor.createdAt || (r.created_at === cursor.createdAt && r.id > cursor.id),
+          )
+        : rows
+      return after.slice(0, Math.min(pageSize, serverCap))
+    },
+  }
+}
+
+function fakeGraph(initial: GraphMemoryNode[], events: Event[]): ReconcileGraph & { nodes: GraphMemoryNode[] } {
+  const state = {
+    nodes: initial.map((n) => ({ ...n })),
+    async fetchNodePage(skip: number, limit: number) {
+      return [...state.nodes].sort((a, b) => a.id.localeCompare(b.id)).slice(skip, skip + limit).map((n) => ({ ...n }))
+    },
+    async forgetMemories(ids: string[]) {
+      events.push({ kind: 'stamp', ids })
+      let n = 0
+      state.nodes = state.nodes.map((node) => {
+        if (!ids.includes(node.id) || node.forgotten) return node
+        n++
+        return { ...node, forgotten: true }
+      })
+      return n
+    },
+    async setProjects(rows: Array<{ id: string; projectId: string }>) {
+      events.push({ kind: 'project', ids: rows.map((r) => r.id) })
+      const byId = new Map(rows.map((r) => [r.id, r.projectId]))
+      state.nodes = state.nodes.map((node) =>
+        byId.has(node.id) ? { ...node, projectId: byId.get(node.id)! } : node,
+      )
+    },
+    async deleteNodes(ids: string[]) {
+      events.push({ kind: 'delete', ids })
+      const before = state.nodes.length
+      state.nodes = state.nodes.filter((node) => !ids.includes(node.id))
+      return before - state.nodes.length
+    },
+  }
+  return state
+}
+
+const sqlRow = (id: string, over: Partial<SqlSourceRow> = {}): SqlSourceRow => ({
+  id,
+  created_at: '2026-01-01T00:00:00Z',
+  project_id: null,
+  ...over,
+})
+
+function harness(argv: string[], nodes: GraphMemoryNode[], tables: Partial<Record<SqlTier, SqlSourceRow[]>>) {
+  const events: Event[] = []
+  const graph = fakeGraph(nodes, events)
+  const logs: string[] = []
+  const run = () =>
+    runReconcile(
+      {
+        sql: fakeSql(tables, 2),
+        graph,
+        appendUndo: async (lines) => {
+          events.push({ kind: 'undo', lines: [...lines] })
+        },
+        log: (line) => logs.push(line),
+        now: () => '2026-10-01T00:00:00.000Z',
+        nodePageSize: 2,
+      },
+      parseReconcileArgs(argv),
+    )
+  return { events, graph, logs, run }
+}
+
+const DRIFT_TABLES: Partial<Record<SqlTier, SqlSourceRow[]>> = {
+  semantic: [
+    sqlRow('s-dead', { forgotten_at: '2026-02-01T00:00:00Z' }),
+    sqlRow('s-sup', { superseded_by: 's-live', created_at: '2026-01-02T00:00:00Z' }),
+    sqlRow('s-live', { project_id: 'engram', created_at: '2026-01-03T00:00:00Z' }),
+    sqlRow('s-live-orphan', { created_at: '2026-01-04T00:00:00Z' }),
+  ],
+  episode: [sqlRow('e-1', { project_id: 'ouija' }), sqlRow('e-2', { project_id: 'ouija' })],
+  digest: [sqlRow('d-1')],
+}
+
+const DRIFT_NODES: GraphMemoryNode[] = [
+  node('s-dead', { degree: 0 }),
+  node('s-sup'),
+  node('s-live'),
+  node('s-live-orphan', { degree: 0 }),
+  node('e-1', { memoryType: 'episode' }),
+  node('e-2', { memoryType: 'episode' }),
+  node('d-1', { memoryType: 'digest' }),
+  node('ghost-linked'),
+  node('ghost-orphan', { degree: 0, memoryType: null }),
+]
+
+describe('runReconcile', () => {
+  it('pages every table past a server row cap and every node page', async () => {
+    const { run } = harness([], DRIFT_NODES, DRIFT_TABLES)
+    const { before } = await run()
+    expect(before.totals).toEqual({ rows: 7, nodes: 9 })
+    expect([...before.stamp].sort()).toEqual(['s-dead', 's-sup'])
+  })
+
+  it('a dry run issues no write and prints one count-only report', async () => {
+    const { events, logs, run } = harness([], DRIFT_NODES, DRIFT_TABLES)
+    const outcome = await run()
+    expect(events).toEqual([])
+    expect(outcome.after).toBeNull()
+    expect(outcome.written).toEqual({ stamped: 0, projects: 0, deleted: 0 })
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).not.toContain('ghost')
+  })
+
+  it('--apply stamps and sets projects in batches, each preceded by its undo lines', async () => {
+    const { events, graph, run } = harness(
+      ['--apply', '--undo-log', 'u.jsonl', '--batch-size', '1'],
+      DRIFT_NODES,
+      DRIFT_TABLES,
+    )
+    const outcome = await run()
+
+    const writes = events.filter((e) => e.kind !== 'undo')
+    expect(writes.map((e) => e.kind)).toEqual(['stamp', 'stamp', 'project', 'project', 'project'])
+    expect(writes.every((e) => e.kind !== 'undo' && e.ids.length === 1)).toBe(true)
+    events.forEach((e, i) => {
+      if (e.kind === 'undo') return
+      const prev = events[i - 1]
+      expect(prev?.kind).toBe('undo')
+      expect(prev?.kind === 'undo' && prev.lines.map((l) => l.id)).toEqual(e.ids)
+    })
+    const undo = events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    expect(undo).toContainEqual({ op: 'stamp', id: 's-dead', at: '2026-10-01T00:00:00.000Z' })
+    expect(undo).toContainEqual({ op: 'project', id: 'e-1', before: null })
+
+    expect(outcome.written).toEqual({ stamped: 2, projects: 3, deleted: 0 })
+    expect(outcome.after?.stamp).toEqual([])
+    expect(outcome.after?.setProject).toEqual([])
+    expect(graph.nodes).toHaveLength(9)
+  })
+
+  it('deletes nothing without a delete flag, missing nodes with --delete-missing, dead orphans with --delete-orphans', async () => {
+    const applyOnly = harness(['--apply', '--undo-log', 'u'], DRIFT_NODES, DRIFT_TABLES)
+    await applyOnly.run()
+    expect(applyOnly.events.some((e) => e.kind === 'delete')).toBe(false)
+
+    const missing = harness(['--apply', '--delete-missing', '--undo-log', 'u'], DRIFT_NODES, DRIFT_TABLES)
+    await missing.run()
+    expect(missing.events.filter((e) => e.kind === 'delete').flatMap((e) => (e.kind === 'delete' ? e.ids : [])).sort()).toEqual([
+      'ghost-linked',
+      'ghost-orphan',
+    ])
+
+    const orphans = harness(['--apply', '--delete-orphans', '--undo-log', 'u'], DRIFT_NODES, DRIFT_TABLES)
+    const outcome = await orphans.run()
+    expect(orphans.events.filter((e) => e.kind === 'delete').flatMap((e) => (e.kind === 'delete' ? e.ids : [])).sort()).toEqual([
+      'ghost-orphan',
+      's-dead',
+    ])
+    const undo = orphans.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    expect(undo).toContainEqual({ op: 'delete', id: 'ghost-orphan', memoryType: null, projectId: null })
+    expect(outcome.after?.orphans).toEqual({ live: 1, inactive: 0, missing: 0 })
+  })
+
+  it("never deletes a live row's node, with every delete flag set", async () => {
+    const both = harness(
+      ['--apply', '--delete-missing', '--delete-orphans', '--undo-log', 'u'],
+      DRIFT_NODES,
+      DRIFT_TABLES,
+    )
+    await both.run()
+    const deleted = both.events.flatMap((e) => (e.kind === 'delete' ? e.ids : []))
+    expect(deleted.sort()).toEqual(['ghost-linked', 'ghost-orphan', 's-dead'])
+    for (const live of ['s-live', 's-live-orphan', 'e-1', 'e-2', 'd-1']) {
+      expect(both.graph.nodes.map((n) => n.id)).toContain(live)
+    }
   })
 })
