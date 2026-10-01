@@ -138,6 +138,13 @@ const result = await memory.recall(query, { tokenBudget: 2000 })
 
 The text is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole. Two more environment variables shape the text: `ENGRAM_RECALL_EMIT_K` (emit only the first K Recalled memories) and `ENGRAM_RECALL_FAINT` (`on` by default, `off` drops the Faint Associations section). Unset, empty or absent, each means no limit, so `formatted` is the same unbounded text as before; a malformed value throws, naming the variable.
 
+Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
+
+- `ENGRAM_RECALL_HUB_DAMPING` — damps memories recalled far more often than their tier. For episode, semantic and procedural candidates, T = max(p99 of the tier's access_count, 10); the factor is 1 when access ≤ T, else `1 / (1 + ln(access / T))`. Digests get 1. The p99 comes from the storage's `accessCountQuantile` and is cached per storage instance for 10 minutes. On PostgREST it needs the `engram_access_count_quantile` function, so re-apply `packages/postgrest/schema.sql` before turning this on; with the function missing, hub damping is a no-op that logs one warning per process.
+- `ENGRAM_RECALL_SEMANTIC_CONFIDENCE` — semantic candidates are scaled by `0.5 + 0.5 · clamp(confidence, 0, 1)`.
+
+The prior is the product of the enabled factors. It multiplies each primary candidate's score, and after reranking it multiplies the rerank component again: `blended = w · rerank · prior + (1 − w) · relevance`. Graph associations are unaffected. A memory whose prior is not 1 carries it as `rankPrior`.
+
 Access counts, co-recalled edges and graph edge weights are recorded only for the memories and associations the text emitted. `reconsolidate: false` records nothing, for measurement harnesses and previews that must not change those counts.
 
 ##### Synthesize mode (v0.6)
