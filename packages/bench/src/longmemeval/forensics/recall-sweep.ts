@@ -44,7 +44,7 @@ import { LongMemEvalAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
 import { parseContextMode, runSweepRecall, type ContextMode, type FormattedContextFields } from './context-modes.js'
 import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
-import { parseEventDate } from '@engram-mem/core'
+import { parseEventDate, recallOutputPolicyFromEnv } from '@engram-mem/core'
 import { parseRerankerArgs, buildModelMeta } from './reranker-meta-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
 import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
@@ -56,11 +56,13 @@ import {
   formatRowLine,
   idListSha256,
   orderRowsByDataset,
+  outputPolicyRecord,
   parsePartial,
   parseQuestionIdList,
   partialPathFor,
   pendingQuestions,
   selectQuestions,
+  type OutputPolicyRecord,
   type RunIdentity,
 } from './sweep-checkpoint-lib.js'
 
@@ -127,8 +129,10 @@ async function main(): Promise<void> {
     ...(args.vectorMode ? { vectorMode: args.vectorMode } : {}),
   }
 
+  // Recall reads the same env per call, so this is the policy every row was assembled under.
+  const outputPolicy = exitOnError(() => outputPolicyRecord(recallOutputPolicyFromEnv(process.env)))
   const partialPath = partialPathFor(args.output)
-  const identity = buildRunIdentity(args, selection?.sha256)
+  const identity = buildRunIdentity(args, selection?.sha256, outputPolicy)
   const resumedRows = openCheckpoint(partialPath, identity, args.resume === true)
   exitOnError(() => assertRowsInSelection(questions, resumedRows))
   const todo = pendingQuestions(questions, new Set(resumedRows.map((r) => r.question_id)))
@@ -252,6 +256,7 @@ async function main(): Promise<void> {
     meta: {
       args: args as unknown as Record<string, unknown>,
       ...buildModelMeta(resolvedBackend, args.onnxRerankerModel),
+      output_policy: outputPolicy,
       K_values: K_VALUES,
       total_questions: rows.length,
       total_seconds: parseFloat(totalDur),
@@ -313,7 +318,7 @@ function loadSelection(args: SweepArgs): { ids: string[]; sha256: string } | und
   })
 }
 
-function buildRunIdentity(args: SweepArgs, idsSha256: string | undefined): RunIdentity {
+function buildRunIdentity(args: SweepArgs, idsSha256: string | undefined, outputPolicy: OutputPolicyRecord): RunIdentity {
   const backend: RerankerBackend = args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')
   const questionSelection = idsSha256 !== undefined
     ? `ids:${idsSha256}`
@@ -329,6 +334,9 @@ function buildRunIdentity(args: SweepArgs, idsSha256: string | undefined): RunId
     max_results: args.maxResults,
     synthesize: args.synthesize,
     question_selection: questionSelection,
+    output_emit_k: outputPolicy.emit_k,
+    output_token_budget: outputPolicy.token_budget,
+    output_faint: outputPolicy.faint,
   }
 }
 

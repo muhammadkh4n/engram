@@ -16,19 +16,34 @@ const QID = 'q-7a1'
 // Shaped like a formatter payload: header, tagged memory lines, a Related
 // section and a Faint Associations section. One line quotes the bench's
 // namespaced session id so the rewrite is observable.
+const ITEM_LINES = {
+  m1: '- [episode · user · 2023-05-20] I moved the herb planters to the balcony last weekend.',
+  m2: `- [episode · assistant · 2023-05-20] Noted for lme:${QID}:sess_b — basil needs six hours of sun.`,
+  r1: '- [digest · 2023-05-21] Gardening: balcony planters, basil, watering schedule.',
+  f1: '- [episode · user · 2023-04-02] The hardware store had terracotta pots on sale.',
+}
+
 const PAYLOAD = [
   '## Engram — Recalled Conversation Memory',
   '',
   'IMPORTANT: The following are memories retrieved from past conversations.',
   '',
   '### Recalled Memories\n',
-  '- [episode · user · 2023-05-20] I moved the herb planters to the balcony last weekend.',
-  `- [episode · assistant · 2023-05-20] Noted for lme:${QID}:sess_b — basil needs six hours of sun.`,
+  ITEM_LINES.m1,
+  ITEM_LINES.m2,
   '\n### Related Memories\n',
-  '- [digest · 2023-05-21] Gardening: balcony planters, basil, watering schedule.',
+  ITEM_LINES.r1,
   '\n### Faint Associations\n',
-  '- [episode · user · 2023-04-02] The hardware store had terracotta pots on sale.',
+  ITEM_LINES.f1,
 ].join('\n')
+
+// Offsets of each item line in the raw payload, as Memory.recall reports them.
+function rawItem(section: string, id: keyof typeof ITEM_LINES): { section: string; id: string; start: number; end: number } {
+  const start = PAYLOAD.indexOf(ITEM_LINES[id])
+  return { section, id, start, end: start + ITEM_LINES[id].length }
+}
+
+const PAYLOAD_ITEMS = [rawItem('recalled', 'm1'), rawItem('recalled', 'm2'), rawItem('related', 'r1'), rawItem('faint', 'f1')]
 
 function stubResult(overrides: Partial<SweepRecallResult> = {}): SweepRecallResult {
   return {
@@ -39,6 +54,8 @@ function stubResult(overrides: Partial<SweepRecallResult> = {}): SweepRecallResu
     ],
     formatted: PAYLOAD,
     synthesis: null,
+    estimatedTokens: 97,
+    payload: { truncated: false, items: PAYLOAD_ITEMS },
     ...overrides,
   }
 }
@@ -203,12 +220,86 @@ describe('runSweepRecall — formatted mode', () => {
 
   it('records an empty payload as-is', async () => {
     const out = await runSweepRecall(
-      stubMemory(stubResult({ memories: [], formatted: '' })),
+      stubMemory(stubResult({ memories: [], formatted: '', estimatedTokens: 0, payload: { truncated: false, items: [] } })),
       QUESTION,
       { contextMode: 'formatted', maxK: 30, synthesize: false },
     )
-    expect(out.formattedFields).toEqual({ formatted: '', context_chars: 0, context_items: 0, gold_ids_in_context: [] })
+    expect(out.formattedFields).toEqual({
+      formatted: '',
+      context_chars: 0,
+      context_items: 0,
+      gold_ids_in_context: [],
+      payload_items: [],
+      context_tokens: 0,
+      truncated: false,
+    })
     expect(out.recalledSessionIds).toEqual([])
+  })
+})
+
+describe('runSweepRecall — formatted mode payload items', () => {
+  const FORMATTED = { contextMode: 'formatted', maxK: 30, synthesize: false } as const
+  const withLinks = (): SweepRecallResult =>
+    stubResult({
+      associations: [{ id: 'r1', metadata: { lmeSessionId: 'sess_c' } }],
+      faintAssociations: [{ id: 'f1', metadata: { lmeSessionId: 'sess_z' } }],
+      estimatedTokens: 123,
+      payload: { truncated: true, items: PAYLOAD_ITEMS },
+    })
+
+  it('records section, offsets and dataset session per item, plus the token estimate and truncation flag', async () => {
+    const out = await runSweepRecall(stubMemory(withLinks()), QUESTION, FORMATTED)
+    const fields = out.formattedFields!
+    expect(fields.payload_items.map(({ section, session }) => ({ section, session }))).toEqual([
+      { section: 'recalled', session: 'sess_a' },
+      { section: 'recalled', session: 'sess_b' },
+      { section: 'related', session: 'sess_c' },
+      { section: 'faint', session: 'sess_z' },
+    ])
+    expect(fields.context_tokens).toBe(123)
+    expect(fields.truncated).toBe(true)
+  })
+
+  it('keeps formatted.slice(start, end) equal to each item line after the namespace rewrite', async () => {
+    const out = await runSweepRecall(stubMemory(withLinks()), QUESTION, FORMATTED)
+    const { formatted, payload_items } = out.formattedFields!
+    const expected = [ITEM_LINES.m1, ITEM_LINES.m2, ITEM_LINES.r1, ITEM_LINES.f1].map((l) => l.split(`lme:${QID}:`).join(''))
+    expect(payload_items.map((it) => formatted.slice(it.start, it.end))).toEqual(expected)
+    // The rewrite shortens the second line, so every later item moved left.
+    expect(payload_items[2]!.start).toBe(PAYLOAD_ITEMS[2]!.start - `lme:${QID}:`.length)
+  })
+
+  it('records a null session for an item without a memory id or without a dataset session', async () => {
+    const result = stubResult({
+      memories: [{ id: 'm1' }],
+      payload: { truncated: false, items: [{ section: 'context', start: 0, end: 2 }, rawItem('recalled', 'm1')] },
+    })
+    const out = await runSweepRecall(stubMemory(result), QUESTION, FORMATTED)
+    expect(out.formattedFields!.payload_items.map((it) => it.session)).toEqual([null, null])
+  })
+
+  it('records truncated false when the budget did not stop assembly', async () => {
+    const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, FORMATTED)
+    expect(out.formattedFields!.truncated).toBe(false)
+    expect(out.formattedFields!.context_tokens).toBe(97)
+  })
+
+  it('refuses a recall result without payload items or a token estimate', async () => {
+    const { payload: _p, ...noPayload } = stubResult()
+    await expect(runSweepRecall(stubMemory(noPayload), QUESTION, FORMATTED)).rejects.toThrow(/no "payload"/)
+    const { estimatedTokens: _t, ...noTokens } = stubResult()
+    await expect(runSweepRecall(stubMemory(noTokens), QUESTION, FORMATTED)).rejects.toThrow(/estimatedTokens/)
+  })
+
+  it('refuses an item offset outside the payload', async () => {
+    const result = stubResult({ payload: { truncated: false, items: [{ section: 'recalled', id: 'm1', start: 5, end: PAYLOAD.length + 1 }] } })
+    await expect(runSweepRecall(stubMemory(result), QUESTION, FORMATTED)).rejects.toThrow(/outside the/)
+  })
+
+  it('needs no payload in sessions mode', async () => {
+    const { payload: _p, estimatedTokens: _t, ...bare } = stubResult()
+    const out = await runSweepRecall(stubMemory(bare), QUESTION, { contextMode: 'sessions', maxK: 30, synthesize: false })
+    expect(out.formattedFields).toBeUndefined()
   })
 })
 

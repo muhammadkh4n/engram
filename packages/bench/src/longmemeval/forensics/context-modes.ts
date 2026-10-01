@@ -81,7 +81,23 @@ export function productionRecallOptions(projectId?: string): ProductionRecallOpt
 }
 
 interface MetadataCarrier {
+  id?: string
   metadata?: Record<string, unknown>
+}
+
+/** One emitted line of the payload; `raw.slice(start, end)` is the line. */
+export interface SweepPayloadItem {
+  section: string
+  /** The memory id when the item renders a memory. */
+  id?: string
+  start: number
+  end: number
+}
+
+/** Structural mirror of core's RecallPayload, the fields the sweep records. */
+export interface SweepRecallPayload {
+  truncated: boolean
+  items: ReadonlyArray<SweepPayloadItem>
 }
 
 export interface SweepRecallResult extends SessionProjectionInput {
@@ -92,6 +108,10 @@ export interface SweepRecallResult extends SessionProjectionInput {
   associations?: ReadonlyArray<MetadataCarrier>
   /** "Faint Associations" in `formatted`; absent when there were none. */
   faintAssociations?: ReadonlyArray<MetadataCarrier>
+  /** Token estimate of `formatted`. */
+  estimatedTokens?: number
+  /** Where each emitted item sits in `formatted`; set by Memory.recall. */
+  payload?: SweepRecallPayload
 }
 
 export interface SweepMemory {
@@ -107,12 +127,28 @@ export interface SweepRecallConfig {
   now?: Date | null
 }
 
+/** One payload item located in the recorded (namespace-rewritten) text. */
+export interface RecordedPayloadItem {
+  section: string
+  /** `formatted.slice(start, end)` of the row is the item line. */
+  start: number
+  end: number
+  /** Dataset session id of the rendered memory; null for non-memory items. */
+  session: string | null
+}
+
 export interface FormattedContextFields {
   formatted: string
   context_chars: number
   context_items: number
   /** Gold session ids with at least one memory in the payload, in gold order. */
   gold_ids_in_context: string[]
+  /** Every emitted item in payload order, so the text can be re-cut exactly. */
+  payload_items: RecordedPayloadItem[]
+  /** The recall's token estimate of the payload. */
+  context_tokens: number
+  /** The output token budget stopped assembly before every candidate item. */
+  truncated: boolean
 }
 
 export interface SweepRecallOutcome {
@@ -152,6 +188,38 @@ export function goldIdsInContext(result: SweepRecallResult, goldIds: readonly st
     if (typeof sid === 'string') inContext.add(sid)
   }
   return goldIds.filter((id, i) => inContext.has(id) && goldIds.indexOf(id) === i)
+}
+
+/**
+ * Payload items with offsets moved from the raw recall text into `rewrite(raw)`.
+ * The rewrite removes a namespace prefix that contains no newline, and every
+ * item boundary sits at a line edge, so no removed span straddles a boundary
+ * and the new offset is the length of the rewritten prefix.
+ */
+export function recordPayloadItems(
+  result: SweepRecallResult,
+  rewrite: (text: string) => string,
+): RecordedPayloadItem[] {
+  if (!result.payload) {
+    throw new Error('recall result has no "payload"; formatted mode needs a core whose Memory.recall reports payload items')
+  }
+  const raw = result.formatted
+  const sessionById = new Map<string, string>()
+  for (const m of [...result.memories, ...(result.associations ?? []), ...(result.faintAssociations ?? [])]) {
+    const sid = m.metadata?.['lmeSessionId']
+    if (typeof m.id === 'string' && typeof sid === 'string' && !sessionById.has(m.id)) sessionById.set(m.id, sid)
+  }
+  return result.payload.items.map((item) => {
+    if (!(Number.isInteger(item.start) && Number.isInteger(item.end) && item.start >= 0 && item.start <= item.end && item.end <= raw.length)) {
+      throw new Error(`payload item [${item.start}, ${item.end}) lies outside the ${raw.length}-char payload`)
+    }
+    return {
+      section: item.section,
+      start: rewrite(raw.slice(0, item.start)).length,
+      end: rewrite(raw.slice(0, item.end)).length,
+      session: item.id !== undefined ? sessionById.get(item.id) ?? null : null,
+    }
+  })
 }
 
 const RELEVANCE_DECIMALS = 1e4
@@ -197,12 +265,20 @@ export async function runSweepRecall(
   }
 
   if (cfg.contextMode === 'formatted') {
-    const formatted = stripBenchSessionNamespace(result.formatted, question.question_id)
+    const rewrite = (text: string): string => stripBenchSessionNamespace(text, question.question_id)
+    const formatted = rewrite(result.formatted)
+    if (typeof result.estimatedTokens !== 'number') {
+      throw new Error('recall result has no numeric "estimatedTokens"; formatted mode records it as context_tokens')
+    }
+    const payloadItems = recordPayloadItems(result, rewrite)
     outcome.formattedFields = {
       formatted,
       context_chars: formatted.length,
       context_items: result.memories.length,
       gold_ids_in_context: goldIdsInContext(result, question.answer_session_ids),
+      payload_items: payloadItems,
+      context_tokens: result.estimatedTokens,
+      truncated: result.payload!.truncated,
     }
   }
 
