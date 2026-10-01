@@ -98,3 +98,15 @@ describe('engram_recall similarity floor', () => {
     }
   })
 })
+
+describe('pgvector version guard', () => {
+  it('rejects pgvector older than 0.8.0 after creating the extension and before any HNSW setting', () => {
+    const extension = schema.indexOf('CREATE EXTENSION IF NOT EXISTS vector')
+    const guard = schema.indexOf("string_to_array(installed, '.')::int[] < '{0,8,0}'::int[]")
+    const firstIterative = schema.indexOf("SET hnsw.iterative_scan")
+    expect(extension).toBeGreaterThanOrEqual(0)
+    expect(guard).toBeGreaterThan(extension)
+    expect(firstIterative).toBeGreaterThan(guard)
+    expect(schema.slice(guard, firstIterative)).toMatch(/RAISE EXCEPTION 'pgvector % is installed; engram requires pgvector >= 0\.8\.0\. Run ALTER EXTENSION vector UPDATE/)
+  })
+})

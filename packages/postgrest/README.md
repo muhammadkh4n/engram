@@ -13,6 +13,8 @@ npm install @engram-mem/openai  # recommended — for embeddings + reranking
 
 ## Two deployment options
 
+**Requirements:** PostgreSQL 17 and pgvector >= 0.8.0. `schema.sql` is a PostgreSQL 17 dump, and its vector RPCs use pgvector's iterative HNSW scans; the schema refuses to apply on an older pgvector.
+
 ### Option A — Supabase (hosted)
 
 The original target. Zero infrastructure to manage; pay for compute add-ons as you scale.
@@ -50,7 +52,7 @@ docker run -d --name engram-postgres \
   -e POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
   -e POSTGRES_DB=engram \
   -p 127.0.0.1:5432:5432 \
-  pgvector/pgvector:pg16
+  pgvector/pgvector:pg17
 
 # Apply the schema — one idempotent file, ships in the package
 # (create the service_role / authenticator roles first, per the runbook)

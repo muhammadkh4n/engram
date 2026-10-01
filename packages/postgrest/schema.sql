@@ -53,6 +53,20 @@ SET row_security = off;
 -- CREATE EXTENSION has no target schema and fails on a fresh database.
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
+-- The vector RPCs set hnsw.iterative_scan and hnsw.max_scan_tuples, which
+-- pgvector only knows from 0.8.0; older versions reject them at apply or
+-- call time. Fail the apply early with an actionable message instead.
+DO $$
+DECLARE
+  installed text;
+BEGIN
+  SELECT extversion INTO installed FROM pg_extension WHERE extname = 'vector';
+  IF string_to_array(installed, '.')::int[] < '{0,8,0}'::int[] THEN
+    RAISE EXCEPTION 'pgvector % is installed; engram requires pgvector >= 0.8.0. Run ALTER EXTENSION vector UPDATE; (after installing a newer pgvector) and re-apply.', installed;
+  END IF;
+END
+$$;
+
 -- =============================================================================
 -- forget() tombstone — within-file ordering note
 -- -----------------------------------------------------------------------------
