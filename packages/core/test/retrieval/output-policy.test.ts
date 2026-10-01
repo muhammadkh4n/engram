@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { renderRecallPayload } from '../../src/retrieval/engine.js'
 import {
   assemble,
+  degradedRecallNotice,
   recallOutputPolicyFromEnv,
   resolveRecallOutputPolicy,
   vectorUnavailableNotice,
@@ -180,6 +181,20 @@ describe('assemble — notice line', () => {
 
   it('renders nothing when no item is emitted, notice or not', () => {
     expect(assemble(rendered({}), DEFAULT_RECALL_OUTPUT_POLICY, NOTICE).text).toBe('')
+  })
+})
+
+describe('degradedRecallNotice', () => {
+  it('keeps the semantic-only notice when the keyword search ran', () => {
+    expect(degradedRecallNotice({ vector: '429 insufficient_quota' })).toBe(
+      vectorUnavailableNotice('429 insufficient_quota'),
+    )
+  })
+
+  it('names both failures when the keyword search failed too', () => {
+    expect(degradedRecallNotice({ vector: '429 insufficient_quota', lexical: 'statement timeout' })).toBe(
+      '> Semantic and keyword search unavailable (semantic: 429 insufficient_quota; keyword: statement timeout); these results come from a plain text match only.',
+    )
   })
 })
 

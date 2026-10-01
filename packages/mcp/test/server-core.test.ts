@@ -319,6 +319,20 @@ describe('runMemoryRecall', () => {
     expect(res.content[0]?.text).toBe(`${NOTICE}\nNo keyword matches.`)
   })
 
+  it('says the text match found nothing, not the keyword search, when keyword search failed', async () => {
+    const res = await runMemoryRecall(
+      stubMemory(result({ degraded: { vector: REASON, lexical: 'canceling statement due to statement timeout' } })),
+      { query: 'deploy window' },
+    )
+    const text = res.content[0]?.text ?? ''
+
+    expect(res.isError).toBeUndefined()
+    expect(text).not.toContain('No keyword matches.')
+    expect(text).toBe(
+      `> Semantic and keyword search unavailable (semantic: ${REASON}; keyword: canceling statement due to statement timeout); these results come from a plain text match only.\nNo text matches.`,
+    )
+  })
+
   it('keeps the plain empty answer for a healthy recall', async () => {
     const res = await runMemoryRecall(stubMemory(result({})), { query: 'deploy window' })
 

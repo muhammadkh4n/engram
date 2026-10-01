@@ -92,6 +92,7 @@ export {
   PAYLOAD_SECTION_HEADERS,
   PAYLOAD_SECTION_ORDER,
   vectorUnavailableNotice,
+  degradedRecallNotice,
 } from './retrieval/output-policy.js'
 export { embedFailureReason } from './retrieval/embed-failure.js'
 export type {

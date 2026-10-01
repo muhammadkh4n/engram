@@ -347,6 +347,7 @@ describe('recall engine — failed lexical leg', () => {
 
       expect(result.memories.length).toBeGreaterThan(0)
       expect(result.timings?.['lexicalError']).toBe(1)
+      expect(result).not.toHaveProperty('degraded')
       expect(errSpy).toHaveBeenCalledWith(
         '[engram] lexical leg failed: engram_text_match is not in the schema cache',
       )
@@ -400,6 +401,56 @@ describe('recall engine — query embedding unavailable', () => {
     )
     expect(result.timings?.['vectorError']).toBe(1)
     expect(result.timings).not.toHaveProperty('hyde')
+  })
+
+  describe('and the lexical leg fails too', () => {
+    let errSpy: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      errSpy.mockRestore()
+    })
+
+    function degradedRecall(lexicalError: Error) {
+      const storage = createMockStorage()
+      storage.textBoost = vi.fn().mockRejectedValue(lexicalError)
+      const opts = makeOpts({ embedding: [], vectorUnavailable: '429 insufficient_quota' })
+      return { storage, run: () => recall('deployment strategy', storage, new SensoryBuffer(), opts) }
+    }
+
+    it('answers from the per-tier text search and names both failures', async () => {
+      const { storage, run } = degradedRecall(new Error('canceling statement due to statement timeout'))
+
+      const result = await run()
+
+      expect(storage.episodes.search).toHaveBeenCalled()
+      expect(result.memories.length).toBeGreaterThan(0)
+      expect(result.degraded).toEqual({
+        vector: '429 insufficient_quota',
+        lexical: 'canceling statement due to statement timeout',
+      })
+      expect(result.formatted.split('\n')[0]).toBe(
+        '> Semantic and keyword search unavailable (semantic: 429 insufficient_quota; keyword: canceling statement due to statement timeout); these results come from a plain text match only.',
+      )
+    })
+
+    it('keeps one scrubbed line of the lexical error, capped like the vector reason', async () => {
+      const password = 'Zq8vLm2pXw9tRk4s'
+      const longTail = 'x'.repeat(400)
+      const { run } = degradedRecall(
+        new Error(`connect to postgres://engram:${password}@db.internal:5432/engram failed ${longTail}\n    at Socket.<anonymous>`),
+      )
+
+      const lexical = (await run()).degraded?.lexical ?? ''
+
+      expect(lexical).not.toContain(password)
+      expect(lexical).not.toContain('Socket')
+      expect(lexical.length).toBeLessThanOrEqual(200)
+      expect(lexical.endsWith('…')).toBe(true)
+    })
   })
 
   it('leaves a healthy recall without the degraded field or flag', async () => {
