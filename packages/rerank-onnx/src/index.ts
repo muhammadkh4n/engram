@@ -197,3 +197,13 @@ function sigmoid(x: number): number {
   const z = Math.exp(x)
   return z / (1 + z)
 }
+
+export {
+  createOnnxEmbedder,
+  formatEmbedQuery,
+  lastTokenIndices,
+  DEFAULT_EMBED_MODEL,
+  DEFAULT_EMBED_QUERY_TASK,
+  type OnnxEmbedder,
+  type OnnxEmbedderOptions,
+} from './embed.js'
