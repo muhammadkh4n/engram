@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest'
 import {
   parseRerankerArgs, buildModelMeta, buildJudgeModelMeta,
   DEFAULT_ONNX_RERANK_MODEL, OPENAI_RERANK_MODEL, BENCH_EMBED_MODEL,
+  parseEmbedArgs, resolveEmbedSettings, DEFAULT_ONNX_EMBED_MODEL,
 } from '../src/longmemeval/forensics/reranker-meta-lib.js'
+import { DEFAULT_EMBED_MODEL } from '@engram-mem/rerank-onnx'
 
 describe('parseRerankerArgs', () => {
   it('accepts openai, onnx and none', () => {
@@ -72,5 +74,50 @@ describe('buildJudgeModelMeta', () => {
       rerankerBackend: null, rerankModel: null, embedModel: null, chatModel: 'gpt-4o-mini',
     })
     expect(buildJudgeModelMeta(undefined, 'm').rerankerBackend).toBeNull()
+  })
+})
+
+describe('parseEmbedArgs', () => {
+  it('sets nothing when no embed flag is given, so a plain run keeps its args', () => {
+    expect(parseEmbedArgs(['--limit', '5', '--reranker', 'onnx'])).toEqual({})
+  })
+
+  it('accepts both backends, a model id and positive integer dims', () => {
+    expect(parseEmbedArgs(['--embed-backend', 'openai'])).toEqual({ embedBackend: 'openai' })
+    expect(parseEmbedArgs(['--embed-backend', 'onnx', '--embed-model', 'org/m', '--embed-dims', '1024']))
+      .toEqual({ embedBackend: 'onnx', embedModel: 'org/m', embedDims: 1024 })
+  })
+
+  it('rejects an unknown or missing backend', () => {
+    expect(() => parseEmbedArgs(['--embed-backend', 'cohere'])).toThrow(/openai\|onnx.*"cohere"/)
+    expect(() => parseEmbedArgs(['--embed-backend', '--limit', '5'])).toThrow(/--embed-backend must be one of/)
+  })
+
+  it('rejects --embed-model without a value', () => {
+    expect(() => parseEmbedArgs(['--embed-model'])).toThrow(/requires a model id/)
+    expect(() => parseEmbedArgs(['--embed-model', '--embed-dims', '3'])).toThrow(/requires a model id/)
+  })
+
+  it('rejects dims that are not a positive integer', () => {
+    for (const bad of ['0', '-5', '1.5', '1e3', 'abc', '99999999999999999999']) {
+      expect(() => parseEmbedArgs(['--embed-dims', bad])).toThrow(/positive integer/)
+    }
+    expect(() => parseEmbedArgs(['--embed-dims'])).toThrow(/positive integer/)
+  })
+})
+
+describe('resolveEmbedSettings', () => {
+  it('defaults to openai text-embedding-3-small and records the resolved width', () => {
+    expect(resolveEmbedSettings({}, 1536)).toEqual({ backend: 'openai', model: BENCH_EMBED_MODEL, dims: 1536 })
+  })
+
+  it('defaults onnx to the embedder package default model', () => {
+    expect(resolveEmbedSettings({ embedBackend: 'onnx' }, 1024).model).toBe(DEFAULT_ONNX_EMBED_MODEL)
+    expect(DEFAULT_ONNX_EMBED_MODEL).toBe(DEFAULT_EMBED_MODEL)
+  })
+
+  it('keeps an explicit model and dims', () => {
+    expect(resolveEmbedSettings({ embedModel: 'text-embedding-3-large', embedDims: 1536 }, 1536))
+      .toEqual({ backend: 'openai', model: 'text-embedding-3-large', dims: 1536 })
   })
 })

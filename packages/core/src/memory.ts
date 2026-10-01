@@ -679,9 +679,10 @@ export class Memory {
     // runs on them and says why semantic search is missing.
     let embedding = opts?.embedding
     let vectorUnavailable: string | undefined
-    if (embedding === undefined && this.intelligence?.embed) {
+    const embedQuery = this.queryEmbedder()
+    if (embedding === undefined && embedQuery) {
       try {
-        embedding = await this.intelligence.embed(query)
+        embedding = await embedQuery(query)
       } catch (err) {
         vectorUnavailable = await embedFailureReason(err)
         console.error(`[engram] recall: query embedding failed, using keyword search only: ${vectorUnavailable}`)
@@ -966,9 +967,10 @@ export class Memory {
     // Embed the query so the vector path runs; without an embedding only the
     // narrower text path can match.
     let embedding: number[] = []
-    if (this.intelligence?.embed) {
+    const embedQuery = this.queryEmbedder()
+    if (embedQuery) {
       try {
-        embedding = await this.intelligence.embed(query)
+        embedding = await embedQuery(query)
       } catch (err) {
         console.error('[engram] forget: embedding failed, falling back to text-only search:', err)
       }
@@ -1115,6 +1117,18 @@ export class Memory {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * The embedder for search queries: `embedQuery` when the adapter has one
+   * (asymmetric models encode a query differently from a document), else
+   * `embed`. Undefined when the adapter cannot embed at all.
+   */
+  private queryEmbedder(): ((text: string) => Promise<number[]>) | undefined {
+    const intelligence = this.intelligence
+    if (intelligence?.embedQuery) return (text) => intelligence.embedQuery!(text)
+    if (intelligence?.embed) return (text) => intelligence.embed!(text)
+    return undefined
+  }
 
   private assertInitialized(): void {
     if (!this.initialized) {

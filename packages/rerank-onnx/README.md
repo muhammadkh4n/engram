@@ -86,3 +86,42 @@ Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on t
 
 > **In the MCP server (`@engram-mem/mcp`):** just set `ENGRAM_RERANK_LOCAL=true` in the server's env — the MCP startup will dynamically import this package and spread its `rerank` over the openaiIntelligence adapter automatically. Pick the model via `ENGRAM_RERANK_LOCAL_MODEL` (default: `Alibaba-NLP/gte-reranker-modernbert-base`).
 
+
+## Local embedder
+
+The package also exports `createOnnxEmbedder`, a local bi-encoder for the embedding side of recall. The default model is `onnx-community/Qwen3-Embedding-0.6B-ONNX` at `q8`. It implements the `embed`, `embedBatch`, `embedQuery` and `dimensions` members of the core `IntelligenceAdapter`, so it replaces the API embedder in the same way the reranker replaces the API reranker:
+
+```ts
+import { openaiIntelligence } from '@engram-mem/openai'
+import { createOnnxEmbedder } from '@engram-mem/rerank-onnx'
+
+const embedder = createOnnxEmbedder() // default: Qwen3-Embedding-0.6B @ q8
+await embedder.load() // dimensions() reads the model config, so load before wiring
+
+const intelligence = {
+  ...openaiIntelligence({ apiKey: process.env.OPENAI_API_KEY! }),
+  embed: embedder.embed,
+  embedBatch: embedder.embedBatch,
+  embedQuery: embedder.embedQuery,
+  dimensions: embedder.dimensions,
+}
+```
+
+Vectors from different embedding models live in different spaces, and this model's hidden size (1024) differs from `text-embedding-3-small` (1536). A store embedded with one model cannot be searched with another; switching models means re-embedding the store.
+
+**Pooling.** Qwen3-Embedding is trained for last-token pooling. The embedder takes each sequence's hidden state at its last non-padding token, located through the attention mask, then L2-normalises it to unit length. Locating the token through the mask makes the result independent of the tokenizer's padding side; taking the final position of the padded batch would only be correct for left padding.
+
+**Query instruction.** The model is asymmetric. `embedQuery` formats a query as the model card does, `Instruct: <task>\nQuery:<query>`, with the default task `Given a question or topic, retrieve memories that answer or relate to it`. `embed` and `embedBatch` embed documents bare. Core's recall and forget preview call `embedQuery` when an adapter provides it, while stored content goes through `embed` / `embedBatch`.
+
+**Verification.** The unit tests stub the tokenizer and the model, so they check the pooling index, the normalisation, the instruction and the batching, not the weights. Before relying on a model, load the real weights once and check that the model card's example queries and documents reproduce its published similarity scores.
+
+```ts
+createOnnxEmbedder({
+  model: 'onnx-community/Qwen3-Embedding-0.6B-ONNX',
+  dtype: 'q8',        // 'fp32' | 'fp16' | 'q8' | 'q4'
+  queryTask: 'Given a question or topic, retrieve memories that answer or relate to it',
+  batchSize: 16,      // texts per forward pass
+  maxLength: 512,     // max tokens per text
+  maxChars: 2000,     // chars per text before tokenization; the query instruction is not counted
+})
+```
