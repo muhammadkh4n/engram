@@ -39,6 +39,7 @@ import {
   type GraphMemoryNode,
   type ReconcileGraph,
   type ReconcileSqlSource,
+  type SqlSourceRow,
   type SqlTier,
 } from './graph-reconcile-lib.js'
 
@@ -55,6 +56,9 @@ const HELP =
   '  --batch-size N     nodes per write (default 1000)\n' +
   '  A stamp or project change is undone from the undo log. A delete is undone only\n' +
   '  from a Neo4j dump: take one before --delete-missing or --delete-orphans.\n'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const ID_LOOKUP_SLICE = 200
 
 const TABLES: Record<SqlTier, { table: string; columns: string }> = {
   episode: { table: 'memory_episodes', columns: 'id, project_id, created_at, forgotten_at' },
@@ -79,6 +83,22 @@ function postgrestSource(client: PostgrestClient): ReconcileSqlSource {
       if (error) throw new Error(`${table} fetch failed: ${error.message}`)
       return (data ?? []) as unknown as Awaited<ReturnType<ReconcileSqlSource['fetchPage']>>
     },
+    async fetchByIds(tier, ids) {
+      const { table, columns } = TABLES[tier]
+      // The ids are uuid columns: a non-uuid id has no row, and would make Postgres reject the filter.
+      const uuids = ids.filter((id) => UUID_RE.test(id))
+      const rows: SqlSourceRow[] = []
+      // Sliced so the id list stays inside a request URL's length limit.
+      for (let i = 0; i < uuids.length; i += ID_LOOKUP_SLICE) {
+        const { data, error } = await client
+          .from(table)
+          .select(columns)
+          .in('id', uuids.slice(i, i + ID_LOOKUP_SLICE))
+        if (error) throw new Error(`${table} id lookup failed: ${error.message}`)
+        rows.push(...((data ?? []) as unknown as SqlSourceRow[]))
+      }
+      return rows
+    },
   }
 }
 
@@ -95,14 +115,16 @@ function toStringOrNull(value: unknown): string | null {
 
 function neo4jGraph(graph: NeuralGraph): ReconcileGraph {
   return {
-    async fetchNodePage(skip, limit) {
-      // SKIP and LIMIT are inlined: the driver sends JS numbers as floats, which Neo4j rejects there.
+    async fetchNodePage(after, limit) {
+      // LIMIT is inlined: the driver sends JS numbers as floats, which Neo4j rejects there.
       const result = await graph.runCypher(
         `MATCH (m:Memory)
+         WHERE $after IS NULL OR m.id > $after
          RETURN m.id AS id, m.memoryType AS memoryType, m.projectId AS projectId,
                 m.forgottenAt IS NOT NULL AS forgotten, COUNT { (m)--() } AS degree
          ORDER BY m.id
-         SKIP ${Math.trunc(skip)} LIMIT ${Math.trunc(limit)}`,
+         LIMIT ${Math.trunc(limit)}`,
+        { after },
       )
       return result.records.map(
         (r): GraphMemoryNode => ({

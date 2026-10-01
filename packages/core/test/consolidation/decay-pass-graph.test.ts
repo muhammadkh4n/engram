@@ -340,6 +340,45 @@ describe('decayPass tombstone sync', () => {
     expect(sinceThird.getTime()).toBe(firstThrough - 86_400_000)
   })
 
+  it('a skipped sync carries the previous point, so the next successful run resumes from it', async () => {
+    const runs: Array<{ completedAt: Date; result: Record<string, unknown> }> = []
+    const getLastRun = vi.fn(async () => runs[runs.length - 1] ?? null)
+    const storage = makeMockStorage()
+    const listTombstonesSince = vi.fn(async () => tombstones(1))
+    Object.assign(storage, { listTombstonesSince, consolidationRuns: { getLastRun } })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    Object.assign(graph, { forgetMemories: vi.fn(async (ids: string[]) => ids.length) })
+
+    const first = await decayPass(storage, {}, graph)
+    runs.push({ completedAt: new Date(), result: first as unknown as Record<string, unknown> })
+    const firstThrough = first.graphTombstonesSyncedThrough
+    expect(Number.isFinite(Date.parse(firstThrough ?? ''))).toBe(true)
+
+    const skipped = await decayPass(storage, {}, null)
+    runs.push({ completedAt: new Date(Date.now() + 86_400_000), result: skipped as unknown as Record<string, unknown> })
+    expect(listTombstonesSince).toHaveBeenCalledTimes(1)
+    expect(skipped.graphTombstonesSynced).toBeUndefined()
+    expect(skipped.graphTombstonesSyncedThrough).toBe(firstThrough)
+
+    const third = await decayPass(storage, {}, graph)
+
+    expect(third.graphTombstonesSynced).toBe(1)
+    const sinceThird = listTombstonesSince.mock.calls[1][0] as Date
+    expect(sinceThird.getTime()).toBe(Date.parse(firstThrough ?? '') - 86_400_000)
+  })
+
+  it('a sync skipped for a graph without forgetMemories carries a legacy run point as its completion', async () => {
+    const storage = makeMockStorage()
+    const completedAt = new Date(Date.now() - 3 * 86_400_000)
+    const getLastRun = vi.fn(async () => ({ completedAt, result: { cycle: 'decay', graphTombstonesSynced: 4 } }))
+    Object.assign(storage, { listTombstonesSince: vi.fn(async () => []), consolidationRuns: { getLastRun } })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+
+    const result = await decayPass(storage, {}, graph)
+
+    expect(result.graphTombstonesSyncedThrough).toBe(completedAt.toISOString())
+  })
+
   it('falls back to 8 days when no decay run has completed', async () => {
     const storage = makeMockStorage()
     const listTombstonesSince = vi.fn(async () => tombstones(1))

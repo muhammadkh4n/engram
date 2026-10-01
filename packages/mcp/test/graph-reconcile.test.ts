@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatReconcileReport,
+  readGraphNodes,
   runReconcile,
   type ReconcileGraph,
   type ReconcileSqlSource,
@@ -196,6 +197,10 @@ type Event = { kind: 'undo'; lines: UndoLine[] } | { kind: 'stamp' | 'project' |
 
 function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = Infinity): ReconcileSqlSource {
   return {
+    async fetchByIds(tier, ids) {
+      const wanted = new Set(ids.map((id) => id.toLowerCase()))
+      return (tables[tier] ?? []).filter((r) => wanted.has(r.id.toLowerCase())).map((r) => ({ ...r }))
+    },
     async fetchPage(tier, cursor, pageSize) {
       const rows = [...(tables[tier] ?? [])].sort((a, b) =>
         a.created_at === b.created_at ? a.id.localeCompare(b.id) : a.created_at.localeCompare(b.created_at),
@@ -213,8 +218,12 @@ function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = I
 function fakeGraph(initial: GraphMemoryNode[], events: Event[]): ReconcileGraph & { nodes: GraphMemoryNode[] } {
   const state = {
     nodes: initial.map((n) => ({ ...n })),
-    async fetchNodePage(skip: number, limit: number) {
-      return [...state.nodes].sort((a, b) => a.id.localeCompare(b.id)).slice(skip, skip + limit).map((n) => ({ ...n }))
+    async fetchNodePage(after: string | null, limit: number) {
+      return [...state.nodes]
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .filter((n) => after === null || n.id > after)
+        .slice(0, limit)
+        .map((n) => ({ ...n }))
     },
     async forgetMemories(ids: string[]) {
       events.push({ kind: 'stamp', ids })
@@ -307,7 +316,7 @@ describe('runReconcile', () => {
     const outcome = await run()
     expect(events).toEqual([])
     expect(outcome.after).toBeNull()
-    expect(outcome.written).toEqual({ stamped: 0, projects: 0, deleted: 0 })
+    expect(outcome.written).toEqual({ stamped: 0, projects: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
     expect(logs).toHaveLength(1)
     expect(logs[0]).not.toContain('ghost')
   })
@@ -333,7 +342,7 @@ describe('runReconcile', () => {
     expect(undo).toContainEqual({ op: 'stamp', id: 's-dead', at: '2026-10-01T00:00:00.000Z' })
     expect(undo).toContainEqual({ op: 'project', id: 'e-1', before: null })
 
-    expect(outcome.written).toEqual({ stamped: 2, projects: 3, deleted: 0 })
+    expect(outcome.written).toEqual({ stamped: 2, projects: 3, deleted: 0, skippedChangedSinceSnapshot: 0 })
     expect(outcome.after?.stamp).toEqual([])
     expect(outcome.after?.setProject).toEqual([])
     expect(graph.nodes).toHaveLength(9)
@@ -374,5 +383,67 @@ describe('runReconcile', () => {
     for (const live of ['s-live', 's-live-orphan', 'e-1', 'e-2', 'd-1']) {
       expect(both.graph.nodes.map((n) => n.id)).toContain(live)
     }
+  })
+
+  it('keeps the node of a row inserted after the SQL snapshot and counts it as skipped', async () => {
+    const tables = { ...DRIFT_TABLES, semantic: [...(DRIFT_TABLES.semantic ?? [])] }
+    const run = harness(
+      ['--apply', '--delete-missing', '--undo-log', 'u'],
+      [...DRIFT_NODES, node('fresh', { degree: 0 })],
+      tables,
+    )
+    // The row lands while the graph is being read, after the SQL snapshot was taken.
+    const read = run.graph.fetchNodePage
+    run.graph.fetchNodePage = async (after, limit) => {
+      if (!tables.semantic.some((r) => r.id === 'fresh')) tables.semantic.push(sqlRow('fresh'))
+      return read(after, limit)
+    }
+
+    const outcome = await run.run()
+
+    expect(outcome.before.missing).toContain('fresh')
+    const deleted = run.events.flatMap((e) => (e.kind === 'delete' ? e.ids : []))
+    expect(deleted.sort()).toEqual(['ghost-linked', 'ghost-orphan'])
+    expect(run.graph.nodes.map((n) => n.id)).toContain('fresh')
+    expect(outcome.written.skippedChangedSinceSnapshot).toBe(1)
+    const undo = run.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    expect(undo.map((l) => l.id)).not.toContain('fresh')
+    expect(run.logs.join('\n')).toContain('skipped (changed since snapshot) 1')
+  })
+
+  it('does not delete an inactive orphan whose row was restored after the snapshot', async () => {
+    const tables = { ...DRIFT_TABLES, semantic: [...(DRIFT_TABLES.semantic ?? [])] }
+    const run = harness(['--apply', '--delete-orphans', '--undo-log', 'u'], DRIFT_NODES, tables)
+    const read = run.graph.fetchNodePage
+    run.graph.fetchNodePage = async (after, limit) => {
+      tables.semantic = tables.semantic.map((r) => (r.id === 's-dead' ? { ...r, forgotten_at: null } : r))
+      return read(after, limit)
+    }
+
+    const outcome = await run.run()
+
+    expect(outcome.before.deletableOrphans).toContain('s-dead')
+    const deleted = run.events.flatMap((e) => (e.kind === 'delete' ? e.ids : []))
+    expect(deleted).toEqual(['ghost-orphan'])
+    expect(run.graph.nodes.map((n) => n.id)).toContain('s-dead')
+    expect(outcome.written.skippedChangedSinceSnapshot).toBe(1)
+  })
+})
+
+describe('readGraphNodes', () => {
+  it('pages by key, reading every node once when nodes are added between pages', async () => {
+    const graph = fakeGraph(['a', 'c', 'e', 'g', 'i'].map((id) => node(id)), [])
+    const read = graph.fetchNodePage
+    let calls = 0
+    graph.fetchNodePage = async (after, limit) => {
+      const page = await read(after, limit)
+      if (++calls === 1) graph.nodes = [...graph.nodes, node('b'), node('h')]
+      return page
+    }
+
+    const ids = (await readGraphNodes(graph, 2)).map((n) => n.id)
+
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const id of ['a', 'c', 'e', 'g', 'i', 'h']) expect(ids).toContain(id)
   })
 })

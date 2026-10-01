@@ -154,9 +154,9 @@ interface TombstoneSyncOutcome {
  * graph write never reaches it, leaving forgotten memories reachable through
  * spreading activation. Each pass re-stamps every tombstone since the point
  * the last completed decay run recorded as synced, minus a day of overlap, so
- * a skipped or late week is still covered. A failed sync records the old point
- * again rather than this run's time, so the window it missed is re-read by the
- * next run. Without a recorded point it falls back to a fixed window.
+ * a skipped or late week is still covered. A failed sync, or one skipped
+ * because no graph is connected, records the old point again rather than this
+ * run's time, so the window it missed is re-read by the next run. Without a recorded point it falls back to a fixed window.
  * forgetMemories is idempotent, so overlap is harmless.
  */
 async function syncTombstones(
@@ -164,7 +164,12 @@ async function syncTombstones(
   graph: GraphPort | null | undefined,
   fallbackDays: number,
 ): Promise<TombstoneSyncOutcome | undefined> {
-  if (!storage.listTombstonesSince || !graph?.forgetMemories) return undefined
+  if (!storage.listTombstonesSince || !graph?.forgetMemories) {
+    // Only the newest completed run is consulted, so a run that recorded no
+    // point would send the next run back to the fixed window and lose the gap.
+    const carried = await recordedSyncPoint(storage).catch(() => undefined)
+    return carried ? { syncedThrough: carried } : undefined
+  }
   let since: Date | undefined
   try {
     since = await tombstoneSyncStart(storage, fallbackDays)
@@ -180,6 +185,17 @@ async function syncTombstones(
     console.warn(`[decay-pass] tombstone sync failed: ${msg}`)
     return since ? { syncedThrough: new Date(since.getTime() + SYNC_OVERLAP_MS).toISOString() } : undefined
   }
+}
+
+/** The point the last completed decay run recorded as synced, unchanged. */
+async function recordedSyncPoint(storage: StorageAdapter): Promise<string | undefined> {
+  const lastRun = await storage.consolidationRuns?.getLastRun('decay')
+  const recorded = lastRun?.result?.graphTombstonesSyncedThrough
+  if (recorded && Number.isFinite(Date.parse(recorded))) return recorded
+  if (lastRun?.completedAt && typeof lastRun.result?.graphTombstonesSynced === 'number') {
+    return lastRun.completedAt.toISOString()
+  }
+  return undefined
 }
 
 async function tombstoneSyncStart(storage: StorageAdapter, fallbackDays: number): Promise<Date> {

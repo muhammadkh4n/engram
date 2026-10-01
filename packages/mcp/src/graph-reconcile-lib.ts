@@ -221,11 +221,13 @@ export interface SqlSourceRow {
 export interface ReconcileSqlSource {
   /** Rows of `tier` strictly after `cursor`, ordered by (created_at, id). */
   fetchPage(tier: SqlTier, cursor: PageCursor | null, pageSize: number): Promise<SqlSourceRow[]>
+  /** Every row of `tier` whose id is in `ids`, forgotten and superseded rows included. */
+  fetchByIds(tier: SqlTier, ids: readonly string[]): Promise<SqlSourceRow[]>
 }
 
 export interface ReconcileGraph {
-  /** Memory nodes ordered by id. */
-  fetchNodePage(skip: number, limit: number): Promise<GraphMemoryNode[]>
+  /** Memory nodes with an id strictly after `after` (all when null), ordered by id. */
+  fetchNodePage(after: string | null, limit: number): Promise<GraphMemoryNode[]>
   /** Sets `forgottenAt` on nodes that lack it. */
   forgetMemories(ids: string[]): Promise<number>
   setProjects(rows: Array<{ id: string; projectId: string }>): Promise<void>
@@ -250,7 +252,7 @@ export interface ReconcileDeps {
 export interface ReconcileOutcome {
   before: ReconcilePlan
   after: ReconcilePlan | null
-  written: { stamped: number; projects: number; deleted: number }
+  written: { stamped: number; projects: number; deleted: number; skippedChangedSinceSnapshot: number }
 }
 
 export const DEFAULT_NODE_PAGE_SIZE = 5000
@@ -280,12 +282,18 @@ export async function readSqlRows(
   return rows
 }
 
+/**
+ * Pages by key rather than by offset: nodes written while the read runs would
+ * otherwise shift the offsets, reading some nodes twice and skipping others.
+ */
 export async function readGraphNodes(graph: ReconcileGraph, pageSize: number): Promise<GraphMemoryNode[]> {
   const nodes: GraphMemoryNode[] = []
-  for (let skip = 0; ; skip += pageSize) {
-    const page = await graph.fetchNodePage(skip, pageSize)
+  let after: string | null = null
+  for (;;) {
+    const page = await graph.fetchNodePage(after, pageSize)
     nodes.push(...page)
     if (page.length < pageSize) break
+    after = page[page.length - 1]!.id
   }
   return nodes
 }
@@ -307,6 +315,28 @@ function deleteTargets(plan: ReconcilePlan, args: ReconcileArgs, liveIds: Readon
   return [...ids.values()]
 }
 
+/** Whether each id has a live row now: true live, false only inactive rows, absent no row at all. */
+async function currentRowState(sql: ReconcileSqlSource, ids: readonly string[]): Promise<Map<string, boolean>> {
+  const live = new Map<string, boolean>()
+  for (const tier of SQL_TIERS) {
+    for (const r of await sql.fetchByIds(tier, ids)) {
+      const isLive = r.forgotten_at == null && r.superseded_by == null
+      live.set(key(r.id), (live.get(key(r.id)) ?? false) || isLive)
+    }
+  }
+  return live
+}
+
+/**
+ * The snapshot is read before the graph, so a memory written meanwhile has a
+ * node but no snapshot row, and a restored row still reads as inactive. A
+ * candidate is deleted only if it still qualifies against SQL as it is now.
+ */
+function stillDeletable(snapshot: SqlMemoryRow | undefined, liveNow: boolean | undefined): boolean {
+  if (snapshot === undefined) return liveNow === undefined
+  return snapshot.inactive && liveNow === false
+}
+
 export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Promise<ReconcileOutcome> {
   const now = deps.now ?? (() => new Date().toISOString())
   const nodePageSize = deps.nodePageSize ?? DEFAULT_NODE_PAGE_SIZE
@@ -316,7 +346,7 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   const before = planReconcile(rows, nodes)
   deps.log(formatReconcileReport(before))
 
-  const written = { stamped: 0, projects: 0, deleted: 0 }
+  const written = { stamped: 0, projects: 0, deleted: 0, skippedChangedSinceSnapshot: 0 }
   if (!args.apply) return { before, after: null, written }
 
   for (const batch of chunks(before.stamp, args.batchSize)) {
@@ -333,7 +363,12 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
 
   const liveIds = new Set(rows.filter((r) => !r.inactive).map((r) => key(r.id)))
   const nodesById = new Map(nodes.map((n) => [key(n.id), n]))
-  for (const batch of chunks(deleteTargets(before, args, liveIds), args.batchSize)) {
+  const snapshotById = indexRows(rows)
+  for (const candidates of chunks(deleteTargets(before, args, liveIds), args.batchSize)) {
+    const liveNow = await currentRowState(deps.sql, candidates)
+    const batch = candidates.filter((id) => stillDeletable(snapshotById.get(key(id)), liveNow.get(key(id))))
+    written.skippedChangedSinceSnapshot += candidates.length - batch.length
+    if (batch.length === 0) continue
     await deps.appendUndo(
       batch.map((id) => {
         const n = nodesById.get(key(id))
@@ -344,7 +379,8 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   }
 
   deps.log(
-    `written: stamped ${written.stamped}, projects ${written.projects}, deleted ${written.deleted}`,
+    `written: stamped ${written.stamped}, projects ${written.projects}, deleted ${written.deleted}, ` +
+      `skipped (changed since snapshot) ${written.skippedChangedSinceSnapshot}`,
   )
   const after = planReconcile(rows, await readGraphNodes(deps.graph, nodePageSize))
   deps.log(formatReconcileReport(after))
