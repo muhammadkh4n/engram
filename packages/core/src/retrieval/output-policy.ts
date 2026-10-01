@@ -30,6 +30,12 @@ export const PAYLOAD_SECTION_HEADERS: Readonly<Record<PayloadSection, string>> =
   faint: '\n### Faint Associations\n',
 }
 
+/** First line of a recall whose query could not be embedded, so only the
+ *  lexical leg ran. Tells the reader why results may miss paraphrases. */
+export function vectorUnavailableNotice(reason: string): string {
+  return `> Semantic search unavailable (${reason}); these results come from keyword search only.`
+}
+
 export interface RenderedItem {
   /** One payload line, e.g. `- [episode · user · 2026-03-04] content`. */
   text: string
@@ -99,13 +105,17 @@ function candidatesFor(
  * jumps a larger, better-ranked one. The first item is always emitted whole so
  * a non-empty recall never returns headers alone. A section heading is written
  * only together with its first emitted item. No emitted item yields ''.
+ *
+ * A `notice` becomes the first line, ahead of the header lines, and counts
+ * against the budget like any header.
  */
 export function assemble(
   rendered: RenderedPayload,
   policy: RecallOutputPolicy = DEFAULT_RECALL_OUTPUT_POLICY,
+  notice?: string,
 ): AssembledPayload {
   const payload = emptyRecallPayload()
-  let text = PAYLOAD_HEADER_LINES.join('\n')
+  let text = (notice !== undefined ? [notice, ...PAYLOAD_HEADER_LINES] : PAYLOAD_HEADER_LINES).join('\n')
 
   for (const section of PAYLOAD_SECTION_ORDER) {
     let headed = false

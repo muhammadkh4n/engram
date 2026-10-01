@@ -368,6 +368,51 @@ describe('recall engine — failed lexical leg', () => {
   })
 })
 
+describe('recall engine — query embedding unavailable', () => {
+  const originalTiming = process.env['ENGRAM_RECALL_TIMING']
+
+  afterEach(() => {
+    if (originalTiming === undefined) delete process.env['ENGRAM_RECALL_TIMING']
+    else process.env['ENGRAM_RECALL_TIMING'] = originalTiming
+  })
+
+  it('skips HyDE, leads with the notice and flags the result and the timings', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+    const storage = createMockStorage()
+    const generateHypotheticalDoc = vi.fn().mockResolvedValue('hypothetical')
+    const embed = vi.fn().mockResolvedValue([0.9, 0.8, 0.7])
+    const opts = makeOpts({
+      embedding: [],
+      vectorUnavailable: '429 insufficient_quota',
+      intelligence: { generateHypotheticalDoc, embed },
+    })
+
+    // Temporal, so a healthy recall of this query fires HyDE.
+    const result = await recall('what deployment strategy did we pick last week?', storage, new SensoryBuffer(), opts)
+
+    expect(generateHypotheticalDoc).not.toHaveBeenCalled()
+    expect(embed).not.toHaveBeenCalled()
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+    expect(result.memories.length).toBeGreaterThan(0)
+    expect(result.degraded).toEqual({ vector: '429 insufficient_quota' })
+    expect(result.formatted.split('\n')[0]).toBe(
+      '> Semantic search unavailable (429 insufficient_quota); these results come from keyword search only.',
+    )
+    expect(result.timings?.['vectorError']).toBe(1)
+    expect(result.timings).not.toHaveProperty('hyde')
+  })
+
+  it('leaves a healthy recall without the degraded field or flag', async () => {
+    process.env['ENGRAM_RECALL_TIMING'] = '1'
+
+    const result = await recall('deployment strategy', createMockStorage(), new SensoryBuffer(), makeOpts())
+
+    expect(result).not.toHaveProperty('degraded')
+    expect(result.timings).not.toHaveProperty('vectorError')
+    expect(result.formatted.startsWith('## Engram — Recalled Conversation Memory\n')).toBe(true)
+  })
+})
+
 describe('recall engine — cross-encoder reranking', () => {
   it('reranks memories when intelligence.rerank is provided', async () => {
     const storage = createMockStorage()

@@ -4,6 +4,8 @@ import {
   assemble,
   recallOutputPolicyFromEnv,
   resolveRecallOutputPolicy,
+  vectorUnavailableNotice,
+  DEFAULT_RECALL_OUTPUT_POLICY,
   PAYLOAD_HEADER_LINES,
   type AssembledPayload,
   type RenderedItem,
@@ -146,6 +148,38 @@ describe('assemble — byte identity', () => {
     expect(result.text).not.toContain('### Context')
     expect(result.text).not.toContain('### Related Memories')
     expect(result.text).toContain('### Faint Associations')
+  })
+})
+
+describe('assemble — notice line', () => {
+  const NOTICE = vectorUnavailableNotice('429 insufficient_quota')
+
+  it('reproduces the golden payload when no notice is given', () => {
+    expect(assemble(RENDERED, DEFAULT_RECALL_OUTPUT_POLICY, undefined).text).toBe(GOLDEN)
+  })
+
+  it('puts the notice on the first line, ahead of the unchanged payload', () => {
+    const result = assemble(RENDERED, DEFAULT_RECALL_OUTPUT_POLICY, NOTICE)
+
+    expect(NOTICE).toBe(
+      '> Semantic search unavailable (429 insufficient_quota); these results come from keyword search only.',
+    )
+    expect(result.text).toBe(`${NOTICE}\n${GOLDEN}`)
+    expectItemsIndexText(result, RENDERED)
+  })
+
+  it('counts the notice against the token budget', () => {
+    const withoutNotice = assemble(RENDERED, { tokenBudget: estimateTokens(GOLDEN), faint: true })
+    const withNotice = assemble(RENDERED, { tokenBudget: estimateTokens(GOLDEN), faint: true }, NOTICE)
+
+    expect(withoutNotice.payload.truncated).toBe(false)
+    expect(withNotice.payload.truncated).toBe(true)
+    expect(estimateTokens(withNotice.text)).toBeLessThanOrEqual(estimateTokens(GOLDEN))
+    expectItemsIndexText(withNotice, RENDERED)
+  })
+
+  it('renders nothing when no item is emitted, notice or not', () => {
+    expect(assemble(rendered({}), DEFAULT_RECALL_OUTPUT_POLICY, NOTICE).text).toBe('')
   })
 })
 
