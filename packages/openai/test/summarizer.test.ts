@@ -583,7 +583,6 @@ describe('OpenAISummarizer.extractSalience failures', () => {
   it.each([
     ['unparseable text', 'not json at all'],
     ['fenced prose with no JSON', '```\nI think this should be stored.\n```'],
-    ['prose around a fenced object', 'Here it is:\n```json\n{"store":true}\n```'],
     ['an empty reply', ''],
     ['a JSON array', '[true]'],
     ['an object without a store verdict', '{"category":"noise"}'],

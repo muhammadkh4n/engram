@@ -11,6 +11,7 @@ import type {
   EvidenceItem,
   EvidenceSelection,
 } from '@engram-mem/core'
+import { extractJsonReply } from './json-reply.js'
 
 export interface OpenAISummarizerOptions {
   apiKey: string
@@ -242,24 +243,6 @@ const TRANSCRIPT_DIGEST_PARAMS: Record<
 > = {
   'session-summary': { prompt: SESSION_SUMMARY_SYSTEM_PROMPT, maxTokens: 500, temperature: 0.3 },
   'pre-compact': { prompt: PRE_COMPACT_SYSTEM_PROMPT, maxTokens: 600, temperature: 0.2 },
-}
-
-/**
- * Parses a reply that should be one JSON value. Chat models other than
- * OpenAI's often wrap the object in a ```json (or bare ```) fence despite the
- * instruction, so a fence enclosing the whole reply is unwrapped when the reply
- * itself is not JSON. Backticks inside a JSON string value are left alone.
- * Anything else throws.
- */
-function parseJsonReply(raw: string): unknown {
-  const trimmed = raw.trim()
-  try {
-    return JSON.parse(trimmed)
-  } catch (err) {
-    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/)
-    if (fenced?.[1] === undefined) throw err
-    return JSON.parse(fenced[1])
-  }
 }
 
 /** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
@@ -646,7 +629,7 @@ export class OpenAISummarizer {
 
     let parsed: unknown
     try {
-      parsed = parseJsonReply(raw)
+      parsed = extractJsonReply(raw)
     } catch (err) {
       throw new Error(
         `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
@@ -891,7 +874,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
-      const parsed: unknown = parseJsonReply(raw)
+      const parsed: unknown = extractJsonReply(raw)
 
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         throw new Error('Not a plain object')
@@ -924,7 +907,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
     try {
-      const parsed: unknown = parseJsonReply(raw)
+      const parsed: unknown = extractJsonReply(raw)
 
       if (!Array.isArray(parsed)) {
         return []
@@ -960,34 +943,19 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 const MAX_EXPANSION_TERMS = 5
 
 /**
- * Chat models often wrap the requested JSON array in prose or a ```json
- * fence. The array is the span from the first `[` to the last `]`; anything
- * that does not parse to an array yields no terms.
+ * The reply should be a JSON array of strings; models also wrap it in prose,
+ * a fence, or an object. The first array holding at least one string is used;
+ * a reply with none yields no terms.
  */
 function parseExpansionTerms(raw: string): string[] {
-  const start = raw.indexOf('[')
-  const end = raw.lastIndexOf(']')
-  if (start === -1 || end <= start) return []
-  const whole = tryParseArray(raw.slice(start, end + 1))
-  if (whole) return cleanExpansionTerms(whole)
-  // Prose around the array can carry its own brackets ("Variants [JSON]: [...]",
-  // "[...] (see [1])"), which breaks the outermost span. Try every bracketed
-  // span in order and take the first array holding at least one string.
-  for (let s = start; s !== -1; s = raw.indexOf('[', s + 1)) {
-    for (let e = raw.indexOf(']', s + 1); e !== -1; e = raw.indexOf(']', e + 1)) {
-      const arr = tryParseArray(raw.slice(s, e + 1))
-      if (arr && arr.some((item) => typeof item === 'string')) return cleanExpansionTerms(arr)
-    }
-  }
-  return []
-}
-
-function tryParseArray(text: string): unknown[] | null {
   try {
-    const parsed: unknown = JSON.parse(text)
-    return Array.isArray(parsed) ? parsed : null
+    const terms = extractJsonReply(
+      raw,
+      (value) => Array.isArray(value) && value.some((item) => typeof item === 'string'),
+    )
+    return cleanExpansionTerms(terms as unknown[])
   } catch {
-    return null
+    return []
   }
 }
 
