@@ -36,26 +36,26 @@
  *   --session-id <string>         Session ID to attach to the memory
  *   --raw                          Skip classifier; store content as-is
  *   --no-dedup                    Skip dedup check [Phase 2]
- *   --classifier-model <name>     Override model (default: gpt-4o-mini)
+ *   --classifier-model <name>     Override model (default: the summarizer's default chat model)
  *   --threshold <0..1>            Classifier confidence threshold (default: env or 0.7)
  *   --dry-run                      Classify and log only; do not write
  *   --verbose                      Emit classifier decision to stderr
  *
- * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY
+ * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY (`--raw --dry-run`
+ * reaches neither a model nor a store and needs none of them)
  * Optional env: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
  *               ENGRAM_SALIENCE_THRESHOLD, ENGRAM_SALIENCE_DISABLED
  */
 
 import { readFileSync } from 'node:fs'
 import { createMemory } from '@engram-mem/core'
-import type { SalienceClassification } from '@engram-mem/core'
+import type { IntelligenceAdapter, Memory } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
+import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
-import { projectForCategory, resolveProject } from './project-detect.js'
-import { findDuplicate, boostDuplicate } from './dedup.js'
+import { resolveProject } from './project-detect.js'
 import { logRejection } from './rejection-log.js'
-import { scrubModelInput } from './scrub-model-input.js'
+import { runCapture } from './capture.js'
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -278,175 +278,121 @@ async function main(): Promise<void> {
     process.exit(0)
   }
 
-  const resolved = await resolveContent(args)
-  if (!resolved) {
+  const content = await resolveContent(args)
+  if (!content) {
     log(args.verbose, 'no content to ingest, exiting')
     process.exit(0)
   }
-  // Every later consumer (classifier model, rejection log, dedup embedding,
-  // rawTurn metadata, verbose log lines) reads this scrubbed copy.
-  const content = await scrubModelInput(resolved, '[engram-ingest]')
 
-  if (content.length < 2) {
-    log(args.verbose, `content too short (${content.length} chars)`)
-    process.exit(0)
-  }
-
-  // --- Project resolution ---
   const detectedProject = resolveProject(args.project, process.cwd())
   log(args.verbose, `project: ${detectedProject ?? '<shared>'} (flag=${args.project})`)
 
-  // --- Classification ---
-  let classification: SalienceClassification
-  if (args.raw) {
-    classification = {
-      store: true,
-      category: 'fact',
-      confidence: 1,
-      distilled: content,
-      reason: 'raw_mode',
-    }
-  } else {
-    const openaiKey = requireEnv('OPENAI_API_KEY')
-    const intelligence = openaiIntelligence({
-      apiKey: openaiKey,
-      ...(args.classifierModel ? { summarizationModel: args.classifierModel } : {}),
-    })
-
-    if (!intelligence.extractSalience) {
-      process.stderr.write('[engram-ingest] intelligence adapter lacks extractSalience\n')
-      process.exit(2)
-    }
-
-    classification = await intelligence.extractSalience(content, {
-      turnRole: args.turn,
-      ...(detectedProject ? { project: detectedProject } : {}),
-    })
-  }
-
-  log(
-    args.verbose,
-    `classifier: store=${classification.store} category=${classification.category} confidence=${classification.confidence.toFixed(2)} reason="${classification.reason}"`,
-  )
-
-  // Preferences and facts about people hold in every project: they are
-  // stored shared even when the turn happened inside a repository.
-  const project = projectForCategory(detectedProject, classification.category)
-
-  // --- Gate ---
-  if (!classification.store || classification.confidence < args.threshold) {
-    // Append to rolling rejection log for audit + prompt tuning.
-    // Skip logging for --raw mode because raw mode always stores, and
-    // for the too-short short-circuit (no useful signal there).
-    if (!args.raw && classification.reason !== 'too_short') {
-      logRejection({
-        timestamp: new Date().toISOString(),
-        cwd: process.cwd(),
-        project: detectedProject,
-        role: args.turn,
-        source: args.source,
-        category: classification.category,
-        confidence: classification.confidence,
-        reason: classification.reason,
-        contentPreview: content.slice(0, 300),
+  // A raw dry run stops before the dedup embedding and the store, so it makes
+  // no model call and needs no key; every other path calls the model.
+  const needsModel = !(args.raw && args.dryRun)
+  const openaiKey = needsModel ? requireEnv('OPENAI_API_KEY') : ''
+  const classifier: IntelligenceAdapter = needsModel
+    ? openaiIntelligence({
+        apiKey: openaiKey,
+        ...(args.classifierModel ? { summarizationModel: args.classifierModel } : {}),
       })
+    : {}
+  if (!args.raw && !classifier.extractSalience) {
+    process.stderr.write('[engram-ingest] intelligence adapter lacks extractSalience\n')
+    process.exit(2)
+  }
+
+  // Supabase and Neo4j are only reached on the paths that need them: the
+  // rejected and dry-run paths connect to neither, the duplicate path skips
+  // the graph.
+  const opened: { storage?: PostgRestStorageAdapter; memory?: Memory } = {}
+
+  const getStorage = async (): Promise<PostgRestStorageAdapter> => {
+    if (!opened.storage) {
+      const storage = new PostgRestStorageAdapter({
+        url: requireEnv('SUPABASE_URL'),
+        key: requireEnv('SUPABASE_KEY'),
+      })
+      await storage.initialize()
+      opened.storage = storage
     }
-    log(
-      args.verbose,
-      `rejected: store=${classification.store} confidence=${classification.confidence.toFixed(2)} threshold=${args.threshold}`,
-    )
-    process.exit(0)
+    return opened.storage
   }
 
-  if (args.dryRun) {
-    log(args.verbose, `[dry-run] would store: "${classification.distilled}"`)
-    process.exit(0)
+  const getMemory = async (): Promise<Memory> => {
+    // A separate storage instance: Memory.dispose() disposes its storage,
+    // which must not pull the dedup instance out from under the pipeline.
+    const ingestStorage = new PostgRestStorageAdapter({
+      url: requireEnv('SUPABASE_URL'),
+      key: requireEnv('SUPABASE_KEY'),
+    })
+    const graph = await tryCreateGraph('[engram-ingest]')
+    const created = createMemory({
+      storage: ingestStorage,
+      intelligence: openaiIntelligence({ apiKey: openaiKey }),
+      // ENGRAM_INGEST_CONTEXTUAL=true → Memory.ingest generates a contextual
+      // preamble via intelligence.contextualizeChunk and uses it to enrich
+      // the embedding. Content stays pristine for FTS.
+      contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
+      ...(graph ? { graph } : {}),
+    })
+    await created.initialize()
+    opened.memory = created
+    return created
   }
-
-  // --- Ingest ---
-  const supabaseUrl = requireEnv('SUPABASE_URL')
-  const supabaseKey = requireEnv('SUPABASE_KEY')
-  const openaiKey = requireEnv('OPENAI_API_KEY')
-
-  const storage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
-  const intelligence = openaiIntelligence({ apiKey: openaiKey })
-
-  // --- Dedup gate ---
-  // Fires BEFORE the graph/memory stack is constructed so we avoid the
-  // cost of initializing Neo4j on the duplicate path.
-  if (!args.noDedup) {
-    await storage.initialize()
-    try {
-      const dup = await findDuplicate(
-        classification.distilled,
-        storage,
-        intelligence,
-        project ? { project } : {},
-      )
-      if (args.verbose && dup.debug) {
-        const d = dup.debug
-        log(
-          args.verbose,
-          `dedup: candidates=${d.candidatesReturned} topSim=${d.topSimilarity.toFixed(3)} topProj=${d.topProject ?? 'null'} rejByThresh=${d.rejectedByThreshold} rejByWindow=${d.rejectedByWindow} rejByProj=${d.rejectedByProject}`,
-        )
-      }
-      if (dup.duplicateId) {
-        await boostDuplicate(storage, dup.duplicateId)
-        log(
-          args.verbose,
-          `deduped: existing=${dup.duplicateId.slice(0, 8)} similarity=${dup.similarity.toFixed(3)}`,
-        )
-        await storage.dispose()
-        return
-      }
-    } finally {
-      // Dispose the shallow storage before constructing the full Memory.
-      // This avoids double-dispose later.
-      await storage.dispose().catch(() => {})
-    }
-  }
-
-  // --- Full Memory construction + ingest ---
-  // Use a fresh storage instance because we disposed the dedup-check one.
-  const ingestStorage = new PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
-  const graph = await tryCreateGraph('[engram-ingest]')
-
-  // The project_id column and metadata.project carry the same value so the
-  // stored tag and anything later derived from the metadata never disagree.
-  const memory = createMemory({
-    storage: ingestStorage,
-    intelligence,
-    // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true → Memory.ingest generates a
-    // contextual preamble via intelligence.contextualizeChunk and uses it
-    // to enrich the embedding (Anthropic-style Contextual Retrieval).
-    // Content stays pristine for FTS. ~$0.0001 per turn with gpt-4o-mini.
-    contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
-    ...(project ? { projectId: project } : {}),
-    ...(graph ? { graph } : {}),
-  })
-  await memory.initialize()
 
   try {
-    await memory.ingest({
-      content: classification.distilled,
-      role: args.turn,
-      sessionId: args.sessionId ?? undefined,
-      metadata: {
-        salienceCategory: classification.category,
-        salienceConfidence: classification.confidence,
-        salienceReason: classification.reason,
-        source: args.source,
-        ...(project ? { project } : {}),
-        rawTurn: content.slice(0, 4000),
+    const outcome = await runCapture(
+      {
+        getMemory,
+        storage: getStorage,
+        intelligence: classifier,
+        threshold: args.threshold,
+        captureModel: args.classifierModel ?? DEFAULT_CHAT_MODEL,
+        logPrefix: '[engram-ingest]',
+        ...(args.verbose ? { log: (line: string) => log(true, line) } : {}),
+        onRejected: (rejected) => {
+          // Raw mode always stores, and a too-short turn carries no signal
+          // worth auditing.
+          if (args.raw || rejected.classification.reason === 'too_short') return
+          logRejection({
+            timestamp: new Date().toISOString(),
+            cwd: process.cwd(),
+            project: rejected.project,
+            role: rejected.role,
+            source: rejected.source,
+            category: rejected.classification.category,
+            confidence: rejected.classification.confidence,
+            reason: rejected.classification.reason,
+            contentPreview: rejected.content.slice(0, 300),
+          })
+        },
       },
-    })
-    // Wait for fire-and-forget graph decomposition to finish before the
-    // process exits. Without this, the CLI can return immediately after
-    // the SQL insert and process.exit() kills the inflight Neo4j write.
-    await memory.flushPendingWrites()
-    log(args.verbose, `stored as ${classification.category} in project=${project ?? '<shared>'}`)
+      {
+        content,
+        role: args.turn,
+        ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+        project: detectedProject,
+        source: args.source,
+        gate: !args.raw,
+        dedup: !args.noDedup,
+        dryRun: args.dryRun,
+      },
+    )
+    // The local mode has no dead-letter file: an unclassifiable turn fails
+    // the run so the hook's log shows it.
+    if (outcome.outcome === 'error') {
+      throw new Error(`capture failed (${outcome.reason ?? 'error'}): ${outcome.message ?? ''}`)
+    }
+    if (opened.memory) {
+      // Wait for fire-and-forget graph decomposition to finish before the
+      // process exits. Without this, the CLI can return immediately after
+      // the SQL insert and process.exit() kills the inflight Neo4j write.
+      await opened.memory.flushPendingWrites()
+    }
   } finally {
-    await memory.dispose()
+    if (opened.memory) await opened.memory.dispose()
+    if (opened.storage) await opened.storage.dispose().catch(() => {})
   }
 }
 

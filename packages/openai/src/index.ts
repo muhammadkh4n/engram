@@ -5,8 +5,8 @@ import type { ChatReasoningMode } from './summarizer.js'
 
 export { OpenAIEmbeddingService } from './embeddings.js'
 export type { OpenAIEmbeddingServiceOptions } from './embeddings.js'
-export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM } from './summarizer.js'
-export type { OpenAISummarizerOptions, ChatReasoningMode } from './summarizer.js'
+export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM, DEFAULT_CHAT_MODEL } from './summarizer.js'
+export type { OpenAISummarizerOptions, ChatReasoningMode, TranscriptDigestKind } from './summarizer.js'
 
 export interface OpenAIIntelligenceOptions {
   apiKey: string
@@ -97,6 +97,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     },
     contextualizeChunk(chunk, ctxOpts) {
       return summarizer.contextualizeChunk(chunk, ctxOpts)
+    },
+    digestTranscript(excerpt, digestOpts) {
+      return summarizer.digestTranscript(excerpt, digestOpts)
     },
   }
 }

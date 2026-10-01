@@ -82,7 +82,7 @@ async function callEverySite(s: OpenAISummarizer): Promise<Array<Record<string, 
   await s.generateHypotheticalDoc('what did Alice say')
   mockChatCreate.mockResolvedValueOnce(chatReply('Alice is speaking.'))
   await s.contextualizeChunk('chunk text', { conversationContext: 'prior turns' })
-  mockChatCreate.mockResolvedValueOnce(chatReply('{"category":"noise"}'))
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"store":false,"category":"none"}'))
   await s.extractSalience('a turn that is long enough to classify for salience', { turnRole: 'user' })
   mockChatCreate.mockResolvedValueOnce(chatReply(SUMMARY_JSON))
   await s.summarize('content', { mode: 'preserve_details', targetTokens: 100 })

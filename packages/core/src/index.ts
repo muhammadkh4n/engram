@@ -49,6 +49,7 @@ export type {
   EvidenceItem,
   EvidenceSelection,
 } from './adapters/intelligence.js'
+export { UnclassifiableReplyError, isUnclassifiableReply } from './adapters/intelligence.js'
 export type {
   GraphPort,
   GraphQueryResult,

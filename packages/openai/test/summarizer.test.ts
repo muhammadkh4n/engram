@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { SummarizeOptions } from '@engram-mem/core'
+import { UnclassifiableReplyError, isUnclassifiableReply } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.
@@ -117,6 +118,32 @@ describe('OpenAISummarizer', () => {
 
       expect(result.text).toBe(payload.text)
       expect(result.topics).toEqual(['a'])
+    })
+
+    it('keeps backticks inside a JSON string value of an unfenced reply', async () => {
+      const payload = {
+        text: 'Use ```ts fences``` for code samples.',
+        topics: ['docs'],
+        entities: [],
+        decisions: [],
+      }
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify(payload)))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.summarize('content', defaultOpts)
+
+      expect(result.text).toBe(payload.text)
+      expect(result.topics).toEqual(['docs'])
+    })
+
+    it('handles JSON wrapped in a bare code fence', async () => {
+      const payload = { text: 'Bare fence.', topics: ['b'], entities: [], decisions: [] }
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(`\`\`\`\n${JSON.stringify(payload)}\n\`\`\``))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+      const result = await summarizer.summarize('content', defaultOpts)
+
+      expect(result.text).toBe('Bare fence.')
     })
 
     it('handles bullet_points mode', async () => {
@@ -391,5 +418,191 @@ describe('OpenAISummarizer', () => {
       expect(await expand('] not [ an array')).toEqual([])
       expect(await expand(null)).toEqual([])
     })
+  })
+
+  describe('digestTranscript()', () => {
+    type Body = {
+      model: string
+      max_tokens: number
+      temperature: number
+      messages: { role: string; content: string }[]
+      reasoning?: unknown
+    }
+    const lastBody = (): Body => mockChatCreate.mock.calls[0]![0] as Body
+
+    it('session-summary sends the session prompt with max_tokens 500 and temperature 0.3', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('Fixing the dedup race\n- chose advisory locks\n'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('User: hi\n\nAssistant: hello', { kind: 'session-summary' })
+
+      const body = lastBody()
+      expect(body.model).toBe('gpt-4o-mini')
+      expect(body.max_tokens).toBe(500)
+      expect(body.temperature).toBe(0.3)
+      expect(body.messages[0]!.role).toBe('system')
+      expect(body.messages[0]!.content).toContain('You summarize Claude Code work sessions.')
+      expect(body.messages[1]).toEqual({ role: 'user', content: 'User: hi\n\nAssistant: hello' })
+      expect(result).toEqual({ memory: 'Fixing the dedup race\n- chose advisory locks', context: '' })
+    })
+
+    it('pre-compact sends the compaction prompt with max_tokens 600 and temperature 0.2', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- a\n\nCONTEXT:\nb'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key', model: 'deepseek/deepseek-v4-flash' })
+
+      await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      const body = lastBody()
+      expect(body.model).toBe('deepseek/deepseek-v4-flash')
+      expect(body.max_tokens).toBe(600)
+      expect(body.temperature).toBe(0.2)
+      expect(body.messages[0]!.content).toContain('You analyze Claude Code conversations before context compaction.')
+      expect(body.messages[0]!.content).toContain('MEMORY:\n<bullet points>\n\nCONTEXT:\n<paragraph>')
+    })
+
+    it('pre-compact splits the MEMORY and CONTEXT sections', async () => {
+      mockChatCreate.mockResolvedValueOnce(
+        makeChatResponse('MEMORY:\n- Chose pgvector HNSW\n- MK prefers bullets\n\nCONTEXT:\nMigrating the recall index.\n'),
+      )
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({
+        memory: '- Chose pgvector HNSW\n- MK prefers bullets',
+        context: 'Migrating the recall index.',
+      })
+    })
+
+    it('pre-compact without a CONTEXT section gives an empty context', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- only memory here'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({ memory: '- only memory here', context: '' })
+    })
+
+    it('pre-compact without markers keeps the whole reply as memory', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('  - unlabelled bullet\n'))
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      const result = await summarizer.digestTranscript('transcript', { kind: 'pre-compact' })
+
+      expect(result).toEqual({ memory: '- unlabelled bullet', context: '' })
+    })
+
+    it.each(['session-summary', 'pre-compact'] as const)('an empty reply gives an empty memory (%s)', async (kind) => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(''))
+      mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: null } }] })
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      expect(await summarizer.digestTranscript('transcript', { kind })).toEqual({ memory: '', context: '' })
+      expect(await summarizer.digestTranscript('transcript', { kind })).toEqual({ memory: '', context: '' })
+    })
+
+    it.each(['session-summary', 'pre-compact'] as const)(
+      'carries the reasoning-off field when reasoning is off (%s)',
+      async (kind) => {
+        mockChatCreate.mockResolvedValueOnce(makeChatResponse('MEMORY:\n- x'))
+        const summarizer = new OpenAISummarizer({ apiKey: 'test-key', reasoning: 'off' })
+
+        await summarizer.digestTranscript('transcript', { kind })
+
+        expect(lastBody().reasoning).toEqual({ effort: 'none' })
+      },
+    )
+  })
+})
+
+describe('OpenAISummarizer.extractSalience failures', () => {
+  const TURN = 'We moved the ingest worker to a systemd timer and removed the pm2 cron entry.'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  })
+
+  it('returns a real verdict from a well-formed reply', async () => {
+    mockChatCreate.mockResolvedValueOnce(
+      makeChatResponse(JSON.stringify({ store: false, category: 'none', confidence: 0.9, distilled: '', reason: 'chit-chat' })),
+    )
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toMatchObject({
+      store: false,
+      confidence: 0.9,
+      reason: 'chit-chat',
+    })
+  })
+
+  it('rethrows a chat API error instead of returning a rejection', async () => {
+    mockChatCreate.mockRejectedValueOnce(new Error('429 rate limited'))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow('429 rate limited')
+  })
+
+  it.each([
+    ['a ```json fence', (j: string) => `\n  \`\`\`json\n${j}\n\`\`\`  \n`],
+    ['a bare fence', (j: string) => ` \`\`\`\n${j}\n\`\`\`\n`],
+  ])('parses a reply wrapped in %s like the unfenced reply', async (_label, wrap) => {
+    const reply = JSON.stringify({
+      store: true,
+      category: 'decision',
+      confidence: 0.8,
+      distilled: 'The ingest worker runs from a systemd timer, not pm2 cron.',
+      reason: 'infra decision',
+    })
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const plain = await s.extractSalience(TURN, { turnRole: 'user' })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(wrap(reply)))
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toEqual(plain)
+    expect(plain).toMatchObject({ store: true, category: 'decision', confidence: 0.8 })
+  })
+
+  it('keeps backticks inside a JSON string value of an unfenced reply', async () => {
+    const reply = JSON.stringify({
+      store: true,
+      category: 'preference',
+      confidence: 0.85,
+      distilled: 'Wrap shell snippets in ```bash fences``` in answers.',
+      reason: 'formatting preference',
+    })
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toMatchObject({
+      store: true,
+      category: 'preference',
+      distilled: 'Wrap shell snippets in ```bash fences``` in answers.',
+    })
+  })
+
+  it.each([
+    ['unparseable text', 'not json at all'],
+    ['fenced prose with no JSON', '```\nI think this should be stored.\n```'],
+    ['an empty reply', ''],
+    ['a JSON array', '[true]'],
+    ['an object without a store verdict', '{"category":"noise"}'],
+  ])('throws a parse error on %s', async (_label, reply) => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow(/extractSalience: .*classifier output/)
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toBeInstanceOf(UnclassifiableReplyError)
+  })
+
+  it('keeps a chat API error out of the unreadable-reply class', async () => {
+    mockChatCreate.mockRejectedValueOnce(new Error('503 upstream unavailable'))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    const err = await s.extractSalience(TURN, { turnRole: 'user' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(Error)
+    expect(isUnclassifiableReply(err)).toBe(false)
   })
 })

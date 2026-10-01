@@ -43,6 +43,7 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_RERANK_LOCAL=true` — swap the LLM-pointwise reranker for a local cross-encoder via ONNX Runtime (zero per-query cost). Requires `@engram-mem/rerank-onnx` to be installed.
 - `ENGRAM_RERANK_LOCAL_MODEL` — pick the model. Default: `Alibaba-NLP/gte-reranker-modernbert-base` (rerank p50 3.6 s, RSS 1.66 GB on a CPU host). `mixedbread-ai/mxbai-rerank-large-v1` is the previous default (about 4× slower rerank, RSS 2.84 GB); `mixedbread-ai/mxbai-rerank-base-v1` and `mixedbread-ai/mxbai-rerank-xsmall-v1` are smaller mxbai variants. Rerank scores are not comparable across models. Upgrading with this variable unset switches the model and downloads its weights on first use; set it to `mixedbread-ai/mxbai-rerank-large-v1` to keep the previous one.
 - `ENGRAM_INGEST_CONTEXTUAL=true` — Anthropic-style Contextual Retrieval. Memory.ingest will call `intelligence.contextualizeChunk` to generate a 50-100 token preamble per turn and use it to enrich the embedding (content stays pristine so FTS keeps lexical precision).
+- `ENGRAM_SALIENCE_THRESHOLD` — server env for the capture route and the local ingest CLIs: the salience classifier's confidence cut, `0`..`1`, default `0.7`. A capture the classifier marks not worth storing, or scores below it, is rejected.
 - `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
 **Optional (enables Neo4j neural graph):**
@@ -103,6 +104,45 @@ Store a message into memory.
 **Role must be:** `"user"`, `"assistant"`, or `"system"`
 
 **When Claude uses it:** After important user statements, decisions, preferences, or assistant responses worth remembering.
+
+Agents call `memory_ingest` as shown; its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
+
+## Capture route (HTTP server)
+
+`POST /capture` on the HTTP server (`engram-mcp-http`) runs the capture pipeline: secret scrub, salience classification, dedup and storage, with the server's model configuration. It is for hooks and ingest CLIs, not agents, and sits behind the same `Authorization: Bearer $BEARER_TOKEN` check as `/mcp`. One request per capture; no MCP handshake.
+
+**Body** (JSON object; unknown fields are refused with 400):
+
+| Field | Type | Notes |
+|---|---|---|
+| `content` | string, required | Non-empty, at most 100,000 characters |
+| `source` | string, required | Lowercase slug naming the caller, e.g. `git-commit` |
+| `role` | `"user"` \| `"assistant"` \| `"system"` | Required unless `derive` is set |
+| `session_id` | string | At most 256 characters |
+| `project_id` | string | Project tag; omitted or `null` means shared; any other non-string is a 400 |
+| `gate` | boolean, default `true` | Run the salience classifier; `false` stores without it |
+| `dedup` | boolean, default `true` | Skip near-duplicates of recent memories |
+| `derive` | `"session-summary"` \| `"pre-compact"` | `content` is a transcript; the server digests it first |
+| `dry_run` | boolean, default `false` | Classify but store nothing |
+| `key` | string | Idempotency key, at most 128 characters; a repeat within the same `session_id` returns `replayed` |
+| `meta` | object of strings | Provenance only. Allowed keys: `transcriptPath`, `trigger`, `cwd`, `capturedAt`; any other key is refused with 400 naming it. Values at most 512 characters |
+
+**Response:** always a JSON outcome:
+
+```json
+{ "outcome": "stored", "model": "…", "category": "decision", "confidence": 0.86, "project": "engram" }
+```
+
+- `outcome`: `stored`, `rejected` (with `reason`), `deduped` (with `duplicateOf`, `similarity`), `replayed`, `dry_run` or `error`.
+- A `key` is only checked against captures in the same session. A capture with a `key` and no `session_id` is stored under session `default` and is not idempotent: only the dedup check can catch a repeat.
+- `pre-compact` derives also return `context`, the text to re-inject, whenever the model produced one, whether the memory was stored, deduped or rejected as `empty_digest`. A `replayed` retry returns no `context`: the digest is not re-run.
+- Classifier failures come in two classes:
+  - The chat call failed (network, 429, 5xx): `500`, `retryable: true`. Send the capture again later. The response message is the generic `capture failed; retry later`; the cause goes to the server log only.
+  - The model answered, but its reply could not be read as a verdict (not JSON, or no boolean `store`). The server asks once more. If the second reply is unreadable too, it answers `422` with `outcome: "error"`, `reason: "unclassifiable"`, `retryable: false`. Resending the same content will not help, so a client dead-letters it instead of retrying.
+- Status: 200 for every other pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 422 unclassifiable (`retryable: false`); 500 any other failure after validation, or a request body that could not be read (`retryable: true`, generic message, detail in the server log); 405 for methods other than POST.
+- The local `engram-ingest` CLI exits 1 on an unclassifiable turn, as on any other failure. It needs `OPENAI_API_KEY` whenever it calls a model or the store; `--raw --dry-run` calls neither and needs no credentials.
+
+Today only `engram-ingest` (git post-commit and the other local ingest callers) runs this pipeline in-process through `runCapture`. The pre-compact and session-summary hooks still use their own scripts; they switch to this route in a client follow-up.
 
 ### memory_forget
 

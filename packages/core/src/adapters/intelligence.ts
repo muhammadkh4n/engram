@@ -138,6 +138,12 @@ export interface IntelligenceAdapter {
    *
    * Implementations MUST default to rejection. The caller only stores
    * when both `store === true` and `confidence >= threshold` (typically 0.7).
+   *
+   * Returns `store: false` only for a real verdict from the classifier. When
+   * no verdict was reached the promise rejects, so the caller never drops the
+   * turn as a rejection. A failed model call rejects with its own error (worth
+   * retrying later); a reply that cannot be read as a verdict rejects with
+   * UnclassifiableReplyError.
    */
   extractSalience?(
     content: string,
@@ -197,4 +203,41 @@ export interface IntelligenceAdapter {
     evidence: ReadonlyArray<EvidenceItem>,
     opts: { mode: 'temporal' | 'aggregation' },
   ): Promise<EvidenceSelection>
+  /**
+   * Digest a conversation transcript excerpt into storable memory.
+   *
+   * - `session-summary`: a bullet summary of a finished session (decisions,
+   *   solved problems, preferences, facts, next steps). `context` is always
+   *   the empty string for this kind.
+   * - `pre-compact`: `memory` holds the long-term bullet points; `context`
+   *   holds a short paragraph for re-injection after context compaction
+   *   (empty when the model produced none).
+   *
+   * An empty `memory` means the model returned nothing usable; callers
+   * should store nothing.
+   */
+  digestTranscript?(
+    excerpt: string,
+    opts: { kind: 'session-summary' | 'pre-compact' },
+  ): Promise<{ memory: string; context: string }>
+}
+
+/**
+ * The classifier answered, but its reply cannot be read as a verdict (not
+ * JSON, or no boolean `store`). Distinct from a failed model call: resending
+ * the same turn later does not make an unreadable reply readable.
+ */
+export class UnclassifiableReplyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UnclassifiableReplyError'
+  }
+}
+
+/**
+ * Matched by name as well as by class, so the check holds when the adapter
+ * and the caller load separate copies of this package.
+ */
+export function isUnclassifiableReply(err: unknown): err is UnclassifiableReplyError {
+  return err instanceof UnclassifiableReplyError || (err instanceof Error && err.name === 'UnclassifiableReplyError')
 }

@@ -19,10 +19,11 @@ import {
 import { createMemory, startConsolidationWorker, MAX_FORGET_IDS } from '@engram-mem/core'
 import type { StorageAdapter, IntelligenceAdapter, GraphPort, ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
+import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
+import type { CaptureDeps } from './ingest/capture.js'
 
 /**
  * Read the package version once at module load from the colocated package.json.
@@ -212,10 +213,80 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
   return out
 }
 
-let memory: Memory | null = null
+const DEFAULT_SALIENCE_THRESHOLD = 0.7
 
+/**
+ * ENGRAM_SALIENCE_THRESHOLD: the classifier confidence a capture needs to be
+ * stored, a number in 0..1 (default 0.7). Anything else fails startup: a
+ * typo read as NaN would reject every capture, and a value above 1 would
+ * silently store nothing.
+ */
+export function parseSalienceThresholdEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['ENGRAM_SALIENCE_THRESHOLD']?.trim()
+  if (!raw) return DEFAULT_SALIENCE_THRESHOLD
+  const n = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) ? Number(raw) : NaN
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`ENGRAM_SALIENCE_THRESHOLD must be a number between 0 and 1, got "${raw}"`)
+  }
+  return n
+}
+
+/** The chat model every capture classification and digest runs on. */
+export function captureModelFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  return env['ENGRAM_CHAT_MODEL']?.trim() || DEFAULT_CHAT_MODEL
+}
+
+/**
+ * Wrap an async builder so it runs once however many callers arrive before
+ * it settles: every caller awaits the same in-flight promise, so none sees a
+ * half-built result and no second build starts. A rejected build is
+ * forgotten, so the next call builds again.
+ */
+export function sharedInit<T>(build: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null
+  return () => {
+    if (!pending) {
+      pending = build().catch((err: unknown) => {
+        pending = null
+        throw err
+      })
+    }
+    return pending
+  }
+}
+
+interface MemoryStack {
+  memory: Memory
+  /** The stores the memory was built on, shared with the capture route so both use one config. */
+  storage: StorageAdapter
+  intelligence: IntelligenceAdapter
+}
+
+const getMemoryStack = sharedInit(buildMemoryStack)
+
+/**
+ * Capture pipeline deps on the server's own stores and chat model. Builds the
+ * memory stack on first use; the pipeline gets getMemory itself, so it is the
+ * same instance agents' memory_ingest writes through.
+ */
+export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
+  const stack = await getMemoryStack()
+  return {
+    getMemory,
+    storage: stack.storage,
+    intelligence: stack.intelligence,
+    threshold: opts.threshold,
+    captureModel: opts.captureModel,
+    logPrefix: '[engram-mcp-http]',
+  }
+}
+
+/** The server's memory, built and initialised on first use. */
 export async function getMemory(): Promise<Memory> {
-  if (memory) return memory
+  return (await getMemoryStack()).memory
+}
+
+async function buildMemoryStack(): Promise<MemoryStack> {
 
   const supabaseUrl = requireEnv('SUPABASE_URL')
   const supabaseKey = requireEnv('SUPABASE_KEY')
@@ -276,7 +347,7 @@ export async function getMemory(): Promise<Memory> {
   // agent via the declarative `project_id` param on memory_recall /
   // memory_ingest. On recall it ranks that project's memories higher and
   // hides none; omitting it means no project preference.
-  memory = createMemory({
+  const memory = createMemory({
     storage,
     intelligence,
     autoConsolidate: true,
@@ -303,7 +374,7 @@ export async function getMemory(): Promise<Memory> {
   process.once('SIGTERM', () => worker.stop())
   process.once('SIGINT', () => worker.stop())
 
-  return memory
+  return { memory, storage, intelligence }
 }
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.

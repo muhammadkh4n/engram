@@ -11,6 +11,8 @@ import type {
   EvidenceItem,
   EvidenceSelection,
 } from '@engram-mem/core'
+import { UnclassifiableReplyError } from '@engram-mem/core'
+import { extractJsonReply } from './json-reply.js'
 
 export interface OpenAISummarizerOptions {
   apiKey: string
@@ -195,6 +197,66 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
   return parts.join('\n')
 }
 
+/** Chat model used when none is configured. */
+export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini'
+
+export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
+
+const SESSION_SUMMARY_SYSTEM_PROMPT = `You summarize Claude Code work sessions. Extract ONLY:
+- Key decisions made
+- Problems solved (with solutions)
+- Architectural choices
+- User preferences expressed
+- Important facts learned
+- Action items / next steps
+
+Skip: file reads, grep output, test runs, routine tool use, small talk.
+Output a concise bullet-point summary (max 300 words). Start with a one-line session title.`
+
+const PRE_COMPACT_SYSTEM_PROMPT = `You analyze Claude Code conversations before context compaction.
+
+Extract TWO outputs:
+
+1. MEMORY (for long-term storage):
+Bullet points of ONLY high-value items:
+- Architectural decisions with rationale
+- User preferences / requirements stated
+- Non-obvious solutions found
+- Important facts learned (credentials, endpoints, configs discovered)
+- Bugs found and their root causes
+- Action items / next steps agreed on
+Skip: routine operations, file reads, test runs, greps, build commands.
+Max 200 words.
+
+2. CONTEXT (for immediate re-injection after compaction):
+A brief paragraph (max 100 words) summarizing what the user is currently working on and what was just decided, so Claude can resume seamlessly.
+
+Format your response EXACTLY as:
+MEMORY:
+<bullet points>
+
+CONTEXT:
+<paragraph>`
+
+const TRANSCRIPT_DIGEST_PARAMS: Record<
+  TranscriptDigestKind,
+  { prompt: string; maxTokens: number; temperature: number }
+> = {
+  'session-summary': { prompt: SESSION_SUMMARY_SYSTEM_PROMPT, maxTokens: 500, temperature: 0.3 },
+  'pre-compact': { prompt: PRE_COMPACT_SYSTEM_PROMPT, maxTokens: 600, temperature: 0.2 },
+}
+
+/** Splits a pre-compact reply on its MEMORY:/CONTEXT: markers. A reply
+ *  without a MEMORY: marker is kept whole as memory. */
+function parsePreCompactDigest(output: string): { memory: string; context: string } {
+  const memoryMatch = output.match(/MEMORY:\s*([\s\S]*?)(?=CONTEXT:|$)/)
+  const contextMatch = output.match(/CONTEXT:\s*([\s\S]*)$/)
+  return {
+    memory: memoryMatch?.[1]?.trim() ?? output.trim(),
+    context: contextMatch?.[1]?.trim() ?? '',
+  }
+}
+
 export class OpenAISummarizer {
   private readonly client: OpenAI
   private readonly model: string
@@ -209,7 +271,7 @@ export class OpenAISummarizer {
 
   constructor(opts: OpenAISummarizerOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
-    this.model = opts.model ?? 'gpt-4o-mini'
+    this.model = opts.model ?? DEFAULT_CHAT_MODEL
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
     this.providerPrefs = opts.providerPrefs
     this.reasoning = opts.reasoning
@@ -289,6 +351,25 @@ export class OpenAISummarizer {
 
     const raw = resp.choices[0]?.message?.content ?? '{}'
     return this.parseSummaryResult(raw, content)
+  }
+
+  async digestTranscript(
+    excerpt: string,
+    opts: { kind: TranscriptDigestKind },
+  ): Promise<{ memory: string; context: string }> {
+    const params = TRANSCRIPT_DIGEST_PARAMS[opts.kind]
+    const resp = await this.chatCreate(`digestTranscript:${opts.kind}`, {
+      model: this.model,
+      messages: [
+        { role: 'system', content: params.prompt },
+        { role: 'user', content: excerpt },
+      ],
+      max_tokens: params.maxTokens,
+      temperature: params.temperature,
+    })
+    const output = resp.choices[0]?.message?.content ?? ''
+    if (opts.kind === 'pre-compact') return parsePreCompactDigest(output)
+    return { memory: output.trim(), context: '' }
   }
 
   async generateHypotheticalDoc(query: string): Promise<string> {
@@ -493,10 +574,10 @@ export class OpenAISummarizer {
   /**
    * Salience classification for the Layer 1 & 2 memory ingestion gate.
    *
-   * Uses gpt-4o-mini with JSON response format. Default-rejects: returns
-   * store=false with low confidence when in doubt. On any API or parse
-   * failure, returns a rejection result rather than throwing so the
-   * caller's ingestion pipeline is not blocked.
+   * Uses the configured chat model with JSON response format. Default-rejects:
+   * the model returns store=false with low confidence when in doubt. A chat
+   * API error or unparseable output throws, so the caller can retry the
+   * capture instead of recording a verdict the model never gave.
    */
   async extractSalience(
     content: string,
@@ -518,6 +599,7 @@ export class OpenAISummarizer {
 
     const userMessage = buildSalienceUserMessage(trimmed, opts)
 
+    let raw: string
     try {
       const resp = await this.chatCreate('extractSalience', {
         model: this.model,
@@ -529,21 +611,14 @@ export class OpenAISummarizer {
         temperature: 0.1,
         response_format: { type: 'json_object' },
       })
-
-      const raw = resp.choices[0]?.message?.content ?? '{}'
-      return this.parseSalience(raw)
+      raw = resp.choices[0]?.message?.content ?? ''
     } catch (err) {
       process.stderr.write(
         `[openai] extractSalience failed: ${err instanceof Error ? err.message : String(err)}\n`,
       )
-      return {
-        store: false,
-        category: 'none',
-        confidence: 0,
-        distilled: '',
-        reason: 'classifier_error',
-      }
+      throw err
     }
+    return this.parseSalience(raw)
   }
 
   private parseSalience(raw: string): SalienceClassification {
@@ -553,36 +628,35 @@ export class OpenAISummarizer {
       'emotional_signal', 'none',
     ])
 
+    let parsed: unknown
     try {
-      const parsed: unknown = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null) {
-        return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
-      }
-      const obj = parsed as Record<string, unknown>
-
-      const store = obj['store'] === true
-      const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
-      const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
-        ? (rawCategory as SalienceCategory)
-        : 'none'
-      const confidence =
-        typeof obj['confidence'] === 'number'
-          ? Math.min(1, Math.max(0, obj['confidence']))
-          : 0
-      const distilled = typeof obj['distilled'] === 'string' ? obj['distilled'].trim() : ''
-      const reason = typeof obj['reason'] === 'string' ? obj['reason'] : ''
-
-      // Guardrail: if the classifier says store but gives no distilled text
-      // or the distilled text is shorter than the minimum useful length,
-      // reject it. Prevents empty writes.
-      if (store && distilled.length < 15) {
-        return { store: false, category, confidence, distilled: '', reason: 'empty_distilled' }
-      }
-
-      return { store, category, confidence, distilled, reason }
-    } catch {
-      return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
+      parsed = extractJsonReply(raw, isSalienceVerdict)
+    } catch (err) {
+      throw new UnclassifiableReplyError(
+        `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
+      )
     }
+    const obj = parsed as Record<string, unknown>
+    const store = obj['store'] === true
+    const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
+    const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
+      ? (rawCategory as SalienceCategory)
+      : 'none'
+    const confidence =
+      typeof obj['confidence'] === 'number'
+        ? Math.min(1, Math.max(0, obj['confidence']))
+        : 0
+    const distilled = typeof obj['distilled'] === 'string' ? obj['distilled'].trim() : ''
+    const reason = typeof obj['reason'] === 'string' ? obj['reason'] : ''
+
+    // Guardrail: if the classifier says store but gives no distilled text
+    // or the distilled text is shorter than the minimum useful length,
+    // reject it. Prevents empty writes.
+    if (store && distilled.length < 15) {
+      return { store: false, category, confidence, distilled: '', reason: 'empty_distilled' }
+    }
+
+    return { store, category, confidence, distilled, reason }
   }
 
   private parseExtractedEntities(raw: string): ExtractedEntity[] {
@@ -794,14 +868,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
     try {
-      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw]
-      const parsed: unknown = JSON.parse(jsonMatch[1] ?? raw)
-
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('Not a plain object')
-      }
-
-      const obj = parsed as Record<string, unknown>
+      const obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
 
       return {
         text: typeof obj['text'] === 'string' ? obj['text'] : originalContent.slice(0, 500),
@@ -828,12 +895,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
 
   private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
     try {
-      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw]
-      const parsed: unknown = JSON.parse(jsonMatch[1] ?? raw)
-
-      if (!Array.isArray(parsed)) {
-        return []
-      }
+      const parsed = extractJsonReply(raw, isCandidateList) as unknown[]
 
       return parsed
         .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
@@ -862,37 +924,35 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
   }
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isSalienceVerdict(value: unknown): boolean {
+  return isPlainObject(value) && typeof value['store'] === 'boolean'
+}
+
+/** A list holding at least one object; `[]` and `[1]` in prose are not candidates. */
+function isCandidateList(value: unknown): boolean {
+  return Array.isArray(value) && value.some(isPlainObject)
+}
+
 const MAX_EXPANSION_TERMS = 5
 
 /**
- * Chat models often wrap the requested JSON array in prose or a ```json
- * fence. The array is the span from the first `[` to the last `]`; anything
- * that does not parse to an array yields no terms.
+ * The reply should be a JSON array of strings; models also wrap it in prose,
+ * a fence, or an object. The first array holding at least one string is used;
+ * a reply with none yields no terms.
  */
 function parseExpansionTerms(raw: string): string[] {
-  const start = raw.indexOf('[')
-  const end = raw.lastIndexOf(']')
-  if (start === -1 || end <= start) return []
-  const whole = tryParseArray(raw.slice(start, end + 1))
-  if (whole) return cleanExpansionTerms(whole)
-  // Prose around the array can carry its own brackets ("Variants [JSON]: [...]",
-  // "[...] (see [1])"), which breaks the outermost span. Try every bracketed
-  // span in order and take the first array holding at least one string.
-  for (let s = start; s !== -1; s = raw.indexOf('[', s + 1)) {
-    for (let e = raw.indexOf(']', s + 1); e !== -1; e = raw.indexOf(']', e + 1)) {
-      const arr = tryParseArray(raw.slice(s, e + 1))
-      if (arr && arr.some((item) => typeof item === 'string')) return cleanExpansionTerms(arr)
-    }
-  }
-  return []
-}
-
-function tryParseArray(text: string): unknown[] | null {
   try {
-    const parsed: unknown = JSON.parse(text)
-    return Array.isArray(parsed) ? parsed : null
+    const terms = extractJsonReply(
+      raw,
+      (value) => Array.isArray(value) && value.some((item) => typeof item === 'string'),
+    )
+    return cleanExpansionTerms(terms as unknown[])
   } catch {
-    return null
+    return []
   }
 }
 
