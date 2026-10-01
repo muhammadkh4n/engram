@@ -21,7 +21,8 @@
   "files": [
     "dist/",
     "README.md",
-    "schema.sql"
+    "schema.sql",
+    "bm25.sql"
   ],
   "publishConfig": {
     "access": "public"

@@ -14,6 +14,16 @@ const TOMBSTONE_PAGE_SIZE = 1000
 
 type TombstoneQuery = ReturnType<ReturnType<PostgrestClient['from']>['select']>
 
+/**
+ * `bm25`: pg_textsearch is installed and `engram_bm25_match` ranks the lexical
+ * leg with BM25. `tsvector`: the function is absent and `engram_text_match`
+ * ranks with `ts_rank_cd`.
+ */
+export type LexicalMode = 'bm25' | 'tsvector'
+
+// PostgREST's code for "function not found in the schema cache".
+const PGRST_FUNCTION_NOT_FOUND = 'PGRST202'
+
 export interface PostgRestAdapterOptions {
   url: string
   key: string
@@ -23,6 +33,7 @@ export interface PostgRestAdapterOptions {
 export class PostgRestStorageAdapter implements StorageAdapter {
   private client: PostgrestClient
   private _isLegacy: boolean = false
+  private _lexicalMode: LexicalMode = 'tsvector'
   private _episodes: PostgRestEpisodeStorage | null = null
   private _digests: PostgRestDigestStorage | null = null
   private _semantic: PostgRestSemanticStorage | null = null
@@ -60,10 +71,16 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         throw new Error(`PostgREST connection failed: ${legacyError.message}`)
       }
       // Legacy mode: memories table absent, use compatibility wrappers.
-      console.log('[engram] legacy schema detected — running in compatibility mode (no memories pool table)')
+      console.error('[engram] legacy schema detected — running in compatibility mode (no memories pool table)')
       this._isLegacy = true
     } else {
       this._isLegacy = false
+      this._lexicalMode = await this.probeLexicalMode()
+      console.error(
+        this._lexicalMode === 'bm25'
+          ? '[engram] lexical ranking: bm25 (pg_textsearch)'
+          : '[engram] lexical ranking: ts_rank_cd (pg_textsearch not installed)',
+      )
     }
 
     this._episodes = new PostgRestEpisodeStorage(this.client, this._isLegacy)
@@ -72,6 +89,26 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     this._procedural = new PostgRestProceduralStorage(this.client)
     this._associations = new PostgRestAssociationStorage(this.client)
     this._consolidationRuns = new PostgRestConsolidationRunStorage(this.client)
+  }
+
+  get lexicalMode(): LexicalMode {
+    return this._lexicalMode
+  }
+
+  /**
+   * Only "function not in the schema cache" means BM25 is not installed. Any
+   * other failure (a missing pg_textsearch index, a permission error) is a
+   * broken install and must surface instead of silently ranking with ts_rank_cd.
+   * An empty term array returns no rows, so the probe does no index work.
+   */
+  private async probeLexicalMode(): Promise<LexicalMode> {
+    const { error } = await this.client.rpc('engram_bm25_match', {
+      p_terms: [],
+      p_match_count: 1,
+    })
+    if (!error) return 'bm25'
+    if (error.code === PGRST_FUNCTION_NOT_FOUND) return 'tsvector'
+    throw new Error(`BM25 lexical ranking probe failed (${error.code || 'no code'}): ${error.message}`)
   }
 
   async dispose(): Promise<void> {
@@ -319,7 +356,8 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     const uniqueTerms = [...new Set(cleaned.filter(t => t.length > 0))]
     if (uniqueTerms.length === 0) return []
 
-    const { data, error } = await this.client.rpc('engram_text_match', {
+    const fn = this._lexicalMode === 'bm25' ? 'engram_bm25_match' : 'engram_text_match'
+    const { data, error } = await this.client.rpc(fn, {
       p_terms: uniqueTerms,
       p_match_count: opts?.limit ?? 30,
       p_session_id: opts?.sessionId ?? null,
