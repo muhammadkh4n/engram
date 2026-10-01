@@ -3,6 +3,7 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { ConsolidateResult } from '../types.js'
 import { salienceGate } from '../ingestion/plasticity.js'
+import { existingNodeLabels, existingRelTypes } from './graph-schema.js'
 
 export interface DreamCycleOptions {
   daysLookback?: number
@@ -58,41 +59,6 @@ function topNByFrequency(freq: Map<string, number>, n: number): string[] {
  * ceiling (we'd hit the cap sooner with bad pricing than we should, never
  * later).
  */
-/**
- * GDS `gds.graph.project` is strict — passing any relationship type or
- * node label that doesn't exist in the database causes the WHOLE
- * projection to fail with `Invalid relationship projection`. The dream
- * cycle was hard-coding the full taxonomy (TEMPORAL, TOPICAL,
- * CONTEXTUAL, DERIVES_FROM, CO_RECALLED, CONTRADICTS, …) but only a
- * subset of those types actually gets written by current ingest code,
- * so Louvain silently never ran on the production graph.
- *
- * Fix: query the live schema first and filter the requested list down
- * to what actually exists. Empty intersection → caller skips the
- * projection entirely (no-op cycle, not a failure).
- */
-async function existingNodeLabels(graph: GraphPort, requested: readonly string[]): Promise<string[]> {
-  try {
-    const result = await graph.runCypher!('CALL db.labels() YIELD label RETURN collect(label) AS labels')
-    const all = (result.records[0]?.get('labels') as string[] | undefined) ?? []
-    return requested.filter((l) => all.includes(l))
-  } catch {
-    // db.labels unavailable (test stub?) — fall back to original list,
-    // GDS will surface the missing-label error as before.
-    return [...requested]
-  }
-}
-
-async function existingRelTypes(graph: GraphPort, requested: readonly string[]): Promise<string[]> {
-  try {
-    const result = await graph.runCypher!('CALL db.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS types')
-    const all = (result.records[0]?.get('types') as string[] | undefined) ?? []
-    return requested.filter((t) => all.includes(t))
-  } catch {
-    return [...requested]
-  }
-}
-
 function estimateLlmCallCost(
   promptChars: number,
   outputChars: number,
@@ -192,6 +158,7 @@ export async function dreamCycle(
   // Operation 1: Community Detection (Louvain via GDS)
   // -----------------------------------------------------------------------
   if (gdsAvailable && graph?.runCypher) {
+    let louvainSucceeded = false
     try {
       // Clear old community assignments
       await graph.runCypherWrite!(`
@@ -245,6 +212,7 @@ export async function dreamCycle(
       `)
       const communityCount = louvainResult.records[0]?.get('communityCount')
       communitiesDetected = typeof communityCount === 'number' ? communityCount : Number(communityCount ?? 0)
+      louvainSucceeded = true
 
       // Drop projection
       try { await graph.runCypher(`CALL gds.graph.drop('memory-graph', false)`) } catch { /* ok */ }
@@ -274,6 +242,11 @@ export async function dreamCycle(
       typeof graph?.getCommunityContext === 'function' &&
       typeof graph?.upsertCommunityNode === 'function'
     ) {
+      // One stamp for the whole run: memberships and Community nodes written
+      // by this run carry it, and the replacement below removes the rest.
+      const runGeneratedAt = new Date().toISOString()
+      let summariesCompleted = false
+      const rewrittenCommunityIds: string[] = []
       try {
         const allCommunities = await graph.getCommunityMembers!({
           minSize: minCommunitySize,
@@ -357,10 +330,11 @@ export async function dreamCycle(
             topTopics,
             topPersons,
             dominantEmotion,
-            generatedAt: new Date().toISOString(),
+            generatedAt: runGeneratedAt,
             projectId: opts?.projectId ?? null,
             memberNodeIds,
           })
+          rewrittenCommunityIds.push(communityNodeId)
 
           await writeCommunityCache(storage, {
             communityId: communityNodeId,
@@ -375,9 +349,62 @@ export async function dreamCycle(
 
           communitySummariesGenerated++
         }
+        summariesCompleted = cappedAt === undefined
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.warn(`[dream-cycle] Community summary generation failed: ${msg}`)
+      }
+
+      // Edges leave the graph only as replaced memberships or with a purged
+      // node; age is never evidence against an edge. Louvain renumbers
+      // communities on every run, so a membership this run did not restamp
+      // points at a dead assignment. Replacement runs only when the summary
+      // loop reached every detected community: a failed Louvain, a thrown
+      // loop, or a loop stopped by the community-count or LLM-cost ceiling is
+      // partial, and replacing then would delete the memberships and
+      // Community nodes of every community the run never reached (typically
+      // the small ones of a paused project). A partial run replaces nothing.
+      //
+      // A capped run still trims the communities it did rewrite: each was
+      // restamped with this run's generatedAt, so its members carrying another
+      // stamp belong to an earlier assignment. Without the trim, a graph whose
+      // community count stays above the cap would never replace, and those
+      // stale memberships would pile up run after run.
+      if (louvainSucceeded && !summariesCompleted && cappedAt !== undefined) {
+        console.warn(
+          `[dream-cycle] Community membership replacement skipped: summary loop stopped at ${cappedAt}` +
+          ` after ${communitySummariesGenerated} communities; previous memberships kept`,
+        )
+        if (rewrittenCommunityIds.length > 0 && typeof graph.trimCommunityMemberships === 'function') {
+          try {
+            const trimmed = await graph.trimCommunityMemberships({
+              generatedAt: runGeneratedAt,
+              communityIds: rewrittenCommunityIds,
+            })
+            console.log(
+              `[dream-cycle] Community trim: memberships=${trimmed.membershipsRemoved}` +
+              ` communities=${rewrittenCommunityIds.length}`,
+            )
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.warn(`[dream-cycle] Community membership trim failed: ${msg}`)
+          }
+        }
+      }
+      if (louvainSucceeded && summariesCompleted && typeof graph.replaceCommunityMemberships === 'function') {
+        try {
+          const removed = await graph.replaceCommunityMemberships({
+            generatedAt: runGeneratedAt,
+            projectId: opts?.projectId ?? null,
+          })
+          console.log(
+            `[dream-cycle] Community replacement: memberships=${removed.membershipsRemoved}` +
+            ` communities=${removed.communitiesRemoved} scope=${opts?.projectId ?? 'all'}`,
+          )
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.warn(`[dream-cycle] Community membership replacement failed: ${msg}`)
+        }
       }
     }
   } else if (graphAvailable) {

@@ -81,6 +81,24 @@ const ALL_CYCLES: ConsolidationCycle[] = ['light', 'deep', 'dream', 'decay']
 
 let _running = false
 
+const HOUR_MS = 60 * 60 * 1000
+/** First retry delay after a failed run; doubles per consecutive failure. */
+const FAILURE_BACKOFF_BASE_MS = HOUR_MS
+/** Finished runs read to count consecutive failures; 2^15 h exceeds any cap. */
+const FAILURE_LOOKBACK = 16
+const BACKOFF_LOG_INTERVAL_MS = HOUR_MS
+const lastBackoffLogAt = new Map<ConsolidationCycle, number>()
+
+/**
+ * Delay before a cycle with `consecutiveFailures` failed runs since its last
+ * completion may be attempted again: 1 h, doubling per failure, capped.
+ */
+export function failureBackoffMs(consecutiveFailures: number, capMs: number): number {
+  if (consecutiveFailures <= 0) return 0
+  const exponent = Math.min(consecutiveFailures - 1, FAILURE_LOOKBACK)
+  return Math.min(FAILURE_BACKOFF_BASE_MS * 2 ** exponent, capMs)
+}
+
 /**
  * Run due consolidation cycles once. Called from Memory.initialize().
  * Logs results to consolidation_runs table when available.
@@ -98,14 +116,24 @@ export async function runAutoConsolidation(
   const enabledCycles = new Set<ConsolidationCycle>(opts?.cycles ?? ALL_CYCLES)
   const results: ConsolidateResult[] = []
   const tracker = storage.consolidationRuns
+  // Light and deep sleep have no time interval, so a failing one is retried
+  // hourly rather than backed off for longer.
+  const backoffCapMs: Record<ConsolidationCycle, number> = {
+    light: FAILURE_BACKOFF_BASE_MS,
+    deep: FAILURE_BACKOFF_BASE_MS,
+    dream: config.dreamCycleIntervalHours * HOUR_MS,
+    decay: config.decayIntervalDays * 24 * HOUR_MS,
+  }
+  const eligible = async (cycle: ConsolidationCycle): Promise<boolean> =>
+    enabledCycles.has(cycle) && !(await isBackingOff(cycle, tracker, backoffCapMs[cycle]))
 
   try {
-    if (enabledCycles.has('light') && await isLightSleepDue(storage, config.lightSleepThreshold)) {
+    if (await eligible('light') && await isLightSleepDue(storage, config.lightSleepThreshold)) {
       results.push(await runTracked('light', tracker, () =>
         lightSleep(storage, intelligence, undefined, graph)))
     }
 
-    if (enabledCycles.has('deep') && await isDeepSleepDue(
+    if (await eligible('deep') && await isDeepSleepDue(
       storage,
       tracker,
       config.deepSleepThreshold,
@@ -126,7 +154,7 @@ export async function runAutoConsolidation(
       }))
     }
 
-    if (enabledCycles.has('dream') && await isDreamCycleDue(
+    if (await eligible('dream') && await isDreamCycleDue(
       storage,
       tracker,
       config.dreamCycleIntervalHours,
@@ -145,7 +173,7 @@ export async function runAutoConsolidation(
       }))
     }
 
-    if (enabledCycles.has('decay') && await isDecayDue(storage, tracker, config.decayIntervalDays)) {
+    if (await eligible('decay') && await isDecayDue(storage, tracker, config.decayIntervalDays)) {
       results.push(await runTracked('decay', tracker, () =>
         decayPass(storage, undefined, graph)))
     }
@@ -232,6 +260,48 @@ async function runTracked(
     console.warn(`[engram] auto-consolidation: ${cycle} failed in ${durationMs}ms:`, (err as Error).message)
     return { cycle }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Failure backoff — a cycle whose last finished run failed waits before the
+// next attempt, instead of re-running (and re-paying its LLM calls) on every
+// worker tick. The completion-based due checks never see failed runs.
+// ---------------------------------------------------------------------------
+
+async function isBackingOff(
+  cycle: ConsolidationCycle,
+  tracker: StorageAdapter['consolidationRuns'],
+  capMs: number,
+): Promise<boolean> {
+  if (!tracker?.getRecentFinished) return false
+  let runs: Awaited<ReturnType<NonNullable<typeof tracker.getRecentFinished>>>
+  try {
+    runs = await tracker.getRecentFinished(cycle, FAILURE_LOOKBACK)
+  } catch {
+    return false
+  }
+  let failures = 0
+  for (const run of runs) {
+    if (run.status !== 'failed') break
+    failures++
+  }
+  if (failures === 0) return false
+
+  const last = runs[0]!
+  const failedAt = (last.completedAt ?? last.startedAt).getTime()
+  const retryAt = failedAt + failureBackoffMs(failures, capMs)
+  const now = Date.now()
+  if (now >= retryAt) return false
+
+  const loggedAt = lastBackoffLogAt.get(cycle)
+  if (loggedAt === undefined || now - loggedAt >= BACKOFF_LOG_INTERVAL_MS) {
+    lastBackoffLogAt.set(cycle, now)
+    console.info(
+      `[engram] auto-consolidation: ${cycle} skipped, backing off after ${failures} consecutive ` +
+        `failure(s) until ${new Date(retryAt).toISOString()}`,
+    )
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------

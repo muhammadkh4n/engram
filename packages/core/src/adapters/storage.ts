@@ -16,10 +16,25 @@ import type {
   ConsolidateResult,
 } from '../types.js'
 
+/**
+ * Options for id lookups (`getById`, `getByIds`, `episodes.getByIds`).
+ *
+ * By default a tombstoned episode, semantic or procedural row (`forgotten_at`
+ * set) and a superseded semantic row (`superseded_by` set) are not returned:
+ * ids reach these lookups from graph activation, association walks and BM25
+ * rescue, none of which knows whether the row is still live.
+ * `includeInactive: true` returns them, for callers that act on tombstones
+ * themselves. Digests carry neither column and are always returned.
+ */
+export interface LookupOptions {
+  includeInactive?: boolean
+}
+
 export interface EpisodeStorage {
   insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
-  getByIds(ids: string[]): Promise<Episode[]>
+  /** See `LookupOptions`: tombstoned episodes are skipped unless `includeInactive`. */
+  getByIds(ids: string[], opts?: LookupOptions): Promise<Episode[]>
   getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]>
   /**
    * Id of one episode in the session created at or after `since` whose
@@ -60,7 +75,22 @@ export interface SemanticStorage {
     memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>
   ): Promise<SemanticMemory>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]>
+  /**
+   * The `limit` live (not forgotten, not superseded), embedded memories
+   * nearest to `embedding`, with `similarity` = cosine similarity, sorted
+   * descending. Unlike `search`, whose hybrid scores are fused ranks, the
+   * scores here are comparable to a fixed cosine threshold. PostgREST items
+   * carry only the recall-row fields (no topic, sources or embedding).
+   */
+  findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]>
   getUnaccessed(days: number): Promise<SemanticMemory[]>
+  /**
+   * Ids of every live (not tombstoned, not superseded) semantic memory above
+   * the confidence floor and not accessed within `days`: the rows the
+   * gradient decay pass may lower. Must return every qualifying row, not a
+   * server-capped first page. Falls back to getUnaccessed when not implemented.
+   */
+  listDecayCandidateIds?(days: number): Promise<string[]>
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
   markSuperseded(id: string, supersededBy: string): Promise<void>
   /**
@@ -93,6 +123,15 @@ export interface ProceduralStorage {
   ): Promise<ProceduralMemory>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
   searchByTrigger(activity: string, opts?: SearchOptions): Promise<SearchResult<ProceduralMemory>[]>
+  /**
+   * The `limit` live (not forgotten), embedded memories nearest to
+   * `embedding`, with `similarity` = cosine similarity, sorted descending.
+   * Unlike `search`, whose hybrid scores are fused ranks, the scores here are
+   * comparable to a fixed cosine threshold. PostgREST items carry only the
+   * recall-row fields (procedure, confidence, timestamps; no category,
+   * trigger, source episodes or embedding).
+   */
+  findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]>
   recordAccess(id: string): Promise<void>
   /**
    * Tombstone the given memories (sets forgotten_at). Excluded from recall,
@@ -120,7 +159,6 @@ export interface AssociationStorage {
     targetId: string,
     targetType: MemoryType
   ): Promise<void>
-  pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number>
   discoverTopicalEdges(opts: {
     daysLookback: number
     maxNew: number
@@ -140,6 +178,13 @@ export interface ConsolidationRunStorage {
   getLastRun(cycle: 'light' | 'deep' | 'dream' | 'decay'): Promise<ConsolidationRun | null>
   /** Get recent runs across all cycles. */
   getRecent(limit?: number): Promise<ConsolidationRun[]>
+  /**
+   * The newest finished (completed or failed) runs of one cycle, newest
+   * first. The auto-consolidation worker counts the consecutive failures at
+   * the head of this list to back a failing cycle off; without it a failing
+   * cycle is retried on every worker tick.
+   */
+  getRecentFinished?(cycle: 'light' | 'deep' | 'dream' | 'decay', limit: number): Promise<ConsolidationRun[]>
 }
 
 export interface StorageAdapter {
@@ -165,8 +210,10 @@ export interface StorageAdapter {
   semantic: SemanticStorage
   procedural: ProceduralStorage
   associations: AssociationStorage
-  getById(id: string, type: MemoryType): Promise<TypedMemory | null>
-  getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]>
+  /** See `LookupOptions`: tombstoned and superseded rows are skipped unless `includeInactive`. */
+  getById(id: string, type: MemoryType, opts?: LookupOptions): Promise<TypedMemory | null>
+  /** See `LookupOptions`: tombstoned and superseded rows are skipped unless `includeInactive`. */
+  getByIds(ids: Array<{ id: string; type: MemoryType }>, opts?: LookupOptions): Promise<TypedMemory[]>
   saveSensorySnapshot(sessionId: string, snapshot: SensorySnapshot): Promise<void>
   loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null>
   /** Optional consolidation run tracking. When present, auto-consolidation logs results. */

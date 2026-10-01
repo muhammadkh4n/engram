@@ -7,8 +7,11 @@ import { PostgRestEpisodeStorage } from '../src/episodes.js'
 // order of an `in` filter, so the adapter must restore it.
 function batchClient() {
   const inCalls: string[][] = []
+  const isCalls: Array<Array<[string, unknown]>> = []
   const from = vi.fn(() => {
     let ids: string[] = []
+    const filters: Array<[string, unknown]> = []
+    isCalls.push(filters)
     const chain: Record<string, unknown> = {}
     chain['select'] = vi.fn(() => chain)
     chain['in'] = vi.fn((_column: string, values: string[]) => {
@@ -16,11 +19,15 @@ function batchClient() {
       inCalls.push(values)
       return chain
     })
+    chain['is'] = vi.fn((column: string, value: unknown) => {
+      filters.push([column, value])
+      return chain
+    })
     chain['then'] = (resolve: (v: unknown) => void) =>
       Promise.resolve({ data: [...ids].reverse().map(episodeRow), error: null }).then(resolve)
     return chain
   })
-  return { from, rpc: vi.fn(), inCalls }
+  return { from, rpc: vi.fn(), inCalls, isCalls }
 }
 
 function uuid(i: number): string {
@@ -64,6 +71,25 @@ describe('getByIds batches long id lists', () => {
     expect(client.inCalls.map((c) => c.length)).toEqual([50, 50, 20])
     expect(client.inCalls.flat()).toEqual(ids)
     expect(result.map((m) => m.data.id)).toEqual(ids)
+    expect(client.isCalls).toEqual([
+      [['forgotten_at', null]],
+      [['forgotten_at', null]],
+      [['forgotten_at', null]],
+    ])
+  })
+
+  it('drops the tombstone filter from every batch when inactive rows are asked for', async () => {
+    const client = batchClient()
+    const adapter = buildAdapter(client)
+    const ids = Array.from({ length: 60 }, (_, i) => uuid(i))
+
+    await adapter.getByIds(
+      ids.map((id) => ({ id, type: 'episode' as const })),
+      { includeInactive: true },
+    )
+
+    expect(client.inCalls.map((c) => c.length)).toEqual([50, 10])
+    expect(client.isCalls).toEqual([[], []])
   })
 
   it('keeps the input order for a list that fits one request', async () => {

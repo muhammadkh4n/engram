@@ -114,61 +114,19 @@ describe('decayPass', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Calls pruneWeak on associations
+  // Deletes no association edges
   // -------------------------------------------------------------------------
 
-  describe('association pruneWeak', () => {
-    it('calls storage.associations.pruneWeak', async () => {
+  describe('association edges', () => {
+    it('never prunes SQL association edges', async () => {
       const storage = makeMockStorage()
-
-      await decayPass(storage)
-
-      expect(storage.associations.pruneWeak).toHaveBeenCalledOnce()
-    })
-
-    it('calls pruneWeak with maxStrength 0.05 by default', async () => {
-      const storage = makeMockStorage()
-
-      await decayPass(storage)
-
-      const [opts] = vi.mocked(storage.associations.pruneWeak).mock.calls[0]
-      expect(opts.maxStrength).toBe(0.05)
-    })
-
-    it('calls pruneWeak with olderThanDays 90 by default', async () => {
-      const storage = makeMockStorage()
-
-      await decayPass(storage)
-
-      const [opts] = vi.mocked(storage.associations.pruneWeak).mock.calls[0]
-      expect(opts.olderThanDays).toBe(90)
-    })
-
-    it('uses custom edgePruneThreshold when provided', async () => {
-      const storage = makeMockStorage()
-
-      await decayPass(storage, { edgePruneThreshold: 0.1 })
-
-      const [opts] = vi.mocked(storage.associations.pruneWeak).mock.calls[0]
-      expect(opts.maxStrength).toBe(0.1)
-    })
-
-    it('uses custom edgePruneDays when provided', async () => {
-      const storage = makeMockStorage()
-
-      await decayPass(storage, { edgePruneDays: 60 })
-
-      const [opts] = vi.mocked(storage.associations.pruneWeak).mock.calls[0]
-      expect(opts.olderThanDays).toBe(60)
-    })
-
-    it('returns edgesPruned count from pruneWeak result', async () => {
-      const storage = makeMockStorage()
-      vi.mocked(storage.associations.pruneWeak).mockResolvedValue(12)
+      const pruneWeak = vi.fn(async () => 3)
+      Object.assign(storage.associations, { pruneWeak })
 
       const result = await decayPass(storage)
 
-      expect(result.edgesPruned).toBe(12)
+      expect(pruneWeak).not.toHaveBeenCalled()
+      expect(result).not.toHaveProperty('edgesPruned')
     })
   })
 
@@ -183,17 +141,15 @@ describe('decayPass', () => {
       expect(result.cycle).toBe('decay')
     })
 
-    it('aggregates all three counts correctly', async () => {
+    it('aggregates both decay counts correctly', async () => {
       const storage = makeMockStorage()
       vi.mocked(storage.semantic.batchDecay).mockResolvedValue(10)
       vi.mocked(storage.procedural.batchDecay).mockResolvedValue(5)
-      vi.mocked(storage.associations.pruneWeak).mockResolvedValue(8)
 
       const result = await decayPass(storage)
 
       expect(result.semanticDecayed).toBe(10)
       expect(result.proceduralDecayed).toBe(5)
-      expect(result.edgesPruned).toBe(8)
     })
 
     it('returns all expected fields', async () => {
@@ -202,17 +158,15 @@ describe('decayPass', () => {
       expect(result).toHaveProperty('cycle')
       expect(result).toHaveProperty('semanticDecayed')
       expect(result).toHaveProperty('proceduralDecayed')
-      expect(result).toHaveProperty('edgesPruned')
     })
 
-    it('all three storage operations are always called', async () => {
+    it('both decay operations are always called', async () => {
       const storage = makeMockStorage()
 
       await decayPass(storage)
 
       expect(storage.semantic.batchDecay).toHaveBeenCalledOnce()
       expect(storage.procedural.batchDecay).toHaveBeenCalledOnce()
-      expect(storage.associations.pruneWeak).toHaveBeenCalledOnce()
     })
   })
 })

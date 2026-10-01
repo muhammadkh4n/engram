@@ -1,5 +1,5 @@
 import type { GraphPort } from '../adapters/graph.js'
-import type { RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup, SynthesisBlock, SynthesizeOpts } from '../types.js'
+import type { MemoryType, RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup, SynthesisBlock, SynthesizeOpts } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
@@ -21,6 +21,10 @@ import { resolveEventDate, isoDate } from '../utils/event-date.js'
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// When one id exists in several tiers, pattern completion keeps the first
+// tier in this order.
+const PATTERN_TYPE_PRECEDENCE: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
 
 function getMemoryContent(typed: TypedMemory): string {
   switch (typed.type) {
@@ -592,15 +596,27 @@ export async function recall(
           .slice(0, strategy.maxResults)
           .map(([id]) => id)
 
-        const patternMemories: RetrievedMemory[] = []
-        for (const memoryId of sortedIds) {
-          const activation = mergedActivation.get(memoryId) ?? 0
-          if (activation < 0.01) continue
+        // A graph node id carries no tier, so look every id up in all four
+        // tables in one call. The lookup skips tombstoned and superseded rows,
+        // so a node whose row was forgotten simply resolves to nothing.
+        const hydrateIds = sortedIds.filter((id) => (mergedActivation.get(id) ?? 0) >= 0.01)
+        const rows = hydrateIds.length > 0
+          ? await storage.getByIds(
+              hydrateIds.flatMap((id) => PATTERN_TYPE_PRECEDENCE.map((type) => ({ id, type }))),
+            )
+          : []
+        const rowById = new Map<string, TypedMemory>()
+        for (const row of rows) {
+          const current = rowById.get(row.data.id)
+          if (!current || PATTERN_TYPE_PRECEDENCE.indexOf(row.type) < PATTERN_TYPE_PRECEDENCE.indexOf(current.type)) {
+            rowById.set(row.data.id, row)
+          }
+        }
 
-          const typed = await storage.getById(memoryId, 'episode')
-            ?? await storage.getById(memoryId, 'digest')
-            ?? await storage.getById(memoryId, 'semantic')
-            ?? await storage.getById(memoryId, 'procedural')
+        const patternMemories: RetrievedMemory[] = []
+        for (const memoryId of hydrateIds) {
+          const activation = mergedActivation.get(memoryId) ?? 0
+          const typed = rowById.get(memoryId)
           if (!typed) continue
 
           patternMemories.push({

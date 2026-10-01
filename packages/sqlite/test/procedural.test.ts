@@ -222,6 +222,21 @@ describe('SqliteProceduralStorage', () => {
     expect(row.confidence).toBeCloseTo(0.05, 2)
   })
 
+  it('batchDecay keeps a tombstoned memory\'s confidence', async () => {
+    const forgotten = await store.insert({ ...BASE_MEMORY, confidence: 0.8 })
+    const live = await store.insert({ ...BASE_MEMORY, trigger: 'When reviewing a pull request', confidence: 0.8 })
+    db.prepare(`UPDATE procedural SET last_accessed = julianday('now') - 60`).run()
+    await store.markForgotten([forgotten.id])
+
+    const decayed = await store.batchDecay({ daysThreshold: 30, decayRate: 0.1 })
+
+    const confidenceOf = (id: string) =>
+      (db.prepare('SELECT confidence FROM procedural WHERE id = ?').get(id) as { confidence: number }).confidence
+    expect(decayed).toBe(1)
+    expect(confidenceOf(forgotten.id)).toBeCloseTo(0.8, 5)
+    expect(confidenceOf(live.id)).toBeCloseTo(0.7, 5)
+  })
+
   it('batchDecay skips recently accessed memories', async () => {
     const mem = await store.insert({
       ...BASE_MEMORY,
@@ -254,5 +269,23 @@ describe('SqliteProceduralStorage', () => {
 
     const decayed = await store.batchDecay({ daysThreshold: 0, decayRate: 0.1 })
     expect(decayed).toBeGreaterThanOrEqual(1)
+  })
+
+  it('findNearest returns live rows by exact cosine, skipping forgotten ones', async () => {
+    const insertWith = (procedure: string, embedding: number[] | null) =>
+      store.insert({ ...BASE_MEMORY, procedure, embedding })
+    const exact = await insertWith('exact', [1, 0, 0])
+    const close = await insertWith('close', [0.8, 0.6, 0])
+    await insertWith('orthogonal', [0, 1, 0])
+    await insertWith('unembedded', null)
+    const forgotten = await insertWith('forgotten', [1, 0, 0])
+    await store.markForgotten([forgotten.id])
+
+    const results = await store.findNearest([1, 0, 0], 2)
+
+    expect(results.map((r) => r.item.id)).toEqual([exact.id, close.id])
+    expect(results[0].similarity).toBeCloseTo(1.0, 5)
+    expect(results[1].similarity).toBeCloseTo(0.8, 5)
+    expect(results[0].item.procedure).toBe('exact')
   })
 })

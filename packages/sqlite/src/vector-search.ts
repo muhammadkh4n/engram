@@ -52,6 +52,32 @@ export function cosineF32(a: number[] | Float32Array, b: Float32Array): number {
 }
 
 // ---------------------------------------------------------------------------
+// Exact nearest neighbours
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan every row `sql` returns (`id`, `embedding` columns; the statement takes
+ * no parameters and applies its own liveness filter) and return the `limit`
+ * ids with the highest cosine similarity to `embedding`, sorted descending.
+ * An exhaustive scan, not the recent-row window hybridSearch uses, so an old
+ * near-duplicate is still found.
+ */
+export function nearestByCosine(
+  db: Database.Database,
+  sql: string,
+  embedding: number[],
+  limit: number,
+): Array<{ id: string; similarity: number }> {
+  const rows = db.prepare(sql).all() as Array<{ id: string; embedding: Buffer | null }>
+  const scored: Array<{ id: string; similarity: number }> = []
+  for (const row of rows) {
+    if (!row.embedding) continue
+    scored.push({ id: row.id, similarity: cosineF32(embedding, blobToF32(row.embedding)) })
+  }
+  return scored.sort((a, b) => b.similarity - a.similarity).slice(0, limit)
+}
+
+// ---------------------------------------------------------------------------
 // Generic hybrid-search rows
 // ---------------------------------------------------------------------------
 

@@ -2,9 +2,15 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { orIlikeOperand, orOperand } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
+
+/** Rows per decay RPC call; keeps each request body and UPDATE bounded. */
+const GRADIENT_CHUNK_SIZE = 500
+
+/** Rows requested per page when walking unaccessed memories. */
+const UNACCESSED_PAGE_SIZE = 1000
 
 export class PostgRestSemanticStorage implements SemanticStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -71,20 +77,13 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       }
 
       // Embedding only — fall back to pure vector search
-      const { data, error } = await this.client.rpc('engram_recall', {
-        p_query_embedding: embedding,
-        p_session_id: null,
-        p_match_count: limit,
-        p_min_similarity: opts?.minScore ?? 0.15,
-        p_include_episodes: false,
-        p_include_digests: false,
-        p_include_semantic: true,
-        p_include_procedural: false,
-        p_project_id: opts?.projectId ?? null,
-      })
-      if (error) throw new Error(`Semantic search (vector) failed: ${error.message}`)
-
-      const rows = (data ?? []) as RecallRow[]
+      const rows = await this.vectorRecall(
+        embedding,
+        limit,
+        opts?.minScore ?? 0.15,
+        opts?.projectId ?? null,
+        'Semantic search (vector)',
+      )
       return rows.map((r) => ({
         item: recallRowToSemantic(r),
         similarity: r.similarity,
@@ -99,6 +98,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       .select('*')
       .or(`topic.ilike.%${safe}%,content.ilike.%${safe}%`)
       .is('superseded_by', null)
+      .is('forgotten_at', null)
       .limit(limit)
 
     if (error) throw new Error(`Semantic search (text) failed: ${error.message}`)
@@ -108,15 +108,80 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     }))
   }
 
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]> {
+    // A floor of -1 admits every cosine value, so the nearest rows come back
+    // however far they are; the caller applies its own threshold.
+    const rows = await this.vectorRecall(embedding, limit, -1, null, 'Semantic findNearest')
+    // engram_recall orders each tier's leg but has no outer ORDER BY.
+    return rows
+      .map((r) => ({ item: recallRowToSemantic(r), similarity: r.similarity }))
+      .sort((a, b) => b.similarity - a.similarity)
+  }
+
+  /** Cosine-only semantic leg of engram_recall, across every session. */
+  private async vectorRecall(
+    embedding: number[],
+    limit: number,
+    minSimilarity: number,
+    projectId: string | null,
+    label: string,
+  ): Promise<RecallRow[]> {
+    const { data, error } = await this.client.rpc('engram_recall', {
+      p_query_embedding: embedding,
+      p_session_id: null,
+      p_match_count: limit,
+      p_min_similarity: minSimilarity,
+      p_include_episodes: false,
+      p_include_digests: false,
+      p_include_semantic: true,
+      p_include_procedural: false,
+      p_project_id: projectId,
+    })
+    if (error) throw new Error(`${label} failed: ${error.message}`)
+    return (data ?? []) as RecallRow[]
+  }
+
   async getUnaccessed(days: number): Promise<SemanticMemory[]> {
+    const rows = await this.pageUnaccessed<SemanticRow>(days, '*', 'getUnaccessed')
+    return rows.map(rowToSemantic)
+  }
+
+  async listDecayCandidateIds(days: number): Promise<string[]> {
+    const rows = await this.pageUnaccessed<{ id: string }>(days, 'id', 'listDecayCandidateIds')
+    return rows.map((r) => r.id)
+  }
+
+  /**
+   * PostgREST truncates every response at the server's max-rows setting and
+   * says nothing, so a single select can silently drop rows. Keyset paging on
+   * the primary key until an empty page is returned reads every row whatever
+   * that cap is; an empty page, not a short one, ends the walk because a
+   * short page may just be the cap.
+   */
+  private async pageUnaccessed<T extends { id: string }>(
+    days: number,
+    columns: string,
+    label: string,
+  ): Promise<T[]> {
     const cutoff = new Date(Date.now() - days * 86400000).toISOString()
-    const { data, error } = await this.client
-      .from('memory_semantic')
-      .select('*')
-      .gt('confidence', 0.05)
-      .or(`last_accessed.is.null,last_accessed.lt.${cutoff}`)
-    if (error) throw new Error(`Semantic getUnaccessed failed: ${error.message}`)
-    return ((data ?? []) as SemanticRow[]).map(rowToSemantic)
+    const all: T[] = []
+    let after: string | null = null
+    for (;;) {
+      let query = this.client
+        .from('memory_semantic')
+        .select(columns)
+        .gt('confidence', 0.05)
+        .is('forgotten_at', null)
+        .is('superseded_by', null)
+        .or(`last_accessed.is.null,last_accessed.lt.${cutoff}`)
+      if (after !== null) query = query.gt('id', after)
+      const { data, error } = await query.order('id', { ascending: true }).limit(UNACCESSED_PAGE_SIZE)
+      if (error) throw new Error(`Semantic ${label} failed: ${error.message}`)
+      const page = (data ?? []) as unknown as T[]
+      if (page.length === 0) return all
+      all.push(...page)
+      after = page[page.length - 1]!.id
+    }
   }
 
   async recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void> {
@@ -180,25 +245,23 @@ export class PostgRestSemanticStorage implements SemanticStorage {
   async batchDecayGradient(
     updates: Array<{ id: string; effectiveDecayRate: number; daysThreshold: number }>,
   ): Promise<number> {
+    if (updates.length === 0) return 0
+    const days = updates[0]!.daysThreshold
+    if (updates.some((u) => u.daysThreshold !== days)) {
+      throw new Error('Semantic batchDecayGradient failed: updates must share one daysThreshold')
+    }
+    // An RPC error throws and writes nothing: a fallback value here would land
+    // on every row of the batch, which is worse than skipping one decay run.
     let total = 0
-    for (const u of updates) {
-      const { error } = await this.client.rpc('engram_decay_semantic_single', {
-        p_id: u.id,
-        p_decay_rate: u.effectiveDecayRate,
-        p_days_threshold: u.daysThreshold,
+    for (let start = 0; start < updates.length; start += GRADIENT_CHUNK_SIZE) {
+      const chunk = updates.slice(start, start + GRADIENT_CHUNK_SIZE)
+      const { data, error } = await this.client.rpc('engram_decay_semantic_gradient', {
+        p_ids: chunk.map((u) => u.id),
+        p_rates: chunk.map((u) => u.effectiveDecayRate),
+        p_days: days,
       })
-      // RPC may not exist yet — fall back silently
-      if (error) {
-        // If the RPC doesn't exist, do a direct update
-        const { count } = await this.client
-          .from('memory_semantic')
-          .update({ confidence: 0.05 }) // floor — can't do math in Supabase client
-          .eq('id', u.id)
-          .is('superseded_by', null)
-        total += count ?? 0
-        continue
-      }
-      total++
+      if (error) throw new Error(`Semantic batchDecayGradient failed: ${error.message}`)
+      total += typeof data === 'number' ? data : 0
     }
     return total
   }
@@ -229,7 +292,7 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     let query = this.client
       .from('memory_semantic')
       .select('*')
-      .or(`topic.eq.${sanitizeIlike(topic)},topic.ilike.%${sanitizeIlike(topic)}%`)
+      .or(`topic.eq.${orOperand(topic)},topic.ilike.${orIlikeOperand(topic)}`)
       .order('created_at', { ascending: true })
 
     if (opts?.fromDate) {

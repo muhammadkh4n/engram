@@ -1383,12 +1383,67 @@ export class NeuralGraph {
                       r.traversalCount = 0,
                       r.createdAt = $now,
                       r.lastTraversed = null
+        SET r.generatedAt = $generatedAt
       `, {
         communityId: props.id,
         memberIds: props.memberNodeIds,
         now: new Date().toISOString(),
+        generatedAt: props.generatedAt,
       })
     }
+  }
+
+  /**
+   * Remove the community memberships and Community nodes that a completed
+   * community run did not regenerate. Every membership and Community node the
+   * run wrote carries its generatedAt; anything else in scope belongs to an
+   * earlier Louvain assignment, whose community ids no longer mean anything.
+   *
+   * Edges leave the graph only as replaced memberships or with a purged node;
+   * age is never evidence against an edge. Scoped to one project when
+   * projectId is set, otherwise over every Community node.
+   */
+  async replaceCommunityMemberships(opts: {
+    generatedAt: string
+    projectId: string | null
+  }): Promise<{ membershipsRemoved: number; communitiesRemoved: number }> {
+    const result = await this.runCypherWrite(`
+      MATCH (c:Community)
+      WHERE $projectId IS NULL OR c.projectId = $projectId
+      OPTIONAL MATCH ()-[r:MEMBER_OF]->(c)
+      WHERE r.generatedAt IS NULL OR r.generatedAt <> $generatedAt
+      DELETE r
+      WITH DISTINCT c
+      WHERE c.generatedAt IS NULL OR c.generatedAt <> $generatedAt
+      DETACH DELETE c
+    `, { generatedAt: opts.generatedAt, projectId: opts.projectId })
+    const counters = result.summary?.counters?.updates?.()
+    return {
+      membershipsRemoved: counters?.relationshipsDeleted ?? 0,
+      communitiesRemoved: counters?.nodesDeleted ?? 0,
+    }
+  }
+
+  /**
+   * Remove the stale memberships of Community nodes a partial run rewrote.
+   * Each listed community was restamped with the run's generatedAt, so a
+   * MEMBER_OF edge into it carrying another stamp is left from an earlier
+   * Louvain assignment. Community nodes are never deleted here, and
+   * communities not listed keep every edge.
+   */
+  async trimCommunityMemberships(opts: {
+    generatedAt: string
+    communityIds: string[]
+  }): Promise<{ membershipsRemoved: number }> {
+    if (opts.communityIds.length === 0) return { membershipsRemoved: 0 }
+    const result = await this.runCypherWrite(`
+      MATCH ()-[r:MEMBER_OF]->(c:Community)
+      WHERE c.id IN $communityIds
+        AND (r.generatedAt IS NULL OR r.generatedAt <> $generatedAt)
+      DELETE r
+    `, { generatedAt: opts.generatedAt, communityIds: opts.communityIds })
+    const counters = result.summary?.counters?.updates?.()
+    return { membershipsRemoved: counters?.relationshipsDeleted ?? 0 }
   }
 
   /**

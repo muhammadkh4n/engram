@@ -856,15 +856,15 @@ export class Memory {
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,
-      edgesPruned: decayResult.edgesPruned ?? 0,
       graphNodesCreated: graphNodesCreated > 0 ? graphNodesCreated : undefined,
       graphEdgesCreated: graphEdgesCreated > 0 ? graphEdgesCreated : undefined,
       communitiesDetected: dreamResult.communitiesDetected,
       bridgeNodesFound: dreamResult.bridgeNodesFound,
       replayEdgesCreated: dreamResult.replayEdgesCreated,
       causalEdgesCreated: dreamResult.causalEdgesCreated,
-      graphEdgesPruned: decayResult.graphEdgesPruned,
-      isolatedNodesDeprioritized: decayResult.isolatedNodesDeprioritized,
+      ...(decayResult.graphTombstonesSynced !== undefined
+        ? { graphTombstonesSynced: decayResult.graphTombstonesSynced }
+        : {}),
     }
   }
 
@@ -1004,9 +1004,12 @@ export class Memory {
     const requested = normalizeForgetIds(ids)
 
     // An id carries no tier, so look it up in every table. Rows are keyed by
-    // the type the adapter returns, not the type asked for.
+    // the type the adapter returns, not the type asked for. Re-forgetting must
+    // find an already tombstoned row to report it forgotten, so the lookup
+    // includes inactive rows.
     const rows = await this.storage.getByIds(
       requested.flatMap((id) => FORGET_LOOKUP_TYPES.map((type) => ({ id, type }))),
+      { includeInactive: true },
     )
     const rowsById = new Map<string, TypedMemory[]>()
     for (const row of rows) {

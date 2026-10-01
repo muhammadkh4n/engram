@@ -24,6 +24,7 @@ import {
   parseSalienceThresholdEnv,
   captureModelFromEnv,
   sharedInit,
+  CONSOLIDATION_WORKER_CYCLES,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -368,5 +369,17 @@ describe('sharedInit', () => {
     await expect(get()).rejects.toThrow('ECONNREFUSED')
     await expect(get()).resolves.toBe('stack')
     expect(build).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('consolidation worker cycles', () => {
+  it('schedules the dream cycle alongside the cheap cycles', () => {
+    expect(CONSOLIDATION_WORKER_CYCLES).toEqual(['light', 'deep', 'dream', 'decay'])
+  })
+
+  it('passes the exported cycle list to the worker', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const src = await readFile(new URL('../src/server-core.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/startConsolidationWorker\([^)]*\{\s*cycles: \[\.\.\.CONSOLIDATION_WORKER_CYCLES\]/)
   })
 })

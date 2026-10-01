@@ -1,7 +1,7 @@
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { EpisodeStorage } from '@engram-mem/core'
+import type { EpisodeStorage, LookupOptions } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
@@ -31,8 +31,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
 
     // Build the row — legacy schema only has: id, session_id, role, content,
     // embedding, metadata, created_at. Full schema adds salience, access_count,
-    // last_accessed, consolidated_at, entities, searchable_content.
-    const searchableContent = (episode.metadata?.searchableContent as string) ?? null
+    // last_accessed, consolidated_at, entities, project_id.
 
     const row: Record<string, unknown> = {
       id,
@@ -49,7 +48,6 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       row.last_accessed = episode.lastAccessed?.toISOString() ?? null
       row.consolidated_at = episode.consolidatedAt?.toISOString() ?? null
       row.entities = episode.entities
-      row.searchable_content = searchableContent
       row.project_id = episode.projectId ?? null
     }
 
@@ -154,13 +152,17 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     }))
   }
 
-  async getByIds(requestedIds: string[]): Promise<Episode[]> {
+  async getByIds(requestedIds: string[], opts?: LookupOptions): Promise<Episode[]> {
     const ids = onlyUuids(requestedIds)
     if (ids.length === 0) return []
-    const { data, error } = await this.client
+    let query = this.client
       .from('memory_episodes')
       .select('*')
       .in('id', ids)
+    // The legacy schema predates the forgotten_at column; filtering on it
+    // there would fail the request.
+    if (!opts?.includeInactive && !this.legacyMode) query = query.is('forgotten_at', null)
+    const { data, error } = await query
     if (error) throw new Error(`Episode getByIds failed: ${error.message}`)
     return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, this.legacyMode))
   }

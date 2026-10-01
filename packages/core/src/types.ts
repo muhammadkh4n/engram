@@ -387,7 +387,6 @@ export interface ConsolidateResult {
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number
-  edgesPruned?: number
   // Graph fields — present when Neo4j graph is active
   graphNodesCreated?: number
   graphEdgesCreated?: number
@@ -396,8 +395,14 @@ export interface ConsolidateResult {
   bridgeNodesFound?: number
   replayEdgesCreated?: number
   causalEdgesCreated?: number
-  graphEdgesPruned?: number
-  isolatedNodesDeprioritized?: number
+  /** Graph nodes newly stamped forgotten from recent SQL tombstones. */
+  graphTombstonesSynced?: number
+  /**
+   * ISO instant up to which SQL tombstones are known stamped onto the graph.
+   * A successful sync records when it started reading; a failed one carries
+   * the previous value forward, so the next run re-reads the missed window.
+   */
+  graphTombstonesSyncedThrough?: string
   // Wave 5 additions:
   communitySummariesGenerated?: number
   // v0.3.12 additions — consolidation observability + cost ceilings:
@@ -441,7 +446,6 @@ export interface EngineConfig {
       intervalMs?: number
       semanticDecayRate?: number
       proceduralDecayRate?: number
-      edgePruneThreshold?: number
     }
   }
   tokenizer?: (text: string) => number

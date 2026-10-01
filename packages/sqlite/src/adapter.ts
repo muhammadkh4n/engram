@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
-import type { StorageAdapter } from '@engram-mem/core'
+import type { StorageAdapter, LookupOptions } from '@engram-mem/core'
 import { cosineF32, blobToF32 } from './vector-search.js'
 import { runMigrations } from './migrations.js'
 import { SqliteEpisodeStorage } from './episodes.js'
@@ -10,6 +10,19 @@ import { SqliteProceduralStorage } from './procedural.js'
 import { SqliteAssociationStorage } from './associations.js'
 import { SqliteConsolidationRunStorage } from './consolidation-runs.js'
 import { julianToDate, dateToJulian, orOfFtsStrings } from './search.js'
+
+/**
+ * SQL suffixes for id lookups. Unless `includeInactive` is set, a tombstoned
+ * row is skipped in every tier that has `forgotten_at`, and a superseded
+ * semantic row is skipped too. Digests have neither column.
+ */
+function lookupPredicates(opts?: LookupOptions): { notForgotten: string; live: string } {
+  if (opts?.includeInactive) return { notForgotten: '', live: '' }
+  return {
+    notForgotten: ' AND forgotten_at IS NULL',
+    live: ' AND forgotten_at IS NULL AND superseded_by IS NULL',
+  }
+}
 
 export class SqliteStorageAdapter implements StorageAdapter {
   private db: Database.Database | null = null
@@ -84,14 +97,15 @@ export class SqliteStorageAdapter implements StorageAdapter {
     return this.db
   }
 
-  async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
+  async getById(id: string, type: MemoryType, opts?: LookupOptions): Promise<TypedMemory | null> {
     const db = this.assertDb()
+    const { notForgotten, live } = lookupPredicates(opts)
 
     switch (type) {
       case 'episode': {
-        const row = db.prepare('SELECT * FROM episodes WHERE id = ?').get(id) as EpisodeRow | undefined
+        const row = db.prepare(`SELECT * FROM episodes WHERE id = ?${notForgotten}`).get(id) as EpisodeRow | undefined
         if (!row) return null
-        const episodes = await this._episodes!.getByIds([id])
+        const episodes = await this._episodes!.getByIds([id], opts)
         return episodes.length > 0 ? { type: 'episode', data: episodes[0] } : null
       }
       case 'digest': {
@@ -100,21 +114,25 @@ export class SqliteStorageAdapter implements StorageAdapter {
         return { type: 'digest', data: rowToDigest(row) }
       }
       case 'semantic': {
-        const row = db.prepare('SELECT * FROM semantic WHERE id = ?').get(id) as SemanticRow | undefined
+        const row = db.prepare(`SELECT * FROM semantic WHERE id = ?${live}`).get(id) as SemanticRow | undefined
         if (!row) return null
         return { type: 'semantic', data: rowToSemanticMemory(row) }
       }
       case 'procedural': {
-        const row = db.prepare('SELECT * FROM procedural WHERE id = ?').get(id) as ProceduralRow | undefined
+        const row = db.prepare(`SELECT * FROM procedural WHERE id = ?${notForgotten}`).get(id) as ProceduralRow | undefined
         if (!row) return null
         return { type: 'procedural', data: rowToProceduralMemory(row) }
       }
     }
   }
 
-  async getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> {
+  async getByIds(
+    ids: Array<{ id: string; type: MemoryType }>,
+    opts?: LookupOptions,
+  ): Promise<TypedMemory[]> {
     if (ids.length === 0) return []
     const db = this.assertDb()
+    const { notForgotten, live } = lookupPredicates(opts)
 
     // Group by type for efficient batch queries
     const byType = new Map<MemoryType, string[]>()
@@ -128,7 +146,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
 
     const episodeIds = byType.get('episode')
     if (episodeIds && episodeIds.length > 0) {
-      const episodes = await this._episodes!.getByIds(episodeIds)
+      const episodes = await this._episodes!.getByIds(episodeIds, opts)
       for (const ep of episodes) results.push({ type: 'episode', data: ep })
     }
 
@@ -145,7 +163,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (semanticIds && semanticIds.length > 0) {
       const placeholders = semanticIds.map(() => '?').join(',')
       const rows = db
-        .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})`)
+        .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})${live}`)
         .all(...semanticIds) as SemanticRow[]
       for (const row of rows) results.push({ type: 'semantic', data: rowToSemanticMemory(row) })
     }
@@ -154,7 +172,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (proceduralIds && proceduralIds.length > 0) {
       const placeholders = proceduralIds.map(() => '?').join(',')
       const rows = db
-        .prepare(`SELECT * FROM procedural WHERE id IN (${placeholders})`)
+        .prepare(`SELECT * FROM procedural WHERE id IN (${placeholders})${notForgotten}`)
         .all(...proceduralIds) as ProceduralRow[]
       for (const row of rows) results.push({ type: 'procedural', data: rowToProceduralMemory(row) })
     }

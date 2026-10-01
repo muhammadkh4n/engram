@@ -3,7 +3,7 @@ import type { ProceduralMemory, SearchOptions, SearchResult } from '@engram-mem/
 import { generateId } from '@engram-mem/core'
 import type { ProceduralStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
-import { hybridSearch } from './vector-search.js'
+import { hybridSearch, nearestByCosine } from './vector-search.js'
 
 export class SqliteProceduralStorage implements ProceduralStorage {
   constructor(private db: Database.Database) {}
@@ -116,6 +116,28 @@ export class SqliteProceduralStorage implements ProceduralStorage {
       }))
   }
 
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]> {
+    const nearest = nearestByCosine(
+      this.db,
+      `SELECT id, embedding FROM procedural
+       WHERE embedding IS NOT NULL AND forgotten_at IS NULL`,
+      embedding,
+      limit,
+    )
+    if (nearest.length === 0) return []
+    const placeholders = nearest.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`SELECT * FROM procedural WHERE id IN (${placeholders})`)
+      .all(...nearest.map((n) => n.id)) as ProceduralRow[]
+    const rowById = new Map(rows.map((r) => [r.id, r]))
+    const results: SearchResult<ProceduralMemory>[] = []
+    for (const n of nearest) {
+      const row = rowById.get(n.id)
+      if (row) results.push({ item: this.rowToProcedural(row), similarity: n.similarity })
+    }
+    return results
+  }
+
   async searchByTrigger(
     activity: string,
     opts?: SearchOptions
@@ -182,6 +204,7 @@ export class SqliteProceduralStorage implements ProceduralStorage {
         `UPDATE procedural
          SET confidence = MAX(0.05, confidence - ?)
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .run(opts.decayRate, opts.daysThreshold)

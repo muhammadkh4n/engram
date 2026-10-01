@@ -212,6 +212,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
   const semantic: SemanticStorage = {
     insert: vi.fn(),
     search: vi.fn().mockResolvedValue(semanticResults),
+    findNearest: vi.fn().mockResolvedValue([]),
     getUnaccessed: vi.fn().mockResolvedValue([]),
     recordAccessAndBoost: vi.fn().mockResolvedValue(undefined),
     markSuperseded: vi.fn().mockResolvedValue(undefined),
@@ -223,6 +224,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     insert: vi.fn(),
     search: vi.fn().mockResolvedValue(proceduralResults),
     searchByTrigger: vi.fn().mockResolvedValue([]),
+    findNearest: vi.fn().mockResolvedValue([]),
     recordAccess: vi.fn().mockResolvedValue(undefined),
     markForgotten: vi.fn().mockResolvedValue(0),
     incrementObservation: vi.fn().mockResolvedValue(undefined),
@@ -233,7 +235,6 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     insert: vi.fn(),
     walk: vi.fn().mockResolvedValue(walkResults),
     upsertCoRecalled: vi.fn().mockResolvedValue(undefined),
-    pruneWeak: vi.fn().mockResolvedValue(0),
     discoverTopicalEdges: vi.fn().mockResolvedValue([] as DiscoveredEdge[]),
   }
 

@@ -23,7 +23,6 @@ function makeMockStorage(overrides?: Partial<AssociationStorage>): AssociationSt
     } satisfies Association),
     walk: vi.fn().mockResolvedValue([] as WalkResult[]),
     upsertCoRecalled: vi.fn().mockResolvedValue(undefined),
-    pruneWeak: vi.fn().mockResolvedValue(0),
     discoverTopicalEdges: vi.fn().mockResolvedValue([] as DiscoveredEdge[]),
     ...overrides,
   }

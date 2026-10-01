@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
+ * Runs against live stores; a manual script, not part of the published package.
+ *
  * Wave 3 consolidation integration test against production Neo4j + Supabase.
  *
  * Runs each consolidation cycle and reports results.
  * Requires: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
  *
- * Usage: source ~/.engram/env && npx tsx packages/mcp/src/test-wave3-consolidation.ts
+ * Usage: source ~/.engram/env && npx tsx packages/mcp/scripts/test-wave3-consolidation.ts
  */
 
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
@@ -120,9 +122,6 @@ async function main() {
     console.log(`[ok] Decay pass: ${Date.now() - t4}ms`)
     console.log(`  Semantic decayed: ${decayResult.semanticDecayed ?? 0}`)
     console.log(`  Procedural decayed: ${decayResult.proceduralDecayed ?? 0}`)
-    console.log(`  SQL edges pruned: ${decayResult.edgesPruned ?? 0}`)
-    console.log(`  Graph edges pruned: ${decayResult.graphEdgesPruned ?? 'n/a'}`)
-    console.log(`  Isolated nodes: ${decayResult.isolatedNodesDeprioritized ?? 'n/a'}`)
   } catch (err) {
     console.error(`[FAIL] Decay pass: ${(err as Error).message}`)
   }

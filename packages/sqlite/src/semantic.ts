@@ -3,7 +3,7 @@ import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/co
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate, dateToJulian } from './search.js'
-import { hybridSearch } from './vector-search.js'
+import { hybridSearch, nearestByCosine } from './vector-search.js'
 
 export class SqliteSemanticStorage implements SemanticStorage {
   constructor(private db: Database.Database) {}
@@ -117,15 +117,53 @@ export class SqliteSemanticStorage implements SemanticStorage {
       }))
   }
 
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]> {
+    const nearest = nearestByCosine(
+      this.db,
+      `SELECT id, embedding FROM semantic
+       WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL`,
+      embedding,
+      limit,
+    )
+    if (nearest.length === 0) return []
+    const placeholders = nearest.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`SELECT * FROM semantic WHERE id IN (${placeholders})`)
+      .all(...nearest.map((n) => n.id)) as SemanticRow[]
+    const rowById = new Map(rows.map((r) => [r.id, r]))
+    const results: SearchResult<SemanticMemory>[] = []
+    for (const n of nearest) {
+      const row = rowById.get(n.id)
+      if (row) results.push({ item: this.rowToSemantic(row), similarity: n.similarity })
+    }
+    return results
+  }
+
   async getUnaccessed(days: number): Promise<SemanticMemory[]> {
     const rows = this.db
       .prepare(
         `SELECT * FROM semantic
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .all(days) as SemanticRow[]
     return rows.map((r) => this.rowToSemantic(r))
+  }
+
+  async listDecayCandidateIds(days: number): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM semantic
+         WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
+           AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+         ORDER BY id`
+      )
+      .all(days) as Array<{ id: string }>
+    return rows.map((r) => r.id)
   }
 
   async recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void> {
@@ -163,6 +201,8 @@ export class SqliteSemanticStorage implements SemanticStorage {
         `UPDATE semantic
          SET confidence = MAX(0.05, confidence - ?)
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .run(opts.decayRate, opts.daysThreshold)
@@ -174,10 +214,12 @@ export class SqliteSemanticStorage implements SemanticStorage {
   ): Promise<number> {
     const stmt = this.db.prepare(`
       UPDATE semantic
-      SET confidence = MAX(0.0, confidence - ?)
+      SET confidence = MAX(0.05, confidence - ?)
       WHERE id = ?
-        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+        AND confidence > 0.05
+        AND forgotten_at IS NULL
         AND superseded_by IS NULL
+        AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
     `)
     let total = 0
     const txn = this.db.transaction(() => {

@@ -1,6 +1,6 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
-import type { StorageAdapter } from '@engram-mem/core'
+import type { StorageAdapter, LookupOptions } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
 import { PostgRestDigestStorage } from './digests.js'
 import { PostgRestSemanticStorage } from './semantic.js'
@@ -9,6 +9,10 @@ import { PostgRestAssociationStorage } from './associations.js'
 import { PostgRestConsolidationRunStorage } from './consolidation-runs.js'
 import { parseVector } from './parse-vector.js'
 import { isUuid } from './uuid.js'
+
+const TOMBSTONE_PAGE_SIZE = 1000
+
+type TombstoneQuery = ReturnType<ReturnType<PostgrestClient['from']>['select']>
 
 export interface PostgRestAdapterOptions {
   url: string
@@ -126,13 +130,14 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     return this._consolidationRuns ?? undefined
   }
 
-  async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
+  async getById(id: string, type: MemoryType, opts?: LookupOptions): Promise<TypedMemory | null> {
     this.assertInitialized()
     if (!isUuid(id)) return null
+    const activeOnly = !opts?.includeInactive
 
     switch (type) {
       case 'episode': {
-        const episodes = await this._episodes!.getByIds([id])
+        const episodes = await this._episodes!.getByIds([id], opts)
         if (episodes.length === 0) return null
         return { type: 'episode', data: episodes[0] }
       }
@@ -151,21 +156,23 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         return found ? { type: 'digest', data: found } : null
       }
       case 'semantic': {
-        const { data, error } = await this.client
+        let query = this.client
           .from('memory_semantic')
           .select('*')
           .eq('id', id)
-          .maybeSingle()
+        if (activeOnly) query = query.is('forgotten_at', null).is('superseded_by', null)
+        const { data, error } = await query.maybeSingle()
         if (error) throw new Error(`getById semantic failed: ${error.message}`)
         if (!data) return null
         return { type: 'semantic', data: rowToSemantic(data as SemanticRow) }
       }
       case 'procedural': {
-        const { data, error } = await this.client
+        let query = this.client
           .from('memory_procedural')
           .select('*')
           .eq('id', id)
-          .maybeSingle()
+        if (activeOnly) query = query.is('forgotten_at', null)
+        const { data, error } = await query.maybeSingle()
         if (error) throw new Error(`getById procedural failed: ${error.message}`)
         if (!data) return null
         return { type: 'procedural', data: rowToProcedural(data as ProceduralRow) }
@@ -173,9 +180,13 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }
   }
 
-  async getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> {
+  async getByIds(
+    ids: Array<{ id: string; type: MemoryType }>,
+    opts?: LookupOptions,
+  ): Promise<TypedMemory[]> {
     if (ids.length === 0) return []
     this.assertInitialized()
+    const activeOnly = !opts?.includeInactive
 
     const byType = new Map<MemoryType, string[]>()
     for (const { id, type } of ids) {
@@ -189,7 +200,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     const keep = (m: TypedMemory) => found.set(`${m.type}:${m.data.id}`, m)
 
     for (const batch of idBatches(byType.get('episode'))) {
-      const episodes = await this._episodes!.getByIds(batch)
+      const episodes = await this._episodes!.getByIds(batch, opts)
       for (const ep of episodes) keep({ type: 'episode', data: ep })
     }
 
@@ -205,10 +216,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }
 
     for (const batch of idBatches(byType.get('semantic'))) {
-      const { data, error } = await this.client
+      let query = this.client
         .from('memory_semantic')
         .select('*')
         .in('id', batch)
+      if (activeOnly) query = query.is('forgotten_at', null).is('superseded_by', null)
+      const { data, error } = await query
       if (error) throw new Error(`getByIds semantic failed: ${error.message}`)
       for (const row of (data ?? []) as SemanticRow[]) {
         keep({ type: 'semantic', data: rowToSemantic(row) })
@@ -216,10 +229,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }
 
     for (const batch of idBatches(byType.get('procedural'))) {
-      const { data, error } = await this.client
+      let query = this.client
         .from('memory_procedural')
         .select('*')
         .in('id', batch)
+      if (activeOnly) query = query.is('forgotten_at', null)
+      const { data, error } = await query
       if (error) throw new Error(`getByIds procedural failed: ${error.message}`)
       for (const row of (data ?? []) as ProceduralRow[]) {
         keep({ type: 'procedural', data: rowToProcedural(row) })
@@ -418,12 +433,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     const seen = new Set<string>()
     const results: Array<{ id: string; type: MemoryType }> = []
 
-    const collect = (rows: Array<{ id: string }> | null, type: MemoryType): void => {
-      for (const row of rows ?? []) {
-        const key = `${type}:${row.id}`
+    const collect = (ids: string[], type: MemoryType): void => {
+      for (const id of ids) {
+        const key = `${type}:${id}`
         if (seen.has(key)) continue
         seen.add(key)
-        results.push({ id: row.id, type })
+        results.push({ id, type })
       }
     }
 
@@ -435,27 +450,44 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     // memory_digests: no forgotten_at column, never superseded — intentionally omitted.
 
     for (const [type, table] of forgottenTables) {
-      const { data, error } = await this.client
-        .from(table)
-        .select('id')
-        .gte('forgotten_at', sinceIso)
-      if (error) throw new Error(`listTombstonesSince(${type}) failed: ${error.message}`)
-      collect(data as Array<{ id: string }> | null, type)
+      collect(await this.pageTombstoneIds(table, type, (q) => q.gte('forgotten_at', sinceIso)), type)
     }
 
     // Semantic supersession is a distinct tombstone reason from forget() —
     // `collect`'s seen-set dedupes a row that happens to be both.
-    const { data: supersededData, error: supersededError } = await this.client
-      .from('memory_semantic')
-      .select('id')
-      .gte('updated_at', sinceIso)
-      .not('superseded_by', 'is', null)
-    if (supersededError) {
-      throw new Error(`listTombstonesSince(semantic superseded) failed: ${supersededError.message}`)
-    }
-    collect(supersededData as Array<{ id: string }> | null, 'semantic')
+    collect(
+      await this.pageTombstoneIds('memory_semantic', 'semantic superseded', (q) =>
+        q.gte('updated_at', sinceIso).not('superseded_by', 'is', null)),
+      'semantic',
+    )
 
     return results
+  }
+
+  /**
+   * PostgREST truncates every response at the server's max-rows setting
+   * without signalling it, so one unpaged select returns at most that many
+   * tombstones. Walking the primary key until an empty page reads every
+   * matching row whatever the cap; a short page does not end the walk, since
+   * it may just be the cap.
+   */
+  private async pageTombstoneIds(
+    table: string,
+    label: string,
+    filter: (query: TombstoneQuery) => TombstoneQuery,
+  ): Promise<string[]> {
+    const ids: string[] = []
+    let after: string | null = null
+    for (;;) {
+      let query = filter(this.client.from(table).select('id'))
+      if (after !== null) query = query.gt('id', after)
+      const { data, error } = await query.order('id', { ascending: true }).limit(TOMBSTONE_PAGE_SIZE)
+      if (error) throw new Error(`listTombstonesSince(${label}) failed: ${error.message}`)
+      const page = (data ?? []) as Array<{ id: string }>
+      if (page.length === 0) return ids
+      for (const row of page) ids.push(row.id)
+      after = page[page.length - 1]!.id
+    }
   }
 
   private assertInitialized(): void {

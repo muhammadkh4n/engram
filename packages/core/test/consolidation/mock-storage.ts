@@ -142,7 +142,8 @@ export interface MockSemanticStorage extends SemanticStorage {
 
 export function makeMockSemanticStorage(
   initialMemories: SemanticMemory[] = [],
-  searchResults: SearchResult<SemanticMemory>[] = []
+  searchResults: SearchResult<SemanticMemory>[] = [],
+  nearestResults: SearchResult<SemanticMemory>[] = []
 ): MockSemanticStorage {
   const memories: SemanticMemory[] = [...initialMemories]
 
@@ -164,6 +165,8 @@ export function makeMockSemanticStorage(
 
     search: vi.fn(async (_query, _opts) => searchResults),
 
+    findNearest: vi.fn(async (_embedding, _limit) => nearestResults),
+
     getUnaccessed: vi.fn(async () => memories),
 
     recordAccessAndBoost: vi.fn(async () => {}),
@@ -184,7 +187,8 @@ export interface MockProceduralStorage extends ProceduralStorage {
 
 export function makeMockProceduralStorage(
   initialMemories: ProceduralMemory[] = [],
-  searchResults: SearchResult<ProceduralMemory>[] = []
+  searchResults: SearchResult<ProceduralMemory>[] = [],
+  nearestResults: SearchResult<ProceduralMemory>[] = [],
 ): MockProceduralStorage {
   const memories: ProceduralMemory[] = [...initialMemories]
 
@@ -207,6 +211,8 @@ export function makeMockProceduralStorage(
     search: vi.fn(async (_query, _opts) => searchResults),
 
     searchByTrigger: vi.fn(async (_activity, _opts) => searchResults),
+
+    findNearest: vi.fn(async (_embedding, _limit) => nearestResults),
 
     recordAccess: vi.fn(async () => {}),
 
@@ -246,7 +252,6 @@ export function makeMockAssociationStorage(
 
     upsertCoRecalled: vi.fn(async () => {}),
 
-    pruneWeak: vi.fn(async () => 3),
 
     discoverTopicalEdges: vi.fn(async () => discoveredEdges),
   }
@@ -270,8 +275,10 @@ export interface MockStorageOptions {
   initialDigests?: Digest[]
   initialSemanticMemories?: SemanticMemory[]
   semanticSearchResults?: SearchResult<SemanticMemory>[]
+  semanticNearestResults?: SearchResult<SemanticMemory>[]
   initialProceduralMemories?: ProceduralMemory[]
   proceduralSearchResults?: SearchResult<ProceduralMemory>[]
+  proceduralNearestResults?: SearchResult<ProceduralMemory>[]
   discoveredEdges?: DiscoveredEdge[]
 }
 
@@ -285,8 +292,16 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
 
     episodes: makeMockEpisodeStorage(sessions, episodesPerSession),
     digests: makeMockDigestStorage(opts.initialDigests),
-    semantic: makeMockSemanticStorage(opts.initialSemanticMemories, opts.semanticSearchResults),
-    procedural: makeMockProceduralStorage(opts.initialProceduralMemories, opts.proceduralSearchResults),
+    semantic: makeMockSemanticStorage(
+      opts.initialSemanticMemories,
+      opts.semanticSearchResults,
+      opts.semanticNearestResults,
+    ),
+    procedural: makeMockProceduralStorage(
+      opts.initialProceduralMemories,
+      opts.proceduralSearchResults,
+      opts.proceduralNearestResults,
+    ),
     associations: makeMockAssociationStorage(opts.discoveredEdges),
 
     getById: vi.fn(async (_id: string, _type: MemoryType): Promise<TypedMemory | null> => null),
