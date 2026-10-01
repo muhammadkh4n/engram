@@ -28,7 +28,21 @@ export function sanitizeFtsQuery(query: string): string {
   if (tokens.length === 0) return '""'
 
   // Join with OR — BM25 ranks results by how many tokens match
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ')
+  return orOfFtsStrings(tokens)
+}
+
+/**
+ * Quote each term as an FTS5 string and OR them. Inside a string FTS5 treats
+ * '-', '.', '+', ':' and keywords as literal text, so identifiers like
+ * `aca-2613` or `node.js` match instead of parsing as column filters or
+ * syntax errors. Blank terms are dropped; returns '' when none remain.
+ */
+export function orOfFtsStrings(terms: string[]): string {
+  return terms
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .map((t) => `"${t.replace(/"/g, '""')}"`)
+    .join(' OR ')
 }
 
 /** Convert Julian Day number to JS Date. */

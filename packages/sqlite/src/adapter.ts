@@ -9,7 +9,7 @@ import { SqliteSemanticStorage } from './semantic.js'
 import { SqliteProceduralStorage } from './procedural.js'
 import { SqliteAssociationStorage } from './associations.js'
 import { SqliteConsolidationRunStorage } from './consolidation-runs.js'
-import { julianToDate, dateToJulian } from './search.js'
+import { julianToDate, dateToJulian, orOfFtsStrings } from './search.js'
 
 export class SqliteStorageAdapter implements StorageAdapter {
   private db: Database.Database | null = null
@@ -324,54 +324,33 @@ export class SqliteStorageAdapter implements StorageAdapter {
     if (terms.length === 0) return []
     const limit = opts?.limit ?? 30
 
-    // FTS5 OR join
-    const ftsQuery = terms.join(' OR ')
+    const ftsQuery = orOfFtsStrings(terms)
+    if (!ftsQuery) return []
     const allResults: Array<{ id: string; type: MemoryType; rankScore: number }> = []
     const projectId = opts?.projectId
 
-    try {
-      let sql = 'SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL ORDER BY rank LIMIT ?'
-      const params: unknown[] = [ftsQuery, limit]
-      if (projectId) {
-        sql = `SELECT e.id, rank FROM episodes_fts f JOIN episodes e ON e.rowid = f.rowid WHERE episodes_fts MATCH ? AND e.forgotten_at IS NULL AND (e.project_id = ? OR e.project_id IS NULL) ORDER BY rank LIMIT ?`
-        params.splice(1, 0, projectId)
+    const tiers: Array<{ type: MemoryType; fts: string; table: string; alive: string }> = [
+      { type: 'episode', fts: 'episodes_fts', table: 'episodes', alive: 'AND t.forgotten_at IS NULL' },
+      { type: 'digest', fts: 'digests_fts', table: 'digests', alive: '' },
+      { type: 'semantic', fts: 'semantic_fts', table: 'semantic', alive: 'AND t.superseded_by IS NULL AND t.forgotten_at IS NULL' },
+      { type: 'procedural', fts: 'procedural_fts', table: 'procedural', alive: 'AND t.forgotten_at IS NULL' },
+    ]
+    for (const tier of tiers) {
+      const scope = projectId ? 'AND (t.project_id = ? OR t.project_id IS NULL)' : ''
+      const sql = `SELECT t.id, rank FROM ${tier.fts} f JOIN ${tier.table} t ON t.rowid = f.rowid WHERE ${tier.fts} MATCH ? ${tier.alive} ${scope} ORDER BY rank LIMIT ?`
+      const params: unknown[] = projectId ? [ftsQuery, projectId, limit] : [ftsQuery, limit]
+      let rows: Array<{ id: string; rank: number }>
+      try {
+        rows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
+      } catch (err) {
+        // A missing FTS table means the tier has no lexical index yet; any
+        // other failure is a broken query and must not read as "no matches".
+        const message = err instanceof Error ? err.message : String(err)
+        if (message.includes('no such table')) continue
+        throw new Error(`textBoost ${tier.type} FTS query failed: ${message}`, { cause: err })
       }
-      const epRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
-      for (const r of epRows) allResults.push({ id: r.id, type: 'episode', rankScore: Math.abs(r.rank) })
-    } catch { /* FTS5 table may not exist */ }
-
-    try {
-      let sql = 'SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? ORDER BY rank LIMIT ?'
-      const params: unknown[] = [ftsQuery, limit]
-      if (projectId) {
-        sql = `SELECT d.id, rank FROM digests_fts f JOIN digests d ON d.rowid = f.rowid WHERE digests_fts MATCH ? AND (d.project_id = ? OR d.project_id IS NULL) ORDER BY rank LIMIT ?`
-        params.splice(1, 0, projectId)
-      }
-      const dgRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
-      for (const r of dgRows) allResults.push({ id: r.id, type: 'digest', rankScore: Math.abs(r.rank) })
-    } catch { /* FTS5 table may not exist */ }
-
-    try {
-      let sql = 'SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND s.superseded_by IS NULL AND s.forgotten_at IS NULL ORDER BY rank LIMIT ?'
-      const params: unknown[] = [ftsQuery, limit]
-      if (projectId) {
-        sql = `SELECT s.id, rank FROM semantic_fts f JOIN semantic s ON s.rowid = f.rowid WHERE semantic_fts MATCH ? AND s.superseded_by IS NULL AND s.forgotten_at IS NULL AND (s.project_id = ? OR s.project_id IS NULL) ORDER BY rank LIMIT ?`
-        params.splice(1, 0, projectId)
-      }
-      const smRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
-      for (const r of smRows) allResults.push({ id: r.id, type: 'semantic', rankScore: Math.abs(r.rank) })
-    } catch { /* FTS5 table may not exist */ }
-
-    try {
-      let sql = 'SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL ORDER BY rank LIMIT ?'
-      const params: unknown[] = [ftsQuery, limit]
-      if (projectId) {
-        sql = `SELECT p.id, rank FROM procedural_fts f JOIN procedural p ON p.rowid = f.rowid WHERE procedural_fts MATCH ? AND p.forgotten_at IS NULL AND (p.project_id = ? OR p.project_id IS NULL) ORDER BY rank LIMIT ?`
-        params.splice(1, 0, projectId)
-      }
-      const prRows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>
-      for (const r of prRows) allResults.push({ id: r.id, type: 'procedural', rankScore: Math.abs(r.rank) })
-    } catch { /* FTS5 table may not exist */ }
+      for (const r of rows) allResults.push({ id: r.id, type: tier.type, rankScore: Math.abs(r.rank) })
+    }
 
     const maxRank = allResults.length > 0 ? Math.max(...allResults.map(r => r.rankScore)) : 1
     return allResults
