@@ -12,10 +12,32 @@ export class CircuitOpenError extends Error {
   }
 }
 
+const MAX_CAUSE_CHARS = 160;
+
+/**
+ * One-line description of the failure that opened the circuit: HTTP status,
+ * provider error code and the first line of the message. Provider response
+ * bodies and request headers stay out, so the text is safe to surface to the
+ * caller of an open circuit.
+ */
+function describeFailure(err: unknown): string {
+  const fields = (err ?? {}) as { status?: unknown; code?: unknown };
+  const status = typeof fields.status === 'number' ? String(fields.status) : '';
+  const code = typeof fields.code === 'string' ? fields.code : '';
+  const rawMessage = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  let firstLine = rawMessage.split('\n', 1)[0].trim();
+  // SDK messages lead with the status ("429 You exceeded ..."); keep it once.
+  if (status && firstLine.startsWith(`${status} `)) firstLine = firstLine.slice(status.length + 1);
+  const head = [status, code].filter(Boolean).join(' ');
+  const text = head && firstLine ? `${head}: ${firstLine}` : head || firstLine || 'unknown error';
+  return text.length > MAX_CAUSE_CHARS ? `${text.slice(0, MAX_CAUSE_CHARS - 1)}…` : text;
+}
+
 export class CircuitBreaker {
   private state: CircuitState = 'closed';
   private failures = 0;
   private lastFailureTime = 0;
+  private lastFailureCause = '';
   private readonly threshold: number;
   private readonly cooldownMs: number;
   /** SEC4: Only one request may probe in half-open state. */
@@ -41,17 +63,13 @@ export class CircuitBreaker {
     const currentState = this.getState();
 
     if (currentState === 'open') {
-      throw new CircuitOpenError(
-        `Circuit is open. ${this.remainingCooldownMs()}ms until retry.`
-      );
+      throw new CircuitOpenError(this.openMessage());
     }
 
     // SEC4: In half-open state only one concurrent probe is allowed.
     if (currentState === 'half-open') {
       if (this._halfOpenProbe) {
-        throw new CircuitOpenError(
-          `Circuit is open. ${this.remainingCooldownMs()}ms until retry.`
-        );
+        throw new CircuitOpenError(this.openMessage());
       }
       this._halfOpenProbe = true;
     }
@@ -61,7 +79,7 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (err) {
-      this.onFailure();
+      this.onFailure(err);
       throw err;
     }
   }
@@ -70,15 +88,22 @@ export class CircuitBreaker {
     this.failures = 0;
     this.state = 'closed';
     this._halfOpenProbe = false;
+    this.lastFailureCause = '';
   }
 
-  private onFailure(): void {
+  private onFailure(err: unknown): void {
     this.failures++;
+    this.lastFailureCause = describeFailure(err);
     this.lastFailureTime = Date.now();
     this._halfOpenProbe = false;
     if (this.failures >= this.threshold) {
       this.state = 'open';
     }
+  }
+
+  private openMessage(): string {
+    const cause = this.lastFailureCause ? ` (last failure: ${this.lastFailureCause})` : '';
+    return `Circuit is open${cause}. ${this.remainingCooldownMs()}ms until retry.`;
   }
 
   private remainingCooldownMs(): number {
@@ -90,6 +115,7 @@ export class CircuitBreaker {
     this.state = 'closed';
     this.failures = 0;
     this.lastFailureTime = 0;
+    this.lastFailureCause = '';
     this._halfOpenProbe = false;
   }
 
