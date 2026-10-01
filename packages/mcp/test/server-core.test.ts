@@ -25,6 +25,10 @@ import {
   captureModelFromEnv,
   sharedInit,
   CONSOLIDATION_WORKER_CYCLES,
+  recallOutputPolicyAtStartup,
+  getMemory,
+  RECALL_TOKEN_BUDGET_MIN,
+  RECALL_TOKEN_BUDGET_MAX,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -136,6 +140,30 @@ describe('formatRecallTimingLine', () => {
       '[recall] total=3 search=1 lexical=error items=2 chars=40',
     )
   })
+
+  it('prints pattern and mmr in order, then graph sub-stages sorted', () => {
+    const line = formatRecallTimingLine(
+      { 'graph.walk': 7.2, mmr: 3.4, graph: 20, total: 100, 'graph.community': 9.6, pattern: 1.2, rerank: 50 },
+      30,
+      900,
+    )
+
+    expect(line).toBe(
+      '[recall] total=100 pattern=1 mmr=3 rerank=50 graph=20 graph.community=10 graph.walk=7 items=30 chars=900',
+    )
+  })
+
+  it('appends the emitted count and estimated tokens after the pool count', () => {
+    const line = formatRecallTimingLine({ total: 10, mmr: 2 }, 30, 4000, { emitted: 12, tokens: 1000, truncated: false })
+
+    expect(line).toBe('[recall] total=10 mmr=2 items=30 chars=4000 emitted=12 tokens=1000')
+  })
+
+  it('marks a payload cut by the token budget with truncated=1', () => {
+    const line = formatRecallTimingLine({ total: 10 }, 30, 2000, { emitted: 5, tokens: 500, truncated: true })
+
+    expect(line).toBe('[recall] total=10 items=30 chars=2000 emitted=5 tokens=500 truncated=1')
+  })
 })
 
 describe('recallOptionsFromArgs', () => {
@@ -151,6 +179,58 @@ describe('recallOptionsFromArgs', () => {
 
   it('ignores a non-string project id and passes synthesize through', () => {
     expect(recallOptionsFromArgs({ query: 'q', project_id: 42, synthesize: true })).toEqual({ synthesize: true })
+  })
+
+  it('passes token_budget through as tokenBudget at both bounds', () => {
+    expect(recallOptionsFromArgs({ query: 'q', token_budget: RECALL_TOKEN_BUDGET_MIN })).toEqual({ tokenBudget: 256 })
+    expect(recallOptionsFromArgs({ query: 'q', token_budget: RECALL_TOKEN_BUDGET_MAX, project_id: 'engram' })).toEqual({
+      projectId: 'engram',
+      tokenBudget: 32000,
+    })
+  })
+
+  it.each([255, 32001, 0, -1, 1000.5, '2000', null, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects token_budget %s',
+    (value) => {
+      const opts = recallOptionsFromArgs({ query: 'q', token_budget: value })
+
+      expect(opts).toHaveProperty('error')
+      expect((opts as { error: string }).error).toMatch(/token_budget must be an integer from 256 to 32000/)
+    },
+  )
+})
+
+describe('recallOutputPolicyAtStartup', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('resolves the unbounded policy when nothing is set and logs numbers only', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(recallOutputPolicyAtStartup({})).toEqual({ faint: true })
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=unbounded faint=on',
+    )
+  })
+
+  it('resolves and logs a configured policy', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_RECALL_EMIT_K: '12', ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_FAINT: 'off' }
+
+    expect(recallOutputPolicyAtStartup(env)).toEqual({ emitK: 12, tokenBudget: 4000, faint: false })
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall output policy: emitK=12 tokenBudget=4000 faint=off')
+  })
+
+  it('fails startup on a malformed budget before any backend is contacted', async () => {
+    const saved = process.env['ENGRAM_RECALL_TOKEN_BUDGET']
+    process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = 'abc'
+    try {
+      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_TOKEN_BUDGET must be a positive integer, got "abc"/)
+    } finally {
+      if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
+      else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
+    }
   })
 })
 

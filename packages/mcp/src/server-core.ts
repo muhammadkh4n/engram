@@ -16,8 +16,15 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { createMemory, startConsolidationWorker, MAX_FORGET_IDS } from '@engram-mem/core'
-import type { StorageAdapter, IntelligenceAdapter, GraphPort, ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
+import { createMemory, startConsolidationWorker, MAX_FORGET_IDS, recallOutputPolicyFromEnv } from '@engram-mem/core'
+import type {
+  StorageAdapter,
+  IntelligenceAdapter,
+  GraphPort,
+  ForgetPreview,
+  ForgetByIdsResult,
+  RecallOutputPolicy,
+} from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
@@ -289,7 +296,22 @@ export async function getMemory(): Promise<Memory> {
   return (await getMemoryStack()).memory
 }
 
+/**
+ * Resolve the recall output policy from the environment and log it. Called
+ * once when the memory stack is built, so a malformed ENGRAM_RECALL_* value
+ * fails startup instead of every recall. The log line carries numbers only.
+ */
+export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
+  const policy = recallOutputPolicyFromEnv(env)
+  console.error(
+    `[engram-mcp] recall output policy: emitK=${policy.emitK ?? 'unbounded'} ` +
+      `tokenBudget=${policy.tokenBudget ?? 'unbounded'} faint=${policy.faint ? 'on' : 'off'}`,
+  )
+  return policy
+}
+
 async function buildMemoryStack(): Promise<MemoryStack> {
+  recallOutputPolicyAtStartup()
 
   const supabaseUrl = requireEnv('SUPABASE_URL')
   const supabaseKey = requireEnv('SUPABASE_KEY')
@@ -423,6 +445,13 @@ const TOOLS = [
           description:
             'Opt-in: append a deterministic stated-preference constraint block (verbatim quotes with session/date citations) computed from the recalled memories. Code-only, no LLM call at recall time; no effect when the recalled memories contain no stated preferences.',
         },
+        token_budget: {
+          type: 'integer',
+          minimum: 256,
+          maximum: 32000,
+          description:
+            'Optional cap on the returned text in estimated tokens (256-32000). Raises or lowers the server default for this call only. Items are emitted in rank order and the result stops at the first item that does not fit; the top memory is always returned whole.',
+        },
       },
       required: ['query'],
     },
@@ -550,34 +579,78 @@ const TOOLS = [
   },
 ]
 
-const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'rerank', 'graph'] as const
+const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'pattern', 'mmr', 'rerank', 'graph'] as const
+
+/** Per-call token_budget bounds on memory_recall. Below the floor the header
+ *  lines alone use most of the budget; the ceiling stays well inside a tool
+ *  result a client will accept. */
+export const RECALL_TOKEN_BUDGET_MIN = 256
+export const RECALL_TOKEN_BUDGET_MAX = 32000
+
+export interface RecallArgOptions {
+  projectId?: string
+  synthesize?: true
+  tokenBudget?: number
+}
 
 /**
  * Recall options from memory_recall arguments. The project id is normalised
  * exactly as memory_ingest normalises it, so a padded id or a shared alias
- * (blank/global/none/shared) ranks against the same tag ingest wrote.
+ * (blank/global/none/shared) ranks against the same tag ingest wrote. An
+ * out-of-range or non-integer token_budget is an error, not ignored, so a
+ * caller never silently gets an unbounded payload.
  */
-export function recallOptionsFromArgs(args: Record<string, unknown>): { projectId?: string; synthesize?: true } {
+export function recallOptionsFromArgs(args: Record<string, unknown>): RecallArgOptions | { error: string } {
   const projectId = normalizeProjectId(args['project_id'])
+  const rawBudget = args['token_budget']
+  if (
+    rawBudget !== undefined &&
+    (typeof rawBudget !== 'number' ||
+      !Number.isInteger(rawBudget) ||
+      rawBudget < RECALL_TOKEN_BUDGET_MIN ||
+      rawBudget > RECALL_TOKEN_BUDGET_MAX)
+  ) {
+    return {
+      error: `token_budget must be an integer from ${RECALL_TOKEN_BUDGET_MIN} to ${RECALL_TOKEN_BUDGET_MAX}, got ${JSON.stringify(rawBudget)}`,
+    }
+  }
   return {
     ...(projectId ? { projectId } : {}),
     ...(args['synthesize'] === true ? { synthesize: true as const } : {}),
+    ...(rawBudget !== undefined ? { tokenBudget: rawBudget } : {}),
   }
 }
 
-/** One-line recall latency summary. Absent stages are omitted, not zeroed, so
- *  a missing key means the stage never ran for that query. A failed lexical
- *  leg (vector-only recall) is printed as lexical=error. */
+/** Size of the payload a recall returned. */
+export interface RecallPayloadSize {
+  /** Recalled memories written into the text. */
+  emitted: number
+  /** Estimated tokens of the text. */
+  tokens: number
+  /** The token budget cut the payload short. */
+  truncated: boolean
+}
+
+/** One-line recall latency summary. Stages print in a fixed order, then any
+ *  graph.* sub-stages sorted by name. Absent stages are omitted, not zeroed,
+ *  so a missing key means the stage never ran for that query. A failed
+ *  lexical leg (vector-only recall) is printed as lexical=error. `items` is
+ *  the ranked pool; `emitted` is how much of it the payload carried. */
 export function formatRecallTimingLine(
   timings: Record<string, number>,
   items: number,
   chars: number,
+  size?: RecallPayloadSize,
 ): string {
-  const parts = RECALL_TIMING_STAGES
+  const subStages = Object.keys(timings).filter(key => key.startsWith('graph.')).sort()
+  const parts = [...RECALL_TIMING_STAGES, ...subStages]
     .filter(stage => timings[stage] !== undefined)
     .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
   const lexical = timings['lexicalError'] !== undefined ? ['lexical=error'] : []
-  return ['[recall]', ...parts, ...lexical, `items=${items}`, `chars=${chars}`].join(' ')
+  const sizeParts = size
+    ? [`emitted=${size.emitted}`, `tokens=${size.tokens}`, ...(size.truncated ? ['truncated=1'] : [])]
+    : []
+  return ['[recall]', ...parts, ...lexical, `items=${items}`, `chars=${chars}`, ...sizeParts].join(' ')
 }
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
@@ -695,11 +768,20 @@ export function createEngramServer(): Server {
           }
         }
 
-        const result = await mem.recall(query.trim(), recallOptionsFromArgs(args))
+        const recallOpts = recallOptionsFromArgs(args)
+        if ('error' in recallOpts) return toolError(recallOpts.error)
+
+        const result = await mem.recall(query.trim(), recallOpts)
 
         if (result.timings) {
           // stderr: stdout carries the stdio JSON-RPC stream.
-          console.error(formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length))
+          console.error(
+            formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length, {
+              emitted: result.payload?.emittedMemories ?? result.memories.length,
+              tokens: result.estimatedTokens,
+              truncated: result.payload?.truncated === true,
+            }),
+          )
         }
 
         if (!result.formatted || result.memories.length === 0) {
