@@ -4,12 +4,15 @@
  * resend it on the next successful run.
  *
  * Files (all mode 0600):
- * - `spool.jsonl`: one `{"v":1,"at":ISO,"payload":{…}}` line per unsent capture.
+ * - `spool.jsonl`: one `{"v":1,"at":ISO,"attempts":n,"payload":{…}}` line per
+ *   unsent capture; `attempts` counts the posts the server answered with a
+ *   retryable failure (the first one included).
  * - `spool.flushing.<pid>.<claimedAtMs>.<rand>.jsonl`: a flush claims the spool
  *   by renaming it. Only one process wins a rename, so two hooks firing at once
  *   never send the same entry twice. A claim older than ten minutes belongs to
  *   a flusher that died and is taken over by the next flush.
- * - `spool.dead.jsonl`: captures the server refused as invalid, with its message.
+ * - `spool.dead.jsonl`: captures the server refused as invalid, and spooled
+ *   ones that failed `SPOOL_MAX_ATTEMPTS` times, with the last message.
  * - `capture-state.json`: per-source last success / last error, rewritten
  *   atomically after every attempt.
  * - `spool.lock`: advisory lock held for the file operations on the three
@@ -53,6 +56,11 @@ export type PostResult =
       ok: false
       /** false = resending the same capture cannot succeed; it is dead-lettered. */
       retryable: boolean
+      /**
+       * The request never reached the server (connection error, no token).
+       * Says nothing about this capture, so a spooled entry is not charged an attempt.
+       */
+      unreachable?: true
       status?: number
       message: string
       outcome?: CaptureOutcome
@@ -99,6 +107,12 @@ export interface SendOptions extends PostOptions {
 export const TURN_TIMEOUT_MS = 60_000
 export const DERIVE_TIMEOUT_MS = 180_000
 export const SPOOL_FLUSH_MAX = 20
+/**
+ * A spooled capture the server keeps failing (an answer or a timeout, never a
+ * connection error) is dead-lettered on this attempt, so it cannot hold the
+ * head of the backlog forever.
+ */
+export const SPOOL_MAX_ATTEMPTS = 8
 export const CLAIM_STALE_MS = 10 * 60_000
 const CLAIM_SAFETY_MS = 30_000
 /** Holders keep the lock for a few file operations; one this old was left by a dead process. */
@@ -122,6 +136,8 @@ const OUTCOMES: ReadonlySet<string> = new Set(['stored', 'rejected', 'deduped', 
 interface SpoolEntry {
   v: 1
   at: string
+  /** Absent on lines written before attempts were counted; read as 1. */
+  attempts?: number
   payload: CapturePayload
 }
 
@@ -240,7 +256,7 @@ export async function postCapture(
   try {
     token = await readServerToken(env)
   } catch (err) {
-    return { ok: false, retryable: true, message: clip(`no server token: ${errorMessage(err)}`) }
+    return { ok: false, retryable: true, unreachable: true, message: clip(`no server token: ${errorMessage(err)}`) }
   }
   try {
     const response = await fetch(captureEndpoint(serverUrl), {
@@ -258,7 +274,9 @@ export async function postCapture(
     const isTimeout = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
     const cause = err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : ''
     const message = isTimeout ? `timeout after ${timeoutMs} ms` : `${errorMessage(err)}${cause}`
-    return { ok: false, retryable: true, message: clip(message) }
+    // A timeout reached the server, which may still be working on this
+    // capture; only a request that never got there is unreachable.
+    return { ok: false, retryable: true, ...(isTimeout ? {} : { unreachable: true as const }), message: clip(message) }
   }
 }
 
@@ -384,8 +402,19 @@ async function withSpoolLock<T>(dir: string, unlocked: string, fn: (locked: bool
   }
 }
 
-function deadLetter(payload: unknown, result: PostResult & { ok: false }, at: string): Record<string, unknown> {
-  return { v: 1, at, ...(result.status ? { status: result.status } : {}), message: result.message, payload }
+function deadLetter(
+  payload: unknown,
+  result: PostResult & { ok: false },
+  at: string,
+  attempts?: number,
+): Record<string, unknown> {
+  const status = result.status ? { status: result.status } : {}
+  return { v: 1, at, ...status, message: result.message, ...(attempts ? { attempts } : {}), payload }
+}
+
+function attemptsOf(entry: SpoolEntry): number {
+  const { attempts } = entry
+  return typeof attempts === 'number' && Number.isInteger(attempts) && attempts >= 1 ? attempts : 1
 }
 
 function newClaimName(nowMs: number): string {
@@ -486,6 +515,7 @@ async function flushSpool(dir: string, env: CaptureEnv, budgetMs: number, nowIso
   const deadLines: unknown[] = unreadable.map((l) => ({ v: 1, at: nowIso(), message: 'unreadable spool line', raw: l.raw }))
   let sent = 0
   let index = 0
+  let requeued: SpoolEntry | undefined
   for (; index < entries.length && sent < SPOOL_FLUSH_MAX; index++) {
     const entry = entries[index]
     if (Date.now() - startMs + defaultTimeoutMs(entry.payload) > budgetMs) break
@@ -495,15 +525,24 @@ async function flushSpool(dir: string, env: CaptureEnv, budgetMs: number, nowIso
       sent++
     } else if (!result.retryable) {
       deadLines.push(deadLetter(entry.payload, result, nowIso()))
+    } else if (result.unreachable) {
+      break
     } else {
+      const count = attemptsOf(entry) + 1
+      if (count >= SPOOL_MAX_ATTEMPTS) {
+        deadLines.push(deadLetter(entry.payload, result, nowIso(), count))
+        continue
+      }
+      requeued = { ...entry, attempts: count }
       break
     }
   }
+  const unsent = requeued ? [requeued, ...entries.slice(index + 1)] : entries.slice(index)
 
   // Remaining entries go back before the claims are removed: a crash in
   // between resends a capture (the key makes that a replay) instead of losing it.
   await withSpoolLock(dir, `returned unsent entries to ${SPOOL_FILE} without it`, async () => {
-    await appendLines(join(dir, SPOOL_FILE), entries.slice(index))
+    await appendLines(join(dir, SPOOL_FILE), unsent)
     await appendLines(join(dir, DEAD_FILE), deadLines)
   })
   await Promise.all(claims.map((path) => fs.rm(path, { force: true })))
@@ -594,7 +633,7 @@ export async function sendCapture(
     flushed = flush.flushed
     dead = flush.dead
   } else if (result.retryable) {
-    const entry: SpoolEntry = { v: 1, at: nowIso(), payload }
+    const entry: SpoolEntry = { v: 1, at: nowIso(), attempts: 1, payload }
     await withSpoolLock(dir, `appended to ${SPOOL_FILE} without it`, () =>
       appendLines(join(dir, SPOOL_FILE), [entry]),
     )

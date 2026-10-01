@@ -12,6 +12,7 @@ import {
   postCapture,
   sendCapture,
   SPOOL_FLUSH_MAX,
+  SPOOL_MAX_ATTEMPTS,
   type CaptureEnv,
   type CapturePayload,
 } from '../src/ingest/capture-client.js'
@@ -34,6 +35,8 @@ interface Stub {
   received: Received[]
   respond: Responder
   delayMs: number
+  /** After answering this many requests the stub stops listening and drops its connections. */
+  refuseAfter?: number
   close: () => Promise<void>
 }
 
@@ -50,7 +53,12 @@ async function startStub(): Promise<Stub> {
       const reply = stub.respond(body)
       setTimeout(() => {
         res.writeHead(reply.status, { 'content-type': 'application/json' })
-        res.end(JSON.stringify(reply.body))
+        res.end(JSON.stringify(reply.body), () => {
+          if (stub.refuseAfter !== undefined && stub.received.length >= stub.refuseAfter) {
+            server.close()
+            server.closeAllConnections()
+          }
+        })
       }, stub.delayMs)
     })
   })
@@ -189,6 +197,16 @@ describe('postCapture', () => {
     stub.delayMs = 300
     const result = await postCapture(turn('k-slow'), envFor(stub.url), { timeoutMs: 50 })
     expect(result).toMatchObject({ ok: false, retryable: true, message: 'timeout after 50 ms' })
+    expect(result).not.toHaveProperty('unreachable')
+  })
+
+  it('marks a refused connection as unreachable and a server answer as reached', async () => {
+    const refused = await postCapture(turn('k-down'), envFor(await closedPortUrl()))
+    expect(refused).toMatchObject({ ok: false, retryable: true, unreachable: true })
+    stub.respond = () => ({ status: 500, body: { outcome: 'error', model: MODEL, message: 'boom' } })
+    const answered = await postCapture(turn('k-500'), envFor(stub.url))
+    expect(answered).toMatchObject({ ok: false, retryable: true, status: 500 })
+    expect(answered).not.toHaveProperty('unreachable')
   })
 })
 
@@ -247,6 +265,68 @@ describe('sendCapture', () => {
     expect(result).toMatchObject({ flushed: 1, spooled: 3 })
     expect(await spoolKeys()).toEqual(['s2', 's3', 's4'])
     expect(await claimFiles()).toEqual([])
+  })
+
+  it('dead-letters a spooled entry on its eighth 500 and sends the entries behind it', async () => {
+    const failing = (body: CapturePayload): Reply =>
+      body.key === 'poison'
+        ? { status: 500, body: { outcome: 'error', model: MODEL, retryable: true, message: 'capture failed; retry later' } }
+        : stored(body)
+    stub.respond = failing
+    await sendCapture(turn('poison'), envFor(stub.url))
+    await sendCapture(turn('s1'), envFor(await closedPortUrl()))
+    await sendCapture(turn('s2'), envFor(await closedPortUrl()))
+    expect((await readJsonl('spool.jsonl')).map((e) => e['attempts'])).toEqual([1, 1, 1])
+
+    for (let run = 2; run < SPOOL_MAX_ATTEMPTS; run++) {
+      await sendCapture(turn(`own-${run}`), envFor(stub.url))
+      expect(await spoolKeys()).toEqual(['poison', 's1', 's2'])
+      expect((await readJsonl('spool.jsonl'))[0]['attempts']).toBe(run)
+    }
+    expect(await readJsonl('spool.dead.jsonl')).toEqual([])
+
+    const result = await sendCapture(turn('own-last'), envFor(stub.url))
+
+    expect(stub.received.filter((r) => r.body.key === 'poison')).toHaveLength(SPOOL_MAX_ATTEMPTS)
+    expect(result).toMatchObject({ flushed: 2, dead: 1, spooled: 0 })
+    expect(sentKeys().slice(-4)).toEqual(['own-last', 'poison', 's1', 's2'])
+    expect(await spoolKeys()).toEqual([])
+    expect(await readJsonl('spool.dead.jsonl')).toEqual([
+      expect.objectContaining({
+        status: 500,
+        attempts: SPOOL_MAX_ATTEMPTS,
+        message: 'capture failed; retry later',
+        payload: turn('poison'),
+      }),
+    ])
+  })
+
+  it('counts no attempt when the server stops answering mid-flush', async () => {
+    const line = (key: string, attempts: number) =>
+      JSON.stringify({ v: 1, at: '2026-09-30T08:00:00.000Z', attempts, payload: turn(key) })
+    await fs.writeFile(join(engram, 'spool.jsonl'), `${line('s1', 3)}\n${line('s2', 1)}\n`, { mode: 0o600 })
+    stub.refuseAfter = 1
+
+    const result = await sendCapture(turn('k-own'), envFor(stub.url))
+
+    expect(sentKeys()).toEqual(['k-own'])
+    expect(result).toMatchObject({ disposition: 'sent', flushed: 0, dead: 0, spooled: 2 })
+    const spool = await readJsonl('spool.jsonl')
+    expect(spool.map((e) => [(e['payload'] as CapturePayload).key, e['attempts']])).toEqual([
+      ['s1', 3],
+      ['s2', 1],
+    ])
+    expect(await readJsonl('spool.dead.jsonl')).toEqual([])
+  })
+
+  it('reads a spool line without attempts as one attempt', async () => {
+    await prefillSpool(['s1'])
+    stub.respond = (body) =>
+      body.key === 's1' ? { status: 503, body: { outcome: 'error', model: MODEL, message: 'busy' } } : stored(body)
+
+    await sendCapture(turn('k-own'), envFor(stub.url))
+
+    expect((await readJsonl('spool.jsonl')).map((e) => e['attempts'])).toEqual([2])
   })
 
   it('dead-letters a retryable:false outcome with the server message', async () => {
