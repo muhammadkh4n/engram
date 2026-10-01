@@ -1422,6 +1422,83 @@ $smoke$;
 
 
 --
+-- Function privileges: EXECUTE for service_role only.
+--
+-- PostgREST serves schema public and runs every request without a JWT as the
+-- anon role, so any function in public that anon may execute is callable as
+-- /rpc/<name> by anyone who can reach PostgREST. Postgres grants EXECUTE on a
+-- new function to PUBLIC, and on Supabase default privileges also grant it to
+-- anon and authenticated. The engram_* functions are SECURITY DEFINER: they
+-- run as their owner, past RLS, and return memory content or tombstone,
+-- decay and re-weight memories. Clients authenticate with the service-role
+-- key, so EXECUTE is revoked from PUBLIC, anon and authenticated and granted
+-- to service_role explicitly, which also covers a database whose default
+-- privileges grant service_role nothing. Functions that are dropped and
+-- re-created above lose their grants on every apply, so this section runs
+-- after the last function definition and re-applying the file restores it.
+--
+-- Every function below is an RPC endpoint and gets the service_role grant;
+-- this file defines no trigger functions. match_episodes and match_digests
+-- are SECURITY INVOKER, kept for adapters on the pre-recall-RPC schema.
+--
+
+REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM PUBLIC;
+
+-- anon and authenticated exist on Supabase and on installs that followed the
+-- self-host runbook; a database without them has nothing to revoke.
+DO $$
+DECLARE
+  role_name name;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM %I', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) TO service_role;
+GRANT EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) TO service_role;
+
+
+--
 -- PostgreSQL database dump complete
 --
 

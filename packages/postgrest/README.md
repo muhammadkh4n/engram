@@ -102,6 +102,8 @@ Engram ships a single idempotent `schema.sql` — bundled in this npm package an
 
 > **Upgrade order for the lexical leg:** this version runs keyword matching through the new `engram_text_match` RPC (terms are sent verbatim and the tsquery is built in Postgres, so identifiers such as `ACA-2613` or `gpt-4o` match). Apply `schema.sql` and run `NOTIFY pgrst, 'reload schema';` **before** restarting the server on the new version. The function is additive — `engram_text_boost` stays for the build still running — so applying the schema first is safe. If the server starts first, recall still answers from vector search alone, stderr logs `[engram] lexical leg failed: …` once per distinct error, and the `[recall]` timing line (`ENGRAM_RECALL_TIMING=1`) shows `lexical=error` until the schema is applied.
 
+> **RPC access:** only `service_role` may execute the RPC functions in `schema.sql` and `bm25.sql`. They run as their owner (`SECURITY DEFINER`), so both files revoke `EXECUTE` from `PUBLIC`, `anon` and `authenticated` and grant it to `service_role`: every `/rpc/engram_*` endpoint refuses a request with the anon key or with no JWT (`401`, error code `42501`). Configure the adapter with a service-role JWT. After upgrading, re-apply `schema.sql` (and `bm25.sql` if you use it) and reload PostgREST's schema cache, so an existing database drops the grants older versions left in place.
+
 Tables (all in `public`):
 - `memory_episodes` — raw turns with embeddings
 - `memory_digests` — light-sleep summaries
