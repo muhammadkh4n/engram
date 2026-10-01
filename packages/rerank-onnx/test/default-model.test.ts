@@ -7,6 +7,8 @@ const calls = vi.hoisted(() => ({
   tokenizerModels: [] as string[],
   modelLoads: [] as Array<{ model: string; options: unknown }>,
   nextLogits: [] as number[],
+  // When set, every pair gets this logit, however the docs are batched.
+  perPairLogit: null as number | null,
 }))
 
 vi.mock('@huggingface/transformers', () => ({
@@ -20,7 +22,15 @@ vi.mock('@huggingface/transformers', () => ({
     from_pretrained: async (model: string, options: unknown) => {
       calls.modelLoads.push({ model, options })
       return {
-        _call: async () => ({ logits: { data: Float32Array.from(calls.nextLogits) } }),
+        _call: async (inputs: { pairs: number }) => ({
+          logits: {
+            data: Float32Array.from(
+              calls.perPairLogit === null
+                ? calls.nextLogits
+                : new Array<number>(inputs.pairs).fill(calls.perPairLogit),
+            ),
+          },
+        }),
       }
     },
   },
@@ -35,6 +45,7 @@ describe('createOnnxReranker defaults and scoring (stubbed runtime)', () => {
     calls.tokenizerModels.length = 0
     calls.modelLoads.length = 0
     calls.nextLogits = []
+    calls.perPairLogit = null
   })
 
   it('defaults to gte-reranker-modernbert-base at q8', async () => {
@@ -79,5 +90,20 @@ describe('createOnnxReranker defaults and scoring (stubbed runtime)', () => {
         { id: 'b', content: 'beta' },
       ]),
     ).rejects.toThrow(/expected one logit per pair/)
+  })
+
+  // The engine sends at most 30 fused candidates plus a 15-row lexical reserve.
+  it('scores a 45-doc slate in full with the default cap', async () => {
+    calls.perPairLogit = 1
+    const docs = Array.from({ length: 45 }, (_, i) => ({ id: `d${i}`, content: `doc ${i}` }))
+    const result = await createOnnxReranker().rerank('q', docs)
+    expect(result.map(r => r.id)).toEqual(docs.map(d => d.id))
+  })
+
+  it('caps a call at 50 docs by default', async () => {
+    calls.perPairLogit = 1
+    const docs = Array.from({ length: 60 }, (_, i) => ({ id: `d${i}`, content: `doc ${i}` }))
+    const result = await createOnnxReranker().rerank('q', docs)
+    expect(result.map(r => r.id)).toEqual(docs.slice(0, 50).map(d => d.id))
   })
 })

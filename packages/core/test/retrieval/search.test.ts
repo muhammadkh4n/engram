@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { unifiedSearch, isRecallFailureNoise } from '../../src/retrieval/search.js'
 import { createMockStorage } from './mock-storage.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
-import type { RecallStrategy } from '../../src/types.js'
+import type { Episode, MemoryType, RecallStrategy, SearchResult, TypedMemory } from '../../src/types.js'
 
 const LIGHT_STRATEGY: RecallStrategy = {
   mode: 'light',
@@ -219,5 +219,187 @@ describe('isRecallFailureNoise', () => {
     expect(isRecallFailureNoise('assistant', "I can't find that, but it shipped on May 12.")).toBe(
       false,
     )
+  })
+})
+
+describe('unifiedSearch — failed lexical leg', () => {
+  function failingTextBoost(message: string) {
+    const storage = createMockStorage()
+    storage.textBoost = vi.fn().mockRejectedValue(new Error(message))
+    return storage
+  }
+
+  it('returns the vector hits, logs the error and reports it', async () => {
+    const storage = failingTextBoost('Could not find the function public.engram_text_match')
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onLexicalError = vi.fn()
+    try {
+      const result = await unifiedSearch({
+        query: 'TypeScript strict mode',
+        embedding: [0.1, 0.2, 0.3],
+        strategy: LIGHT_STRATEGY,
+        storage,
+        sensory: new SensoryBuffer(),
+        onLexicalError,
+      })
+
+      expect(result.length).toBeGreaterThan(0)
+      expect(storage.vectorSearch).toHaveBeenCalled()
+      expect(onLexicalError).toHaveBeenCalledTimes(1)
+      expect(errSpy).toHaveBeenCalledWith(
+        '[engram] lexical leg failed: Could not find the function public.engram_text_match',
+      )
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+
+  it('logs each distinct message once per process but reports every failure', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onLexicalError = vi.fn()
+    const run = (message: string) =>
+      unifiedSearch({
+        query: 'TypeScript strict mode',
+        embedding: [0.1, 0.2, 0.3],
+        strategy: LIGHT_STRATEGY,
+        storage: failingTextBoost(message),
+        sensory: new SensoryBuffer(),
+        onLexicalError,
+      })
+    try {
+      await run('relation "episodes" does not exist')
+      await run('relation "episodes" does not exist')
+      await run('connection reset by peer')
+
+      const lines = errSpy.mock.calls.map((c) => c[0])
+      expect(lines).toEqual([
+        '[engram] lexical leg failed: relation "episodes" does not exist',
+        '[engram] lexical leg failed: connection reset by peer',
+      ])
+      expect(onLexicalError).toHaveBeenCalledTimes(3)
+    } finally {
+      errSpy.mockRestore()
+    }
+  })
+})
+
+describe('unifiedSearch — lexical-only candidates', () => {
+  const NOW = new Date('2026-06-01T12:00:00Z')
+  const CREATED_AT = new Date(NOW.getTime() - 24 * 3_600_000)
+  const QUERY_VEC = [1, 0, 0, 0]
+
+  function ep(id: string, content: string, embedding: number[] | null): Episode {
+    return {
+      id,
+      sessionId: `sess-${id}`,
+      role: 'user',
+      content,
+      salience: 0.5,
+      accessCount: 0,
+      lastAccessed: null,
+      consolidatedAt: null,
+      embedding,
+      entities: [],
+      metadata: {},
+      createdAt: CREATED_AT,
+      projectId: null,
+    }
+  }
+
+  /** The scoring formula for a user-role row with no access count, no
+   *  priming and no failure-noise penalty. */
+  function expectedScore(cosine: number, boost: number, recencyBias: number): number {
+    const ageHours = (NOW.getTime() - CREATED_AT.getTime()) / 3_600_000
+    return cosine + boost * 0.15 + recencyBias * Math.exp(-ageHours / 720)
+  }
+
+  const vectorHit = ep('vec-1', 'deploy pipeline for the billing worker', [0.6, 0.8, 0, 0])
+  const rescueA = ep('lex-a', 'ACA-2613 renewal export columns', [0.4, 0, Math.sqrt(1 - 0.16), 0])
+  const rescueB = ep('lex-b', 'ACA-2613 portfolio drilldown', [0.3, 0.3, 0.3, Math.sqrt(1 - 0.27)])
+  const noEmbedding = ep('lex-null', 'ACA-2613 legacy import without vectors', null)
+  const otherDims = ep('lex-dims', 'ACA-2613 row from an older embedding model', [1, 0])
+
+  function buildStorage() {
+    const vectorSearchResults: SearchResult<TypedMemory>[] = [
+      { item: { type: 'episode', data: vectorHit }, similarity: 0.6 },
+    ]
+    const textBoostResults: Array<{ id: string; type: MemoryType; boost: number }> = [
+      { id: 'vec-1', type: 'episode', boost: 0.2 },
+      { id: 'lex-a', type: 'episode', boost: 1.0 },
+      { id: 'lex-missing', type: 'episode', boost: 0.9 },
+      { id: 'lex-b', type: 'episode', boost: 0.7 },
+      { id: 'lex-null', type: 'episode', boost: 0.5 },
+      { id: 'lex-dims', type: 'episode', boost: 0.4 },
+    ]
+    const storage = createMockStorage({ vectorSearchResults, textBoostResults })
+    const byId = new Map<string, TypedMemory>(
+      [vectorHit, rescueA, rescueB, noEmbedding, otherDims].map((e) => [e.id, { type: 'episode', data: e }]),
+    )
+    storage.getByIds = vi.fn(async (refs: Array<{ id: string; type: MemoryType }>) =>
+      refs.flatMap((r) => {
+        const m = byId.get(r.id)
+        return m ? [m] : []
+      }),
+    )
+    return storage
+  }
+
+  async function run(storage = buildStorage()) {
+    const result = await unifiedSearch({
+      query: 'ACA-2613',
+      embedding: QUERY_VEC,
+      strategy: LIGHT_STRATEGY,
+      storage,
+      sensory: new SensoryBuffer(),
+    })
+    return { storage, result }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('fetches every lexical-only hit in one getByIds call and never per row', async () => {
+    const { storage, result } = await run()
+    expect(storage.getByIds).toHaveBeenCalledTimes(1)
+    expect(storage.getByIds).toHaveBeenCalledWith([
+      { id: 'lex-a', type: 'episode' },
+      { id: 'lex-missing', type: 'episode' },
+      { id: 'lex-b', type: 'episode' },
+      { id: 'lex-null', type: 'episode' },
+      { id: 'lex-dims', type: 'episode' },
+    ])
+    expect(storage.getById).not.toHaveBeenCalled()
+    expect(result.map((r) => r.id)).not.toContain('lex-missing')
+  })
+
+  it('scores a lexical-only row on its true cosine to the query', async () => {
+    const { result } = await run()
+    const a = result.find((r) => r.id === 'lex-a')
+    const b = result.find((r) => r.id === 'lex-b')
+    expect(a?.relevance).toBeCloseTo(expectedScore(0.4, 1.0, LIGHT_STRATEGY.recencyBias), 10)
+    expect(b?.relevance).toBeCloseTo(expectedScore(0.3, 0.7, LIGHT_STRATEGY.recencyBias), 10)
+  })
+
+  it('scores a row without a usable embedding with no vector term', async () => {
+    const { result } = await run()
+    const noVec = result.find((r) => r.id === 'lex-null')
+    const dims = result.find((r) => r.id === 'lex-dims')
+    expect(noVec?.relevance).toBeCloseTo(expectedScore(0, 0.5, LIGHT_STRATEGY.recencyBias), 10)
+    expect(dims?.relevance).toBeCloseTo(expectedScore(0, 0.4, LIGHT_STRATEGY.recencyBias), 10)
+  })
+
+  it('skips the fetch when every lexical hit is already a vector hit', async () => {
+    const storage = createMockStorage({
+      vectorSearchResults: [{ item: { type: 'episode', data: vectorHit }, similarity: 0.6 }],
+      textBoostResults: [{ id: 'vec-1', type: 'episode', boost: 0.2 }],
+    })
+    await run(storage)
+    expect(storage.getByIds).not.toHaveBeenCalled()
   })
 })

@@ -100,13 +100,13 @@ describe('top-level adapter vectorSearch/textBoost forward p_project_id', () => 
     )
   })
 
-  it('textBoost forwards p_project_id to engram_text_boost', async () => {
+  it('textBoost forwards p_project_id to engram_text_match', async () => {
     const mock = mockClient()
     const adapter = buildAdapter(mock)
     await adapter.textBoost(['deploy', 'rotate'], { limit: 30, projectId: 'beta' })
 
     expect(mock.rpc).toHaveBeenCalledWith(
-      'engram_text_boost',
+      'engram_text_match',
       expect.objectContaining({ p_project_id: 'beta' }),
     )
   })

@@ -6,6 +6,7 @@ import type {
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
+import { cosineSimilarity } from '../ingestion/near-duplicate.js'
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
@@ -169,10 +170,62 @@ export interface UnifiedSearchOpts {
   /** Project/group boost applied before the maxResults cut, so same-project
    *  candidates are not crowded out of the slate the reranker sees. */
   projectRanking?: ProjectRanking
+  /** Called when storage.textBoost throws. The recall continues with an
+   *  empty lexical leg; the caller can mark the failure in its diagnostics. */
+  onLexicalError?: (err: unknown) => void
+  /** Lexical hits that missed the `maxResults` cut, appended after it in
+   *  descending boost order (at most this many). Default 0: the output is the
+   *  fused cut alone. */
+  lexicalReserve?: number
+}
+
+/** Lexical-leg error messages already written to stderr by this process.
+ *  A persistent failure (e.g. a missing RPC) would otherwise log on every
+ *  recall. */
+const loggedLexicalErrors = new Set<string>()
+
+function reportLexicalError(err: unknown, onLexicalError?: (err: unknown) => void): void {
+  const message = err instanceof Error ? err.message : String(err)
+  if (!loggedLexicalErrors.has(message)) {
+    loggedLexicalErrors.add(message)
+    console.error(`[engram] lexical leg failed: ${message}`)
+  }
+  onLexicalError?.(err)
+}
+
+/**
+ * Lexical candidates from storage.textBoost. A failure here (schema not yet
+ * applied, transient database error) empties the lexical leg only: vector
+ * search alone still answers the recall, and the error is logged and
+ * reported rather than swallowed.
+ */
+async function lexicalLeg(
+  storage: StorageAdapter,
+  terms: string[],
+  opts: Parameters<StorageAdapter['textBoost']>[1],
+  onLexicalError?: (err: unknown) => void,
+): ReturnType<StorageAdapter['textBoost']> {
+  try {
+    return await storage.textBoost(terms, opts)
+  } catch (err) {
+    reportLexicalError(err, onLexicalError)
+    return []
+  }
+}
+
+/** Cosine of a lexical-only candidate to the query. A row without an
+ *  embedding, or with one of another dimension, has no vector evidence and
+ *  scores 0 on this term. */
+function rescueCosine(query: readonly number[], row: readonly number[] | null | undefined): number {
+  if (!row || query.length === 0 || row.length !== query.length) return 0
+  return cosineSimilarity(query, row)
 }
 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
-  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking } = opts
+  const {
+    query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
+    lexicalReserve = 0,
+  } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
@@ -184,7 +237,9 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const hasVectorSearch = typeof storage.vectorSearch === 'function'
   const hasTextBoost = typeof storage.textBoost === 'function'
 
-  // Wider candidate pool — more candidates into reranker = better ordering
+  // Vector and lexical candidates are fused into one scored list and cut to
+  // maxResults. When a reranker follows, the lexical reserve joins that cut,
+  // so exact-term matches outside the nearest neighbours still reach it.
   const vectorLimit = strategy.maxResults * 4
 
   const vectorResults = hasVectorSearch && embedding.length > 0
@@ -199,11 +254,16 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const terms = extractTerms(query, expandedTerms)
   const bm25Limit = strategy.maxResults * 5
   const boostResults = terms.length > 0 && hasTextBoost
-    ? await storage.textBoost(terms, {
-        limit: bm25Limit,
-        sessionId,
-        ...(projectId !== undefined ? { projectId } : {}),
-      })
+    ? await lexicalLeg(
+        storage,
+        terms,
+        {
+          limit: bm25Limit,
+          sessionId,
+          ...(projectId !== undefined ? { projectId } : {}),
+        },
+        onLexicalError,
+      )
     : []
 
   const boostMap = new Map<string, number>()
@@ -251,11 +311,18 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
 
     // BM25 rescue: add keyword-matched candidates that vector search missed.
-    // These have exact term matches but weak embedding similarity — the
-    // reranker will sort out true relevance.
+    // They are hydrated in one batched fetch (one round trip instead of one
+    // per row) and scored on their true cosine to the query, so an exact
+    // term match competes on the same footing as a vector neighbour.
+    const rescueRefs = boostResults
+      .filter((b) => !scoredIds.has(b.id))
+      .map((b) => ({ id: b.id, type: b.type }))
+    const rescued = rescueRefs.length > 0 ? await storage.getByIds(rescueRefs) : []
+    const rescuedById = new Map(rescued.map((t) => [t.data.id, t]))
+
     for (const b of boostResults) {
       if (scoredIds.has(b.id)) continue
-      const typed = await storage.getById(b.id, b.type)
+      const typed = rescuedById.get(b.id)
       if (!typed) continue
 
       const content = extractContent(typed)
@@ -266,7 +333,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       const primingBoost = sensory.getPrimingBoost(content)
 
       const finalScore = computeScore({
-        cosineSimilarity: 0,
+        cosineSimilarity: rescueCosine(embedding, typed.data.embedding),
         bm25Boost: b.boost,
         recencyBias: strategy.recencyBias,
         createdAt,
@@ -356,7 +423,35 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   }
 
   const ranked = projectRanking ? applyProjectRanking(scored, projectRanking) : scored
-  return ranked
+  const cut = ranked
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, strategy.maxResults)
+  if (lexicalReserve <= 0 || boostResults.length === 0) return cut
+  return [...cut, ...lexicalReserveRows(ranked, cut, boostResults, lexicalReserve)]
+}
+
+/**
+ * Lexical hits that missed the fused cut, strongest boost first. Drawn from
+ * the project-ranked list, so a row that strict scoping dropped stays out;
+ * each keeps its fused score.
+ */
+function lexicalReserveRows(
+  ranked: readonly RetrievedMemory[],
+  cut: readonly RetrievedMemory[],
+  boostResults: ReadonlyArray<{ id: string; boost: number }>,
+  reserve: number,
+): RetrievedMemory[] {
+  const rankedById = new Map(ranked.map((m) => [m.id, m]))
+  const taken = new Set(cut.map((m) => m.id))
+  const rows: RetrievedMemory[] = []
+  const byBoost = [...boostResults].sort((a, b) => b.boost - a.boost)
+  for (const { id } of byBoost) {
+    if (rows.length >= reserve) break
+    if (taken.has(id)) continue
+    const m = rankedById.get(id)
+    if (!m) continue
+    rows.push(m)
+    taken.add(id)
+  }
+  return rows
 }

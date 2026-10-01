@@ -196,54 +196,61 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       byType.set(type, list)
     }
 
-    const results: TypedMemory[] = []
+    const found = new Map<string, TypedMemory>()
+    const keep = (m: TypedMemory) => found.set(`${m.type}:${m.data.id}`, m)
 
-    const episodeIds = byType.get('episode')
-    if (episodeIds && episodeIds.length > 0) {
-      const episodes = await this._episodes!.getByIds(episodeIds, opts)
-      for (const ep of episodes) results.push({ type: 'episode', data: ep })
+    for (const batch of idBatches(byType.get('episode'))) {
+      const episodes = await this._episodes!.getByIds(batch, opts)
+      for (const ep of episodes) keep({ type: 'episode', data: ep })
     }
 
-    const digestIds = byType.get('digest')
-    if (digestIds && digestIds.length > 0) {
+    for (const batch of idBatches(byType.get('digest'))) {
       const { data, error } = await this.client
         .from('memory_digests')
         .select('*')
-        .in('id', digestIds)
+        .in('id', batch)
       if (error) throw new Error(`getByIds digest failed: ${error.message}`)
       for (const row of (data ?? []) as DigestRow[]) {
-        results.push({ type: 'digest', data: rowToDigest(row) })
+        keep({ type: 'digest', data: rowToDigest(row) })
       }
     }
 
-    const semanticIds = byType.get('semantic')
-    if (semanticIds && semanticIds.length > 0) {
+    for (const batch of idBatches(byType.get('semantic'))) {
       let query = this.client
         .from('memory_semantic')
         .select('*')
-        .in('id', semanticIds)
+        .in('id', batch)
       if (activeOnly) query = query.is('forgotten_at', null).is('superseded_by', null)
       const { data, error } = await query
       if (error) throw new Error(`getByIds semantic failed: ${error.message}`)
       for (const row of (data ?? []) as SemanticRow[]) {
-        results.push({ type: 'semantic', data: rowToSemantic(row) })
+        keep({ type: 'semantic', data: rowToSemantic(row) })
       }
     }
 
-    const proceduralIds = byType.get('procedural')
-    if (proceduralIds && proceduralIds.length > 0) {
+    for (const batch of idBatches(byType.get('procedural'))) {
       let query = this.client
         .from('memory_procedural')
         .select('*')
-        .in('id', proceduralIds)
+        .in('id', batch)
       if (activeOnly) query = query.is('forgotten_at', null)
       const { data, error } = await query
       if (error) throw new Error(`getByIds procedural failed: ${error.message}`)
       for (const row of (data ?? []) as ProceduralRow[]) {
-        results.push({ type: 'procedural', data: rowToProcedural(row) })
+        keep({ type: 'procedural', data: rowToProcedural(row) })
       }
     }
 
+    // An `in` filter returns rows in no particular order; callers get them
+    // back in the order they asked for, one per id.
+    const results: TypedMemory[] = []
+    for (const { id, type } of ids) {
+      const key = `${type}:${id}`
+      const m = found.get(key)
+      if (!m) continue
+      results.push(m)
+      found.delete(key)
+    }
     return results
   }
 
@@ -302,16 +309,18 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     projectId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     this.assertInitialized()
-    if (terms.length === 0) return []
 
-    const sanitized = terms
-      .map(t => t.replace(/[^a-zA-Z0-9]/g, ''))
-      .filter(t => t.length > 0)
-    if (sanitized.length === 0) return []
-    const queryTerms = sanitized.join(' | ')
+    // Terms go to Postgres as typed. The tsquery is built server-side with the
+    // same text-search configuration that indexed the rows, so separators in
+    // identifiers (aca-2613, gpt-4o, node.js) survive into matching lexemes.
+    // Postgres text cannot hold NUL, so a term carrying one would fail the
+    // whole request; C0 control characters are dropped from every term.
+    const cleaned = terms.map(t => t.replace(C0_CONTROL, ''))
+    const uniqueTerms = [...new Set(cleaned.filter(t => t.length > 0))]
+    if (uniqueTerms.length === 0) return []
 
-    const { data, error } = await this.client.rpc('engram_text_boost', {
-      p_query_terms: queryTerms,
+    const { data, error } = await this.client.rpc('engram_text_match', {
+      p_terms: uniqueTerms,
       p_match_count: opts?.limit ?? 30,
       p_session_id: opts?.sessionId ?? null,
       p_project_id: opts?.projectId ?? null,
@@ -517,6 +526,19 @@ interface PgScanRow {
 }
 
 // ---------------------------------------------------------------------------
+// An `in` filter puts every id in the request URL (36 chars plus separator
+// each); 50 per request keeps the request line under common proxy limits.
+const GET_BY_IDS_BATCH_SIZE = 50
+
+function idBatches(ids: readonly string[] | undefined): string[][] {
+  const batches: string[][] = []
+  if (!ids) return batches
+  for (let i = 0; i < ids.length; i += GET_BY_IDS_BATCH_SIZE) {
+    batches.push(ids.slice(i, i + GET_BY_IDS_BATCH_SIZE))
+  }
+  return batches
+}
+
 // Inline row mappers for getById/getByIds (avoids cross-importing sub-stores)
 // ---------------------------------------------------------------------------
 
@@ -574,6 +596,9 @@ interface ProceduralRow {
 }
 
 import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
+
+// eslint-disable-next-line no-control-regex
+const C0_CONTROL = /[\u0000-\u001f]/g
 
 function rowToDigest(row: DigestRow): Digest {
   return {
