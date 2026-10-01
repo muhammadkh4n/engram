@@ -37,7 +37,15 @@ export { requireGraph } from './bench-memory-handle.js'
  *     'onnx'                                    → local mxbai-rerank ONNX model
  *     'none'                                    → rerank disabled (same as noRerank)
  */
-export async function createBenchMemory(opts?: BenchmarkOpts): Promise<BenchMemoryHandle> {
+export interface BenchMemoryHooks {
+  /**
+   * Wraps the composed intelligence adapter (reranker backend applied) before
+   * Memory is built; not called when no adapter is configured.
+   */
+  wrapIntelligence?: (intelligence: IntelligenceAdapter) => IntelligenceAdapter
+}
+
+export async function createBenchMemory(opts?: BenchmarkOpts, hooks?: BenchMemoryHooks): Promise<BenchMemoryHandle> {
   const sqlite = new SqliteStorageAdapter(':memory:')
   const useEngine = opts?.vectorMode === 'engine'
   // Snapshotting off (snapshotDir: null) — bench corpora are ephemeral,
@@ -52,7 +60,8 @@ export async function createBenchMemory(opts?: BenchmarkOpts): Promise<BenchMemo
   const fullIntelligence = apiKey ? openaiIntelligence({ apiKey }) : undefined
 
   const backend = resolveBackend(opts)
-  const intelligence = await composeIntelligence(fullIntelligence, backend, opts?.onnxRerankerModel)
+  const composed = await composeIntelligence(fullIntelligence, backend, opts?.onnxRerankerModel)
+  const intelligence = composed && hooks?.wrapIntelligence ? hooks.wrapIntelligence(composed) : composed
 
   // Honor opts.graph — previously plumbed but ignored. Bench Neo4j is opt-in
   // via ENGRAM_BENCH_NEO4J_URI (NOT the prod NEO4J_URI). See bench-graph.ts.
