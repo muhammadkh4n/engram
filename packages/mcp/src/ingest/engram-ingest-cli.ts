@@ -12,10 +12,13 @@
  * `--raw` to skip the classifier (e.g. git commit messages are always
  * stored). Pass `--dry-run` to classify and log without writing.
  *
- * Every storable ingestion flows through Memory.ingest(), which means
- * the full Wave 2 pipeline runs: SQL insert + LLM entity extraction +
- * Neo4j graph decomposition. One entry point, one pipeline, no special
- * cases.
+ * With ENGRAM_SERVER_URL set, the capture is posted to the server's
+ * `POST /capture` route, which runs the classifier, dedup and storage with
+ * the server's model configuration; a capture the server cannot take now is
+ * spooled under ~/.engram/ and resent on the next run. Without it, the same
+ * pipeline runs in-process against this machine's store credentials. The
+ * content, its secret scrub and the project tag are resolved here in both
+ * modes.
  *
  * Usage:
  *   engram-ingest --content "..."                # classify then store
@@ -35,37 +38,50 @@
  *   --source <string>             Provenance tag (claude-code-hook, git-commit, cli, ...)
  *   --session-id <string>         Session ID to attach to the memory
  *   --raw                          Skip classifier; store content as-is
- *   --no-dedup                    Skip dedup check [Phase 2]
- *   --classifier-model <name>     Override model (default: the summarizer's default chat model)
- *   --threshold <0..1>            Classifier confidence threshold (default: env or 0.7)
+ *   --no-dedup                    Skip the near-duplicate check
+ *   --classifier-model <name>     Override model (local mode only; default: the summarizer's
+ *                                 default chat model)
+ *   --threshold <0..1>            Classifier confidence threshold (local mode only; default:
+ *                                 env or 0.7)
  *   --dry-run                      Classify and log only; do not write
  *   --verbose                      Emit classifier decision to stderr
  *
- * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY (`--raw --dry-run`
- * reaches neither a model nor a store and needs none of them)
- * Optional env: NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD,
- *               ENGRAM_SALIENCE_THRESHOLD, ENGRAM_SALIENCE_DISABLED
+ * Server mode env: ENGRAM_SERVER_URL, plus ENGRAM_SERVER_TOKEN_FILE or
+ * ENGRAM_SERVER_TOKEN.
+ * Local mode env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY (`--raw --dry-run`
+ * reaches neither a model nor a store and needs none of them); optional
+ * NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, ENGRAM_SALIENCE_THRESHOLD.
+ * Both: ENGRAM_SALIENCE_DISABLED=1 exits without capturing.
  */
 
-import { readFileSync } from 'node:fs'
-import { createMemory } from '@engram-mem/core'
-import type { IntelligenceAdapter, Memory } from '@engram-mem/core'
-import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
-import { tryCreateGraph } from '../graph-helper.js'
+import { createHash } from 'node:crypto'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { CAPTURE_CONTENT_MAX_CHARS } from '../capture-route.js'
+import type { CaptureInput, CaptureOutcome } from './capture.js'
+import { CLAIM_STALE_MS, TURN_TIMEOUT_MS, sendCapture, type CaptureEnv, type CapturePayload } from './capture-client.js'
 import { resolveProject } from './project-detect.js'
 import { logRejection } from './rejection-log.js'
-import { runCapture } from './capture.js'
+import { scrubModelInput } from './scrub-model-input.js'
+
+const LOG_PREFIX = '[engram-ingest]'
+const REJECTION_PREVIEW_CHARS = 300
+const LOCAL_TIMEOUT_MS = 60_000
+/** A server run posts its own capture, then flushes the spool for at most the claim window. */
+const SERVER_TIMEOUT_MS = TURN_TIMEOUT_MS + CLAIM_STALE_MS
 
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+type Role = 'user' | 'assistant' | 'system'
+
 interface Args {
+  help: boolean
   content: string | null
   stdin: boolean
   transcript: string | null
-  turn: 'user' | 'assistant' | 'system'
+  turn: Role
   project: string
   source: string
   sessionId: string | null
@@ -73,13 +89,16 @@ interface Args {
   noDedup: boolean
   classifierModel: string | null
   threshold: number
+  /** --threshold was passed (the env default does not count). */
+  thresholdFlag: boolean
   dryRun: boolean
   verbose: boolean
 }
 
-function parseArgs(argv: string[]): Args {
-  const envThreshold = process.env['ENGRAM_SALIENCE_THRESHOLD']
+function parseArgs(argv: readonly string[], env: CaptureEnv): Args {
+  const envThreshold = env['ENGRAM_SALIENCE_THRESHOLD']
   const args: Args = {
+    help: false,
     content: null,
     stdin: false,
     transcript: null,
@@ -91,6 +110,7 @@ function parseArgs(argv: string[]): Args {
     noDedup: false,
     classifierModel: null,
     threshold: envThreshold ? Number.parseFloat(envThreshold) : 0.7,
+    thresholdFlag: false,
     dryRun: false,
     verbose: false,
   }
@@ -132,6 +152,7 @@ function parseArgs(argv: string[]): Args {
         break
       case '--threshold':
         args.threshold = Number.parseFloat(argv[++i] ?? '0.7')
+        args.thresholdFlag = true
         break
       case '--dry-run':
         args.dryRun = true
@@ -141,32 +162,37 @@ function parseArgs(argv: string[]): Args {
         break
       case '--help':
       case '-h':
-        printUsageAndExit(0)
+        args.help = true
         break
     }
   }
   return args
 }
 
-function printUsageAndExit(code: number): never {
+function printUsage(): void {
   process.stderr.write(
     'Usage: engram-ingest [--content <str> | --stdin | --transcript <path>] [options]\n' +
     '  See source header for full option list.\n',
   )
-  process.exit(code)
 }
 
 // ---------------------------------------------------------------------------
 // Content resolution
 // ---------------------------------------------------------------------------
 
-async function resolveContent(args: Args): Promise<string | null> {
-  if (args.content) return args.content.trim()
+interface ResolvedContent {
+  text: string
+  /** The transcript entry's uuid, when the content came from --transcript. */
+  uuid?: string
+}
+
+async function resolveContent(args: Args): Promise<ResolvedContent | null> {
+  if (args.content) return { text: args.content.trim() }
 
   if (args.stdin) {
     const buf: Buffer[] = []
     for await (const chunk of process.stdin) buf.push(chunk as Buffer)
-    return Buffer.concat(buf).toString('utf-8').trim()
+    return { text: Buffer.concat(buf).toString('utf-8').trim() }
   }
 
   if (args.transcript) {
@@ -178,22 +204,20 @@ async function resolveContent(args: Args): Promise<string | null> {
 
 /**
  * Read a Claude Code JSONL transcript and extract the content of the most
- * recent turn matching the specified role. Returns null if no match.
+ * recent turn matching the specified role, with the entry's uuid. Returns
+ * null if no match.
  *
  * The Claude Code transcript format is one JSON object per line with a
- * shape like { type: 'user'|'assistant'|..., message: { role, content }, ... }.
+ * shape like { type: 'user'|'assistant'|..., uuid, message: { role, content }, ... }.
  * We tolerate shape variance by pulling content defensively.
  */
-function readTranscriptLastTurn(
-  path: string,
-  role: 'user' | 'assistant' | 'system',
-): string | null {
+export function readTranscriptLastTurn(path: string, role: Role): ResolvedContent | null {
   let raw: string
   try {
     raw = readFileSync(path, 'utf-8')
   } catch (err) {
     process.stderr.write(
-      `[engram-ingest] failed to read transcript ${path}: ${err instanceof Error ? err.message : String(err)}\n`,
+      `${LOG_PREFIX} failed to read transcript ${path}: ${err instanceof Error ? err.message : String(err)}\n`,
     )
     return null
   }
@@ -213,7 +237,10 @@ function readTranscriptLastTurn(
       const msgContent = (message?.['content'] ?? obj['content']) as unknown
 
       if ((type === role || msgRole === role) && msgContent !== undefined) {
-        return extractTextContent(msgContent)
+        const text = extractTextContent(msgContent)
+        if (text === null) return null
+        const uuid = obj['uuid']
+        return typeof uuid === 'string' && uuid.length > 0 ? { text, uuid } : { text }
       }
     } catch {
       // Skip malformed lines
@@ -253,166 +280,204 @@ function extractTextContent(content: unknown): string | null {
 // ---------------------------------------------------------------------------
 
 function log(verbose: boolean, msg: string): void {
-  if (verbose) process.stderr.write(`[engram-ingest] ${msg}\n`)
+  if (verbose) process.stderr.write(`${LOG_PREFIX} ${msg}\n`)
 }
 
-function requireEnv(name: string): string {
-  const val = process.env[name]
-  if (!val) {
-    process.stderr.write(`[engram-ingest] missing required env: ${name}\n`)
-    process.exit(1)
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Raw mode always stores, and a too-short turn carries no signal worth auditing. */
+function shouldLogRejection(args: Args, reason: string | undefined): boolean {
+  return !args.raw && reason !== 'too_short'
+}
+
+function writeRejection(
+  args: Args,
+  project: string | null,
+  content: string,
+  verdict: { category?: string; confidence?: number; reason?: string },
+): void {
+  logRejection({
+    timestamp: new Date().toISOString(),
+    cwd: process.cwd(),
+    project,
+    role: args.turn,
+    source: args.source,
+    category: verdict.category ?? 'unknown',
+    confidence: verdict.confidence ?? 0,
+    reason: verdict.reason ?? '',
+    contentPreview: content.slice(0, REJECTION_PREVIEW_CHARS),
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Server mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable across reruns of the same hook: a transcript turn is identified by
+ * its entry uuid, anything else by its text. The server honours the key only
+ * within the same session id.
+ */
+export function captureKey(source: string, sessionId: string | null, identity: string): string {
+  return createHash('sha256').update(JSON.stringify([source, sessionId ?? '', identity])).digest('hex')
+}
+
+async function runServerMode(
+  args: Args,
+  resolved: ResolvedContent,
+  project: string | null,
+  env: CaptureEnv,
+): Promise<number> {
+  if (args.classifierModel !== null || args.thresholdFlag) {
+    process.stderr.write(
+      `${LOG_PREFIX} --classifier-model and --threshold apply to local mode only; ` +
+        'with ENGRAM_SERVER_URL set the server decides the model and threshold\n',
+    )
+    return 2
   }
-  return val
+
+  const content = (await scrubModelInput(resolved.text, LOG_PREFIX)).slice(0, CAPTURE_CONTENT_MAX_CHARS)
+  const payload: CapturePayload = {
+    content,
+    source: args.source,
+    role: args.turn,
+    ...(args.sessionId ? { session_id: args.sessionId } : {}),
+    project_id: project,
+    gate: !args.raw,
+    dedup: !args.noDedup,
+    dry_run: args.dryRun,
+    key: captureKey(args.source, args.sessionId, resolved.uuid ?? content),
+    meta: { capturedAt: new Date().toISOString() },
+  }
+
+  const sent = await sendCapture(payload, env, { label: 'engram-ingest' })
+  process.stderr.write(`${sent.line}\n`)
+
+  if (!sent.result.ok) return sent.disposition === 'dead' ? 1 : 0
+  const outcome: CaptureOutcome = sent.result.outcome
+  log(args.verbose, `server: outcome=${outcome.outcome} category=${outcome.category ?? '-'} reason="${outcome.reason ?? ''}"`)
+  if (outcome.outcome === 'rejected' && shouldLogRejection(args, outcome.reason)) {
+    writeRejection(args, project, content, outcome)
+  }
+  return 0
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Local mode
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2))
+async function runLocalMode(
+  args: Args,
+  resolved: ResolvedContent,
+  project: string | null,
+  env: CaptureEnv,
+): Promise<number> {
+  const startMs = Date.now()
+  // Loaded on demand so server mode never loads the model and store clients.
+  const { runLocalCapture } = await import('./local-capture.js')
+  const input: CaptureInput = {
+    content: resolved.text,
+    role: args.turn,
+    ...(args.sessionId ? { sessionId: args.sessionId } : {}),
+    project,
+    source: args.source,
+    gate: !args.raw,
+    dedup: !args.noDedup,
+    dryRun: args.dryRun,
+  }
+  const { outcome, model } = await runLocalCapture(input, {
+    env,
+    classifierModel: args.classifierModel,
+    threshold: args.threshold,
+    logPrefix: LOG_PREFIX,
+    ...(args.verbose ? { log: (line: string) => log(true, line) } : {}),
+    onRejected: (rejected) => {
+      if (!shouldLogRejection(args, rejected.classification.reason)) return
+      writeRejection(args, rejected.project, rejected.content, rejected.classification)
+    },
+  })
+  process.stderr.write(
+    `${LOG_PREFIX} mode=local model=${model} source=${args.source} outcome=${outcome.outcome} ms=${Date.now() - startMs}\n`,
+  )
+  // The local mode has no dead-letter file: an unclassifiable turn fails
+  // the run so the hook's log shows it.
+  if (outcome.outcome === 'error') {
+    process.stderr.write(`${LOG_PREFIX} capture failed (${outcome.reason ?? 'error'}): ${outcome.message ?? ''}\n`)
+    return 1
+  }
+  return 0
+}
 
-  // Kill switch
-  if (process.env['ENGRAM_SALIENCE_DISABLED'] === '1') {
+// ---------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------
+
+/** Runs one ingest and returns the process exit code. */
+export async function runIngestCli(argv: readonly string[], env: CaptureEnv = process.env): Promise<number> {
+  const args = parseArgs(argv, env)
+  if (args.help) {
+    printUsage()
+    return 0
+  }
+
+  if (env['ENGRAM_SALIENCE_DISABLED'] === '1') {
     log(args.verbose, 'salience disabled via env, exiting')
-    process.exit(0)
+    return 0
   }
 
-  const content = await resolveContent(args)
-  if (!content) {
+  const resolved = await resolveContent(args)
+  if (!resolved || !resolved.text) {
     log(args.verbose, 'no content to ingest, exiting')
-    process.exit(0)
+    return 0
   }
 
-  const detectedProject = resolveProject(args.project, process.cwd())
-  log(args.verbose, `project: ${detectedProject ?? '<shared>'} (flag=${args.project})`)
-
-  // A raw dry run stops before the dedup embedding and the store, so it makes
-  // no model call and needs no key; every other path calls the model.
-  const needsModel = !(args.raw && args.dryRun)
-  const openaiKey = needsModel ? requireEnv('OPENAI_API_KEY') : ''
-  const classifier: IntelligenceAdapter = needsModel
-    ? openaiIntelligence({
-        apiKey: openaiKey,
-        ...(args.classifierModel ? { summarizationModel: args.classifierModel } : {}),
-      })
-    : {}
-  if (!args.raw && !classifier.extractSalience) {
-    process.stderr.write('[engram-ingest] intelligence adapter lacks extractSalience\n')
-    process.exit(2)
-  }
-
-  // Supabase and Neo4j are only reached on the paths that need them: the
-  // rejected and dry-run paths connect to neither, the duplicate path skips
-  // the graph.
-  const opened: { storage?: PostgRestStorageAdapter; memory?: Memory } = {}
-
-  const getStorage = async (): Promise<PostgRestStorageAdapter> => {
-    if (!opened.storage) {
-      const storage = new PostgRestStorageAdapter({
-        url: requireEnv('SUPABASE_URL'),
-        key: requireEnv('SUPABASE_KEY'),
-      })
-      await storage.initialize()
-      opened.storage = storage
-    }
-    return opened.storage
-  }
-
-  const getMemory = async (): Promise<Memory> => {
-    // A separate storage instance: Memory.dispose() disposes its storage,
-    // which must not pull the dedup instance out from under the pipeline.
-    const ingestStorage = new PostgRestStorageAdapter({
-      url: requireEnv('SUPABASE_URL'),
-      key: requireEnv('SUPABASE_KEY'),
-    })
-    const graph = await tryCreateGraph('[engram-ingest]')
-    const created = createMemory({
-      storage: ingestStorage,
-      intelligence: openaiIntelligence({ apiKey: openaiKey }),
-      // ENGRAM_INGEST_CONTEXTUAL=true → Memory.ingest generates a contextual
-      // preamble via intelligence.contextualizeChunk and uses it to enrich
-      // the embedding. Content stays pristine for FTS.
-      contextualRetrieval: process.env.ENGRAM_INGEST_CONTEXTUAL === 'true',
-      ...(graph ? { graph } : {}),
-    })
-    await created.initialize()
-    opened.memory = created
-    return created
-  }
+  const project = resolveProject(args.project, process.cwd())
+  log(args.verbose, `project: ${project ?? '<shared>'} (flag=${args.project})`)
 
   try {
-    const outcome = await runCapture(
-      {
-        getMemory,
-        storage: getStorage,
-        intelligence: classifier,
-        threshold: args.threshold,
-        captureModel: args.classifierModel ?? DEFAULT_CHAT_MODEL,
-        logPrefix: '[engram-ingest]',
-        ...(args.verbose ? { log: (line: string) => log(true, line) } : {}),
-        onRejected: (rejected) => {
-          // Raw mode always stores, and a too-short turn carries no signal
-          // worth auditing.
-          if (args.raw || rejected.classification.reason === 'too_short') return
-          logRejection({
-            timestamp: new Date().toISOString(),
-            cwd: process.cwd(),
-            project: rejected.project,
-            role: rejected.role,
-            source: rejected.source,
-            category: rejected.classification.category,
-            confidence: rejected.classification.confidence,
-            reason: rejected.classification.reason,
-            contentPreview: rejected.content.slice(0, 300),
-          })
-        },
-      },
-      {
-        content,
-        role: args.turn,
-        ...(args.sessionId ? { sessionId: args.sessionId } : {}),
-        project: detectedProject,
-        source: args.source,
-        gate: !args.raw,
-        dedup: !args.noDedup,
-        dryRun: args.dryRun,
-      },
-    )
-    // The local mode has no dead-letter file: an unclassifiable turn fails
-    // the run so the hook's log shows it.
-    if (outcome.outcome === 'error') {
-      throw new Error(`capture failed (${outcome.reason ?? 'error'}): ${outcome.message ?? ''}`)
-    }
-    if (opened.memory) {
-      // Wait for fire-and-forget graph decomposition to finish before the
-      // process exits. Without this, the CLI can return immediately after
-      // the SQL insert and process.exit() kills the inflight Neo4j write.
-      await opened.memory.flushPendingWrites()
-    }
-  } finally {
-    if (opened.memory) await opened.memory.dispose()
-    if (opened.storage) await opened.storage.dispose().catch(() => {})
+    return env['ENGRAM_SERVER_URL']
+      ? await runServerMode(args, resolved, project, env)
+      : await runLocalMode(args, resolved, project, env)
+  } catch (err) {
+    // A missing credential is a configuration message, not a crash.
+    const isMissingEnv = err instanceof Error && err.name === 'MissingEnvError'
+    const detail = isMissingEnv ? errorText(err) : `FATAL: ${err instanceof Error ? err.stack ?? err.message : String(err)}`
+    process.stderr.write(`${LOG_PREFIX} ${detail}\n`)
+    return 1
   }
 }
 
-// Hard timeout in case something upstream wedges (OpenAI network, Supabase,
-// Neo4j). Exit cleanly so the spawning hook doesn't hold resources.
-const timeoutId = setTimeout(() => {
-  process.stderr.write('[engram-ingest] timeout after 60s, exiting\n')
-  process.exit(3)
-}, 60_000)
-timeoutId.unref()
+function isEntryPoint(): boolean {
+  const entry = process.argv[1]
+  if (!entry) return false
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return false
+  }
+}
 
-main()
-  .then(() => {
-    // Force a clean exit even if OpenAI / Supabase clients are holding
-    // onto keep-alive agents or background timers.
-    process.exit(0)
-  })
-  .catch((err) => {
-    process.stderr.write(
-      `[engram-ingest] FATAL: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-    )
-    process.exit(1)
-  })
+if (isEntryPoint()) {
+  // Hard timeout in case something upstream wedges (network, store, graph).
+  // Exit cleanly so the spawning hook doesn't hold resources. Server mode
+  // outlasts its own post plus the spool flush, so a flush is never cut off
+  // mid-claim.
+  const timeoutMs = process.env['ENGRAM_SERVER_URL'] ? SERVER_TIMEOUT_MS : LOCAL_TIMEOUT_MS
+  const timeoutId = setTimeout(() => {
+    process.stderr.write(`${LOG_PREFIX} timeout after ${timeoutMs / 1000}s, exiting\n`)
+    process.exit(3)
+  }, timeoutMs)
+  timeoutId.unref()
+
+  // Force a clean exit even if HTTP or store clients hold keep-alive agents
+  // or background timers.
+  runIngestCli(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (err: unknown) => {
+      process.stderr.write(`${LOG_PREFIX} FATAL: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
+      process.exit(1)
+    },
+  )
+}

@@ -129,6 +129,8 @@ beforeEach(() => {
   h.memoryDispose.mockResolvedValue(undefined)
   h.findDuplicate.mockResolvedValue({ duplicateId: null, similarity: 0 })
   Object.assign(process.env, ENV)
+  // These cases exercise the in-process pipeline, which runs only without a server URL.
+  delete process.env['ENGRAM_SERVER_URL']
   stderrLines = []
   vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
     stderrLines.push(String(chunk))
@@ -152,6 +154,11 @@ afterEach(() => {
   process.env = { ...savedEnv }
 })
 
+async function runIngest(argv: string[]): Promise<number> {
+  const { runIngestCli } = await import('../src/ingest/engram-ingest-cli.js')
+  return runIngestCli(argv, process.env)
+}
+
 describe('engram-ingest CLI', () => {
   const turn = `Deploy note: API_KEY=${FAKE_KEY} lives in the staging .env from now on`
 
@@ -159,10 +166,9 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockImplementation(async (content: string) => ({
       store: true, category: 'fact', confidence: 0.9, distilled: content, reason: 'decision',
     }))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup', '--verbose']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup', '--verbose'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     expect(h.extractSalience).toHaveBeenCalledOnce()
     expect(h.extractSalience.mock.calls[0]![0]).toBe(
@@ -181,25 +187,20 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockResolvedValue({
       store: false, category: 'noise', confidence: 0.2, distilled: '', reason: 'routine',
     })
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.logRejection).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
+    expect(h.logRejection).toHaveBeenCalled()
 
     const entry = h.logRejection.mock.calls[0]![0] as { contentPreview: string }
     expect(entry.contentPreview).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(entry.contentPreview).not.toContain(FAKE_KEY)
-    expect(exitSpy).toHaveBeenCalledWith(0)
+    expect(code).toBe(0)
   })
 
   it('exits non-zero with the message when the classifier fails, logging no rejection', async () => {
     h.extractSalience.mockRejectedValue(new Error('chat endpoint returned 502'))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
 
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
-
-    expect(exitSpy).toHaveBeenCalledWith(1)
+    expect(code).toBe(1)
     expect(stderrLines.join('')).toContain('chat endpoint returned 502')
     expect(h.logRejection).not.toHaveBeenCalled()
     expect(h.memoryIngest).not.toHaveBeenCalled()
@@ -209,20 +210,18 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockImplementation(async (content: string) => ({
       store: true, category: 'fact', confidence: 0.9, distilled: content, reason: 'decision',
     }))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
     expect(ingested.metadata['captureModel']).toBe('default-chat-model')
   })
 
   it('records a raw capture as seen by no model', async () => {
-    process.argv = ['node', 'engram-ingest', '--raw', '--content', 'feat: stream the transcript read', '--source', 'git-commit', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--raw', '--content', 'feat: stream the transcript read', '--source', 'git-commit', '--no-dedup'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     expect(h.extractSalience).not.toHaveBeenCalled()
     const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
@@ -233,13 +232,9 @@ describe('engram-ingest CLI', () => {
     delete process.env['OPENAI_API_KEY']
     delete process.env['SUPABASE_URL']
     delete process.env['SUPABASE_KEY']
-    process.argv = ['node', 'engram-ingest', '--raw', '--dry-run', '--content', 'feat: stream the transcript read', '--source', 'git-commit']
+    const code = await runIngest(['--raw', '--dry-run', '--content', 'feat: stream the transcript read', '--source', 'git-commit'])
 
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
-
-    expect(exitSpy).toHaveBeenCalledWith(0)
-    expect(exitSpy).not.toHaveBeenCalledWith(1)
+    expect(code).toBe(0)
     expect(stderrLines.join('')).not.toContain('missing required env')
     expect(h.memoryIngest).not.toHaveBeenCalled()
   })
@@ -249,14 +244,8 @@ describe('engram-ingest CLI', () => {
     ['a raw store', ['--raw']],
   ])('still requires OPENAI_API_KEY for %s', async (_label, flags) => {
     delete process.env['OPENAI_API_KEY']
-    process.argv = ['node', 'engram-ingest', ...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    // process.exit is stubbed, so the run goes on past the missing key; wait
-    // for its final exit so nothing outlives the test.
-    await vi.waitFor(() => expect(exitSpy.mock.calls.length).toBeGreaterThanOrEqual(2))
-
-    expect(exitSpy.mock.calls[0]![0]).toBe(1)
+    const code = await runIngest([...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit'])
+    expect(code).toBe(1)
     expect(stderrLines.join('')).toContain('missing required env: OPENAI_API_KEY')
   })
 })
