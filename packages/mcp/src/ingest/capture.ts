@@ -8,12 +8,13 @@
  * a capture behaves the same wherever it runs.
  */
 
-import type {
-  IntelligenceAdapter,
-  Memory,
-  SalienceCategory,
-  SalienceClassification,
-  StorageAdapter,
+import {
+  isUnclassifiableReply,
+  type IntelligenceAdapter,
+  type Memory,
+  type SalienceCategory,
+  type SalienceClassification,
+  type StorageAdapter,
 } from '@engram-mem/core'
 import { findDuplicate, boostDuplicate } from './dedup.js'
 import { projectForCategory } from './project-detect.js'
@@ -26,6 +27,13 @@ export const CAPTURE_KEY_WINDOW_DAYS = 7
 
 /** Recorded as the capture model of a turn stored without classification: no model saw it. */
 export const RAW_CAPTURE_MODEL = 'raw'
+
+/**
+ * Reason on the error outcome of a turn whose classifier reply could not be
+ * read as a verdict twice in a row. Resending it cannot succeed, so the
+ * outcome is not retryable and a client dead-letters it.
+ */
+export const UNCLASSIFIABLE_REASON = 'unclassifiable'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -51,7 +59,10 @@ export interface CaptureOutcome {
   duplicateOf?: string
   similarity?: number
   context?: string
-  /** Error outcomes only: false = the capture failed validation. */
+  /**
+   * Error outcomes only: false = resending the same capture cannot succeed
+   * (it failed validation, or its classifier reply was unreadable twice).
+   */
   retryable?: boolean
   message?: string
 }
@@ -140,13 +151,20 @@ async function classify(
 ): Promise<SalienceClassification> {
   if (content.length < 2) return tooShortClassification()
   if (!input.gate) return rawClassification(content)
-  if (!deps.intelligence.extractSalience) {
+  const extractSalience = deps.intelligence.extractSalience?.bind(deps.intelligence)
+  if (!extractSalience) {
     throw new Error('intelligence adapter lacks extractSalience')
   }
-  return deps.intelligence.extractSalience(content, {
-    turnRole: input.role,
-    ...(input.project ? { project: input.project } : {}),
-  })
+  const opts = { turnRole: input.role, ...(input.project ? { project: input.project } : {}) }
+  try {
+    return await extractSalience(content, opts)
+  } catch (err) {
+    // A sampled reply can be malformed once; a second malformed reply means
+    // this turn is the problem. A failed model call propagates untouched.
+    if (!isUnclassifiableReply(err)) throw err
+    deps.log?.(`classifier reply unreadable, retrying once: ${err.message}`)
+    return extractSalience(content, opts)
+  }
 }
 
 async function checkDuplicate(
@@ -207,16 +225,24 @@ export async function runCapture(deps: CaptureDeps, input: CaptureInput): Promis
 }
 
 /**
- * The pipeline after the idempotency check. The classifier's errors
- * propagate: a failed or unparseable classification is no verdict, so the
- * caller reports it as retryable instead of logging a rejection.
+ * The pipeline after the idempotency check. A failed classifier call is no
+ * verdict, so it propagates for the caller to report as retryable instead of
+ * logging a rejection. A reply unreadable twice is an unclassifiable error
+ * outcome, not retryable.
  */
 async function captureUnseenKey(deps: CaptureDeps, input: CaptureInput, model: string): Promise<CaptureOutcome> {
   // Every later consumer (classifier, rejection callback, dedup embedding,
   // rawTurn metadata) reads this scrubbed copy.
   const content = await scrubModelInput(input.content, deps.logPrefix ?? '[engram-capture]')
 
-  const classification = await classify(deps, input, content)
+  let classification: SalienceClassification
+  try {
+    classification = await classify(deps, input, content)
+  } catch (err) {
+    if (!isUnclassifiableReply(err)) throw err
+    deps.log?.(`unclassifiable: ${err.message}`)
+    return { outcome: 'error', model, retryable: false, reason: UNCLASSIFIABLE_REASON, message: err.message }
+  }
   deps.log?.(
     `classifier: store=${classification.store} category=${classification.category} confidence=${classification.confidence.toFixed(2)} reason="${classification.reason}"`,
   )

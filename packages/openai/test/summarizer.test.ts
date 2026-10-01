@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { SummarizeOptions } from '@engram-mem/core'
+import { UnclassifiableReplyError, isUnclassifiableReply } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.
@@ -591,5 +592,17 @@ describe('OpenAISummarizer.extractSalience failures', () => {
     const s = new OpenAISummarizer({ apiKey: 'k' })
 
     await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow(/extractSalience: .*classifier output/)
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toBeInstanceOf(UnclassifiableReplyError)
+  })
+
+  it('keeps a chat API error out of the unreadable-reply class', async () => {
+    mockChatCreate.mockRejectedValueOnce(new Error('503 upstream unavailable'))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    const err = await s.extractSalience(TURN, { turnRole: 'user' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(Error)
+    expect(isUnclassifiableReply(err)).toBe(false)
   })
 })

@@ -336,7 +336,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    await runCapture(
+    const outcome = await runCapture(
       {
         getMemory,
         storage: getStorage,
@@ -373,6 +373,11 @@ async function main(): Promise<void> {
         dryRun: args.dryRun,
       },
     )
+    // The local mode has no dead-letter file: an unclassifiable turn fails
+    // the run so the hook's log shows it.
+    if (outcome.outcome === 'error') {
+      throw new Error(`capture failed (${outcome.reason ?? 'error'}): ${outcome.message ?? ''}`)
+    }
     if (opened.memory) {
       // Wait for fire-and-forget graph decomposition to finish before the
       // process exits. Without this, the CLI can return immediately after

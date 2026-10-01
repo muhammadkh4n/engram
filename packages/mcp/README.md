@@ -125,7 +125,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 | `derive` | `"session-summary"` \| `"pre-compact"` | `content` is a transcript; the server digests it first |
 | `dry_run` | boolean, default `false` | Classify but store nothing |
 | `key` | string | Idempotency key, at most 128 characters; a repeat within the same `session_id` returns `replayed` |
-| `meta` | object of strings | At most 8 keys, key names at most 128 characters, values at most 512 characters |
+| `meta` | object of strings | At most 8 keys, key names at most 128 characters, values at most 512 characters. Keys the pipeline sets itself are refused with 400 naming the key: `source`, `project`, `type`, `captureKey`, `captureModel`, `rawTurn`, `embedTextVersion`, `contextualPreamble` and any key starting with `salience` |
 
 **Response:** always a JSON outcome:
 
@@ -136,7 +136,11 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 - `outcome`: `stored`, `rejected` (with `reason`), `deduped` (with `duplicateOf`, `similarity`), `replayed`, `dry_run` or `error`.
 - A `key` is only checked against captures in the same session. A capture with a `key` and no `session_id` is stored under session `default` and is not idempotent: only the dedup check can catch a repeat.
 - `pre-compact` derives also return `context`, the text to re-inject, whenever the model produced one, whether the memory was stored, deduped or rejected as `empty_digest`. A `replayed` retry returns no `context`: the digest is not re-run.
-- Status: 200 for every pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 500 failure after validation (`retryable: true`); 405 for methods other than POST.
+- Classifier failures come in two classes:
+  - The chat call failed (network, 429, 5xx): `500`, `retryable: true`. Send the capture again later.
+  - The model answered, but its reply could not be read as a verdict (not JSON, or no boolean `store`). The server asks once more. If the second reply is unreadable too, it answers `422` with `outcome: "error"`, `reason: "unclassifiable"`, `retryable: false`. Resending the same content will not help, so a client dead-letters it instead of retrying.
+- Status: 200 for every other pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 422 unclassifiable (`retryable: false`); 500 any other failure after validation (`retryable: true`); 405 for methods other than POST.
+- The local `engram-ingest` CLI exits 1 on an unclassifiable turn, as on any other failure.
 
 Today only `engram-ingest` (git post-commit and the other local ingest callers) runs this pipeline in-process through `runCapture`. The pre-compact and session-summary hooks still use their own scripts; they switch to this route in a client follow-up.
 

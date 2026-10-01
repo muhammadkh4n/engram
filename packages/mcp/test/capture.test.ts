@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { Memory, SalienceClassification, StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
+import {
+  UnclassifiableReplyError,
+  type Memory,
+  type SalienceClassification,
+  type StorageAdapter,
+  type IntelligenceAdapter,
+} from '@engram-mem/core'
 import { runCapture, type CaptureDeps, type CaptureInput } from '../src/ingest/capture.js'
 
 const TURN =
@@ -131,15 +137,46 @@ describe('runCapture classification', () => {
     expect(message.metadata['captureModel']).toBe('raw')
   })
 
-  it('propagates a classifier failure without calling onRejected or storing', async () => {
+  it('propagates a failed classifier call once, without retrying, rejecting or storing', async () => {
     const h = makeHarness()
     const onRejected = vi.fn()
-    h.extractSalience.mockRejectedValue(new Error('extractSalience: classifier output is not a JSON object'))
+    h.extractSalience.mockRejectedValue(new Error('chat endpoint returned 502'))
 
-    await expect(runCapture({ ...h.deps, onRejected }, input())).rejects.toThrow('not a JSON object')
+    await expect(runCapture({ ...h.deps, onRejected }, input())).rejects.toThrow('returned 502')
 
+    expect(h.extractSalience).toHaveBeenCalledOnce()
     expect(onRejected).not.toHaveBeenCalled()
     expect(h.ingest).not.toHaveBeenCalled()
+  })
+
+  it('returns an unclassifiable error outcome after two unreadable replies', async () => {
+    const h = makeHarness()
+    const onRejected = vi.fn()
+    h.extractSalience.mockRejectedValue(new UnclassifiableReplyError('classifier output is not a JSON object'))
+
+    const out = await runCapture({ ...h.deps, onRejected }, input())
+
+    expect(h.extractSalience).toHaveBeenCalledTimes(2)
+    expect(out).toEqual({
+      outcome: 'error',
+      model: 'test-chat-model',
+      retryable: false,
+      reason: 'unclassifiable',
+      message: 'classifier output is not a JSON object',
+    })
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
+  it('recognises an unreadable-reply error from another copy of core by its name', async () => {
+    const h = makeHarness()
+    const foreign = Object.assign(new Error('no boolean store'), { name: 'UnclassifiableReplyError' })
+    h.extractSalience.mockRejectedValueOnce(foreign)
+
+    const out = await runCapture(h.deps, input())
+
+    expect(h.extractSalience).toHaveBeenCalledTimes(2)
+    expect(out.outcome).toBe('stored')
   })
 
   it('stores a preference shared even when the turn carries a project', async () => {

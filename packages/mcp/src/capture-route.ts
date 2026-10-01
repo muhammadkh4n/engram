@@ -3,9 +3,11 @@
  * run the capture pipeline, and map the outcome to a status code.
  *
  * Status codes let a client tell a capture it must never resend from one
- * worth retrying: 400 = the request is invalid (`retryable: false`), 500 =
- * anything that failed after validation (`retryable: true`), 200 = every
- * pipeline outcome, including rejections.
+ * worth retrying: 400 = the request is invalid (`retryable: false`), 422 =
+ * the classifier's reply for this content was unreadable twice
+ * (`retryable: false`), 500 = anything else that failed after validation
+ * (`retryable: true`), 200 = every other pipeline outcome, including
+ * rejections.
  */
 
 import {
@@ -16,6 +18,7 @@ import {
   type CaptureInput,
   type CaptureOutcome,
   type DerivedCaptureInput,
+  UNCLASSIFIABLE_REASON,
 } from './ingest/capture.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
 
@@ -26,6 +29,28 @@ export const CAPTURE_SESSION_ID_MAX_CHARS = 256
 export const CAPTURE_META_MAX_KEYS = 8
 export const CAPTURE_META_VALUE_MAX_CHARS = 512
 export const CAPTURE_META_KEY_MAX_CHARS = 128
+
+/**
+ * Metadata the pipeline itself decides or that other code reads as a fact
+ * about the row (provenance, scoping, row type, embedding inputs). A client
+ * value under one of these names would be either silently overwritten or
+ * mistaken for the pipeline's own, so the request is refused instead.
+ */
+const RESERVED_META_KEYS: ReadonlySet<string> = new Set([
+  'source',
+  'project',
+  'type',
+  'captureKey',
+  'captureModel',
+  'rawTurn',
+  'embedTextVersion',
+  'contextualPreamble',
+])
+const RESERVED_META_PREFIX = 'salience'
+
+function isReservedMetaKey(key: string): boolean {
+  return RESERVED_META_KEYS.has(key) || key.startsWith(RESERVED_META_PREFIX)
+}
 
 const SOURCE_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/
 const ROLES = ['user', 'assistant', 'system'] as const
@@ -93,6 +118,7 @@ function parseMeta(v: unknown): Parsed<Record<string, string> | undefined> {
     if (k.length > CAPTURE_META_KEY_MAX_CHARS) {
       return { error: `meta key names are limited to ${CAPTURE_META_KEY_MAX_CHARS} characters` }
     }
+    if (isReservedMetaKey(k)) return { error: `meta.${k} is a reserved metadata key` }
     if (typeof val !== 'string') return { error: `meta.${k} must be a string` }
     if (val.length > CAPTURE_META_VALUE_MAX_CHARS) {
       return { error: `meta.${k} exceeds ${CAPTURE_META_VALUE_MAX_CHARS} characters` }
@@ -195,7 +221,8 @@ export async function runCaptureRequest(deps: CaptureRouteDeps, body: unknown): 
       request.kind === 'derive'
         ? await runDerivedCapture(captureDeps, request.input)
         : await runCapture(captureDeps, request.input)
-    return { status: 200, body: outcome }
+    const unclassifiable = outcome.outcome === 'error' && outcome.reason === UNCLASSIFIABLE_REASON
+    return { status: unclassifiable ? 422 : 200, body: outcome }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     deps.log?.(`capture failed (source=${request.input.source}): ${message}`)

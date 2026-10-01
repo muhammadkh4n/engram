@@ -11,7 +11,7 @@
  * corpus (the engine's cold-start rebuild is exercised in
  * `packages/recall-engine/test/decorator.test.ts` instead).
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
 import type { ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
@@ -23,6 +23,7 @@ import {
   runMemoryForget,
   parseSalienceThresholdEnv,
   captureModelFromEnv,
+  sharedInit,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -310,5 +311,56 @@ describe('captureModelFromEnv', () => {
 
   it('falls back to the default chat model', () => {
     expect(captureModelFromEnv({})).toBe('gpt-4o-mini')
+  })
+})
+
+describe('sharedInit', () => {
+  /** A builder that mimics createMemory + initialize: the instance is usable only after initialize resolves. */
+  function deferredBuilder() {
+    const pendingInits: Array<() => void> = []
+    const build = vi.fn(async () => {
+      const instance = { initialized: false }
+      await new Promise<void>((resolve) => pendingInits.push(resolve))
+      instance.initialized = true
+      return instance
+    })
+    return { build, finishInit: () => pendingInits.forEach((resolve) => resolve()) }
+  }
+
+  it('builds one stack for two concurrent first callers, both resolving after initialize', async () => {
+    const b = deferredBuilder()
+    const get = sharedInit(b.build)
+    const seen: boolean[] = []
+
+    const first = get().then((m) => {
+      seen.push(m.initialized)
+      return m
+    })
+    const second = get().then((m) => {
+      seen.push(m.initialized)
+      return m
+    })
+    await Promise.resolve()
+    expect(seen).toEqual([])
+    b.finishInit()
+    const [a, c] = await Promise.all([first, second])
+
+    expect(b.build).toHaveBeenCalledOnce()
+    expect(a).toBe(c)
+    expect(seen).toEqual([true, true])
+    expect(await get()).toBe(a)
+    expect(b.build).toHaveBeenCalledOnce()
+  })
+
+  it('retries the build on the next call after a failed init', async () => {
+    const build = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
+      .mockResolvedValueOnce('stack')
+    const get = sharedInit(build)
+
+    await expect(get()).rejects.toThrow('ECONNREFUSED')
+    await expect(get()).resolves.toBe('stack')
+    expect(build).toHaveBeenCalledTimes(2)
   })
 })

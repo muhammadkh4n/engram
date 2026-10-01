@@ -108,6 +108,28 @@ describe('runCaptureRequest validation', () => {
     expect(h.resolveDeps).not.toHaveBeenCalled()
   })
 
+  it.each([
+    'source',
+    'project',
+    'type',
+    'captureKey',
+    'captureModel',
+    'rawTurn',
+    'embedTextVersion',
+    'contextualPreamble',
+    'salienceCategory',
+    'salienceAnything',
+  ])('refuses the reserved meta key %s with a 400 naming it', async (key) => {
+    const h = makeHarness()
+
+    const res = await runCaptureRequest(h.deps, body({ meta: { cwd: '/tmp', [key]: 'spoofed' } }))
+
+    expect(res.status).toBe(400)
+    expect(res.body).toMatchObject({ outcome: 'error', retryable: false })
+    expect(res.body.message).toContain(`meta.${key}`)
+    expect(h.resolveDeps).not.toHaveBeenCalled()
+  })
+
   it('refuses a body that is not an object', async () => {
     const h = makeHarness()
     const res = await runCaptureRequest(h.deps, ['content'])
@@ -166,6 +188,62 @@ describe('runCaptureRequest turns', () => {
     expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: '429 rate limited' })
     expect(onRejected).not.toHaveBeenCalled()
     expect(h.ingest).not.toHaveBeenCalled()
+  })
+
+  /** Route deps whose classifier is the real summarizer on a stubbed chat client returning `replies` in order. */
+  function withChatReplies(h: ReturnType<typeof makeHarness>, replies: string[]) {
+    const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+    const create = vi.fn()
+    for (const reply of replies) {
+      create.mockResolvedValueOnce({ choices: [{ message: { content: reply } }] })
+    }
+    ;(summarizer as unknown as { client: unknown }).client = { chat: { completions: { create } } }
+    const onRejected = vi.fn()
+    h.resolveDeps.mockResolvedValueOnce({
+      ...h.captureDeps,
+      intelligence: {
+        extractSalience: (content: string, opts: Parameters<OpenAISummarizer['extractSalience']>[1]) =>
+          summarizer.extractSalience(content, opts),
+        embed: vi.fn(async () => [0.1]),
+      } as unknown as IntelligenceAdapter,
+      onRejected,
+    })
+    return { create, onRejected }
+  }
+
+  it('answers 422 unclassifiable, not retryable, after two prose verdicts', async () => {
+    const h = makeHarness()
+    const { create, onRejected } = withChatReplies(h, [
+      'I think this turn should be stored as a decision.',
+      'Yes, store it.',
+    ])
+
+    const res = await runCaptureRequest(h.deps, body())
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(res.status).toBe(422)
+    expect(res.body).toMatchObject({
+      outcome: 'error',
+      model: 'test-chat-model',
+      retryable: false,
+      reason: 'unclassifiable',
+    })
+    expect(res.body.message).toMatch(/classifier output/)
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
+  it('stores the turn when a prose verdict is followed by a valid one', async () => {
+    const h = makeHarness()
+    const valid = JSON.stringify({ store: true, category: 'decision', confidence: 0.9, distilled: DISTILLED, reason: 'infra' })
+    const { create } = withChatReplies(h, ['Store it, it is a decision.', valid])
+
+    const res = await runCaptureRequest(h.deps, body())
+
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ outcome: 'stored', category: 'decision' })
+    expect(h.ingest).toHaveBeenCalledOnce()
   })
 
   it('reports a failure to open the stores as retryable', async () => {
@@ -257,7 +335,7 @@ describe('runCaptureRequest derive', () => {
     const h = makeHarness()
     const res = await runCaptureRequest(
       h.deps,
-      body({ content: EXCERPT, derive: 'pre-compact', meta: { type: 'spoofed', trigger: 'auto' } }),
+      body({ content: EXCERPT, derive: 'pre-compact', meta: { trigger: 'auto' } }),
     )
 
     expect(res.body).toMatchObject({ outcome: 'stored', context: 'Working on stop-hook timeouts.' })

@@ -236,9 +236,33 @@ export function captureModelFromEnv(env: NodeJS.ProcessEnv = process.env): strin
   return env['ENGRAM_CHAT_MODEL']?.trim() || DEFAULT_CHAT_MODEL
 }
 
-let memory: Memory | null = null
-/** The stores getMemory built, shared with the capture route so both use one config. */
-let memoryStores: { storage: StorageAdapter; intelligence: IntelligenceAdapter } | null = null
+/**
+ * Wrap an async builder so it runs once however many callers arrive before
+ * it settles: every caller awaits the same in-flight promise, so none sees a
+ * half-built result and no second build starts. A rejected build is
+ * forgotten, so the next call builds again.
+ */
+export function sharedInit<T>(build: () => Promise<T>): () => Promise<T> {
+  let pending: Promise<T> | null = null
+  return () => {
+    if (!pending) {
+      pending = build().catch((err: unknown) => {
+        pending = null
+        throw err
+      })
+    }
+    return pending
+  }
+}
+
+interface MemoryStack {
+  memory: Memory
+  /** The stores the memory was built on, shared with the capture route so both use one config. */
+  storage: StorageAdapter
+  intelligence: IntelligenceAdapter
+}
+
+const getMemoryStack = sharedInit(buildMemoryStack)
 
 /**
  * Capture pipeline deps on the server's own stores and chat model. Builds the
@@ -246,20 +270,23 @@ let memoryStores: { storage: StorageAdapter; intelligence: IntelligenceAdapter }
  * same instance agents' memory_ingest writes through.
  */
 export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
-  await getMemory()
-  if (!memoryStores) throw new Error('memory stack initialised without its stores')
+  const stack = await getMemoryStack()
   return {
     getMemory,
-    storage: memoryStores.storage,
-    intelligence: memoryStores.intelligence,
+    storage: stack.storage,
+    intelligence: stack.intelligence,
     threshold: opts.threshold,
     captureModel: opts.captureModel,
     logPrefix: '[engram-mcp-http]',
   }
 }
 
+/** The server's memory, built and initialised on first use. */
 export async function getMemory(): Promise<Memory> {
-  if (memory) return memory
+  return (await getMemoryStack()).memory
+}
+
+async function buildMemoryStack(): Promise<MemoryStack> {
 
   const supabaseUrl = requireEnv('SUPABASE_URL')
   const supabaseKey = requireEnv('SUPABASE_KEY')
@@ -320,9 +347,7 @@ export async function getMemory(): Promise<Memory> {
   // agent via the declarative `project_id` param on memory_recall /
   // memory_ingest. On recall it ranks that project's memories higher and
   // hides none; omitting it means no project preference.
-  // Set together with memory: a concurrent caller that sees memory must see its stores.
-  memoryStores = { storage, intelligence }
-  memory = createMemory({
+  const memory = createMemory({
     storage,
     intelligence,
     autoConsolidate: true,
@@ -349,7 +374,7 @@ export async function getMemory(): Promise<Memory> {
   process.once('SIGTERM', () => worker.stop())
   process.once('SIGINT', () => worker.stop())
 
-  return memory
+  return { memory, storage, intelligence }
 }
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.

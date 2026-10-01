@@ -140,9 +140,10 @@ export interface IntelligenceAdapter {
    * when both `store === true` and `confidence >= threshold` (typically 0.7).
    *
    * Returns `store: false` only for a real verdict from the classifier. When
-   * no verdict was reached (the model call failed, or its output could not
-   * be parsed) the promise rejects, so the caller can retry the turn rather
-   * than drop it as a rejection.
+   * no verdict was reached the promise rejects, so the caller never drops the
+   * turn as a rejection. A failed model call rejects with its own error (worth
+   * retrying later); a reply that cannot be read as a verdict rejects with
+   * UnclassifiableReplyError.
    */
   extractSalience?(
     content: string,
@@ -219,4 +220,24 @@ export interface IntelligenceAdapter {
     excerpt: string,
     opts: { kind: 'session-summary' | 'pre-compact' },
   ): Promise<{ memory: string; context: string }>
+}
+
+/**
+ * The classifier answered, but its reply cannot be read as a verdict (not
+ * JSON, or no boolean `store`). Distinct from a failed model call: resending
+ * the same turn later does not make an unreadable reply readable.
+ */
+export class UnclassifiableReplyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'UnclassifiableReplyError'
+  }
+}
+
+/**
+ * Matched by name as well as by class, so the check holds when the adapter
+ * and the caller load separate copies of this package.
+ */
+export function isUnclassifiableReply(err: unknown): err is UnclassifiableReplyError {
+  return err instanceof UnclassifiableReplyError || (err instanceof Error && err.name === 'UnclassifiableReplyError')
 }

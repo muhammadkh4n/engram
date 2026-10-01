@@ -11,6 +11,7 @@ import type {
   EvidenceItem,
   EvidenceSelection,
 } from '@engram-mem/core'
+import { UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
 
 export interface OpenAISummarizerOptions {
@@ -631,16 +632,16 @@ export class OpenAISummarizer {
     try {
       parsed = extractJsonReply(raw)
     } catch (err) {
-      throw new Error(
+      throw new UnclassifiableReplyError(
         `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
       )
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('extractSalience: classifier output is not a JSON object')
+      throw new UnclassifiableReplyError('extractSalience: classifier output is not a JSON object')
     }
     const obj = parsed as Record<string, unknown>
     if (typeof obj['store'] !== 'boolean') {
-      throw new Error('extractSalience: classifier output has no boolean "store" verdict')
+      throw new UnclassifiableReplyError('extractSalience: classifier output has no boolean "store" verdict')
     }
 
     const store = obj['store']
