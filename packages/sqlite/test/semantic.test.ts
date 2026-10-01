@@ -156,6 +156,31 @@ describe('SqliteSemanticStorage', () => {
       expect(confidenceOf(live.id)).toBeCloseTo(0.05, 5)
     })
 
+    it('flat batchDecay keeps tombstoned and superseded confidence', async () => {
+      const forgotten = await insertStale('Tombstoned fact', 0.8)
+      const superseded = await insertStale('Superseded fact', 0.8)
+      const replacement = await insertStale('Replacement fact', 0.9)
+      await store.markForgotten([forgotten.id])
+      await store.markSuperseded(superseded.id, replacement.id)
+
+      const decayed = await store.batchDecay({ daysThreshold: 30, decayRate: 0.1 })
+
+      expect(decayed).toBe(1)
+      expect(confidenceOf(forgotten.id)).toBeCloseTo(0.8, 5)
+      expect(confidenceOf(superseded.id)).toBeCloseTo(0.8, 5)
+      expect(confidenceOf(replacement.id)).toBeCloseTo(0.8, 5)
+    })
+
+    it('listDecayCandidateIds lists only live stale rows', async () => {
+      const forgotten = await insertStale('Tombstoned fact', 0.8)
+      const superseded = await insertStale('Superseded fact', 0.8)
+      const replacement = await insertStale('Replacement fact', 0.9)
+      await store.markForgotten([forgotten.id])
+      await store.markSuperseded(superseded.id, replacement.id)
+
+      expect(await store.listDecayCandidateIds(30)).toEqual([replacement.id])
+    })
+
     it('getUnaccessed excludes tombstoned and superseded rows', async () => {
       const forgotten = await insertStale('Tombstoned fact', 0.8)
       const superseded = await insertStale('Superseded fact', 0.8)

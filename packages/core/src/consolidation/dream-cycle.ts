@@ -347,7 +347,7 @@ export async function dreamCycle(
 
           communitySummariesGenerated++
         }
-        summariesCompleted = true
+        summariesCompleted = cappedAt === undefined
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.warn(`[dream-cycle] Community summary generation failed: ${msg}`)
@@ -356,8 +356,18 @@ export async function dreamCycle(
       // Edges leave the graph only as replaced memberships or with a purged
       // node; age is never evidence against an edge. Louvain renumbers
       // communities on every run, so a membership this run did not restamp
-      // points at a dead assignment. A failed Louvain or an interrupted
-      // summary loop leaves the previous assignment in place untouched.
+      // points at a dead assignment. Replacement runs only when the summary
+      // loop reached every detected community: a failed Louvain, a thrown
+      // loop, or a loop stopped by the community-count or LLM-cost ceiling is
+      // partial, and replacing then would delete the memberships and
+      // Community nodes of every community the run never reached (typically
+      // the small ones of a paused project). A partial run replaces nothing.
+      if (louvainSucceeded && !summariesCompleted && cappedAt !== undefined) {
+        console.warn(
+          `[dream-cycle] Community membership replacement skipped: summary loop stopped at ${cappedAt}` +
+          ` after ${communitySummariesGenerated} communities; previous memberships kept`,
+        )
+      }
       if (louvainSucceeded && summariesCompleted && typeof graph.replaceCommunityMemberships === 'function') {
         try {
           const removed = await graph.replaceCommunityMemberships({

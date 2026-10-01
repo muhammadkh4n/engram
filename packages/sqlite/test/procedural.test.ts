@@ -222,6 +222,21 @@ describe('SqliteProceduralStorage', () => {
     expect(row.confidence).toBeCloseTo(0.05, 2)
   })
 
+  it('batchDecay keeps a tombstoned memory\'s confidence', async () => {
+    const forgotten = await store.insert({ ...BASE_MEMORY, confidence: 0.8 })
+    const live = await store.insert({ ...BASE_MEMORY, trigger: 'When reviewing a pull request', confidence: 0.8 })
+    db.prepare(`UPDATE procedural SET last_accessed = julianday('now') - 60`).run()
+    await store.markForgotten([forgotten.id])
+
+    const decayed = await store.batchDecay({ daysThreshold: 30, decayRate: 0.1 })
+
+    const confidenceOf = (id: string) =>
+      (db.prepare('SELECT confidence FROM procedural WHERE id = ?').get(id) as { confidence: number }).confidence
+    expect(decayed).toBe(1)
+    expect(confidenceOf(forgotten.id)).toBeCloseTo(0.8, 5)
+    expect(confidenceOf(live.id)).toBeCloseTo(0.7, 5)
+  })
+
   it('batchDecay skips recently accessed memories', async () => {
     const mem = await store.insert({
       ...BASE_MEMORY,

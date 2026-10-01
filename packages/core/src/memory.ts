@@ -862,6 +862,9 @@ export class Memory {
       bridgeNodesFound: dreamResult.bridgeNodesFound,
       replayEdgesCreated: dreamResult.replayEdgesCreated,
       causalEdgesCreated: dreamResult.causalEdgesCreated,
+      ...(decayResult.graphTombstonesSynced !== undefined
+        ? { graphTombstonesSynced: decayResult.graphTombstonesSynced }
+        : {}),
     }
   }
 

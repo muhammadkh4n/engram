@@ -30,11 +30,15 @@ export interface DecayPassOptions {
   proceduralDecayRate?: number
   semanticDaysThreshold?: number
   proceduralDaysThreshold?: number
-  /** Look-back window for carrying SQL tombstones into the graph. */
+  /**
+   * Look-back window for carrying SQL tombstones into the graph when no
+   * completed decay run is recorded. Default 8 days.
+   */
   tombstoneSyncDays?: number
 }
 
 const TOMBSTONE_SYNC_BATCH = 1000
+const DAY_MS = 24 * 60 * 60 * 1000
 
 /**
  * Decay Pass — Ebbinghaus forgetting curve over SQL confidence.
@@ -87,12 +91,14 @@ export async function decayPass(
   // Op3: Apply decay — gradient when PageRank available, flat otherwise
   if (pageRankMap.size > 0 && storage.semantic.batchDecayGradient) {
     // Gradient decay for semantic memories
-    const semanticMemories = await storage.semantic.getUnaccessed(semanticDays)
-    const semanticUpdates = semanticMemories.map(m => {
-      const pr = pageRankMap.get(m.id) ?? 0
+    const candidateIds = storage.semantic.listDecayCandidateIds
+      ? await storage.semantic.listDecayCandidateIds(semanticDays)
+      : (await storage.semantic.getUnaccessed(semanticDays)).map(m => m.id)
+    const semanticUpdates = candidateIds.map(id => {
+      const pr = pageRankMap.get(id) ?? 0
       const protection = Math.min(0.8, pr / maxPageRank)
       const effectiveRate = semanticBaseRate * (1 - protection)
-      return { id: m.id, effectiveDecayRate: effectiveRate, daysThreshold: semanticDays }
+      return { id, effectiveDecayRate: effectiveRate, daysThreshold: semanticDays }
     })
     if (semanticUpdates.length > 0) {
       semanticDecayed = await storage.semantic.batchDecayGradient(semanticUpdates)
@@ -135,18 +141,19 @@ export async function decayPass(
 /**
  * forgetByIds stamps the graph online, but a bulk SQL tombstoning or a failed
  * graph write never reaches it, leaving forgotten memories reachable through
- * spreading activation. Re-stamping a window of recent tombstones each pass
- * repairs that; forgetMemories is idempotent, so overlap is harmless. The
- * default window is one weekly decay interval plus a day of overlap.
+ * spreading activation. Each pass re-stamps every tombstone since the last
+ * completed decay run, minus a day of overlap, so a skipped or late week is
+ * still covered; without a recorded run it falls back to a fixed window.
+ * forgetMemories is idempotent, so overlap is harmless.
  */
 async function syncTombstones(
   storage: StorageAdapter,
   graph: GraphPort | null | undefined,
-  days: number,
+  fallbackDays: number,
 ): Promise<number | undefined> {
   if (!storage.listTombstonesSince || !graph?.forgetMemories) return undefined
   try {
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+    const since = await tombstoneSyncStart(storage, fallbackDays)
     const ids = (await storage.listTombstonesSince(since)).map((t) => t.id)
     let stamped = 0
     for (let i = 0; i < ids.length; i += TOMBSTONE_SYNC_BATCH) {
@@ -158,6 +165,12 @@ async function syncTombstones(
     console.warn(`[decay-pass] tombstone sync failed: ${msg}`)
     return undefined
   }
+}
+
+async function tombstoneSyncStart(storage: StorageAdapter, fallbackDays: number): Promise<Date> {
+  const lastRun = await storage.consolidationRuns?.getLastRun('decay')
+  if (lastRun?.completedAt) return new Date(lastRun.completedAt.getTime() - DAY_MS)
+  return new Date(Date.now() - fallbackDays * DAY_MS)
 }
 
 interface PageRankScores {

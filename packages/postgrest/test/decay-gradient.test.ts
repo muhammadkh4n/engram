@@ -17,7 +17,7 @@ function fakeClient(opts: { rpcError?: string } = {}) {
   const updateCalls: unknown[] = []
 
   const query: Record<string, unknown> = {}
-  for (const method of ['select', 'gt', 'is', 'or', 'eq', 'in', 'limit']) {
+  for (const method of ['select', 'gt', 'is', 'or', 'eq', 'in', 'order', 'limit']) {
     query[method] = (...args: unknown[]) => {
       filterCalls.push({ method, args })
       return query

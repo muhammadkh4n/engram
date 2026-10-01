@@ -9,6 +9,9 @@ import { onlyUuids } from './uuid.js'
 /** Rows per decay RPC call; keeps each request body and UPDATE bounded. */
 const GRADIENT_CHUNK_SIZE = 500
 
+/** Rows requested per page when walking unaccessed memories. */
+const UNACCESSED_PAGE_SIZE = 1000
+
 export class PostgRestSemanticStorage implements SemanticStorage {
   constructor(private readonly client: PostgrestClient) {}
 
@@ -112,16 +115,46 @@ export class PostgRestSemanticStorage implements SemanticStorage {
   }
 
   async getUnaccessed(days: number): Promise<SemanticMemory[]> {
+    const rows = await this.pageUnaccessed<SemanticRow>(days, '*', 'getUnaccessed')
+    return rows.map(rowToSemantic)
+  }
+
+  async listDecayCandidateIds(days: number): Promise<string[]> {
+    const rows = await this.pageUnaccessed<{ id: string }>(days, 'id', 'listDecayCandidateIds')
+    return rows.map((r) => r.id)
+  }
+
+  /**
+   * PostgREST truncates every response at the server's max-rows setting and
+   * says nothing, so a single select can silently drop rows. Keyset paging on
+   * the primary key until an empty page is returned reads every row whatever
+   * that cap is; an empty page, not a short one, ends the walk because a
+   * short page may just be the cap.
+   */
+  private async pageUnaccessed<T extends { id: string }>(
+    days: number,
+    columns: string,
+    label: string,
+  ): Promise<T[]> {
     const cutoff = new Date(Date.now() - days * 86400000).toISOString()
-    const { data, error } = await this.client
-      .from('memory_semantic')
-      .select('*')
-      .gt('confidence', 0.05)
-      .is('forgotten_at', null)
-      .is('superseded_by', null)
-      .or(`last_accessed.is.null,last_accessed.lt.${cutoff}`)
-    if (error) throw new Error(`Semantic getUnaccessed failed: ${error.message}`)
-    return ((data ?? []) as SemanticRow[]).map(rowToSemantic)
+    const all: T[] = []
+    let after: string | null = null
+    for (;;) {
+      let query = this.client
+        .from('memory_semantic')
+        .select(columns)
+        .gt('confidence', 0.05)
+        .is('forgotten_at', null)
+        .is('superseded_by', null)
+        .or(`last_accessed.is.null,last_accessed.lt.${cutoff}`)
+      if (after !== null) query = query.gt('id', after)
+      const { data, error } = await query.order('id', { ascending: true }).limit(UNACCESSED_PAGE_SIZE)
+      if (error) throw new Error(`Semantic ${label} failed: ${error.message}`)
+      const page = (data ?? []) as unknown as T[]
+      if (page.length === 0) return all
+      all.push(...page)
+      after = page[page.length - 1]!.id
+    }
   }
 
   async recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void> {

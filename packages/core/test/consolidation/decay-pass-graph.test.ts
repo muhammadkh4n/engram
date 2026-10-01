@@ -148,6 +148,35 @@ describe('decayPass PageRank projection', () => {
   })
 })
 
+describe('decayPass gradient candidates', () => {
+  beforeEach(() => {
+    resetIdCounter()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('decays the ids the storage lists as candidates instead of loading full rows', async () => {
+    const storage = makeMockStorage()
+    const listDecayCandidateIds = vi.fn(async () => ['a', 'b'])
+    Object.assign(storage.semantic, { listDecayCandidateIds })
+    const batchDecayGradient = vi.fn(async (updates: unknown[]) => updates.length)
+    storage.semantic.batchDecayGradient = batchDecayGradient
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'], scores: [{ id: 'a', pageRank: 1 }] })
+
+    const result = await decayPass(storage, {}, graph)
+
+    expect(listDecayCandidateIds).toHaveBeenCalledWith(30)
+    expect(storage.semantic.getUnaccessed).not.toHaveBeenCalled()
+    const updates = batchDecayGradient.mock.calls[0][0] as Array<{ id: string }>
+    expect(updates.map((u) => u.id)).toEqual(['a', 'b'])
+    expect(result.semanticDecayed).toBe(2)
+  })
+})
+
 describe('decayPass graph writes', () => {
   beforeEach(() => {
     resetIdCounter()
@@ -215,6 +244,36 @@ describe('decayPass tombstone sync', () => {
     expect(result.graphTombstonesSynced).toBe(2497)
     const since = listTombstonesSince.mock.calls[0][0] as Date
     const days = (Date.now() - since.getTime()) / 86_400_000
+    expect(days).toBeGreaterThan(7.99)
+    expect(days).toBeLessThan(8.01)
+  })
+
+  it('looks back to a day before the last completed decay run', async () => {
+    const storage = makeMockStorage()
+    const listTombstonesSince = vi.fn(async () => tombstones(1))
+    const completedAt = new Date(Date.now() - 3 * 86_400_000)
+    const getLastRun = vi.fn(async () => ({ completedAt }))
+    Object.assign(storage, { listTombstonesSince, consolidationRuns: { getLastRun } })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    Object.assign(graph, { forgetMemories: vi.fn(async (ids: string[]) => ids.length) })
+
+    await decayPass(storage, {}, graph)
+
+    expect(getLastRun).toHaveBeenCalledWith('decay')
+    const since = listTombstonesSince.mock.calls[0][0] as Date
+    expect(since.getTime()).toBe(completedAt.getTime() - 86_400_000)
+  })
+
+  it('falls back to 8 days when no decay run has completed', async () => {
+    const storage = makeMockStorage()
+    const listTombstonesSince = vi.fn(async () => tombstones(1))
+    Object.assign(storage, { listTombstonesSince, consolidationRuns: { getLastRun: vi.fn(async () => null) } })
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM'] })
+    Object.assign(graph, { forgetMemories: vi.fn(async (ids: string[]) => ids.length) })
+
+    await decayPass(storage, {}, graph)
+
+    const days = (Date.now() - (listTombstonesSince.mock.calls[0][0] as Date).getTime()) / 86_400_000
     expect(days).toBeGreaterThan(7.99)
     expect(days).toBeLessThan(8.01)
   })

@@ -130,6 +130,20 @@ export class SqliteSemanticStorage implements SemanticStorage {
     return rows.map((r) => this.rowToSemantic(r))
   }
 
+  async listDecayCandidateIds(days: number): Promise<string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM semantic
+         WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
+           AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)
+         ORDER BY id`
+      )
+      .all(days) as Array<{ id: string }>
+    return rows.map((r) => r.id)
+  }
+
   async recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void> {
     this.db
       .prepare(
@@ -165,6 +179,8 @@ export class SqliteSemanticStorage implements SemanticStorage {
         `UPDATE semantic
          SET confidence = MAX(0.05, confidence - ?)
          WHERE confidence > 0.05
+           AND forgotten_at IS NULL
+           AND superseded_by IS NULL
            AND (last_accessed IS NULL OR last_accessed < julianday('now') - ?)`
       )
       .run(opts.decayRate, opts.daysThreshold)

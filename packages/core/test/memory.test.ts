@@ -822,6 +822,17 @@ describe('Memory — forgetByIds() graph tombstone', () => {
     await memory.dispose()
   })
 
+  it("consolidate('all') reports the tombstones the decay pass carried into the graph", async () => {
+    const forgetMemories = vi.fn(async (ids: string[]) => ids.length)
+    const { memory, ids } = await seeded(graphWith(forgetMemories))
+    await memory.forgetByIds([ids[0]!])
+
+    const result = await memory.consolidate('all')
+
+    expect(result.graphTombstonesSynced).toBe(1)
+    await memory.dispose()
+  })
+
   it('does not call the graph when nothing was tombstoned', async () => {
     const forgetMemories = vi.fn().mockResolvedValue(0)
     const { memory } = await seeded(graphWith(forgetMemories))
