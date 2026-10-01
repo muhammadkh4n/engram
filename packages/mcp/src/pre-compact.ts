@@ -1,41 +1,36 @@
 #!/usr/bin/env node
 /**
- * PreCompact Hook — Extract & persist important context before compaction
+ * PreCompact Hook — persist the session's key points before compaction.
  *
- * Fires before Claude Code compresses the conversation. Reads the transcript,
- * extracts key decisions/facts via gpt-4o-mini, ingests into Engram, and
- * returns additionalContext so Claude retains awareness post-compaction.
+ * Fires before Claude Code compresses the conversation. Reads the recent
+ * transcript, has it digested into a long-term memory plus a short context
+ * paragraph, and prints that paragraph as additionalContext so Claude keeps
+ * its bearings after compaction.
+ *
+ * With ENGRAM_SERVER_URL set the excerpt goes to the server's capture route,
+ * which runs the digest and the store; without it the pipeline runs here
+ * against this machine's credentials. The hook is synchronous and Claude
+ * Code gives it 30 s, so the post is capped below that; a capture that does
+ * not get through is spooled and nothing is printed.
  *
  * stdin: { session_id, transcript_path, cwd, hook_event_name, trigger }
  * stdout: { additionalContext: "..." } (injected into post-compaction context)
  */
 
 import { readFileSync } from 'node:fs'
-import { createMemory } from '@engram-mem/core'
-import { tryCreateGraph } from './graph-helper.js'
-import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
-import { findDuplicate, boostDuplicate } from './ingest/dedup.js'
-import { resolveProjectScope } from './ingest/project-detect.js'
-import { scrubModelInput } from './ingest/scrub-model-input.js'
-import OpenAI from 'openai'
+import type { CaptureEnv } from './ingest/capture-client.js'
+import { isEntryPoint } from './ingest/entry-point.js'
+import { resolveProject } from './ingest/project-detect.js'
+import { appendHookLog, sendTranscriptCapture } from './ingest/transcript-capture.js'
+import { readTranscriptExcerpt, type TranscriptExcerpt } from './ingest/transcript-excerpt.js'
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
-const SUPABASE_URL = process.env['SUPABASE_URL']
-const SUPABASE_KEY = process.env['SUPABASE_KEY']
-const OPENAI_API_KEY = process.env['OPENAI_API_KEY']
-
-if (!SUPABASE_URL || !SUPABASE_KEY || !OPENAI_API_KEY) {
-  process.stderr.write('[engram-compact] Missing env vars, skipping.\n')
-  process.exit(0)
-}
-
-// ---------------------------------------------------------------------------
-// Read hook input
-// ---------------------------------------------------------------------------
+const LOG_PREFIX = '[engram-compact]'
+const EXCERPT_LIMITS = { maxChars: 40_000, perTurnChars: 3_000 }
+const MIN_EXCERPT_CHARS = 200
+/** Claude Code allows the hook 30 s; the post gets 25 s of it. */
+export const PRE_COMPACT_POST_TIMEOUT_MS = 25_000
+const HOOK_WATCHDOG_MS = 28_000
+const DEFAULT_SESSION_ID = 'claude-code'
 
 interface HookInput {
   session_id?: string
@@ -44,205 +39,95 @@ interface HookInput {
   trigger?: string
 }
 
-function readHookInput(): HookInput {
+function parseHookInput(raw: string): HookInput {
   try {
-    const stdin = readFileSync(0, 'utf-8').trim()
-    return stdin ? JSON.parse(stdin) : {}
+    const parsed: unknown = raw.trim() ? JSON.parse(raw) : {}
+    return typeof parsed === 'object' && parsed !== null ? (parsed as HookInput) : {}
   } catch {
     return {}
   }
 }
 
-// ---------------------------------------------------------------------------
-// Extract conversation from transcript
-// ---------------------------------------------------------------------------
-
-function extractConversation(transcriptPath: string): string {
-  const raw = readFileSync(transcriptPath, 'utf-8')
-  const lines = raw.split('\n').filter(Boolean)
-  const turns: string[] = []
-  let totalChars = 0
-  const MAX_CHARS = 40000
-
-  // Read recent turns (end of file = most recent)
-  for (let i = lines.length - 1; i >= 0 && totalChars < MAX_CHARS; i--) {
-    try {
-      const entry = JSON.parse(lines[i])
-      if (entry.type === 'human' || entry.type === 'assistant') {
-        const role = entry.type === 'human' ? 'User' : 'Assistant'
-        let text = ''
-        if (typeof entry.message?.content === 'string') {
-          text = entry.message.content
-        } else if (Array.isArray(entry.message?.content)) {
-          text = entry.message.content
-            .filter((b: { type: string }) => b.type === 'text')
-            .map((b: { text: string }) => b.text)
-            .join('\n')
-        }
-        if (text.trim().length > 10) {
-          turns.unshift(`${role}: ${text.slice(0, 3000)}`)
-          totalChars += Math.min(text.length, 3000)
-        }
-      }
-    } catch { /* skip */ }
-  }
-
-  return turns.join('\n\n')
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
-// ---------------------------------------------------------------------------
-// Extract key facts via LLM
-// ---------------------------------------------------------------------------
-
-async function extractKeyFacts(conversation: string): Promise<{
-  summary: string
-  keyFacts: string
-}> {
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY })
-
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'system',
-        content: `You analyze Claude Code conversations before context compaction.
-
-Extract TWO outputs:
-
-1. MEMORY (for long-term storage):
-Bullet points of ONLY high-value items:
-- Architectural decisions with rationale
-- User preferences / requirements stated
-- Non-obvious solutions found
-- Important facts learned (credentials, endpoints, configs discovered)
-- Bugs found and their root causes
-- Action items / next steps agreed on
-Skip: routine operations, file reads, test runs, greps, build commands.
-Max 200 words.
-
-2. CONTEXT (for immediate re-injection after compaction):
-A brief paragraph (max 100 words) summarizing what the user is currently working on and what was just decided, so Claude can resume seamlessly.
-
-Format your response EXACTLY as:
-MEMORY:
-<bullet points>
-
-CONTEXT:
-<paragraph>`,
-      },
-      {
-        role: 'user',
-        content: conversation,
-      },
-    ],
-    max_tokens: 600,
-    temperature: 0.2,
-  })
-
-  const output = response.choices[0]?.message?.content ?? ''
-
-  const memoryMatch = output.match(/MEMORY:\s*([\s\S]*?)(?=CONTEXT:|$)/)
-  const contextMatch = output.match(/CONTEXT:\s*([\s\S]*)$/)
-
-  return {
-    summary: memoryMatch?.[1]?.trim() ?? output,
-    keyFacts: contextMatch?.[1]?.trim() ?? '',
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-async function main(): Promise<void> {
-  const hookInput = readHookInput()
-
-  if (!hookInput.transcript_path) {
-    process.stderr.write('[engram-compact] No transcript_path in hook input.\n')
-    return
+/**
+ * Runs the hook for one stdin payload and returns the exit code. The context
+ * paragraph is written through `writeStdout` only when the pipeline produced
+ * one.
+ */
+export async function runPreCompact(
+  hookJson: string,
+  env: CaptureEnv = process.env,
+  writeStdout: (text: string) => void = (text) => process.stdout.write(text),
+): Promise<number> {
+  const hook = parseHookInput(hookJson)
+  if (!hook.transcript_path) {
+    process.stderr.write(`${LOG_PREFIX} No transcript_path in hook input.\n`)
+    return 0
   }
 
-  let conversation: string
+  let excerpt: TranscriptExcerpt
   try {
-    // The transcript is sent to the extraction model, so credential values
-    // are redacted before that call rather than only at ingest.
-    conversation = await scrubModelInput(extractConversation(hookInput.transcript_path), '[engram-compact]')
+    excerpt = readTranscriptExcerpt(hook.transcript_path, EXCERPT_LIMITS)
   } catch (err) {
-    process.stderr.write(`[engram-compact] Failed to read transcript: ${err}\n`)
-    return
+    process.stderr.write(`${LOG_PREFIX} Failed to read transcript: ${errorText(err)}\n`)
+    return 0
+  }
+  if (excerpt.text.length < MIN_EXCERPT_CHARS) {
+    process.stderr.write(`${LOG_PREFIX} Conversation too short, skipping.\n`)
+    return 0
   }
 
-  if (conversation.length < 200) {
-    process.stderr.write('[engram-compact] Conversation too short, skipping.\n')
-    return
-  }
-
-  const { summary, keyFacts } = await extractKeyFacts(conversation)
-
-  // Ingest the summary into Engram long-term memory
-  const storage = new PostgRestStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
-  const intelligence = openaiIntelligence({ apiKey: OPENAI_API_KEY! })
-  const graph = await tryCreateGraph('[engram-compact]')
-  // Wave 5: scope the compaction summary to the same project the MCP server
-  // recalls under (env-first → cwd basename), so it isn't visible to others.
-  const scope = resolveProjectScope()
-  const memory = createMemory({
-    storage,
-    intelligence,
-    ...(scope.id ? { projectId: scope.id } : {}),
-    ...(graph ? { graph } : {}),
-  })
-  await memory.initialize()
-
-  // Dedup: session summaries re-state long-running facts across days.
-  // If this summary substantially overlaps a recent one, boost the
-  // existing memory instead of inserting a near-duplicate.
-  //
-  // Threshold tuning: empirically on text-embedding-3-small, cosine
-  // similarity between two day-over-day session summaries paraphrasing
-  // the same work sits around 0.65; cosine between unrelated long
-  // summaries sits around 0.40. We pick 0.62 — below that, paraphrased
-  // summaries are reliably caught; above 0.70, near-duplicates slip
-  // through because long-text cosine simply doesn't reach higher values.
-  // See /tmp/dedup-tune.mjs sweep (2026-04-17).
-  //
-  // Window is wider than the 7-day dedup default because session
-  // summaries echo facts that persist for weeks.
-  const dup = await findDuplicate(summary, storage, intelligence, {
-    threshold: 0.62,
-    windowDays: 30,
-  })
-
-  if (dup.duplicateId) {
-    await boostDuplicate(storage, dup.duplicateId)
-    process.stderr.write(
-      `[engram-compact] Duplicate of ${dup.duplicateId} (sim=${dup.similarity.toFixed(3)}) — boosted, not re-ingested.\n`,
-    )
-  } else {
-    await memory.ingest({
-      content: summary,
-      role: 'system',
-      sessionId: hookInput.session_id ?? 'claude-code',
-      metadata: {
-        source: 'claude-code',
-        type: 'pre-compact-summary',
-        trigger: hookInput.trigger,
-        cwd: hookInput.cwd,
-        extractedAt: new Date().toISOString(),
+  const cwd = hook.cwd ?? process.cwd()
+  try {
+    const result = await sendTranscriptCapture(
+      {
+        derive: 'pre-compact',
+        excerpt,
+        transcriptPath: hook.transcript_path,
+        sessionId: hook.session_id || DEFAULT_SESSION_ID,
+        project: resolveProject('auto', cwd),
+        meta: {
+          ...(hook.trigger ? { trigger: hook.trigger } : {}),
+          cwd,
+        },
+        logPrefix: LOG_PREFIX,
+        timeoutMs: PRE_COMPACT_POST_TIMEOUT_MS,
+        // The hook is synchronous; the backlog drains on the next capture
+        // that runs in the background.
+        flushBudgetMs: 0,
       },
-    })
-    process.stderr.write(`[engram-compact] Persisted ${summary.length} chars to long-term memory.\n`)
-  }
+      env,
+    )
+    process.stderr.write(`${result.line}\n`)
+    appendHookLog(env, result.line)
 
-  // Return additionalContext to inject after compaction
-  if (keyFacts) {
-    const output = JSON.stringify({
-      additionalContext: `[Engram Memory — preserved before compaction]\n${keyFacts}`,
-    })
-    process.stdout.write(output)
+    const context = result.outcome?.context?.trim()
+    if (context) {
+      writeStdout(JSON.stringify({ additionalContext: `[Engram Memory — preserved before compaction]\n${context}` }))
+    }
+    return result.exitCode
+  } catch (err) {
+    const line = `${LOG_PREFIX} Error: ${errorText(err)}`
+    process.stderr.write(`${line}\n`)
+    appendHookLog(env, line)
+    return 1
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`[engram-compact] Error: ${err instanceof Error ? err.message : String(err)}\n`)
-})
+if (isEntryPoint(import.meta.url)) {
+  // A wedged local model or store call must not hold up compaction.
+  setTimeout(() => process.exit(0), HOOK_WATCHDOG_MS).unref()
+  let stdin = ''
+  try {
+    stdin = readFileSync(0, 'utf-8')
+  } catch {
+    // No stdin: the hook input check below reports it.
+  }
+  runPreCompact(stdin).then(
+    (code) => process.exit(code),
+    () => process.exit(1),
+  )
+}

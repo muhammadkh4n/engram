@@ -18,7 +18,7 @@ const TRANSCRIPT_PATH = '/tmp/engram-cli-scrub-test/transcript.jsonl'
 const h = vi.hoisted(() => ({
   stdin: '',
   transcript: '',
-  createCompletion: vi.fn(),
+  digestTranscript: vi.fn(),
   extractSalience: vi.fn(),
   memoryIngest: vi.fn(),
   memoryDispose: vi.fn(),
@@ -35,12 +35,6 @@ vi.mock('node:fs', async (importOriginal) => {
   }) as typeof actual.readFileSync
   return { ...actual, default: { ...actual, readFileSync }, readFileSync }
 })
-
-vi.mock('openai', () => ({
-  default: class {
-    chat = { completions: { create: h.createCompletion } }
-  },
-}))
 
 vi.mock('@engram-mem/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@engram-mem/core')>()
@@ -63,7 +57,7 @@ vi.mock('@engram-mem/postgrest', () => ({
 }))
 
 vi.mock('@engram-mem/openai', () => ({
-  openaiIntelligence: () => ({ extractSalience: h.extractSalience, embed: vi.fn() }),
+  openaiIntelligence: () => ({ extractSalience: h.extractSalience, digestTranscript: h.digestTranscript, embed: vi.fn() }),
   DEFAULT_CHAT_MODEL: 'default-chat-model',
 }))
 
@@ -87,6 +81,8 @@ writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ pa
 afterAll(() => rmSync(registryDir, { recursive: true, force: true }))
 
 const ENV = {
+  // The hooks append to ~/.engram/hook.log.
+  HOME: registryDir,
   SUPABASE_URL: 'https://example.test',
   SUPABASE_KEY: 'test-key',
   OPENAI_API_KEY: 'test-openai',
@@ -107,7 +103,7 @@ function transcriptLines(entries: Array<{ type: string; text: string }>): string
 
 const SECRET_TRANSCRIPT = transcriptLines([
   {
-    type: 'human',
+    type: 'user',
     text: `Here is the env block for the HTTP server, wire it into ecosystem.config.cjs:\nOPENAI_API_KEY=${FAKE_KEY}\nNEO4J_PASSWORD=${FAKE_PASSWORD}\nPORT=8787`,
   },
   {
@@ -122,7 +118,7 @@ function allText(value: unknown): string {
 
 beforeEach(() => {
   vi.resetModules()
-  for (const fn of [h.createCompletion, h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
+  for (const fn of [h.digestTranscript, h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
     fn.mockReset()
   }
   h.memoryIngest.mockResolvedValue(undefined)
@@ -251,18 +247,23 @@ describe('engram-ingest CLI', () => {
 })
 
 describe('session-summary CLI', () => {
-  it('sends the summariser a scrubbed transcript and logs the redaction kinds', async () => {
-    h.stdin = JSON.stringify({ session_id: 'sess-1', transcript_path: TRANSCRIPT_PATH })
+  it('sends the digest model a scrubbed transcript and logs the redaction kinds', async () => {
     h.transcript = SECRET_TRANSCRIPT
-    h.createCompletion.mockResolvedValue({
-      choices: [{ message: { content: 'Session: pm2 env wiring\n- Added the env block and restarted the HTTP server.' } }],
+    h.digestTranscript.mockResolvedValue({
+      memory: 'Session: pm2 env wiring\n- Added the env block and restarted the HTTP server.',
+      context: '',
     })
 
-    await import('../src/session-summary.js')
-    await vi.waitFor(() => expect(h.memoryIngest).toHaveBeenCalled())
+    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
+    const code = await runSessionSummaryWorker(
+      JSON.stringify({ session_id: 'sess-1', transcript_path: TRANSCRIPT_PATH }),
+      process.env,
+    )
 
-    expect(h.createCompletion).toHaveBeenCalledOnce()
-    const prompt = allText(h.createCompletion.mock.calls[0]![0])
+    expect(code).toBe(0)
+    expect(h.memoryIngest).toHaveBeenCalledOnce()
+    expect(h.digestTranscript).toHaveBeenCalledOnce()
+    const prompt = allText(h.digestTranscript.mock.calls[0])
     expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(prompt).toContain('NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]')
     expect(prompt).not.toContain(FAKE_KEY)
@@ -272,21 +273,33 @@ describe('session-summary CLI', () => {
 })
 
 describe('pre-compact CLI', () => {
-  it('sends the extraction model a scrubbed transcript', async () => {
-    h.stdin = JSON.stringify({ session_id: 'sess-2', transcript_path: TRANSCRIPT_PATH, trigger: 'auto' })
+  it('sends the digest model a scrubbed transcript and prints its context', async () => {
     h.transcript = [SECRET_TRANSCRIPT, SECRET_TRANSCRIPT].join('\n')
-    h.createCompletion.mockResolvedValue({
-      choices: [{ message: { content: 'MEMORY:\n- Wired the pm2 env block for the HTTP server.\n\nCONTEXT:\n' } }],
+    h.digestTranscript.mockResolvedValue({
+      memory: '- Wired the pm2 env block for the HTTP server.',
+      context: 'Wiring the HTTP server env block under pm2.',
     })
+    const stdout: string[] = []
 
-    await import('../src/pre-compact.js')
-    await vi.waitFor(() => expect(h.memoryIngest).toHaveBeenCalled())
+    const { runPreCompact } = await import('../src/pre-compact.js')
+    const code = await runPreCompact(
+      JSON.stringify({ session_id: 'sess-2', transcript_path: TRANSCRIPT_PATH, trigger: 'auto' }),
+      process.env,
+      (text) => stdout.push(text),
+    )
 
-    expect(h.createCompletion).toHaveBeenCalledOnce()
-    const prompt = allText(h.createCompletion.mock.calls[0]![0])
+    expect(code).toBe(0)
+    expect(h.memoryIngest).toHaveBeenCalledOnce()
+    expect(h.digestTranscript).toHaveBeenCalledOnce()
+    const prompt = allText(h.digestTranscript.mock.calls[0])
     expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(prompt).not.toContain(FAKE_KEY)
     expect(prompt).not.toContain(FAKE_PASSWORD)
     expect(stderrLines).toContain('[engram-compact] redacted 4 secret value(s): known(4)\n')
+    expect(stdout).toEqual([
+      JSON.stringify({
+        additionalContext: '[Engram Memory — preserved before compaction]\nWiring the HTTP server env block under pm2.',
+      }),
+    ])
   })
 })

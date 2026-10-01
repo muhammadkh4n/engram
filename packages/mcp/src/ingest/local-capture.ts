@@ -3,9 +3,9 @@
  * classifier, the PostgREST store and the optional graph from this machine's
  * env and runs the capture pipeline here.
  *
- * engram-ingest loads this module with a dynamic import only when
- * ENGRAM_SERVER_URL is unset, so a hook posting to the server never loads a
- * model or store client.
+ * engram-ingest, session-summary and pre-compact load this module with a
+ * dynamic import only when ENGRAM_SERVER_URL is unset, so a hook posting to
+ * the server never loads a model or store client.
  */
 
 import { createMemory } from '@engram-mem/core'
@@ -13,7 +13,15 @@ import type { IntelligenceAdapter, Memory } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
-import { runCapture, type CaptureInput, type CaptureOutcome, type RejectedCapture } from './capture.js'
+import {
+  runCapture,
+  runDerivedCapture,
+  type CaptureDeps,
+  type CaptureInput,
+  type CaptureOutcome,
+  type DerivedCaptureInput,
+  type RejectedCapture,
+} from './capture.js'
 
 export type LocalEnv = Readonly<Record<string, string | undefined>>
 
@@ -47,10 +55,39 @@ function requireEnv(env: LocalEnv, name: string): string {
 }
 
 export async function runLocalCapture(input: CaptureInput, options: LocalCaptureOptions): Promise<LocalCaptureResult> {
-  const { env } = options
   // A raw dry run stops before the dedup embedding and the store, so it makes
   // no model call and needs no key; every other path calls the model.
-  const needsModel = input.gate || !input.dryRun
+  return withLocalDeps(input.gate || !input.dryRun, options, (deps) => {
+    if (input.gate && !deps.intelligence.extractSalience) {
+      throw new Error('intelligence adapter lacks extractSalience')
+    }
+    return runCapture(deps, input)
+  })
+}
+
+export interface LocalDerivedCaptureOptions {
+  env: LocalEnv
+  logPrefix: string
+  log?: (line: string) => void
+}
+
+/** Digests a transcript excerpt with this machine's chat model and stores the digest. */
+export async function runLocalDerivedCapture(
+  input: DerivedCaptureInput,
+  options: LocalDerivedCaptureOptions,
+): Promise<LocalCaptureResult> {
+  // The digest is stored ungated, so the salience threshold is never read.
+  return withLocalDeps(true, { ...options, classifierModel: null, threshold: 1 }, (deps) =>
+    runDerivedCapture(deps, input),
+  )
+}
+
+async function withLocalDeps(
+  needsModel: boolean,
+  options: LocalCaptureOptions,
+  run: (deps: CaptureDeps) => Promise<CaptureOutcome>,
+): Promise<LocalCaptureResult> {
+  const { env } = options
   const openaiKey = needsModel ? requireEnv(env, 'OPENAI_API_KEY') : ''
   const classifier: IntelligenceAdapter = needsModel
     ? openaiIntelligence({
@@ -58,9 +95,6 @@ export async function runLocalCapture(input: CaptureInput, options: LocalCapture
         ...(options.classifierModel ? { summarizationModel: options.classifierModel } : {}),
       })
     : {}
-  if (input.gate && !classifier.extractSalience) {
-    throw new Error('intelligence adapter lacks extractSalience')
-  }
 
   // Supabase and Neo4j are only reached on the paths that need them: the
   // rejected and dry-run paths connect to neither, the duplicate path skips
@@ -102,19 +136,16 @@ export async function runLocalCapture(input: CaptureInput, options: LocalCapture
   }
 
   try {
-    const outcome = await runCapture(
-      {
-        getMemory,
-        storage: getStorage,
-        intelligence: classifier,
-        threshold: options.threshold,
-        captureModel: options.classifierModel ?? DEFAULT_CHAT_MODEL,
-        logPrefix: options.logPrefix,
-        ...(options.log ? { log: options.log } : {}),
-        ...(options.onRejected ? { onRejected: options.onRejected } : {}),
-      },
-      input,
-    )
+    const outcome = await run({
+      getMemory,
+      storage: getStorage,
+      intelligence: classifier,
+      threshold: options.threshold,
+      captureModel: options.classifierModel ?? DEFAULT_CHAT_MODEL,
+      logPrefix: options.logPrefix,
+      ...(options.log ? { log: options.log } : {}),
+      ...(options.onRejected ? { onRejected: options.onRejected } : {}),
+    })
     if (opened.memory) {
       // Wait for fire-and-forget graph decomposition to finish before the
       // process exits. Without this, the CLI can return immediately after

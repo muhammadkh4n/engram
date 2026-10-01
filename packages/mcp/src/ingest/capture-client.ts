@@ -17,7 +17,7 @@
  * every commit and prompt, and the server owns the pipeline.
  */
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -174,6 +174,15 @@ export async function readServerToken(env: CaptureEnv): Promise<string> {
   const token = env['ENGRAM_SERVER_TOKEN']?.trim()
   if (!token) throw new Error('neither ENGRAM_SERVER_TOKEN_FILE nor ENGRAM_SERVER_TOKEN is set')
   return token
+}
+
+/**
+ * Stable across reruns of the same hook: a transcript turn is identified by
+ * its entry uuid, anything else by its text. The server honours the key only
+ * within the same session id.
+ */
+export function captureKey(source: string, sessionId: string | null, identity: string): string {
+  return createHash('sha256').update(JSON.stringify([source, sessionId ?? '', identity])).digest('hex')
 }
 
 export function defaultTimeoutMs(payload: CapturePayload): number {

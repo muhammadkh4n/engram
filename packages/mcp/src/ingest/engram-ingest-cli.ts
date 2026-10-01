@@ -54,12 +54,18 @@
  * Both: ENGRAM_SALIENCE_DISABLED=1 exits without capturing.
  */
 
-import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { CAPTURE_CONTENT_MAX_CHARS } from '../capture-route.js'
 import type { CaptureInput, CaptureOutcome } from './capture.js'
-import { CLAIM_STALE_MS, TURN_TIMEOUT_MS, sendCapture, type CaptureEnv, type CapturePayload } from './capture-client.js'
+import {
+  CLAIM_STALE_MS,
+  TURN_TIMEOUT_MS,
+  captureKey,
+  sendCapture,
+  type CaptureEnv,
+  type CapturePayload,
+} from './capture-client.js'
 import { resolveProject } from './project-detect.js'
 import { logRejection } from './rejection-log.js'
 import { scrubModelInput } from './scrub-model-input.js'
@@ -314,15 +320,6 @@ function writeRejection(
 // ---------------------------------------------------------------------------
 // Server mode
 // ---------------------------------------------------------------------------
-
-/**
- * Stable across reruns of the same hook: a transcript turn is identified by
- * its entry uuid, anything else by its text. The server honours the key only
- * within the same session id.
- */
-export function captureKey(source: string, sessionId: string | null, identity: string): string {
-  return createHash('sha256').update(JSON.stringify([source, sessionId ?? '', identity])).digest('hex')
-}
 
 async function runServerMode(
   args: Args,
