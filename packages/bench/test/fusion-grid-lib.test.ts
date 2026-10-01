@@ -169,17 +169,51 @@ describe('memoizeIntelligence', () => {
     expect(counts).toMatchObject({ embed: 2, expandQuery: 1, generateHypotheticalDoc: 1 })
   })
 
-  it('reranks each (query, document id) once and keeps a missing score missing', async () => {
+  // Mirrors the real rerankers: a one-document call returns 1.0 without
+  // scoring, only the first 50 documents are scored, and a score depends on
+  // the batch it was computed in.
+  function productionLikeReranker(): { rerank: NonNullable<IntelligenceAdapter['rerank']>; batches: string[][] } {
+    const batches: string[][] = []
+    return {
+      batches,
+      async rerank(_q, docs) {
+        batches.push(docs.map((d) => d.id))
+        if (docs.length === 1) return [{ id: docs[0]!.id, score: 1.0 }]
+        const slate = docs.slice(0, 50)
+        return slate.map((d) => ({ id: d.id, score: (d.content.length + slate.length) / 1000 }))
+      },
+    }
+  }
+
+  const doc = (n: number): { id: string; content: string } => ({ id: `d${n}`, content: 'x'.repeat(n + 1) })
+
+  it('gives each cell the scores of a direct call when slates differ by one row', async () => {
+    const small = [doc(0), doc(1), doc(2)]
+    const large = Array.from({ length: 60 }, (_, n) => doc(n))
+    const pairs: Array<[Array<{ id: string; content: string }>, Array<{ id: string; content: string }>]> = [
+      [small, [...small, doc(3)]],
+      [large, large.slice(1)],
+    ]
+    for (const [first, second] of pairs) {
+      const memo = memoizeIntelligence({ rerank: productionLikeReranker().rerank })
+      const direct = productionLikeReranker()
+      expect(await memo.rerank!('q', first)).toEqual(await direct.rerank('q', first))
+      expect(await memo.rerank!('q', second)).toEqual(await direct.rerank('q', second))
+    }
+  })
+
+  it('reuses a repeated slate without a second call and keys on query and document order', async () => {
     const { base, counts, rerankBatches } = countingBase()
     const memo = memoizeIntelligence(base)
     const docs = [{ id: 'a', content: 'aaaa' }, { id: 'b', content: 'bb' }, { id: 'skip', content: 'x' }]
     const first = await memo.rerank!('q1', docs)
-    const second = await memo.rerank!('q1', [docs[1]!, { id: 'c', content: 'cccccc' }, docs[2]!, docs[0]!])
-    await memo.rerank!('q2', [docs[0]!])
-    expect(rerankBatches).toEqual([['a', 'b', 'skip'], ['c'], ['a']])
+    const again = await memo.rerank!('q1', [...docs])
+    await memo.rerank!('q1', [docs[1]!, docs[0]!, docs[2]!])
+    await memo.rerank!('q2', docs)
+    expect(rerankBatches).toEqual([['a', 'b', 'skip'], ['b', 'a', 'skip'], ['a', 'b', 'skip']])
     expect(counts['rerank']).toBe(3)
     expect(first).toEqual([{ id: 'a', score: 0.04 }, { id: 'b', score: 0.02 }])
-    expect(second).toEqual([{ id: 'b', score: 0.02 }, { id: 'c', score: 0.06 }, { id: 'a', score: 0.04 }])
+    expect(again).toEqual(first)
   })
 
   it('memoises a failure and leaves absent methods absent', async () => {

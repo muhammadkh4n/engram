@@ -301,10 +301,10 @@ function toRetrievalStrategy(strategy: RecallStrategy): RetrievalStrategy {
 /**
  * Fuse two ranked memory lists via Reciprocal Rank Fusion.
  *
- * RRF score: Σ 1/(k + rank_i(d)) for each list d appears in.
- * k=60 is the standard from Cormack et al. 2009 — large enough that
- * rank 1 vs rank 2 contributes comparably (1/61 vs 1/62) but rank 50
- * barely registers (1/110). This is why RRF handles heterogeneous
+ * RRF score: Σ 1/(k + rank_i(d)) for each list d appears in, with
+ * k = fusion.rrfK. Its default, 60, is the standard from Cormack et al.
+ * 2009 — large enough that rank 1 vs rank 2 contributes comparably
+ * (1/61 vs 1/62) but rank 50 barely registers (1/110). This is why RRF handles heterogeneous
  * score scales gracefully: a BM25 score of 15 and a cosine of 0.82
  * can't be linearly combined, but their ranks always can.
  *
@@ -519,10 +519,11 @@ export async function recall(
   // while the full evidence chain lives elsewhere — HyDE expands the search
   // into embedding-space neighbors that share the hypothetical answer's shape.
   //
-  // Merge strategy: Reciprocal Rank Fusion (k=60, standard) instead of
-  // max-wins. RRF handles the case where HyDE surfaces a candidate at rank 3
-  // while vector search has it at rank 50 — both signals contribute without
-  // the stronger raw score overwriting the fused rank.
+  // Merge strategy: Reciprocal Rank Fusion with k = fusion.rrfK (default 60,
+  // the standard value) instead of max-wins. RRF handles the case where HyDE
+  // surfaces a candidate at rank 3 while vector search has it at rank 50 —
+  // both signals contribute without the stronger raw score overwriting the
+  // fused rank.
   const topScore = memories[0]?.relevance ?? 0
   const shouldFireHyDE =
     vectorUnavailable === undefined &&

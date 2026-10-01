@@ -136,9 +136,9 @@ export function parseGridArgs(argv: readonly string[]): GridArgs {
 
 /**
  * Memoise the recall-time model calls for one question: `embed`,
- * `expandQuery` and `generateHypotheticalDoc` by input text, `rerank` by
- * (query, document id). A settled failure is memoised too, so every cell sees
- * the same outcome. Methods the base lacks stay absent, because recall checks
+ * `expandQuery` and `generateHypotheticalDoc` by input text, `rerank` by the
+ * whole call, (query, ordered document ids). A settled failure is memoised
+ * too, so every cell sees the same outcome. Methods the base lacks stay absent, because recall checks
  * for their presence; every other method passes through.
  */
 export function memoizeIntelligence(base: IntelligenceAdapter): IntelligenceAdapter {
@@ -166,25 +166,23 @@ function memoByText<T>(fn: (text: string) => Promise<T>): (text: string) => Prom
 
 type RerankFn = NonNullable<IntelligenceAdapter['rerank']>
 
+// Rerankers are not per-document functions: they cap the slate, return a
+// fixed score for a one-document call without running the model, and a
+// batch's composition can move its scores. Reusing scores only for an
+// identical slate, and sending any other slate whole, makes every cell's
+// scores those a direct recall of that cell would get.
 function memoRerank(fn: RerankFn): RerankFn {
-  // undefined = the reranker returned no score for that document.
-  const cache = new Map<string, Promise<number | undefined>>()
-  const keyOf = (query: string, id: string): string => JSON.stringify([query, id])
+  const cache = new Map<string, Promise<Array<{ id: string; score: number }>>>()
   return async (query, documents) => {
-    const missing = new Map<string, { id: string; content: string }>()
-    for (const d of documents) {
-      if (!cache.has(keyOf(query, d.id)) && !missing.has(d.id)) missing.set(d.id, d)
+    const key = JSON.stringify([query, documents.map((d) => d.id)])
+    let hit = cache.get(key)
+    if (!hit) {
+      hit = fn(query, documents)
+      // A cached rejection may never be awaited again; mark it handled.
+      hit.catch(() => {})
+      cache.set(key, hit)
     }
-    if (missing.size > 0) {
-      const call = fn(query, [...missing.values()])
-      for (const id of missing.keys()) {
-        const score = call.then((results) => results.find((r) => r.id === id)?.score)
-        score.catch(() => {})
-        cache.set(keyOf(query, id), score)
-      }
-    }
-    const scores = await Promise.all(documents.map((d) => cache.get(keyOf(query, d.id))!))
-    return documents.flatMap((d, i) => (scores[i] === undefined ? [] : [{ id: d.id, score: scores[i]! }]))
+    return (await hit).map((r) => ({ ...r }))
   }
 }
 
