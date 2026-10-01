@@ -15,8 +15,9 @@ import * as path from 'node:path'
 import { createHash } from 'node:crypto'
 import { validateFusionOverride, type FusionConfig, type IntelligenceAdapter } from '@engram-mem/core'
 import { parseContextMode, runSweepRecall, type FormattedContextFields, type SweepMemory } from './context-modes.js'
-import { parseRerankerArgs } from './reranker-meta-lib.js'
+import { parseEmbedArgs, parseRerankerArgs } from './reranker-meta-lib.js'
 import {
+  buildRunIdentity,
   diffRunIdentity,
   formatCheckpointText,
   formatHeaderLine,
@@ -24,10 +25,11 @@ import {
   parsePartial,
   partialPathFor,
   type CheckpointRow,
+  type OutputPolicyRecord,
   type RunIdentity,
 } from './sweep-checkpoint-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
-import type { RerankerBackend } from '../../types.js'
+import type { EmbedBackend, RerankerBackend } from '../../types.js'
 
 export const DEFAULT_CELL = 'default'
 export const K_VALUES: readonly number[] = [5, 10, 20, 30]
@@ -91,13 +93,19 @@ export interface GridArgs {
   contextMode: 'formatted'
   rerankerBackend?: RerankerBackend
   onnxRerankerModel?: string
+  embedBackend?: EmbedBackend
+  embedModel?: string
+  embedDims?: number
   noGraph: boolean
   outputDir: string
   // Set only when the flag is given, as in recall-sweep's meta.args.
   resume?: true
 }
 
-const VALUE_FLAGS = ['data', 'question-ids', 'grid', 'context-mode', 'reranker', 'onnx-model', 'output-dir']
+const VALUE_FLAGS = [
+  'data', 'question-ids', 'grid', 'context-mode', 'reranker', 'onnx-model',
+  'embed-backend', 'embed-model', 'embed-dims', 'output-dir',
+]
 const BOOLEAN_FLAGS = ['no-graph', 'resume']
 
 /** Parse the grid's argv; throws with a message the caller prints. */
@@ -128,6 +136,7 @@ export function parseGridArgs(argv: readonly string[]): GridArgs {
     grid: required('grid'),
     contextMode: 'formatted',
     ...parseRerankerArgs(argv),
+    ...parseEmbedArgs(argv),
     noGraph: argv.includes('--no-graph'),
     outputDir: required('output-dir'),
     ...(argv.includes('--resume') ? { resume: true as const } : {}),
@@ -297,6 +306,41 @@ export async function recallCells(
     opts.onRow?.(cell, row)
   }
   return rows
+}
+
+/**
+ * The grid's run identity, built by the recall sweep's own builder: a cell row
+ * is a sweep row at the settings the grid fixes (consolidation on, full vector
+ * mode, maxResults = the largest K, no synthesis, an explicit id list).
+ * `embedDims` is the width the wired embedder builds vectors at.
+ */
+export function gridRunIdentity(
+  args: GridArgs,
+  idsSha256: string,
+  outputPolicy: OutputPolicyRecord,
+  embedDims: number,
+): RunIdentity {
+  return buildRunIdentity(
+    {
+      data: args.data,
+      limit: 0,
+      maxResults: Math.max(...K_VALUES),
+      noConsolidate: false,
+      noGraph: args.noGraph,
+      noRerank: false,
+      ...(args.rerankerBackend ? { rerankerBackend: args.rerankerBackend } : {}),
+      ...(args.onnxRerankerModel ? { onnxRerankerModel: args.onnxRerankerModel } : {}),
+      ...(args.embedBackend ? { embedBackend: args.embedBackend } : {}),
+      ...(args.embedModel ? { embedModel: args.embedModel } : {}),
+      ...(args.embedDims !== undefined ? { embedDims: args.embedDims } : {}),
+      vectorMode: 'full',
+      synthesize: false,
+      contextMode: args.contextMode,
+    },
+    idsSha256,
+    outputPolicy,
+    embedDims,
+  )
 }
 
 /** A sweep run identity plus what makes a cell's rows its own. */

@@ -121,6 +121,7 @@ npx tsx packages/bench/src/longmemeval/forensics/fusion-grid.ts \
   --grid ./grid.json \
   --context-mode formatted \
   --reranker onnx --onnx-model mixedbread-ai/mxbai-rerank-large-v1 \
+  [--embed-backend openai|onnx] [--embed-model <id>] [--embed-dims N] \
   [--no-graph] \
   --output-dir ./results/longmemeval/fusion-grid-1 \
   [--resume]
@@ -130,6 +131,11 @@ The grid file is a JSON array of `{ "name": …, "fusion": { … } }`; it must h
 `{ "name": "default", "fusion": {} }`, the shipped configuration. Every fusion object is checked with
 core's validator before any ingest, and names become file names. `ENGRAM_RECALL_FUSION` must be unset,
 because per-call keys merge over it.
+
+The `--embed-*` flags are the recall sweep's, parsed and wired the same way. Each cell's checkpoint
+header records `embed_backend`, `embed_model` and `embed_dims` (the width the wired embedder builds
+vectors at) through the sweep's own identity builder, `meta` records `embedBackend`, `embedModel` and
+`embedDims`, and `--resume` refuses a checkpoint whose embedding identity differs.
 
 Cells differ only by their weights:
 

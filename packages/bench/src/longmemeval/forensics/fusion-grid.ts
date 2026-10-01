@@ -19,20 +19,22 @@
  *     --grid grid.json            # JSON array of { name, fusion }; must hold { "name": "default", "fusion": {} }
  *     --context-mode formatted \
  *     [--reranker openai|onnx|none] [--onnx-model <hf id>] \
+ *     [--embed-backend openai|onnx] [--embed-model <id>] [--embed-dims N] \
  *     [--no-graph] \
  *     --output-dir ./results/longmemeval/grid-1 \
  *     [--resume]                  # continue from every cell's <name>.json.partial.jsonl
  *
  * Writes `<output-dir>/<name>.json` per cell with recall-sweep's formatted
  * row schema; `meta` adds the cell's fusion, the grid file's sha256 and
- * `shared_ingest: true`.
+ * `shared_ingest: true`. The embed flags mean what they mean to recall-sweep,
+ * and the embedder's backend, model and width are recorded in the run identity
+ * and `meta` the same way, so a resume under other embed settings is refused.
  */
 import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
-import { createBenchMemory } from '../../memory-factory.js'
+import { createBenchMemory, resolveEmbedDims } from '../../memory-factory.js'
 import { FUSION_ENV_VAR, recallOutputPolicyFromEnv } from '@engram-mem/core'
-import { buildModelMeta } from './reranker-meta-lib.js'
+import { buildModelMeta, resolveEmbedSettings } from './reranker-meta-lib.js'
 import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
 import {
   idListSha256,
@@ -41,14 +43,13 @@ import {
   parseQuestionIdList,
   pendingQuestions,
   selectQuestions,
-  type OutputPolicyRecord,
-  type RunIdentity,
 } from './sweep-checkpoint-lib.js'
 import {
   K_VALUES,
   aggregateRecall,
   appendCheckpointRow,
   gridIdentity,
+  gridRunIdentity,
   memoizeIntelligence,
   openGridCheckpoints,
   parseGrid,
@@ -56,7 +57,6 @@ import {
   recallCells,
   sensoryResetter,
   sha256Hex,
-  type GridArgs,
   type GridRow,
 } from './fusion-grid-lib.js'
 
@@ -78,13 +78,6 @@ async function main(): Promise<void> {
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length} across ${cells.length} cells: ${cells.map((c) => c.name).join(', ')}`)
 
   const outputPolicy = exitOnError(() => outputPolicyRecord(recallOutputPolicyFromEnv(process.env)))
-  const base = buildRunIdentity(args, idsSha, outputPolicy)
-  const checkpoints = exitOnError(() =>
-    openGridCheckpoints(args.outputDir, cells, (cell) => gridIdentity(base, gridSha, cell), args.resume === true),
-  )
-  const todo = pendingQuestions(questions, checkpoints.completed)
-  if (args.resume) console.log(`Resuming: ${checkpoints.completed.size} questions done in every cell, ${todo.length} to run`)
-
   const benchOpts: BenchmarkOpts = {
     consolidate: true,
     graph: !args.noGraph,
@@ -92,7 +85,22 @@ async function main(): Promise<void> {
     noRerank: false,
     ...(args.rerankerBackend ? { rerankerBackend: args.rerankerBackend } : {}),
     ...(args.onnxRerankerModel ? { onnxRerankerModel: args.onnxRerankerModel } : {}),
+    ...(args.embedBackend ? { embedBackend: args.embedBackend } : {}),
+    ...(args.embedModel ? { embedModel: args.embedModel } : {}),
+    ...(args.embedDims !== undefined ? { embedDims: args.embedDims } : {}),
   }
+  // Resolved before the identity so a resume compares the width the vectors
+  // are built at, not just the flag.
+  const embedDims = await resolveEmbedDims(benchOpts)
+  const embed = resolveEmbedSettings(args, embedDims)
+  console.log(`Embedding: ${embed.backend} ${embed.model} @${embed.dims}`)
+  const base = gridRunIdentity(args, idsSha, outputPolicy, embedDims)
+  const checkpoints = exitOnError(() =>
+    openGridCheckpoints(args.outputDir, cells, (cell) => gridIdentity(base, gridSha, cell), args.resume === true),
+  )
+  const todo = pendingQuestions(questions, checkpoints.completed)
+  if (args.resume) console.log(`Resuming: ${checkpoints.completed.size} questions done in every cell, ${todo.length} to run`)
+
   const newRows = new Map<string, GridRow[]>(cells.map((c) => [c.name, []]))
   const partialByCell = new Map(checkpoints.cells.map((c) => [c.cell.name, c.partialPath]))
   let resolvedBackend: RerankerBackend | null = null
@@ -135,7 +143,9 @@ async function main(): Promise<void> {
     const output = {
       meta: {
         args: args as unknown as Record<string, unknown>,
-        ...buildModelMeta(resolvedBackend, args.onnxRerankerModel),
+        ...buildModelMeta(resolvedBackend, args.onnxRerankerModel, embed.model),
+        embedBackend: embed.backend,
+        embedDims: embed.dims,
         output_policy: outputPolicy,
         K_values: K_VALUES,
         total_questions: rows.length,
@@ -161,25 +171,6 @@ async function main(): Promise<void> {
     console.log(`| ${cp.cell.name} | ${pct(5)} | ${pct(10)} | ${pct(30)} |`)
   }
   console.log(`Grid complete in ${totalDur}s; wrote ${cells.length} files to ${args.outputDir}`)
-}
-
-function buildRunIdentity(args: GridArgs, idsSha256: string, outputPolicy: OutputPolicyRecord): RunIdentity {
-  const backend: RerankerBackend = args.rerankerBackend ?? 'openai'
-  return {
-    data: path.resolve(args.data),
-    context_mode: args.contextMode,
-    reranker_backend: backend,
-    reranker_model: buildModelMeta(backend, args.onnxRerankerModel).rerankModel,
-    graph: !args.noGraph,
-    consolidate: true,
-    vector_mode: 'full',
-    max_results: Math.max(...K_VALUES),
-    synthesize: false,
-    question_selection: `ids:${idsSha256}`,
-    output_emit_k: outputPolicy.emit_k,
-    output_token_budget: outputPolicy.token_budget,
-    output_faint: outputPolicy.faint,
-  }
 }
 
 function sumSeconds(rows: readonly GridRow[], ms: (r: GridRow) => number): number {

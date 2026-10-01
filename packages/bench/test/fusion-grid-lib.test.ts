@@ -8,6 +8,7 @@ import {
   aggregateRecall,
   appendCheckpointRow,
   gridIdentity,
+  gridRunIdentity,
   memoizeIntelligence,
   openGridCheckpoints,
   parseGrid,
@@ -126,6 +127,37 @@ describe('parseGridArgs', () => {
   it('refuses result-cap overrides and unknown flags', () => {
     expect(() => parseGridArgs([...base, '--context-mode', 'formatted', '--max-results', '10'])).toThrow(/--max-results/)
     expect(() => parseGridArgs([...base, '--context-mode', 'formatted', '--limit', '5'])).toThrow(/unknown flag --limit/)
+  })
+
+  it('accepts the recall sweep embed flags and leaves them unset when absent', () => {
+    const plain = parseGridArgs([...base, '--context-mode', 'formatted'])
+    expect('embedBackend' in plain || 'embedModel' in plain || 'embedDims' in plain).toBe(false)
+    expect(
+      parseGridArgs([...base, '--context-mode', 'formatted', '--embed-backend', 'onnx', '--embed-model', 'm/e', '--embed-dims', '1024']),
+    ).toMatchObject({ embedBackend: 'onnx', embedModel: 'm/e', embedDims: 1024 })
+    expect(() => parseGridArgs([...base, '--context-mode', 'formatted', '--embed-backend', 'cohere'])).toThrow(/--embed-backend/)
+    expect(() => parseGridArgs([...base, '--context-mode', 'formatted', '--embed-dims', '0'])).toThrow(/--embed-dims/)
+  })
+})
+
+describe('gridRunIdentity', () => {
+  const args = parseGridArgs([
+    '--data', '/data/lme.json', '--question-ids', 'ids.json', '--grid', 'grid.json', '--output-dir', 'out',
+    '--context-mode', 'formatted', '--reranker', 'onnx', '--no-graph',
+  ])
+  const policy = { emit_k: null, token_budget: null, faint: true }
+
+  it('records the embedder backend, model and the width the vectors are built at', () => {
+    expect(gridRunIdentity(args, 'abc', policy, 1536)).toEqual({
+      data: '/data/lme.json', context_mode: 'formatted', reranker_backend: 'onnx',
+      reranker_model: 'mixedbread-ai/mxbai-rerank-large-v1', graph: false, consolidate: true, vector_mode: 'full',
+      max_results: 30, synthesize: false, question_selection: 'ids:abc', output_emit_k: null,
+      output_token_budget: null, output_faint: true,
+      embed_backend: 'openai', embed_model: 'text-embedding-3-small', embed_dims: 1536,
+    })
+    expect(gridRunIdentity({ ...args, embedBackend: 'onnx' }, 'abc', policy, 1024)).toMatchObject({
+      embed_backend: 'onnx', embed_model: 'onnx-community/Qwen3-Embedding-0.6B-ONNX', embed_dims: 1024,
+    })
   })
 })
 
@@ -320,6 +352,7 @@ describe('openGridCheckpoints', () => {
     data: '/data/lme.json', context_mode: 'formatted', reranker_backend: 'onnx', reranker_model: 'm',
     graph: false, consolidate: true, vector_mode: 'full', max_results: 30, synthesize: false,
     question_selection: 'ids:abc', output_emit_k: null, output_token_budget: null, output_faint: true,
+    embed_backend: 'openai', embed_model: 'text-embedding-3-small', embed_dims: 1536,
   }
   const identityFor = (cell: GridCell) => gridIdentity(identity, 'gridsha', cell)
   const row = (id: string): GridRow => ({ question_id: id } as GridRow)
@@ -355,6 +388,17 @@ describe('openGridCheckpoints', () => {
     expect(() => openGridCheckpoints(dir, CELLS, (c) => gridIdentity(identity, 'othersha', c), true)).toThrow(/grid_sha256 differs/)
     const added = [...CELLS, { name: 'rrf-30', fusion: { rrfK: 30 } }]
     expect(() => openGridCheckpoints(dir, added, identityFor, true)).toThrow(/cell "rrf-30" has no checkpoint/)
+  })
+
+  it('refuses to resume a checkpoint recorded with openai at 1536 under different embed settings', () => {
+    openGridCheckpoints(dir, CELLS, identityFor, false)
+    const under = (embed: Partial<RunIdentity>) => (c: GridCell) => gridIdentity({ ...identity, ...embed }, 'gridsha', c)
+    expect(() => openGridCheckpoints(dir, CELLS, under({ embed_dims: 512 }), true)).toThrow(/embed_dims differs \(checkpoint 1536, this run 512\)/)
+    expect(() => openGridCheckpoints(dir, CELLS, under({ embed_model: 'text-embedding-3-large' }), true)).toThrow(/embed_model differs/)
+    expect(() => openGridCheckpoints(dir, CELLS, under({
+      embed_backend: 'onnx', embed_model: 'onnx-community/Qwen3-Embedding-0.6B-ONNX', embed_dims: 1024,
+    }), true)).toThrow(/embed_backend differs/)
+    expect(openGridCheckpoints(dir, CELLS, identityFor, true).completed.size).toBe(0)
   })
 
   it('starts fresh under --resume when no checkpoint exists', () => {
