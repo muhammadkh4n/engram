@@ -18,7 +18,7 @@ const TRANSCRIPT_PATH = '/tmp/engram-cli-scrub-test/transcript.jsonl'
 const h = vi.hoisted(() => ({
   stdin: '',
   transcript: '',
-  createCompletion: vi.fn(),
+  digestTranscript: vi.fn(),
   extractSalience: vi.fn(),
   memoryIngest: vi.fn(),
   memoryDispose: vi.fn(),
@@ -35,12 +35,6 @@ vi.mock('node:fs', async (importOriginal) => {
   }) as typeof actual.readFileSync
   return { ...actual, default: { ...actual, readFileSync }, readFileSync }
 })
-
-vi.mock('openai', () => ({
-  default: class {
-    chat = { completions: { create: h.createCompletion } }
-  },
-}))
 
 vi.mock('@engram-mem/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@engram-mem/core')>()
@@ -63,7 +57,7 @@ vi.mock('@engram-mem/postgrest', () => ({
 }))
 
 vi.mock('@engram-mem/openai', () => ({
-  openaiIntelligence: () => ({ extractSalience: h.extractSalience, embed: vi.fn() }),
+  openaiIntelligence: () => ({ extractSalience: h.extractSalience, digestTranscript: h.digestTranscript, embed: vi.fn() }),
   DEFAULT_CHAT_MODEL: 'default-chat-model',
 }))
 
@@ -87,6 +81,8 @@ writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ pa
 afterAll(() => rmSync(registryDir, { recursive: true, force: true }))
 
 const ENV = {
+  // The hooks append to ~/.engram/hook.log.
+  HOME: registryDir,
   SUPABASE_URL: 'https://example.test',
   SUPABASE_KEY: 'test-key',
   OPENAI_API_KEY: 'test-openai',
@@ -107,7 +103,7 @@ function transcriptLines(entries: Array<{ type: string; text: string }>): string
 
 const SECRET_TRANSCRIPT = transcriptLines([
   {
-    type: 'human',
+    type: 'user',
     text: `Here is the env block for the HTTP server, wire it into ecosystem.config.cjs:\nOPENAI_API_KEY=${FAKE_KEY}\nNEO4J_PASSWORD=${FAKE_PASSWORD}\nPORT=8787`,
   },
   {
@@ -122,13 +118,15 @@ function allText(value: unknown): string {
 
 beforeEach(() => {
   vi.resetModules()
-  for (const fn of [h.createCompletion, h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
+  for (const fn of [h.digestTranscript, h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
     fn.mockReset()
   }
   h.memoryIngest.mockResolvedValue(undefined)
   h.memoryDispose.mockResolvedValue(undefined)
   h.findDuplicate.mockResolvedValue({ duplicateId: null, similarity: 0 })
   Object.assign(process.env, ENV)
+  // These cases exercise the in-process pipeline, which runs only without a server URL.
+  delete process.env['ENGRAM_SERVER_URL']
   stderrLines = []
   vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
     stderrLines.push(String(chunk))
@@ -152,6 +150,11 @@ afterEach(() => {
   process.env = { ...savedEnv }
 })
 
+async function runIngest(argv: string[]): Promise<number> {
+  const { runIngestCli } = await import('../src/ingest/engram-ingest-cli.js')
+  return runIngestCli(argv, process.env)
+}
+
 describe('engram-ingest CLI', () => {
   const turn = `Deploy note: API_KEY=${FAKE_KEY} lives in the staging .env from now on`
 
@@ -159,10 +162,9 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockImplementation(async (content: string) => ({
       store: true, category: 'fact', confidence: 0.9, distilled: content, reason: 'decision',
     }))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup', '--verbose']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup', '--verbose'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     expect(h.extractSalience).toHaveBeenCalledOnce()
     expect(h.extractSalience.mock.calls[0]![0]).toBe(
@@ -181,25 +183,20 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockResolvedValue({
       store: false, category: 'noise', confidence: 0.2, distilled: '', reason: 'routine',
     })
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.logRejection).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
+    expect(h.logRejection).toHaveBeenCalled()
 
     const entry = h.logRejection.mock.calls[0]![0] as { contentPreview: string }
     expect(entry.contentPreview).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(entry.contentPreview).not.toContain(FAKE_KEY)
-    expect(exitSpy).toHaveBeenCalledWith(0)
+    expect(code).toBe(0)
   })
 
   it('exits non-zero with the message when the classifier fails, logging no rejection', async () => {
     h.extractSalience.mockRejectedValue(new Error('chat endpoint returned 502'))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
 
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
-
-    expect(exitSpy).toHaveBeenCalledWith(1)
+    expect(code).toBe(1)
     expect(stderrLines.join('')).toContain('chat endpoint returned 502')
     expect(h.logRejection).not.toHaveBeenCalled()
     expect(h.memoryIngest).not.toHaveBeenCalled()
@@ -209,20 +206,18 @@ describe('engram-ingest CLI', () => {
     h.extractSalience.mockImplementation(async (content: string) => ({
       store: true, category: 'fact', confidence: 0.9, distilled: content, reason: 'decision',
     }))
-    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--content', turn, '--turn', 'user', '--no-dedup'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
     expect(ingested.metadata['captureModel']).toBe('default-chat-model')
   })
 
   it('records a raw capture as seen by no model', async () => {
-    process.argv = ['node', 'engram-ingest', '--raw', '--content', 'feat: stream the transcript read', '--source', 'git-commit', '--no-dedup']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+    const code = await runIngest(['--raw', '--content', 'feat: stream the transcript read', '--source', 'git-commit', '--no-dedup'])
+    expect(code).toBe(0)
+    expect(h.memoryDispose).toHaveBeenCalled()
 
     expect(h.extractSalience).not.toHaveBeenCalled()
     const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
@@ -233,13 +228,9 @@ describe('engram-ingest CLI', () => {
     delete process.env['OPENAI_API_KEY']
     delete process.env['SUPABASE_URL']
     delete process.env['SUPABASE_KEY']
-    process.argv = ['node', 'engram-ingest', '--raw', '--dry-run', '--content', 'feat: stream the transcript read', '--source', 'git-commit']
+    const code = await runIngest(['--raw', '--dry-run', '--content', 'feat: stream the transcript read', '--source', 'git-commit'])
 
-    await import('../src/ingest/engram-ingest-cli.js')
-    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
-
-    expect(exitSpy).toHaveBeenCalledWith(0)
-    expect(exitSpy).not.toHaveBeenCalledWith(1)
+    expect(code).toBe(0)
     expect(stderrLines.join('')).not.toContain('missing required env')
     expect(h.memoryIngest).not.toHaveBeenCalled()
   })
@@ -249,31 +240,30 @@ describe('engram-ingest CLI', () => {
     ['a raw store', ['--raw']],
   ])('still requires OPENAI_API_KEY for %s', async (_label, flags) => {
     delete process.env['OPENAI_API_KEY']
-    process.argv = ['node', 'engram-ingest', ...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit']
-
-    await import('../src/ingest/engram-ingest-cli.js')
-    // process.exit is stubbed, so the run goes on past the missing key; wait
-    // for its final exit so nothing outlives the test.
-    await vi.waitFor(() => expect(exitSpy.mock.calls.length).toBeGreaterThanOrEqual(2))
-
-    expect(exitSpy.mock.calls[0]![0]).toBe(1)
+    const code = await runIngest([...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit'])
+    expect(code).toBe(1)
     expect(stderrLines.join('')).toContain('missing required env: OPENAI_API_KEY')
   })
 })
 
 describe('session-summary CLI', () => {
-  it('sends the summariser a scrubbed transcript and logs the redaction kinds', async () => {
-    h.stdin = JSON.stringify({ session_id: 'sess-1', transcript_path: TRANSCRIPT_PATH })
+  it('sends the digest model a scrubbed transcript and logs the redaction kinds', async () => {
     h.transcript = SECRET_TRANSCRIPT
-    h.createCompletion.mockResolvedValue({
-      choices: [{ message: { content: 'Session: pm2 env wiring\n- Added the env block and restarted the HTTP server.' } }],
+    h.digestTranscript.mockResolvedValue({
+      memory: 'Session: pm2 env wiring\n- Added the env block and restarted the HTTP server.',
+      context: '',
     })
 
-    await import('../src/session-summary.js')
-    await vi.waitFor(() => expect(h.memoryIngest).toHaveBeenCalled())
+    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
+    const code = await runSessionSummaryWorker(
+      JSON.stringify({ session_id: 'sess-1', transcript_path: TRANSCRIPT_PATH }),
+      process.env,
+    )
 
-    expect(h.createCompletion).toHaveBeenCalledOnce()
-    const prompt = allText(h.createCompletion.mock.calls[0]![0])
+    expect(code).toBe(0)
+    expect(h.memoryIngest).toHaveBeenCalledOnce()
+    expect(h.digestTranscript).toHaveBeenCalledOnce()
+    const prompt = allText(h.digestTranscript.mock.calls[0])
     expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(prompt).toContain('NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]')
     expect(prompt).not.toContain(FAKE_KEY)
@@ -283,21 +273,33 @@ describe('session-summary CLI', () => {
 })
 
 describe('pre-compact CLI', () => {
-  it('sends the extraction model a scrubbed transcript', async () => {
-    h.stdin = JSON.stringify({ session_id: 'sess-2', transcript_path: TRANSCRIPT_PATH, trigger: 'auto' })
+  it('sends the digest model a scrubbed transcript and prints its context', async () => {
     h.transcript = [SECRET_TRANSCRIPT, SECRET_TRANSCRIPT].join('\n')
-    h.createCompletion.mockResolvedValue({
-      choices: [{ message: { content: 'MEMORY:\n- Wired the pm2 env block for the HTTP server.\n\nCONTEXT:\n' } }],
+    h.digestTranscript.mockResolvedValue({
+      memory: '- Wired the pm2 env block for the HTTP server.',
+      context: 'Wiring the HTTP server env block under pm2.',
     })
+    const stdout: string[] = []
 
-    await import('../src/pre-compact.js')
-    await vi.waitFor(() => expect(h.memoryIngest).toHaveBeenCalled())
+    const { runPreCompact } = await import('../src/pre-compact.js')
+    const code = await runPreCompact(
+      JSON.stringify({ session_id: 'sess-2', transcript_path: TRANSCRIPT_PATH, trigger: 'auto' }),
+      process.env,
+      (text) => stdout.push(text),
+    )
 
-    expect(h.createCompletion).toHaveBeenCalledOnce()
-    const prompt = allText(h.createCompletion.mock.calls[0]![0])
+    expect(code).toBe(0)
+    expect(h.memoryIngest).toHaveBeenCalledOnce()
+    expect(h.digestTranscript).toHaveBeenCalledOnce()
+    const prompt = allText(h.digestTranscript.mock.calls[0])
     expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(prompt).not.toContain(FAKE_KEY)
     expect(prompt).not.toContain(FAKE_PASSWORD)
     expect(stderrLines).toContain('[engram-compact] redacted 4 secret value(s): known(4)\n')
+    expect(stdout).toEqual([
+      JSON.stringify({
+        additionalContext: '[Engram Memory — preserved before compaction]\nWiring the HTTP server env block under pm2.',
+      }),
+    ])
   })
 })

@@ -1,200 +1,180 @@
 #!/usr/bin/env node
 /**
- * Session Summary Ingestion Script
+ * Session Summary — Claude Code SessionEnd hook.
  *
- * Called by Claude Code's SessionEnd hook. Reads the session transcript,
- * summarizes key decisions/outcomes via OpenAI, and ingests into Engram.
+ * The hook process only hands off: it re-launches this script detached with
+ * `--worker`, passing the hook's stdin JSON in ENGRAM_HOOK_INPUT and the
+ * worker's output to ~/.engram/hook.log, and exits at once. Claude Code
+ * stops waiting for SessionEnd hooks after a short timeout, so the digest
+ * and the post must not run in the hook process.
  *
- * Receives hook data on stdin as JSON:
- *   { session_id, transcript_path, ... }
+ * The worker reads the recent transcript and has it digested into one
+ * session-summary memory. With ENGRAM_SERVER_URL set the excerpt goes to
+ * the server's capture route, which runs the digest and the store, and is
+ * spooled if the server cannot take it now; without it the pipeline runs
+ * here against this machine's credentials.
  *
- * Falls back to finding the latest transcript if no path is provided.
+ * stdin: { session_id, transcript_path, cwd, ... }. Without a transcript
+ * path the most recently written transcript is used.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { mkdirSync, openSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { createMemory } from '@engram-mem/core'
-import { tryCreateGraph } from './graph-helper.js'
-import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
-import { resolveProjectScope } from './ingest/project-detect.js'
-import { scrubModelInput } from './ingest/scrub-model-input.js'
-import OpenAI from 'openai'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { CLAIM_STALE_MS, DERIVE_TIMEOUT_MS, engramDir, type CaptureEnv } from './ingest/capture-client.js'
+import { isEntryPoint } from './ingest/entry-point.js'
+import { resolveProject } from './ingest/project-detect.js'
+import { sendTranscriptCapture } from './ingest/transcript-capture.js'
+import { readTranscriptExcerpt, type TranscriptExcerpt } from './ingest/transcript-excerpt.js'
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
+const LOG_PREFIX = '[engram-summary]'
+const EXCERPT_LIMITS = { maxChars: 30_000, perTurnChars: 2_000 }
+const MIN_EXCERPT_CHARS = 100
+/** Summaries are stored under one session, outside the conversations they summarise. */
+export const SUMMARY_SESSION_ID = 'claude-code-summaries'
+export const WORKER_FLAG = '--worker'
+export const HOOK_INPUT_ENV = 'ENGRAM_HOOK_INPUT'
+/** The worker outlasts its own post plus a spool flush, so a flush is never cut off mid-claim. */
+const WORKER_TIMEOUT_MS = DERIVE_TIMEOUT_MS + CLAIM_STALE_MS
 
-const SUPABASE_URL = process.env['SUPABASE_URL']
-const SUPABASE_KEY = process.env['SUPABASE_KEY']
-const OPENAI_API_KEY = process.env['OPENAI_API_KEY']
-
-if (!SUPABASE_URL || !SUPABASE_KEY || !OPENAI_API_KEY) {
-  process.stderr.write('[engram-summary] Missing env vars, skipping.\n')
-  process.exit(0)
+interface HookInput {
+  session_id?: string
+  transcript_path?: string
+  cwd?: string
 }
 
-// ---------------------------------------------------------------------------
-// Find transcript
-// ---------------------------------------------------------------------------
-
-function findLatestTranscript(): string | null {
-  const projectsDir = join(homedir(), '.claude', 'projects')
+function parseHookInput(raw: string | undefined): HookInput {
   try {
-    const dirs = readdirSync(projectsDir)
-    let latest: { path: string; mtime: number } | null = null
+    const parsed: unknown = raw?.trim() ? JSON.parse(raw) : {}
+    return typeof parsed === 'object' && parsed !== null ? (parsed as HookInput) : {}
+  } catch {
+    return {}
+  }
+}
 
-    for (const dir of dirs) {
-      const fullDir = join(projectsDir, dir)
-      try {
-        const files = readdirSync(fullDir).filter(f => f.endsWith('.jsonl'))
-        for (const file of files) {
-          const fp = join(fullDir, file)
-          const st = statSync(fp)
-          if (!latest || st.mtimeMs > latest.mtime) {
-            latest = { path: fp, mtime: st.mtimeMs }
-          }
-        }
-      } catch { /* skip */ }
-    }
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
-    return latest?.path ?? null
+function findLatestTranscript(env: CaptureEnv): string | null {
+  const projectsDir = join(env['HOME'] || homedir(), '.claude', 'projects')
+  let latest: { path: string; mtime: number } | null = null
+  let dirs: string[]
+  try {
+    dirs = readdirSync(projectsDir)
   } catch {
     return null
   }
-}
-
-function extractConversation(transcriptPath: string): string {
-  const lines = readFileSync(transcriptPath, 'utf-8').split('\n').filter(Boolean)
-  const turns: string[] = []
-  let totalChars = 0
-  const MAX_CHARS = 30000 // cap input to summarizer
-
-  // Read from end (most recent turns most relevant)
-  for (let i = lines.length - 1; i >= 0 && totalChars < MAX_CHARS; i--) {
+  for (const dir of dirs) {
+    const fullDir = join(projectsDir, dir)
     try {
-      const entry = JSON.parse(lines[i])
-      if (entry.type === 'human' || entry.type === 'assistant') {
-        const role = entry.type === 'human' ? 'User' : 'Assistant'
-        // Extract text content only
-        let text = ''
-        if (typeof entry.message?.content === 'string') {
-          text = entry.message.content
-        } else if (Array.isArray(entry.message?.content)) {
-          text = entry.message.content
-            .filter((b: { type: string }) => b.type === 'text')
-            .map((b: { text: string }) => b.text)
-            .join('\n')
-        }
-        if (text.trim().length > 5) {
-          turns.unshift(`${role}: ${text.slice(0, 2000)}`)
-          totalChars += text.length
-        }
+      for (const file of readdirSync(fullDir).filter((f) => f.endsWith('.jsonl'))) {
+        const path = join(fullDir, file)
+        const mtime = statSync(path).mtimeMs
+        if (!latest || mtime > latest.mtime) latest = { path, mtime }
       }
-    } catch { /* skip malformed lines */ }
+    } catch {
+      // Not a directory, or unreadable: skip it.
+    }
   }
-
-  return turns.join('\n\n')
+  return latest?.path ?? null
 }
 
-// ---------------------------------------------------------------------------
-// Summarize
-// ---------------------------------------------------------------------------
-
-async function summarize(conversation: string): Promise<string | null> {
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY })
-
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      {
-        role: 'system',
-        content: `You summarize Claude Code work sessions. Extract ONLY:
-- Key decisions made
-- Problems solved (with solutions)
-- Architectural choices
-- User preferences expressed
-- Important facts learned
-- Action items / next steps
-
-Skip: file reads, grep output, test runs, routine tool use, small talk.
-Output a concise bullet-point summary (max 300 words). Start with a one-line session title.`,
-      },
-      {
-        role: 'user',
-        content: conversation,
-      },
-    ],
-    max_tokens: 500,
-    temperature: 0.3,
-  })
-
-  return response.choices[0]?.message?.content ?? null
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
-async function main(): Promise<void> {
-  // Try to read hook data from stdin (non-blocking)
-  let hookData: Record<string, unknown> = {}
+/**
+ * Launches the worker detached from the hook process, with its output
+ * appended to ~/.engram/hook.log. `scriptPath` and the inherited exec
+ * arguments re-run this same module.
+ */
+export function spawnSummaryWorker(
+  hookJson: string,
+  env: CaptureEnv = process.env,
+  scriptPath: string = fileURLToPath(import.meta.url),
+): void {
+  let logFd = -1
   try {
-    const stdin = readFileSync(0, 'utf-8').trim()
-    if (stdin) hookData = JSON.parse(stdin)
-  } catch { /* no stdin or invalid JSON */ }
-
-  const transcriptPath = (hookData['transcript_path'] as string) ?? findLatestTranscript()
-  if (!transcriptPath) {
-    process.stderr.write('[engram-summary] No transcript found, skipping.\n')
-    return
+    const dir = engramDir(env)
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    logFd = openSync(join(dir, 'hook.log'), 'a', 0o600)
+  } catch {
+    // Without a log the worker still runs; its output is discarded.
   }
-
-  // The transcript is sent to the summarisation model, so credential values
-  // are redacted before that call rather than only at ingest.
-  const conversation = await scrubModelInput(extractConversation(transcriptPath), '[engram-summary]')
-  if (conversation.length < 100) {
-    process.stderr.write('[engram-summary] Session too short to summarize.\n')
-    return
-  }
-
-  const summary = await summarize(conversation)
-  if (!summary) {
-    process.stderr.write('[engram-summary] Summarization returned empty.\n')
-    return
-  }
-
-  // Ingest into Engram
-  const storage = new PostgRestStorageAdapter({ url: SUPABASE_URL!, key: SUPABASE_KEY! })
-  const intelligence = openaiIntelligence({ apiKey: OPENAI_API_KEY! })
-  const graph = await tryCreateGraph('[engram-summary]')
-  // Wave 5: scope the session summary to the same project the MCP server
-  // recalls under (env-first → cwd basename), so it isn't visible to others.
-  const scope = resolveProjectScope()
-  const memory = createMemory({
-    storage,
-    intelligence,
-    ...(scope.id ? { projectId: scope.id } : {}),
-    ...(graph ? { graph } : {}),
+  const child = spawn(process.execPath, [...process.execArgv, scriptPath, WORKER_FLAG], {
+    env: { ...env, [HOOK_INPUT_ENV]: hookJson },
+    detached: true,
+    stdio: logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore',
   })
-  await memory.initialize()
-
-  await memory.ingest({
-    content: summary,
-    role: 'system',
-    sessionId: 'claude-code-summaries',
-    metadata: {
-      source: 'claude-code',
-      type: 'session-summary',
-      transcriptPath,
-      summarizedAt: new Date().toISOString(),
-    },
-  })
-
-  process.stderr.write(`[engram-summary] Session summary ingested (${summary.length} chars).\n`)
+  child.unref()
 }
 
-main().catch((err) => {
-  process.stderr.write(`[engram-summary] Error: ${err instanceof Error ? err.message : String(err)}\n`)
-})
+/** Digests and sends the summary for one hook payload; returns the exit code. */
+export async function runSessionSummaryWorker(
+  hookJson: string | undefined,
+  env: CaptureEnv = process.env,
+): Promise<number> {
+  const hook = parseHookInput(hookJson)
+  const transcriptPath = hook.transcript_path || findLatestTranscript(env)
+  if (!transcriptPath) {
+    process.stderr.write(`${LOG_PREFIX} No transcript found, skipping.\n`)
+    return 0
+  }
+
+  let excerpt: TranscriptExcerpt
+  try {
+    excerpt = readTranscriptExcerpt(transcriptPath, EXCERPT_LIMITS)
+  } catch (err) {
+    process.stderr.write(`${LOG_PREFIX} Failed to read transcript ${transcriptPath}: ${errorText(err)}\n`)
+    return 1
+  }
+  if (excerpt.text.length < MIN_EXCERPT_CHARS) {
+    process.stderr.write(`${LOG_PREFIX} Session too short to summarize.\n`)
+    return 0
+  }
+
+  try {
+    const result = await sendTranscriptCapture(
+      {
+        derive: 'session-summary',
+        excerpt,
+        transcriptPath,
+        sessionId: SUMMARY_SESSION_ID,
+        project: resolveProject('auto', hook.cwd ?? process.cwd()),
+        meta: { transcriptPath },
+        logPrefix: LOG_PREFIX,
+      },
+      env,
+    )
+    process.stderr.write(`${result.line}\n`)
+    return result.exitCode
+  } catch (err) {
+    process.stderr.write(`${LOG_PREFIX} Error: ${errorText(err)}\n`)
+    return 1
+  }
+}
+
+if (isEntryPoint(import.meta.url)) {
+  if (process.argv.includes(WORKER_FLAG)) {
+    setTimeout(() => {
+      process.stderr.write(`${LOG_PREFIX} timeout after ${WORKER_TIMEOUT_MS / 1000}s, exiting\n`)
+      process.exit(3)
+    }, WORKER_TIMEOUT_MS).unref()
+    runSessionSummaryWorker(process.env[HOOK_INPUT_ENV]).then(
+      (code) => process.exit(code),
+      () => process.exit(1),
+    )
+  } else {
+    let stdin = ''
+    try {
+      stdin = readFileSync(0, 'utf-8')
+    } catch {
+      // No stdin: the worker falls back to the latest transcript.
+    }
+    try {
+      spawnSummaryWorker(stdin)
+    } catch (err) {
+      process.stderr.write(`${LOG_PREFIX} could not start the worker: ${errorText(err)}\n`)
+    }
+    process.exit(0)
+  }
+}
