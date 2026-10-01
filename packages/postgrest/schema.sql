@@ -175,9 +175,14 @@ DROP FUNCTION IF EXISTS public.engram_hybrid_recall(text, public.vector, integer
 
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
+-- The vs CTEs rank by distance through the HNSW indexes, where session_id and
+-- superseded_by are post-filters; an iterative scan in strict order keeps
+-- them from truncating the candidate list or reordering its ranks.
 CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_query_embedding public.vector, p_match_count integer DEFAULT 10, p_full_text_weight double precision DEFAULT 1.0, p_semantic_weight double precision DEFAULT 1.0, p_rrf_k integer DEFAULT 60, p_session_id text DEFAULT NULL::text, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.iterative_scan TO 'strict_order'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
   SELECT * FROM (
     WITH ft AS (
@@ -283,9 +288,16 @@ DROP FUNCTION IF EXISTS public.engram_recall(public.vector, text, integer, doubl
 
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
+-- The similarity floor filters each tier's nearest p_match_count rows from
+-- outside the ordered subquery (its LIMIT keeps Postgres from pushing the
+-- filter in). Inside an iterative HNSW scan a floor few rows pass would keep
+-- the scan walking up to max_scan_tuples; outside it the result is the same,
+-- because rows that pass the floor are always among the nearest ones.
 CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector, p_session_id text DEFAULT NULL::text, p_match_count integer DEFAULT 10, p_min_similarity double precision DEFAULT 0.3, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.iterative_scan TO 'strict_order'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
   SELECT * FROM (
     SELECT id, 'episode'::text, content, salience::float, access_count, created_at,
@@ -294,38 +306,38 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
     WHERE p_include_episodes AND embedding IS NOT NULL
       AND forgotten_at IS NULL
       AND (p_session_id IS NULL OR session_id = p_session_id)
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) ep
+  WHERE ep.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'digest'::text, summary, 0.5::float, 0, created_at,
-           (1-(embedding<=>p_query_embedding))::float, key_topics, project_id, session_id
+           (1-(embedding<=>p_query_embedding))::float AS similarity, key_topics, project_id, session_id
     FROM memory_digests
     WHERE p_include_digests AND embedding IS NOT NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) dg
+  WHERE dg.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'semantic'::text, content, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id, NULL::text
+           (1-(embedding<=>p_query_embedding))::float AS similarity, ARRAY[]::text[], project_id, NULL::text
     FROM memory_semantic
     WHERE p_include_semantic AND embedding IS NOT NULL AND superseded_by IS NULL
       AND forgotten_at IS NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) sm
+  WHERE sm.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'procedural'::text, procedure, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id, NULL::text
+           (1-(embedding<=>p_query_embedding))::float AS similarity, ARRAY[]::text[], project_id, NULL::text
     FROM memory_procedural
     WHERE p_include_procedural AND embedding IS NOT NULL
       AND forgotten_at IS NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) pr
+  WHERE pr.similarity >= p_min_similarity
 $$;
 
 
