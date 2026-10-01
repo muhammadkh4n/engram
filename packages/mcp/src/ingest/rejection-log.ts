@@ -11,10 +11,10 @@
  * reads this file to compute ingest-rate and rejection-reason histograms.
  */
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { appendPrivateFile, ensurePrivateDir } from './private-files.js'
 
 export interface RejectionEntry {
   timestamp: string
@@ -36,7 +36,7 @@ const RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 
 function ensureDir(): void {
   try {
-    mkdirSync(LOG_DIR, { recursive: true })
+    ensurePrivateDir(LOG_DIR)
   } catch {
     // ignore — write will fail loudly if dir is inaccessible
   }
@@ -45,7 +45,7 @@ function ensureDir(): void {
 export function logRejection(entry: RejectionEntry): void {
   ensureDir()
   try {
-    appendFileSync(LOG_PATH, JSON.stringify(entry) + '\n', 'utf-8')
+    appendPrivateFile(LOG_PATH, JSON.stringify(entry) + '\n')
   } catch {
     // non-fatal — the ingest path should never break over logging
   }

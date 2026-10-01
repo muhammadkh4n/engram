@@ -21,10 +21,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { openSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensurePrivateDir, openPrivateFile } from '../ingest/private-files.js'
 
 // Resolve the engram-ingest CLI script relative to this hook file.
 // Both live in the same packages/mcp/dist tree after build.
@@ -86,14 +86,11 @@ async function main(): Promise<void> {
   // can audit the classifier's decisions and debug failures without
   // blocking the user's prompt. Append-open gives us a persistent
   // record across sessions.
-  const logPath = join(homedir(), '.engram', 'hook.log')
+  const dir = join(homedir(), '.engram')
   let logFd: number
   try {
-    // Ensure directory exists. Use mkdirSync because this hook runs
-    // before the async pipeline.
-    const { mkdirSync } = await import('node:fs')
-    mkdirSync(join(homedir(), '.engram'), { recursive: true })
-    logFd = openSync(logPath, 'a')
+    ensurePrivateDir(dir)
+    logFd = openPrivateFile(join(dir, 'hook.log'), 'a')
   } catch {
     logFd = -1
   }

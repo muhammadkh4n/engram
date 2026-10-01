@@ -9,6 +9,7 @@
  */
 
 import {
+  isEmptyClassifierReply,
   isUnclassifiableReply,
   type IntelligenceAdapter,
   type Memory,
@@ -159,10 +160,16 @@ async function classify(
   try {
     return await extractSalience(content, opts)
   } catch (err) {
-    // A sampled reply can be malformed once; a second malformed reply means
-    // this turn is the problem. A failed model call propagates untouched.
-    if (!isUnclassifiableReply(err)) throw err
-    deps.log?.(`classifier reply unreadable, retrying once: ${err.message}`)
+    // A sampled reply can be malformed or empty once; a second unreadable
+    // reply means this turn is the problem, a second empty one propagates as
+    // a failed call. A failed model call propagates untouched.
+    if (isUnclassifiableReply(err)) {
+      deps.log?.(`classifier reply unreadable, retrying once: ${err.message}`)
+    } else if (isEmptyClassifierReply(err)) {
+      deps.log?.(`classifier reply empty, retrying once: ${err.message}`)
+    } else {
+      throw err
+    }
     return extractSalience(content, opts)
   }
 }

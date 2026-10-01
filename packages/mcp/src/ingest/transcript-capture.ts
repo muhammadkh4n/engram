@@ -10,7 +10,6 @@
  * credentials.
  */
 
-import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { CAPTURE_CONTENT_MAX_CHARS, CAPTURE_META_VALUE_MAX_CHARS } from '../capture-route.js'
 import type { CaptureDeriveKind, CaptureOutcome } from './capture.js'
@@ -22,6 +21,7 @@ import {
   type CaptureMetaKey,
   type CapturePayload,
 } from './capture-client.js'
+import { appendPrivateFile, ensurePrivateDir } from './private-files.js'
 import { scrubModelInput } from './scrub-model-input.js'
 import type { TranscriptExcerpt } from './transcript-excerpt.js'
 
@@ -129,8 +129,8 @@ export async function sendTranscriptCapture(
 export function appendHookLog(env: CaptureEnv, line: string): void {
   try {
     const dir = engramDir(env)
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(join(dir, 'hook.log'), `${line}\n`, { mode: 0o600 })
+    ensurePrivateDir(dir)
+    appendPrivateFile(join(dir, 'hook.log'), `${line}\n`)
   } catch {
     // The line was already written to stderr.
   }
