@@ -35,6 +35,7 @@ export type {
   ProceduralStorage,
   AssociationStorage,
   ConsolidationRunStorage,
+  LookupOptions,
 } from './adapters/storage.js'
 export type {
   IntelligenceAdapter,

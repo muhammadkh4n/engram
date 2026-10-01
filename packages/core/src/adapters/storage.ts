@@ -16,10 +16,25 @@ import type {
   ConsolidateResult,
 } from '../types.js'
 
+/**
+ * Options for id lookups (`getById`, `getByIds`, `episodes.getByIds`).
+ *
+ * By default a tombstoned episode, semantic or procedural row (`forgotten_at`
+ * set) and a superseded semantic row (`superseded_by` set) are not returned:
+ * ids reach these lookups from graph activation, association walks and BM25
+ * rescue, none of which knows whether the row is still live.
+ * `includeInactive: true` returns them, for callers that act on tombstones
+ * themselves. Digests carry neither column and are always returned.
+ */
+export interface LookupOptions {
+  includeInactive?: boolean
+}
+
 export interface EpisodeStorage {
   insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
-  getByIds(ids: string[]): Promise<Episode[]>
+  /** See `LookupOptions`: tombstoned episodes are skipped unless `includeInactive`. */
+  getByIds(ids: string[], opts?: LookupOptions): Promise<Episode[]>
   getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]>
   /**
    * Id of one episode in the session created at or after `since` whose
@@ -171,8 +186,10 @@ export interface StorageAdapter {
   semantic: SemanticStorage
   procedural: ProceduralStorage
   associations: AssociationStorage
-  getById(id: string, type: MemoryType): Promise<TypedMemory | null>
-  getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]>
+  /** See `LookupOptions`: tombstoned and superseded rows are skipped unless `includeInactive`. */
+  getById(id: string, type: MemoryType, opts?: LookupOptions): Promise<TypedMemory | null>
+  /** See `LookupOptions`: tombstoned and superseded rows are skipped unless `includeInactive`. */
+  getByIds(ids: Array<{ id: string; type: MemoryType }>, opts?: LookupOptions): Promise<TypedMemory[]>
   saveSensorySnapshot(sessionId: string, snapshot: SensorySnapshot): Promise<void>
   loadSensorySnapshot(sessionId: string): Promise<SensorySnapshot | null>
   /** Optional consolidation run tracking. When present, auto-consolidation logs results. */

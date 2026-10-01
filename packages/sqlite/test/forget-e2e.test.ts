@@ -95,7 +95,7 @@ describe('forget() tombstone', () => {
     const before = (await storage.episodes.getByIds([id]))[0]!.accessCount
     const n = await storage.episodes.markForgotten([id])
     expect(n).toBe(1)
-    const after = (await storage.episodes.getByIds([id]))[0]!.accessCount
+    const after = (await storage.episodes.getByIds([id], { includeInactive: true }))[0]!.accessCount
     expect(after).toBe(before) // old recordAccess would have bumped this by 1
   })
 

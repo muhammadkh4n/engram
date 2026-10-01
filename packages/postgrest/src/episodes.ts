@@ -1,7 +1,7 @@
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { EpisodeStorage } from '@engram-mem/core'
+import type { EpisodeStorage, LookupOptions } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
@@ -154,13 +154,17 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     }))
   }
 
-  async getByIds(requestedIds: string[]): Promise<Episode[]> {
+  async getByIds(requestedIds: string[], opts?: LookupOptions): Promise<Episode[]> {
     const ids = onlyUuids(requestedIds)
     if (ids.length === 0) return []
-    const { data, error } = await this.client
+    let query = this.client
       .from('memory_episodes')
       .select('*')
       .in('id', ids)
+    // The legacy schema predates the forgotten_at column; filtering on it
+    // there would fail the request.
+    if (!opts?.includeInactive && !this.legacyMode) query = query.is('forgotten_at', null)
+    const { data, error } = await query
     if (error) throw new Error(`Episode getByIds failed: ${error.message}`)
     return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, this.legacyMode))
   }

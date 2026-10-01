@@ -1,6 +1,6 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
-import type { StorageAdapter } from '@engram-mem/core'
+import type { StorageAdapter, LookupOptions } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
 import { PostgRestDigestStorage } from './digests.js'
 import { PostgRestSemanticStorage } from './semantic.js'
@@ -126,13 +126,14 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     return this._consolidationRuns ?? undefined
   }
 
-  async getById(id: string, type: MemoryType): Promise<TypedMemory | null> {
+  async getById(id: string, type: MemoryType, opts?: LookupOptions): Promise<TypedMemory | null> {
     this.assertInitialized()
     if (!isUuid(id)) return null
+    const activeOnly = !opts?.includeInactive
 
     switch (type) {
       case 'episode': {
-        const episodes = await this._episodes!.getByIds([id])
+        const episodes = await this._episodes!.getByIds([id], opts)
         if (episodes.length === 0) return null
         return { type: 'episode', data: episodes[0] }
       }
@@ -151,21 +152,23 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         return found ? { type: 'digest', data: found } : null
       }
       case 'semantic': {
-        const { data, error } = await this.client
+        let query = this.client
           .from('memory_semantic')
           .select('*')
           .eq('id', id)
-          .maybeSingle()
+        if (activeOnly) query = query.is('forgotten_at', null).is('superseded_by', null)
+        const { data, error } = await query.maybeSingle()
         if (error) throw new Error(`getById semantic failed: ${error.message}`)
         if (!data) return null
         return { type: 'semantic', data: rowToSemantic(data as SemanticRow) }
       }
       case 'procedural': {
-        const { data, error } = await this.client
+        let query = this.client
           .from('memory_procedural')
           .select('*')
           .eq('id', id)
-          .maybeSingle()
+        if (activeOnly) query = query.is('forgotten_at', null)
+        const { data, error } = await query.maybeSingle()
         if (error) throw new Error(`getById procedural failed: ${error.message}`)
         if (!data) return null
         return { type: 'procedural', data: rowToProcedural(data as ProceduralRow) }
@@ -173,9 +176,13 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }
   }
 
-  async getByIds(ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> {
+  async getByIds(
+    ids: Array<{ id: string; type: MemoryType }>,
+    opts?: LookupOptions,
+  ): Promise<TypedMemory[]> {
     if (ids.length === 0) return []
     this.assertInitialized()
+    const activeOnly = !opts?.includeInactive
 
     const byType = new Map<MemoryType, string[]>()
     for (const { id, type } of ids) {
@@ -189,7 +196,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
     const episodeIds = byType.get('episode')
     if (episodeIds && episodeIds.length > 0) {
-      const episodes = await this._episodes!.getByIds(episodeIds)
+      const episodes = await this._episodes!.getByIds(episodeIds, opts)
       for (const ep of episodes) results.push({ type: 'episode', data: ep })
     }
 
@@ -207,10 +214,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
     const semanticIds = byType.get('semantic')
     if (semanticIds && semanticIds.length > 0) {
-      const { data, error } = await this.client
+      let query = this.client
         .from('memory_semantic')
         .select('*')
         .in('id', semanticIds)
+      if (activeOnly) query = query.is('forgotten_at', null).is('superseded_by', null)
+      const { data, error } = await query
       if (error) throw new Error(`getByIds semantic failed: ${error.message}`)
       for (const row of (data ?? []) as SemanticRow[]) {
         results.push({ type: 'semantic', data: rowToSemantic(row) })
@@ -219,10 +228,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
     const proceduralIds = byType.get('procedural')
     if (proceduralIds && proceduralIds.length > 0) {
-      const { data, error } = await this.client
+      let query = this.client
         .from('memory_procedural')
         .select('*')
         .in('id', proceduralIds)
+      if (activeOnly) query = query.is('forgotten_at', null)
+      const { data, error } = await query
       if (error) throw new Error(`getByIds procedural failed: ${error.message}`)
       for (const row of (data ?? []) as ProceduralRow[]) {
         results.push({ type: 'procedural', data: rowToProcedural(row) })
