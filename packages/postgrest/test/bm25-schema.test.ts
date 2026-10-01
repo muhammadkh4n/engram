@@ -4,6 +4,9 @@
  * planner and the recall filters depend on:
  * - each BM25 index is partial on exactly the rows recall may return, so its
  *   term statistics describe only those rows;
+ * - every index is built with k1 = 1.2 and b = 0.4, and re-applying the file
+ *   drops and rebuilds an index whose stored options differ, since
+ *   pg_textsearch reads k1 and b from the metapage written at build time;
  * - engram_bm25_match matches exactly what engram_text_match matches: one
  *   phraseto_tsquery per term on each tier's GIN fts column, under the same
  *   tier predicates. pg_textsearch's own query ORs an identifier's parts, so
@@ -27,17 +30,19 @@ interface Bm25Index {
   name: string
   table: string
   expr: string
+  options: string
   predicate: string | null
 }
 
 function bm25Indexes(): Bm25Index[] {
   const re =
-    /CREATE INDEX IF NOT EXISTS (\w+) ON public\.(\w+)\s+USING bm25 \((.+?)\) WITH \(text_config = 'english'\)(?:\s+WHERE ([^;]+))?;/g
+    /CREATE INDEX IF NOT EXISTS (\w+) ON public\.(\w+)\s+USING bm25 \((.+?)\) WITH \(([^)]*)\)(?:\s+WHERE ([^;]+))?;/g
   return [...bm25.matchAll(re)].map((m) => ({
     name: m[1]!,
     table: m[2]!,
     expr: m[3]!,
-    predicate: m[4] ? m[4].replace(/\s+/g, ' ').trim() : null,
+    options: m[4]!,
+    predicate: m[5] ? m[5].replace(/\s+/g, ' ').trim() : null,
   }))
 }
 
@@ -122,6 +127,21 @@ const TIERS = {
   },
 } as const
 
+/** The options every BM25 index is built with: english, k1 = 1.2, b = 0.4. */
+const INDEX_OPTIONS = "text_config = 'english', k1 = 1.2, b = 0.4"
+
+/** pg_class.reloptions entries the options above are stored as. */
+const STORED_OPTIONS = ['text_config=english', 'k1=1.2', 'b=0.4']
+
+/** The DO block that drops BM25 indexes built with other options, squashed; '' when absent. */
+function convergenceBlock(): string {
+  const firstIndex = bm25.search(/^CREATE INDEX IF NOT EXISTS/m)
+  if (firstIndex < 0) return ''
+  const blocks = [...bm25.slice(0, firstIndex).matchAll(/^DO \$\$\n([\s\S]*?)\n\$\$;$/gm)]
+  const block = blocks.find((m) => /\bDROP INDEX\b/.test(m[1]!))
+  return block ? squash(block[1]!) : ''
+}
+
 describe('bm25.sql BM25 indexes', () => {
   it('creates the extension idempotently', () => {
     expect(bm25).toMatch(/^CREATE EXTENSION IF NOT EXISTS pg_textsearch;$/m)
@@ -135,8 +155,17 @@ describe('bm25.sql BM25 indexes', () => {
         name: tier.index,
         table: tier.table,
         expr: tier.expr,
+        options: INDEX_OPTIONS,
         predicate: tier.predicate,
       })
+    }
+  })
+
+  it('builds every index with k1 = 1.2 and b = 0.4', () => {
+    const indexes = bm25Indexes()
+    expect(indexes).toHaveLength(4)
+    for (const index of indexes) {
+      expect(index.options).toBe(INDEX_OPTIONS)
     }
   })
 
@@ -152,6 +181,45 @@ describe('bm25.sql BM25 indexes', () => {
     for (const tier of Object.values(TIERS)) {
       expect(tier.expr.replace(/[()]/g, '')).toBe(ftsSource(tier.table))
     }
+  })
+})
+
+describe('bm25.sql converges existing BM25 indexes to the target options', () => {
+  it('runs a convergence block before the BM25 indexes are created', () => {
+    expect(convergenceBlock()).not.toBe('')
+  })
+
+  it('compares stored reloptions with exactly the options the CREATE statements use', () => {
+    const block = convergenceBlock()
+    const target = block.match(/target text\[\] := ARRAY\[([^\]]*)\];/)
+    expect(target).not.toBeNull()
+    const entries = target![1]!.split(',').map((e) => e.trim().replace(/^'|'$/g, ''))
+    expect(entries).toEqual(STORED_OPTIONS)
+    const fromCreate = INDEX_OPTIONS.split(',').map((o) => o.replace(/\s+/g, '').replace(/'/g, ''))
+    expect(entries).toEqual(fromCreate)
+    expect(block).toContain(
+      "AND NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)",
+    )
+  })
+
+  it('considers exactly the four BM25 indexes in public', () => {
+    const block = convergenceBlock()
+    const names = block.match(/c\.relname IN \(([^)]*)\)/)
+    expect(names).not.toBeNull()
+    const listed = names![1]!.split(',').map((n) => n.trim().replace(/^'|'$/g, ''))
+    expect([...listed].sort()).toEqual(bm25Indexes().map((i) => i.name).sort())
+    expect(block).toContain("WHERE n.nspname = 'public' AND c.relkind = 'i'")
+  })
+
+  it('drops each mismatched index by name, without a dependent-object drop', () => {
+    const block = convergenceBlock()
+    expect(block).toContain("EXECUTE format('DROP INDEX public.%I', index_name);")
+    expect(block.match(/DROP INDEX/g)).toHaveLength(1)
+  })
+
+  it('names the convergence among what re-applying does', () => {
+    const header = squash(bm25.slice(0, bm25.search(/^CREATE EXTENSION IF NOT EXISTS/m)).replace(/^--\s*/gm, ''))
+    expect(header).toContain('Re-applying also converges the BM25 indexes')
   })
 })
 
