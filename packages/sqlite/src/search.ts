@@ -35,14 +35,24 @@ export function sanitizeFtsQuery(query: string): string {
  * Quote each term as an FTS5 string and OR them. Inside a string FTS5 treats
  * '-', '.', '+', ':' and keywords as literal text, so identifiers like
  * `aca-2613` or `node.js` match instead of parsing as column filters or
- * syntax errors. Blank terms are dropped; returns '' when none remain.
+ * syntax errors. C0 control characters are removed first: a NUL ends the
+ * string SQLite sees and fails the MATCH. Blank terms are dropped; returns ''
+ * when none remain.
  */
 export function orOfFtsStrings(terms: string[]): string {
   return terms
-    .map((t) => t.trim())
+    .map((t) => stripControlChars(t).trim())
     .filter((t) => t.length > 0)
     .map((t) => `"${t.replace(/"/g, '""')}"`)
     .join(' OR ')
+}
+
+// eslint-disable-next-line no-control-regex
+const C0_CONTROL = /[\u0000-\u001f]/g
+
+/** Remove C0 control characters (NUL, tab, newline, ESC, ...) from a term. */
+export function stripControlChars(term: string): string {
+  return term.replace(C0_CONTROL, '')
 }
 
 /** Convert Julian Day number to JS Date. */

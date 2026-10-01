@@ -291,7 +291,10 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     // Terms go to Postgres as typed. The tsquery is built server-side with the
     // same text-search configuration that indexed the rows, so separators in
     // identifiers (aca-2613, gpt-4o, node.js) survive into matching lexemes.
-    const uniqueTerms = [...new Set(terms.filter(t => t.length > 0))]
+    // Postgres text cannot hold NUL, so a term carrying one would fail the
+    // whole request; C0 control characters are dropped from every term.
+    const cleaned = terms.map(t => t.replace(C0_CONTROL, ''))
+    const uniqueTerms = [...new Set(cleaned.filter(t => t.length > 0))]
     if (uniqueTerms.length === 0) return []
 
     const { data, error } = await this.client.rpc('engram_text_match', {
@@ -541,6 +544,9 @@ interface ProceduralRow {
 }
 
 import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
+
+// eslint-disable-next-line no-control-regex
+const C0_CONTROL = /[\u0000-\u001f]/g
 
 function rowToDigest(row: DigestRow): Digest {
   return {

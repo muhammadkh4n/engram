@@ -72,4 +72,25 @@ describe('textBoost with identifier terms', () => {
   it('blank terms are dropped; none left returns no rows', async () => {
     expect(await storage.textBoost(['  ', ''])).toEqual([])
   })
+
+  it('a NUL or other control character in a term returns the same rows', async () => {
+    const clean = await matched(['deploy', 'aca-2613'])
+    expect(await matched(['dep\u0000loy', 'aca-2613\u0000'])).toEqual(clean)
+    expect(await matched(['\u0000\u001b', 'deploy\n'])).toEqual(['deploy the worker'])
+    expect(await storage.textBoost(['\u0000'])).toEqual([])
+  })
+
+  function rawDb(): { exec(sql: string): void } {
+    return (storage as unknown as { db: { exec(sql: string): void } }).db
+  }
+
+  it('a tier without an FTS table is skipped; the other tiers still return rows', async () => {
+    rawDb().exec('DROP TABLE digests_fts')
+    expect(await matched(['deploy'])).toEqual(['deploy the worker'])
+  })
+
+  it('any other SQLite error is rethrown with the tier name', async () => {
+    rawDb().exec('DROP TABLE semantic_fts; CREATE TABLE semantic_fts (x TEXT)')
+    await expect(storage.textBoost(['deploy'])).rejects.toThrow(/textBoost semantic FTS query failed/)
+  })
 })

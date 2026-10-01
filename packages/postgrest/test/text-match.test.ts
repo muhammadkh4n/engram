@@ -67,6 +67,16 @@ describe('PostgRestStorageAdapter.textBoost sends terms verbatim', () => {
     )
   })
 
+  it('drops control characters from each term, and a term left empty', async () => {
+    const { adapter, rpc } = buildAdapter()
+    await adapter.textBoost(['aca-2613\u0000', 'dep\u001bloy', '\u0000'])
+
+    expect(rpc).toHaveBeenCalledWith(
+      'engram_text_match',
+      expect.objectContaining({ p_terms: ['aca-2613', 'deploy'] }),
+    )
+  })
+
   it('returns [] without a request when no term is left', async () => {
     const { adapter, rpc } = buildAdapter()
     expect(await adapter.textBoost([])).toEqual([])
