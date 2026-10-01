@@ -120,9 +120,6 @@ async function main() {
     console.log(`[ok] Decay pass: ${Date.now() - t4}ms`)
     console.log(`  Semantic decayed: ${decayResult.semanticDecayed ?? 0}`)
     console.log(`  Procedural decayed: ${decayResult.proceduralDecayed ?? 0}`)
-    console.log(`  SQL edges pruned: ${decayResult.edgesPruned ?? 0}`)
-    console.log(`  Graph edges pruned: ${decayResult.graphEdgesPruned ?? 'n/a'}`)
-    console.log(`  Isolated nodes: ${decayResult.isolatedNodesDeprioritized ?? 'n/a'}`)
   } catch (err) {
     console.error(`[FAIL] Decay pass: ${(err as Error).message}`)
   }

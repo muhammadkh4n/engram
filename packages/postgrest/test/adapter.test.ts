@@ -696,19 +696,6 @@ describe('PostgRestAssociationStorage', () => {
       entityCount: 3,
     })
   })
-
-  it('pruneWeak deletes from memory_associations', async () => {
-    const chain = createChainable({ data: [], error: null })
-    mock.from.mockReturnValue(chain)
-
-    const count = await store.pruneWeak({ maxStrength: 0.1, olderThanDays: 90 })
-
-    expect(mock.from).toHaveBeenCalledWith('memory_associations')
-    expect(chain.delete).toHaveBeenCalled()
-    expect(chain.lt).toHaveBeenCalledWith('strength', 0.1)
-    expect(chain.neq).toHaveBeenCalledWith('edge_type', 'derives_from')
-    expect(count).toBe(0) // empty data array
-  })
 })
 
 describe('PostgRestStorageAdapter', () => {

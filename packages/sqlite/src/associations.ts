@@ -143,18 +143,6 @@ export class SqliteAssociationStorage implements AssociationStorage {
       .run(generateId(), sourceId, sourceType, targetId, targetType)
   }
 
-  async pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number> {
-    const result = this.db
-      .prepare(
-        `DELETE FROM associations
-         WHERE strength < ?
-           AND (last_activated IS NULL OR last_activated < julianday('now') - ?)
-           AND edge_type != 'derives_from'`
-      )
-      .run(opts.maxStrength, opts.olderThanDays)
-    return result.changes
-  }
-
   async discoverTopicalEdges(opts: {
     daysLookback: number
     maxNew: number

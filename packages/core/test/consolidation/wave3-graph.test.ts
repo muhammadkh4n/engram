@@ -270,42 +270,17 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
 
   describe('decayPass', () => {
     it('falls back to uniform decay when GDS unavailable', async () => {
-      const result = await decayPass(storage, undefined, graph)
+      await decayPass(storage, undefined, graph)
 
       // No GDS → uniform batchDecay called
       expect(storage.semantic.batchDecay).toHaveBeenCalled()
       expect(storage.procedural.batchDecay).toHaveBeenCalled()
-      expect(storage.associations.pruneWeak).toHaveBeenCalled()
     })
 
-    it('runs edge pruning in Neo4j when graph available', async () => {
-      const pruneResult: GraphQueryResult = {
-        records: [],
-        summary: {
-          counters: {
-            nodesCreated: () => 0,
-            relationshipsCreated: () => 0,
-            relationshipsDeleted: () => 5,
-            propertiesSet: () => 0,
-          },
-        },
-      }
+    it('writes nothing to Neo4j when the graph is available', async () => {
+      await decayPass(storage, undefined, graph)
 
-      graph.runCypherWrite = vi.fn(async (query: string) => {
-        if (query.includes('DELETE r')) return pruneResult
-        return pruneResult
-      })
-
-      // Mock isolated nodes query
-      graph.runCypher = vi.fn(async () => ({
-        records: [],
-        summary: { counters: { nodesCreated: () => 0, relationshipsCreated: () => 0, relationshipsDeleted: () => 0, propertiesSet: () => 0 } },
-      }))
-
-      const result = await decayPass(storage, undefined, graph)
-
-      expect(result.graphEdgesPruned).toBe(5)
-      expect(result.edgesPruned).toBeDefined() // SQL pruning too
+      expect(graph.runCypherWrite).not.toHaveBeenCalled()
     })
 
     it('works without graph — pure SQL decay', async () => {
@@ -313,9 +288,6 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
 
       expect(result.semanticDecayed).toBeDefined()
       expect(result.proceduralDecayed).toBeDefined()
-      expect(result.edgesPruned).toBeDefined()
-      expect(result.graphEdgesPruned).toBeUndefined()
-      expect(result.isolatedNodesDeprioritized).toBeUndefined()
     })
   })
 })

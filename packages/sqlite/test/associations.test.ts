@@ -294,65 +294,6 @@ describe('SqliteAssociationStorage', () => {
   })
 
   // -------------------------------------------------------------------------
-  // pruneWeak
-  // -------------------------------------------------------------------------
-
-  it('pruneWeak: deletes weak old edges', async () => {
-    insertEpisode(db, 'ep-1')
-    insertSemantic(db, 'sem-1')
-
-    // Insert a very weak edge with no last_activated (treated as ancient)
-    db.prepare(
-      `INSERT INTO associations
-         (id, source_id, source_type, target_id, target_type, edge_type, strength, metadata)
-       VALUES ('weak-edge', 'ep-1', 'episode', 'sem-1', 'semantic', 'co_recalled', 0.04, '{}')`
-    ).run()
-
-    const deleted = await store.pruneWeak({ maxStrength: 0.1, olderThanDays: 0 })
-
-    expect(deleted).toBe(1)
-    const row = db
-      .prepare("SELECT id FROM associations WHERE id = 'weak-edge'")
-      .get()
-    expect(row).toBeUndefined()
-  })
-
-  it('pruneWeak: preserves derives_from edges regardless of strength', async () => {
-    insertEpisode(db, 'ep-1')
-    insertSemantic(db, 'sem-1')
-
-    // Insert a very weak derives_from edge — must survive pruning
-    db.prepare(
-      `INSERT INTO associations
-         (id, source_id, source_type, target_id, target_type, edge_type, strength, metadata)
-       VALUES ('provenance-edge', 'ep-1', 'episode', 'sem-1', 'semantic', 'derives_from', 0.04, '{}')`
-    ).run()
-
-    const deleted = await store.pruneWeak({ maxStrength: 0.1, olderThanDays: 0 })
-
-    expect(deleted).toBe(0)
-    const row = db
-      .prepare("SELECT id FROM associations WHERE id = 'provenance-edge'")
-      .get()
-    expect(row).toBeDefined()
-  })
-
-  it('pruneWeak: does not delete edges that are strong enough', async () => {
-    insertEpisode(db, 'ep-1')
-    insertSemantic(db, 'sem-1')
-
-    db.prepare(
-      `INSERT INTO associations
-         (id, source_id, source_type, target_id, target_type, edge_type, strength, metadata)
-       VALUES ('strong-edge', 'ep-1', 'episode', 'sem-1', 'semantic', 'topical', 0.5, '{}')`
-    ).run()
-
-    const deleted = await store.pruneWeak({ maxStrength: 0.1, olderThanDays: 0 })
-
-    expect(deleted).toBe(0)
-  })
-
-  // -------------------------------------------------------------------------
   // discoverTopicalEdges
   // -------------------------------------------------------------------------
 
