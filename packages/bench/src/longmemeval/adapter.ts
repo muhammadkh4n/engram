@@ -24,6 +24,7 @@ import type { LongMemEvalQuestion, LongMemEvalQuestionType } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
 import { mergeAssociationsIntoScored } from '../merge-associations.js'
 import { wipeBenchGraph } from '../bench-graph.js'
+import { assertRecallNotDegraded } from '../refuse-degraded.js'
 
 export class LongMemEvalAdapter {
   /**
@@ -155,6 +156,7 @@ export class LongMemEvalAdapter {
 
       const evalStart = Date.now()
       const recallResult = await memory.recall(question.question)
+      assertRecallNotDegraded(recallResult, question.question_id)
       const topMemories = mergeAssociationsIntoScored(
         recallResult, opts?.mergeAssociationsIntoTopK,
       ).slice(0, topK)

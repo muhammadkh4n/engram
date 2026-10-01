@@ -14,13 +14,15 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import type { ForgetPreview, ForgetByIdsResult } from '@engram-mem/core'
+import type { ForgetPreview, ForgetByIdsResult, RecallResult } from '@engram-mem/core'
+import { vectorUnavailableNotice } from '@engram-mem/core'
 import {
   maybeWithRecallEngine,
   formatRecallTimingLine,
   recallOptionsFromArgs,
   parseChatReasoningEnv,
   runMemoryForget,
+  runMemoryRecall,
   parseSalienceThresholdEnv,
   captureModelFromEnv,
   sharedInit,
@@ -138,6 +140,12 @@ describe('formatRecallTimingLine', () => {
   it('marks a failed lexical leg as lexical=error', () => {
     expect(formatRecallTimingLine({ total: 3.2, search: 1.1, lexicalError: 1 }, 2, 40)).toBe(
       '[recall] total=3 search=1 lexical=error items=2 chars=40',
+    )
+  })
+
+  it('marks a recall without a query embedding as degraded=vector', () => {
+    expect(formatRecallTimingLine({ total: 3.2, search: 1.1, vectorError: 1 }, 2, 40)).toBe(
+      '[recall] total=3 search=1 degraded=vector items=2 chars=40',
     )
   })
 
@@ -269,6 +277,65 @@ describe('parseChatReasoningEnv', () => {
       expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v, ...HOST }))
         .toThrow(/ENGRAM_CHAT_REASONING_HEADROOM/)
     }
+  })
+})
+
+describe('runMemoryRecall', () => {
+  const REASON = '429 You exceeded your current quota, please check your plan and billing details.'
+  const NOTICE = vectorUnavailableNotice(REASON)
+  const MEMORY = {
+    id: 'ep-1', type: 'episode' as const, content: 'The deploy window is Thursday.', relevance: 0.4,
+    source: 'recall' as const, metadata: {},
+  }
+
+  function result(partial: Partial<RecallResult>): RecallResult {
+    return {
+      memories: [], associations: [], primed: [], estimatedTokens: 0, formatted: '',
+      intent: { type: 'QUESTION', confidence: 1, strategy: {} } as unknown as RecallResult['intent'],
+      ...partial,
+    }
+  }
+
+  function stubMemory(r: RecallResult) {
+    return { recall: async () => r }
+  }
+
+  it('returns a degraded recall as normal content that leads with the notice', async () => {
+    const formatted = `${NOTICE}\n## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
+    const res = await runMemoryRecall(
+      stubMemory(result({ memories: [MEMORY], formatted, degraded: { vector: REASON } })),
+      { query: 'deploy window' },
+    )
+
+    expect(res.isError).toBeUndefined()
+    expect(res.content[0]?.text).toBe(formatted)
+    expect(res.content[0]?.text.split('\n')[0]).toBe(NOTICE)
+  })
+
+  it('says the keyword search found nothing when a degraded recall is empty', async () => {
+    const res = await runMemoryRecall(stubMemory(result({ degraded: { vector: REASON } })), { query: 'deploy window' })
+
+    expect(res.isError).toBeUndefined()
+    expect(res.content[0]?.text).toBe(`${NOTICE}\nNo keyword matches.`)
+  })
+
+  it('keeps the plain empty answer for a healthy recall', async () => {
+    const res = await runMemoryRecall(stubMemory(result({})), { query: 'deploy window' })
+
+    expect(res).toEqual({ content: [{ type: 'text', text: 'No relevant memories found.' }] })
+  })
+
+  it('returns a healthy payload unchanged', async () => {
+    const formatted = `## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
+    const res = await runMemoryRecall(stubMemory(result({ memories: [MEMORY], formatted })), { query: 'deploy window' })
+
+    expect(res).toEqual({ content: [{ type: 'text', text: formatted }] })
+  })
+
+  it('rejects an empty query as a tool error', async () => {
+    const res = await runMemoryRecall(stubMemory(result({})), { query: '  ' })
+
+    expect(res).toEqual({ content: [{ type: 'text', text: 'Error: query must be a non-empty string' }], isError: true })
   })
 })
 

@@ -22,6 +22,7 @@ import { findNearDuplicate } from './ingestion/near-duplicate.js'
 import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
 import { buildTextToEmbed, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
+import { embedFailureReason } from './retrieval/embed-failure.js'
 import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
 import { resolveEventDate, isoDate } from './utils/event-date.js'
@@ -672,10 +673,19 @@ export class Memory {
     })
     this.sensory.setIntent(intent)
 
-    // Embed query if intelligence adapter provides embeddings
+    // Embed query if intelligence adapter provides embeddings. An embedder
+    // failure (quota, outage, open circuit) must not cost the whole recall:
+    // the lexical leg, expansion and rerank need no embedding, so the recall
+    // runs on them and says why semantic search is missing.
     let embedding = opts?.embedding
+    let vectorUnavailable: string | undefined
     if (embedding === undefined && this.intelligence?.embed) {
-      embedding = await this.intelligence.embed(query)
+      try {
+        embedding = await this.intelligence.embed(query)
+      } catch (err) {
+        vectorUnavailable = await embedFailureReason(err)
+        console.error(`[engram] recall: query embedding failed, using keyword search only: ${vectorUnavailable}`)
+      }
     }
 
     // Project ranking: the per-call scope wins over the instance scope, and
@@ -697,6 +707,7 @@ export class Memory {
       ...(opts?.synthesize !== undefined ? { synthesize: opts.synthesize } : {}),
       ...(opts?.now !== undefined ? { now: opts.now } : {}),
       ...(opts?.reconsolidate === false ? { reconsolidate: false } : {}),
+      ...(vectorUnavailable !== undefined ? { vectorUnavailable } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn
@@ -713,6 +724,7 @@ export class Memory {
       synthesis: result.synthesis ?? null,
       ...(result.timings ? { timings: result.timings } : {}),
       ...(result.faintAssociations ? { faintAssociations: result.faintAssociations } : {}),
+      ...(result.degraded ? { degraded: result.degraded } : {}),
       payload: result.payload,
     }
   }

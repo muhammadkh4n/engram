@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
-import { orIlikeOperand, orOperand } from './search.js'
+import { orIlikeOperand, orOperand, projectScopeFilter } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -91,15 +91,21 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     }
 
     // Text fallback — strip all non-alphanumeric chars to avoid PostgREST .or()
-    // parser failures (commas, parens, periods are structural in PostgREST filters)
+    // parser failures (commas, parens, periods are structural in PostgREST filters).
+    // It runs whenever the caller has no query vector (an embedder outage, or
+    // a caller that passes none) and reads the table directly, so it applies
+    // the tombstone, supersession and project rules itself.
     const safe = query.replace(/[^a-zA-Z0-9\s]/g, '').split(/\s+/).slice(0, 5).join(' ')
-    const { data, error } = await this.client
+    let queryBuilder = this.client
       .from('memory_semantic')
       .select('*')
       .or(`topic.ilike.%${safe}%,content.ilike.%${safe}%`)
       .is('superseded_by', null)
       .is('forgotten_at', null)
       .limit(limit)
+    if (opts?.projectId !== undefined) queryBuilder = queryBuilder.or(projectScopeFilter(opts.projectId))
+
+    const { data, error } = await queryBuilder
 
     if (error) throw new Error(`Semantic search (text) failed: ${error.message}`)
     return ((data ?? []) as SemanticRow[]).map((r) => ({

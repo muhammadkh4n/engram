@@ -81,6 +81,63 @@ describe('CircuitBreaker', () => {
     });
   });
 
+  describe('open-circuit cause', () => {
+    it('names the status, code and first message line of the failure that opened it', async () => {
+      const failure = Object.assign(new Error('503 upstream overloaded\nbody: {"secret":"x"}'), {
+        status: 503,
+        code: 'server_overloaded',
+      });
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(failure)); } catch {}
+      }
+      const err = await breaker.execute(() => Promise.resolve('nope')).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CircuitOpenError);
+      const message = (err as Error).message;
+      expect(message).toMatch(/^Circuit is open, \d+ms until retry \(last failure: 503 server_overloaded: upstream overloaded\)\.$/);
+    });
+
+    it('redacts a bearer token in the failure line', async () => {
+      const token = 'sk-proj-Q2xYw8dK3mN5pR7tV9zB1cF4gH6jL0nS';
+      const failure = Object.assign(new Error(`401 rejected request with header Authorization: Bearer ${token}`), {
+        status: 401,
+      });
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(failure)); } catch {}
+      }
+      const err = await breaker.execute(() => Promise.resolve('nope')).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CircuitOpenError);
+      const message = (err as Error).message;
+      expect(message).not.toContain(token);
+      expect(message).not.toContain('Q2xYw8dK3mN5');
+      expect(message).toContain('last failure: 401: rejected request with header Authorization');
+    });
+
+    it('keeps the retry delay inside a 200-character cut of a long cause', async () => {
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(new Error('y'.repeat(500)))); } catch {}
+      }
+      const err = (await breaker.execute(() => Promise.resolve(1)).catch((e: unknown) => e)) as Error;
+      expect(err.message.slice(0, 199)).toMatch(/^Circuit is open, \d+ms until retry /);
+    });
+
+    it('caps a long failure message and drops the cause after reset', async () => {
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(new Error('x'.repeat(500)))); } catch {}
+      }
+      const err = (await breaker.execute(() => Promise.resolve(1)).catch((e: unknown) => e)) as Error;
+      expect(err.message.length).toBeLessThan(220);
+      expect(err.message).toContain('…');
+
+      breaker.reset();
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(new Error('second outage'))); } catch {}
+      }
+      const again = (await breaker.execute(() => Promise.resolve(1)).catch((e: unknown) => e)) as Error;
+      expect(again.message).toContain('last failure: second outage');
+      expect(again.message).not.toContain('xxx');
+    });
+  });
+
   describe('half-open state', () => {
     it('transitions to half-open after cooldown', async () => {
       const fastBreaker = new CircuitBreaker({ threshold: 1, cooldownMs: 50 });

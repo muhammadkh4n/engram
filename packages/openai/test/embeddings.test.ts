@@ -168,6 +168,65 @@ describe('OpenAIEmbeddingService', () => {
       await expect(service.embed('blocked')).rejects.toBeInstanceOf(CircuitOpenError)
     })
 
+    it('rejects an embed on an open circuit without waiting on backoff timers', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
+        const breaker = service.getBreaker()
+        for (let i = 0; i < 5; i++) {
+          await breaker.execute(() => Promise.reject(new Error('simulated failure'))).catch(() => undefined)
+        }
+        expect(breaker.getState()).toBe('open')
+
+        // No timer is advanced: a retried open circuit would hang on its first backoff sleep.
+        await expect(service.embed('blocked')).rejects.toBeInstanceOf(CircuitOpenError)
+        await expect(service.embedBatch(['blocked'])).rejects.toBeInstanceOf(CircuitOpenError)
+        expect(vi.getTimerCount()).toBe(0)
+        expect(mockCreate).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('names the provider error that opened the circuit', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        // Shaped like the openai SDK's RateLimitError for an exhausted account.
+        const quotaError = Object.assign(
+          new Error(
+            '429 You exceeded your current quota, please check your plan and billing details.\n' +
+              'For more information on this error, read the docs.'
+          ),
+          { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' }
+        )
+        mockCreate.mockRejectedValue(quotaError)
+        const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
+
+        // Each embed() makes four attempts; two calls reach the threshold of five.
+        const first = service.embed('one').catch((e: unknown) => e)
+        await vi.runAllTimersAsync()
+        expect(await first).toBe(quotaError)
+        const second = service.embed('two').catch((e: unknown) => e)
+        await vi.runAllTimersAsync()
+        expect(await second).toBeInstanceOf(CircuitOpenError)
+        expect(service.getBreaker().getState()).toBe('open')
+
+        const blocked = service.embed('three').catch((e: unknown) => e)
+        await vi.runAllTimersAsync()
+        const err = await blocked
+        expect(err).toBeInstanceOf(CircuitOpenError)
+        const message = (err as Error).message
+        expect(message).toContain('429')
+        expect(message).toContain('insufficient_quota')
+        expect(message).toContain('ms until retry')
+        expect(message).not.toContain('For more information')
+        expect(message).not.toContain('\n')
+      } finally {
+        vi.useRealTimers()
+        mockCreate.mockReset()
+      }
+    })
+
     it('resets and allows calls after the breaker is reset', async () => {
       const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
       const breaker = service.getBreaker()

@@ -17,6 +17,7 @@ import OpenAI from 'openai'
 import type { Memory } from '@engram-mem/core'
 import type { LoCoMoConversationFile, LoCoMoTurn, LoCoMoQA } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
+import { assertRecallNotDegraded } from '../refuse-degraded.js'
 
 // ── TrueMemory protocol constants ──────────────────────────────────────────
 
@@ -301,8 +302,9 @@ function getQa(conv: LoCoMoConversationFile): LoCoMoQA[] {
   return conv.qa.filter(q => q.category !== 5)
 }
 
-async function retrieveContext(memory: Memory, question: string): Promise<string> {
+export async function retrieveContext(memory: Pick<Memory, 'recall'>, question: string): Promise<string> {
   const result = await memory.recall(question)
+  assertRecallNotDegraded(result, question)
   const top = result.memories.slice(0, 100)
   if (top.length === 0) return 'No memories found.'
   return top.map((m, i) => `[Memory ${i + 1}] ${m.content}`).join('\n\n')

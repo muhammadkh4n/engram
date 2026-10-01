@@ -9,6 +9,8 @@ import { describe, it, expect } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import { PostgRestSemanticStorage } from '../src/semantic.js'
 import { PostgRestProceduralStorage } from '../src/procedural.js'
+import { PostgRestEpisodeStorage } from '../src/episodes.js'
+import { PostgRestDigestStorage } from '../src/digests.js'
 
 type Call = [method: string, ...args: unknown[]]
 
@@ -67,5 +69,74 @@ describe('PostgREST text search paths exclude forgotten rows', () => {
     expect(calls[0]).toEqual(['from', 'memory_procedural'])
     expect(calls).toContainEqual(['ilike', 'trigger_text', '%before pushing%'])
     expect(isNullFilters(calls)).toContain('forgotten_at')
+  })
+})
+
+function orFilters(calls: Call[]): unknown[] {
+  return calls.filter(([m]) => m === 'or').map(([, filter]) => filter)
+}
+
+const SCOPE = 'project_id.eq."engram",project_id.is.null'
+
+describe('PostgREST text search paths without a query vector', () => {
+  it('episodes.search filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client).search('billing worker tax column', { limit: 3 })
+
+    expect(calls[0]).toEqual(['from', 'memory_episodes'])
+    expect(isNullFilters(calls)).toContain('forgotten_at')
+    expect(orFilters(calls)).toEqual([])
+  })
+
+  it('episodes.search keeps the project and untagged rows when projectId is set', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client).search('billing worker', { limit: 3, projectId: 'engram' })
+
+    expect(orFilters(calls)).toEqual([SCOPE])
+  })
+
+  it('episodes.search on the legacy schema adds no column it lacks', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client, true).search('billing worker', { limit: 3, projectId: 'engram' })
+
+    expect(isNullFilters(calls)).toEqual([])
+    expect(orFilters(calls)).toEqual([])
+  })
+
+  it('digests.search keeps the project and untagged rows when projectId is set', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestDigestStorage(client).search('billing worker', { limit: 3, projectId: 'engram' })
+
+    expect(calls[0]).toEqual(['from', 'memory_digests'])
+    expect(orFilters(calls)).toEqual([SCOPE])
+  })
+
+  it('digests.search adds no project filter without projectId', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestDigestStorage(client).search('billing worker', { limit: 3 })
+
+    expect(orFilters(calls)).toEqual([])
+  })
+
+  it('semantic.search keeps the project and untagged rows when projectId is set', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestSemanticStorage(client).search('deploy on fridays', { limit: 3, projectId: 'engram' })
+
+    expect(orFilters(calls)).toContain(SCOPE)
+    expect(isNullFilters(calls)).toEqual(expect.arrayContaining(['forgotten_at', 'superseded_by']))
+  })
+
+  it('quotes a project id that carries filter syntax', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client).search('billing', { limit: 3, projectId: 'a,b)' })
+
+    expect(orFilters(calls)).toEqual(['project_id.eq."a,b)",project_id.is.null'])
   })
 })

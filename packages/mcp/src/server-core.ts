@@ -16,7 +16,13 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
-import { createMemory, startConsolidationWorker, MAX_FORGET_IDS, recallOutputPolicyFromEnv } from '@engram-mem/core'
+import {
+  createMemory,
+  startConsolidationWorker,
+  MAX_FORGET_IDS,
+  recallOutputPolicyFromEnv,
+  vectorUnavailableNotice,
+} from '@engram-mem/core'
 import type {
   StorageAdapter,
   IntelligenceAdapter,
@@ -634,7 +640,8 @@ export interface RecallPayloadSize {
 /** One-line recall latency summary. Stages print in a fixed order, then any
  *  graph.* sub-stages sorted by name. Absent stages are omitted, not zeroed,
  *  so a missing key means the stage never ran for that query. A failed
- *  lexical leg (vector-only recall) is printed as lexical=error. `items` is
+ *  lexical leg (vector-only recall) is printed as lexical=error, a failed
+ *  query embedding (keyword-only recall) as degraded=vector. `items` is
  *  the ranked pool; `emitted` is how much of it the payload carried. */
 export function formatRecallTimingLine(
   timings: Record<string, number>,
@@ -647,10 +654,11 @@ export function formatRecallTimingLine(
     .filter(stage => timings[stage] !== undefined)
     .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
   const lexical = timings['lexicalError'] !== undefined ? ['lexical=error'] : []
+  const degraded = timings['vectorError'] !== undefined ? ['degraded=vector'] : []
   const sizeParts = size
     ? [`emitted=${size.emitted}`, `tokens=${size.tokens}`, ...(size.truncated ? ['truncated=1'] : [])]
     : []
-  return ['[recall]', ...parts, ...lexical, `items=${items}`, `chars=${chars}`, ...sizeParts].join(' ')
+  return ['[recall]', ...parts, ...lexical, ...degraded, `items=${items}`, `chars=${chars}`, ...sizeParts].join(' ')
 }
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
@@ -665,6 +673,44 @@ function toolText(text: string): ToolTextResult {
 
 function toolError(message: string): ToolTextResult {
   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
+}
+
+/** A degraded recall is still an answer: the reader gets the reason and the
+ *  keyword results, never a tool error that hides both. */
+export async function runMemoryRecall(
+  mem: Pick<Memory, 'recall'>,
+  args: Record<string, unknown>,
+): Promise<ToolTextResult> {
+  const query = args['query']
+  if (typeof query !== 'string' || query.trim().length === 0) {
+    return toolError('query must be a non-empty string')
+  }
+
+  const recallOpts = recallOptionsFromArgs(args)
+  if ('error' in recallOpts) return toolError(recallOpts.error)
+
+  const result = await mem.recall(query.trim(), recallOpts)
+
+  if (result.timings) {
+    // stderr: stdout carries the stdio JSON-RPC stream.
+    console.error(
+      formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length, {
+        emitted: result.payload?.emittedMemories ?? result.memories.length,
+        tokens: result.estimatedTokens,
+        truncated: result.payload?.truncated === true,
+      }),
+    )
+  }
+
+  if (!result.formatted || result.memories.length === 0) {
+    return toolText(
+      result.degraded
+        ? `${vectorUnavailableNotice(result.degraded.vector)}\nNo keyword matches.`
+        : 'No relevant memories found.',
+    )
+  }
+
+  return toolText(result.formatted)
 }
 
 /** memory_forget takes a query (preview) or ids (tombstone), never both, so a
@@ -759,41 +805,7 @@ export function createEngramServer(): Server {
     try {
       const mem = await getMemory()
 
-      if (name === 'memory_recall') {
-        const query = args['query']
-        if (typeof query !== 'string' || query.trim().length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: query must be a non-empty string' }],
-            isError: true,
-          }
-        }
-
-        const recallOpts = recallOptionsFromArgs(args)
-        if ('error' in recallOpts) return toolError(recallOpts.error)
-
-        const result = await mem.recall(query.trim(), recallOpts)
-
-        if (result.timings) {
-          // stderr: stdout carries the stdio JSON-RPC stream.
-          console.error(
-            formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length, {
-              emitted: result.payload?.emittedMemories ?? result.memories.length,
-              tokens: result.estimatedTokens,
-              truncated: result.payload?.truncated === true,
-            }),
-          )
-        }
-
-        if (!result.formatted || result.memories.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'No relevant memories found.' }],
-          }
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: result.formatted }],
-        }
-      }
+      if (name === 'memory_recall') return await runMemoryRecall(mem, args)
 
       if (name === 'memory_ingest') {
         const content = args['content']

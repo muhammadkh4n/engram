@@ -2,6 +2,8 @@
  * Exponential backoff retry utility.
  */
 
+import { CircuitOpenError } from './circuit-breaker.js';
+
 export interface RetryOptions {
   maxRetries?: number;
   baseDelayMs?: number;
@@ -14,6 +16,7 @@ export interface RetryOptions {
  * delay(attempt) = min(baseDelayMs * 2^attempt, maxDelayMs)
  *
  * Defaults: 3 retries, 500ms base delay, 30 000ms max delay.
+ * A CircuitOpenError is rethrown at once.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
@@ -29,6 +32,9 @@ export async function withRetry<T>(
     try {
       return await fn();
     } catch (err) {
+      // An open circuit rejects without calling the provider until its cooldown
+      // ends, which outlasts every backoff step; retrying only delays the caller.
+      if (err instanceof CircuitOpenError) throw err;
       lastError = err;
       if (attempt < maxRetries) {
         const delay = Math.min(baseDelayMs * Math.pow(2, attempt), maxDelayMs);

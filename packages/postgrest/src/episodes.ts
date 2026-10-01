@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
 import { DuplicateCaptureKeyError, generateId } from '@engram-mem/core'
 import type { EpisodeStorage, LookupOptions } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { projectScopeFilter, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -175,7 +175,11 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       }))
     }
 
-    // Text fallback via ilike — works on both legacy and full schema
+    // Text fallback via ilike — works on both legacy and full schema. It runs
+    // whenever the caller has no query vector (an embedder outage, or a
+    // caller that passes none) and reads the table directly, so it applies
+    // the tombstone and project rules itself. The legacy schema predates
+    // forgotten_at and project_id; filtering on them there fails the request.
     let queryBuilder = this.client
       .from('memory_episodes')
       .select('*')
@@ -184,6 +188,10 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
 
     if (opts?.sessionId) {
       queryBuilder = queryBuilder.eq('session_id', opts.sessionId)
+    }
+    if (!this.legacyMode) {
+      queryBuilder = queryBuilder.is('forgotten_at', null)
+      if (opts?.projectId !== undefined) queryBuilder = queryBuilder.or(projectScopeFilter(opts.projectId))
     }
 
     const { data, error } = await queryBuilder

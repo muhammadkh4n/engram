@@ -193,6 +193,13 @@ export interface TierPriority {
   recencyBias: number
 }
 
+/** Retrieval legs a recall had to run without. `vector`: the query could not
+ *  be embedded, so vector search and HyDE were skipped; the value is the
+ *  embedder's error, one line, credentials redacted. */
+export interface RecallDegradation {
+  vector: string
+}
+
 export interface RecallResult {
   memories: RetrievedMemory[]
   associations: RetrievedMemory[]
@@ -209,6 +216,8 @@ export interface RecallResult {
   timings?: Record<string, number>
   /** Mirrors retrieval/engine.ts RecallResult.faintAssociations. */
   faintAssociations?: RetrievedMemory[]
+  /** Mirrors retrieval/engine.ts RecallResult.degraded. */
+  degraded?: RecallDegradation
   /** Mirrors retrieval/engine.ts RecallResult.payload. Always set by
    *  Memory.recall; optional so hand-built results stay valid. */
   payload?: RecallPayload

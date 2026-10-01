@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { withRetry } from '../../src/resilience/retry.js';
+import { CircuitOpenError } from '../../src/resilience/circuit-breaker.js';
 
 describe('withRetry', () => {
   it('resolves immediately when the function succeeds on the first try', async () => {
@@ -105,5 +106,18 @@ describe('withRetry', () => {
     expect(delays[0]).toBe(1000);
     expect(delays[1]).toBe(1500);
     expect(delays[2]).toBe(1500);
+  });
+
+  it('does not retry an open circuit: rejects at once with no backoff timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const open = new CircuitOpenError('Circuit is open, 30000ms until retry.');
+      const fn = vi.fn().mockRejectedValue(open);
+      await expect(withRetry(fn, { maxRetries: 3, baseDelayMs: 500 })).rejects.toBe(open);
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

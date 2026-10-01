@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { DigestStorage } from '@engram-mem/core'
-import { sanitizeIlike } from './search.js'
+import { projectScopeFilter, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 
 export class PostgRestDigestStorage implements DigestStorage {
@@ -86,12 +86,18 @@ export class PostgRestDigestStorage implements DigestStorage {
       }))
     }
 
-    // Text fallback
-    const { data, error } = await this.client
+    // Text fallback. It runs whenever the caller has no query vector (an
+    // embedder outage, or a caller that passes none) and reads the table
+    // directly, so it applies the project rule itself. Digests carry no
+    // tombstone column.
+    let queryBuilder = this.client
       .from('memory_digests')
       .select('*')
       .ilike('summary', `%${sanitizeIlike(query)}%`)
       .limit(limit)
+    if (opts?.projectId !== undefined) queryBuilder = queryBuilder.or(projectScopeFilter(opts.projectId))
+
+    const { data, error } = await queryBuilder
 
     if (error) throw new Error(`Digest search (text) failed: ${error.message}`)
     return ((data ?? []) as DigestRow[]).map((r) => ({

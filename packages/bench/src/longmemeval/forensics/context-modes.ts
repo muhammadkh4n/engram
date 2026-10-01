@@ -12,6 +12,7 @@
 import { estimateTokens } from '@engram-mem/core'
 import { projectSessionIds, stripBenchSessionNamespace, type SessionProjectionInput } from './project-sessions.js'
 import type { SynthesisBlock } from './synthesis-row.js'
+import { assertRecallNotDegraded } from '../../refuse-degraded.js'
 
 export type ContextMode = 'sessions' | 'formatted'
 
@@ -113,6 +114,8 @@ export interface SweepRecallResult extends SessionProjectionInput {
   estimatedTokens?: number
   /** Where each emitted item sits in `formatted`; set by Memory.recall. */
   payload?: SweepRecallPayload
+  /** Set by Memory.recall when the query could not be embedded. */
+  degraded?: { vector: string }
 }
 
 export interface SweepMemory {
@@ -252,6 +255,7 @@ export async function runSweepRecall(
   cfg: SweepRecallConfig,
 ): Promise<SweepRecallOutcome> {
   const result = await memory.recall(question.question, sweepRecallOptions(cfg))
+  assertRecallNotDegraded(result, question.question_id)
   const outcome: SweepRecallOutcome = {
     recalledSessionIds: projectSessionIds(result),
     relevanceTop: relevanceTop(result),

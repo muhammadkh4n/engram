@@ -1,5 +1,5 @@
 import type { GraphPort } from '../adapters/graph.js'
-import type { MemoryType, RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup, SynthesisBlock, SynthesizeOpts } from '../types.js'
+import type { MemoryType, RecallDegradation, RecallStrategy, RetrievedMemory, RetrievalStrategy, TypedMemory, SessionGroup, SynthesisBlock, SynthesizeOpts } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
@@ -9,6 +9,7 @@ import {
   assemble,
   emptyRecallPayload,
   resolveRecallOutputPolicy,
+  vectorUnavailableNotice,
   type RecallPayload,
   type RenderedItem,
   type RenderedPayload,
@@ -87,6 +88,8 @@ export interface RecallResult {
   /** What `formatted` emitted under the output policy and where each item
    *  sits in it. `memories` and `associations` stay the full ranked lists. */
   payload: RecallPayload
+  /** Set only when a retrieval leg could not run; see `vectorUnavailable`. */
+  degraded?: RecallDegradation
 }
 
 export interface RecallOpts {
@@ -151,6 +154,13 @@ export interface RecallOpts {
    * memories the caller is about to forget.
    */
   reconsolidate?: boolean
+  /**
+   * Why the query could not be embedded (one line, credentials redacted).
+   * The recall then runs on the lexical leg only: HyDE is skipped so the
+   * failing embedder is not called again, the payload leads with a notice
+   * naming the reason, and the result carries `degraded.vector`.
+   */
+  vectorUnavailable?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +389,11 @@ function markLexicalError(timings: StageTimings): void {
   timings['lexicalError'] = 1
 }
 
+function markVectorError(timings: StageTimings): void {
+  if (timings === null) return
+  timings['vectorError'] = 1
+}
+
 function finishTimings(timings: StageTimings, recallStart: number): { timings?: Record<string, number> } {
   if (timings === null) return {}
   return { timings: { ...timings, total: performance.now() - recallStart } }
@@ -413,6 +428,7 @@ export async function recall(
   // value fails here, before any search work.
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
   const rankPriors = rankPriorSwitchesFromEnv(process.env)
+  const vectorUnavailable = opts.vectorUnavailable
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -427,6 +443,8 @@ export async function recall(
       ...finishTimings(timings, recallStart),
     }
   }
+
+  if (vectorUnavailable !== undefined) markVectorError(timings)
 
   // Classify query signals once — shared across expansion, HyDE, future gates.
   const signals = classifyQuery(query)
@@ -470,6 +488,7 @@ export async function recall(
     onLexicalError: () => markLexicalError(timings),
     lexicalReserve,
     rankPriors,
+    ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
   })
   stageEnd(timings, 'search', searchStart)
 
@@ -484,6 +503,7 @@ export async function recall(
   // the stronger raw score overwriting the fused rank.
   const topScore = memories[0]?.relevance ?? 0
   const shouldFireHyDE =
+    vectorUnavailable === undefined &&
     intelligence?.generateHypotheticalDoc !== undefined &&
     intelligence?.embed !== undefined &&
     (topScore < 0.3 || signals.multiHop || signals.temporal)
@@ -804,6 +824,7 @@ export async function recall(
   const assembled = assemble(
     renderRecallPayload(memories, associations, compositeContext, communitySummaries),
     outputPolicy,
+    vectorUnavailable !== undefined ? vectorUnavailableNotice(vectorUnavailable) : undefined,
   )
   // Reconsolidation — fire-and-forget, also strengthens traversed Neo4j
   // edges when graph is non-null. Only what the payload emitted counts as a
@@ -842,6 +863,7 @@ export async function recall(
     ...(outputPolicy.faint && compositeContext !== null && compositeContext.faintAssociations.length > 0
       ? { faintAssociations: compositeContext.faintAssociations }
       : {}),
+    ...(vectorUnavailable !== undefined ? { degraded: { vector: vectorUnavailable } } : {}),
     ...finishTimings(timings, recallStart),
   }
 }

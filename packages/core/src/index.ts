@@ -91,7 +91,9 @@ export {
   PAYLOAD_HEADER_LINES,
   PAYLOAD_SECTION_HEADERS,
   PAYLOAD_SECTION_ORDER,
+  vectorUnavailableNotice,
 } from './retrieval/output-policy.js'
+export { embedFailureReason } from './retrieval/embed-failure.js'
 export type {
   AssembledPayload,
   PayloadItem,
