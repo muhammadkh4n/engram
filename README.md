@@ -377,7 +377,7 @@ const memory = createMemory({
 
 Best for: Multi-agent systems, persistent storage, scaling. Works against hosted Supabase, self-hosted Postgres + PostgREST in Docker, or any PostgREST-compatible endpoint.
 
-**Self-host bootstrap**: apply `packages/postgrest/schema.sql` once with `psql -U postgres -d engram -f schema.sql` — idempotent, re-runnable, creates all tables + functions + RLS policies from scratch.
+**Self-host bootstrap**: apply `packages/postgrest/schema.sql` once with `psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f schema.sql` (stops at the first error and rolls back) — idempotent, re-runnable, creates all tables + functions + RLS policies from scratch.
 
 ## OpenClaw Plugin
 

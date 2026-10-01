@@ -110,3 +110,13 @@ describe('pgvector version guard', () => {
     expect(schema.slice(guard, firstIterative)).toMatch(/RAISE EXCEPTION 'pgvector % is installed; engram requires pgvector >= 0\.8\.0\. Run ALTER EXTENSION vector UPDATE/)
   })
 })
+
+describe('schema.sql is plain SQL', () => {
+  it('holds no psql meta-commands, so any psql client and SQL editors can run it', () => {
+    const metaLines = schema
+      .split('\n')
+      .map((line, i) => ({ line, n: i + 1 }))
+      .filter(({ line }) => line.startsWith('\\'))
+    expect(metaLines).toEqual([])
+  })
+})

@@ -2,7 +2,11 @@
 -- Engram — Self-host PostgreSQL schema (idempotent)
 -- =============================================================================
 --
--- Apply via:   psql -U postgres -d engram -f schema.sql
+-- Apply via:   psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f schema.sql
+--
+-- The file must contain no psql meta-commands (backslash lines such as
+-- pg_dump's \restrict / \unrestrict), so that any psql client version and
+-- SQL editors such as Supabase's can run it as plain SQL.
 --
 -- This file is the canonical schema source of truth for self-host installs.
 -- It is GENERATED from a production dump (post-v0.4.0 rebrand) and made
@@ -31,7 +35,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict tlEVnt8kGKkgOUYZKAXb1KawcsGvDr4beUlVChILStbye6OdwQxAhSvtcrV7MdF
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 17.10 (Debian 17.10-1.pgdg12+1)
@@ -1334,5 +1337,4 @@ $smoke$;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tlEVnt8kGKkgOUYZKAXb1KawcsGvDr4beUlVChILStbye6OdwQxAhSvtcrV7MdF
 

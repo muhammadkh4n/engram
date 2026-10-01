@@ -352,7 +352,7 @@ Useful for agents with specific storage requirements.
 To use Supabase instead of SQLite:
 
 1. Create a Supabase project
-2. Apply the schema once via `psql -U postgres -d engram -f node_modules/@engram-mem/postgrest/schema.sql`
+2. Apply the schema once via `psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f node_modules/@engram-mem/postgrest/schema.sql`
 3. Modify plugin to use supabaseAdapter:
 
 Edit the plugin source (advanced):

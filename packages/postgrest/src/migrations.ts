@@ -9,7 +9,7 @@
 //
 // Apply directly with psql:
 //
-//     psql -U postgres -d engram -f packages/postgrest/schema.sql
+//     psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f packages/postgrest/schema.sql
 //
 // Or read it programmatically via `getSchemaSQL()` and ship the SQL to a
 // remote database however your runtime prefers.
