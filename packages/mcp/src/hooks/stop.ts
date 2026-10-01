@@ -26,10 +26,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { openSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensurePrivateDir, openPrivateFile } from '../ingest/private-files.js'
 
 const thisFile = fileURLToPath(import.meta.url)
 const thisDir = dirname(thisFile)
@@ -83,12 +83,11 @@ async function main(): Promise<void> {
   }
 
   // Append-log the child's output to ~/.engram/hook.log for audit
-  const logPath = join(homedir(), '.engram', 'hook.log')
+  const dir = join(homedir(), '.engram')
   let logFd: number
   try {
-    const { mkdirSync } = await import('node:fs')
-    mkdirSync(join(homedir(), '.engram'), { recursive: true })
-    logFd = openSync(logPath, 'a')
+    ensurePrivateDir(dir)
+    logFd = openPrivateFile(join(dir, 'hook.log'), 'a')
   } catch {
     logFd = -1
   }

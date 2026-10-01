@@ -31,6 +31,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensurePrivateDir } from './ingest/private-files.js'
 
 const thisFile = fileURLToPath(import.meta.url)
 const thisDir = dirname(thisFile)
@@ -198,6 +199,7 @@ function cmdInstall(): void {
     )
   }
 
+  ensurePrivateDir(ENGRAM_DIR)
   mkdirSync(SHELL_SCRIPT_DIR, { recursive: true })
   const script = buildPreexecScript(INGEST_CLI, ENV_FILE, LOG_FILE)
   writeFileSync(PREEXEC_SCRIPT_PATH, script, 'utf-8')

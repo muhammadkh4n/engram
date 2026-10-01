@@ -19,12 +19,13 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, openSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CLAIM_STALE_MS, DERIVE_TIMEOUT_MS, engramDir, type CaptureEnv } from './ingest/capture-client.js'
 import { isEntryPoint } from './ingest/entry-point.js'
+import { ensurePrivateDir, openPrivateFile } from './ingest/private-files.js'
 import { resolveProject } from './ingest/project-detect.js'
 import { sendTranscriptCapture } from './ingest/transcript-capture.js'
 import { readTranscriptExcerpt, type TranscriptExcerpt } from './ingest/transcript-excerpt.js'
@@ -95,8 +96,8 @@ export function spawnSummaryWorker(
   let logFd = -1
   try {
     const dir = engramDir(env)
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    logFd = openSync(join(dir, 'hook.log'), 'a', 0o600)
+    ensurePrivateDir(dir)
+    logFd = openPrivateFile(join(dir, 'hook.log'), 'a')
   } catch {
     // Without a log the worker still runs; its output is discarded.
   }

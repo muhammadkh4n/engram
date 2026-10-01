@@ -28,6 +28,7 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensurePrivateDir } from './ingest/private-files.js'
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -195,6 +196,7 @@ function cmdInstall(dryRun: boolean): void {
   }
 
   // 1. Create hook directory
+  ensurePrivateDir(ENGRAM_DIR)
   mkdirSync(HOOK_DIR, { recursive: true })
 
   // 2. Write hook script

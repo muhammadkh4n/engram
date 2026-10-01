@@ -584,7 +584,6 @@ describe('OpenAISummarizer.extractSalience failures', () => {
   it.each([
     ['unparseable text', 'not json at all'],
     ['fenced prose with no JSON', '```\nI think this should be stored.\n```'],
-    ['an empty reply', ''],
     ['a JSON array', '[true]'],
     ['an object without a store verdict', '{"category":"noise"}'],
   ])('throws a parse error on %s', async (_label, reply) => {
@@ -594,6 +593,23 @@ describe('OpenAISummarizer.extractSalience failures', () => {
     await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow(/extractSalience: .*classifier output/)
     mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
     await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toBeInstanceOf(UnclassifiableReplyError)
+  })
+
+  it.each([
+    ['an empty string', { choices: [{ message: { content: '' } }] }],
+    ['only whitespace', { choices: [{ message: { content: '  \n\t ' } }] }],
+    ['null content', { choices: [{ message: { content: null } }] }],
+    ['no choices', { choices: [] }],
+    ['a length stop with no visible content', { choices: [{ finish_reason: 'length', message: { content: '' } }] }],
+  ])('treats a reply with %s as a failed chat call, not an unreadable verdict', async (_label, resp) => {
+    mockChatCreate.mockResolvedValueOnce(resp)
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    const err = await s.extractSalience(TURN, { turnRole: 'user' }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toMatch(/extractSalience: empty classifier reply/)
+    expect(isUnclassifiableReply(err)).toBe(false)
   })
 
   it('keeps a chat API error out of the unreadable-reply class', async () => {

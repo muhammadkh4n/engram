@@ -30,6 +30,7 @@ import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { CaptureOutcome } from './capture.js'
+import { ensurePrivateDir, openPrivateHandle } from './private-files.js'
 
 export type CaptureMetaKey = 'transcriptPath' | 'trigger' | 'cwd' | 'capturedAt'
 
@@ -281,14 +282,14 @@ export async function postCapture(
 }
 
 async function ensureDir(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+  ensurePrivateDir(dir)
 }
 
 /** Opens, writes and closes inside the caller's lock, so no descriptor outlives it. */
 async function appendLines(path: string, lines: readonly unknown[]): Promise<void> {
   if (lines.length === 0) return
   const data = lines.map((l) => `${JSON.stringify(l)}\n`).join('')
-  const handle = await fs.open(path, 'a', 0o600)
+  const handle = await openPrivateHandle(path, 'a')
   try {
     await handle.appendFile(data)
   } finally {
@@ -377,7 +378,12 @@ async function releaseLock(dir: string, token: string): Promise<void> {
 
 async function logEvent(dir: string, line: string): Promise<void> {
   try {
-    await fs.appendFile(join(dir, LOG_FILE), `${line}\n`, { mode: 0o600 })
+    const handle = await openPrivateHandle(join(dir, LOG_FILE), 'a')
+    try {
+      await handle.appendFile(`${line}\n`)
+    } finally {
+      await handle.close()
+    }
   } catch (err) {
     process.stderr.write(`${line} (hook.log unwritable: ${errorMessage(err)})\n`)
   }

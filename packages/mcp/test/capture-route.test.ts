@@ -251,6 +251,21 @@ describe('runCaptureRequest turns', () => {
     expect(h.ingest).not.toHaveBeenCalled()
   })
 
+  it('answers 500 retryable when the classifier returns an empty reply', async () => {
+    const h = makeHarness()
+    const { create, onRejected } = withChatReplies(h, ['   '])
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const res = await runCaptureRequest(h.deps, body())
+
+    expect(create).toHaveBeenCalledOnce()
+    expect(res.status).toBe(500)
+    expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: 'capture failed; retry later' })
+    expect(h.log).toHaveBeenCalledWith(expect.stringContaining('empty classifier reply'))
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
   it('stores the turn when a prose verdict is followed by a valid one', async () => {
     const h = makeHarness()
     const valid = JSON.stringify({ store: true, category: 'decision', confidence: 0.9, distilled: DISTILLED, reason: 'infra' })

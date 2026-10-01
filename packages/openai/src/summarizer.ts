@@ -611,7 +611,16 @@ export class OpenAISummarizer {
         temperature: 0.1,
         response_format: { type: 'json_object' },
       })
-      raw = resp.choices[0]?.message?.content ?? ''
+      const choice = resp.choices[0]
+      raw = choice?.message?.content ?? ''
+      // A 200 with no visible text is a provider glitch or a reasoning model
+      // that spent max_tokens before answering. Unlike an unreadable verdict,
+      // resending the same turn later can succeed, so it fails like the call.
+      if (raw.trim() === '') {
+        throw new Error(
+          `extractSalience: empty classifier reply (finish_reason=${choice?.finish_reason ?? 'none'})`,
+        )
+      }
     } catch (err) {
       process.stderr.write(
         `[openai] extractSalience failed: ${err instanceof Error ? err.message : String(err)}\n`,

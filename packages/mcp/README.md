@@ -137,7 +137,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 - A `key` is only checked against captures in the same session. A capture with a `key` and no `session_id` is stored under session `default` and is not idempotent: only the dedup check can catch a repeat.
 - `pre-compact` derives also return `context`, the text to re-inject, whenever the model produced one, whether the memory was stored, deduped or rejected as `empty_digest`. A `replayed` retry returns no `context`: the digest is not re-run.
 - Classifier failures come in two classes:
-  - The chat call failed (network, 429, 5xx): `500`, `retryable: true`. Send the capture again later. The response message is the generic `capture failed; retry later`; the cause goes to the server log only.
+  - The chat call failed (network, 429, 5xx), or it answered 200 with no visible text (null, empty or whitespace content, as when a reasoning model spends `max_tokens` before replying): `500`, `retryable: true`. Send the capture again later. The response message is the generic `capture failed; retry later`; the cause goes to the server log only.
   - The model answered, but its reply could not be read as a verdict (not JSON, or no boolean `store`). The server asks once more. If the second reply is unreadable too, it answers `422` with `outcome: "error"`, `reason: "unclassifiable"`, `retryable: false`. Resending the same content will not help, so a client dead-letters it instead of retrying.
 - Status: 200 for every other pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 422 unclassifiable (`retryable: false`); 500 any other failure after validation, or a request body that could not be read (`retryable: true`, generic message, detail in the server log); 405 for methods other than POST.
 - The local `engram-ingest` CLI exits 1 on an unclassifiable turn, as on any other failure. It needs `OPENAI_API_KEY` whenever it calls a model or the store; `--raw --dry-run` calls neither and needs no credentials.
@@ -150,14 +150,14 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 
 - `ENGRAM_SERVER_URL` — the server's MCP endpoint, e.g. `http://host:3850/mcp`, shared with the MCP client config. A trailing `/mcp` (or `/capture`) path segment is replaced by `/capture`; any other URL gets `/capture` appended.
 - `ENGRAM_SERVER_TOKEN_FILE` — file holding the bearer token (trimmed; `~/` expands). Wins over `ENGRAM_SERVER_TOKEN`, the token inline. One of the two is required.
-- Request timeouts: 60 s for a turn, 180 s for a derive capture. The server keeps working after a client gives up and the key has no unique constraint, so a shorter timeout followed by a retry could store twice.
+- Request timeouts: 60 s for a turn, 180 s for a derive capture. The server keeps working after a client gives up and the key has no unique constraint, so a shorter timeout followed by a retry could store twice. The one exception is pre-compact, which uses 25 s because its hook blocks compaction until it returns: on a timeout it spools the capture, and the pre-compact dedup (cosine 0.62 over 30 days) absorbs a digest re-sent while the first request was still running.
 - A capture carries a `key` only when it also carries a `session_id`, so a rerun of the same hook on the same input returns `replayed`. Without a session id (ad-hoc `engram-ingest`, a hook input with no `session_id`) the client sends neither, and the server's dedup check is the only repeat guard.
 - Outcome classes: a 2xx with a pipeline outcome is sent; 400/413/422 or `retryable: false` is dead-lettered; network errors, timeouts, 5xx, 401/403 and 404/405 are spooled (a wrong URL or token is fixed on the client, and the captures wait for it).
 - `engram-ingest` exits 0 when the capture was sent or spooled, 1 when it was dead-lettered, 2 on conflicting flags.
 
 **Local mode** — `ENGRAM_SERVER_URL` is unset. The same pipeline (`runCapture`) runs in-process against this machine's store and model credentials (`SUPABASE_URL`, `SUPABASE_KEY`, `OPENAI_API_KEY`, optional `NEO4J_*`, `ENGRAM_SALIENCE_THRESHOLD`). Model and store clients load only in this mode. There is no spool: a failure is logged and the capture is lost.
 
-**Files in `~/.engram/`** (server mode; all mode `0600`):
+**Files in `~/.engram/`** (server mode). The directory is mode `0700` and every file the hooks and ingest CLIs write there (these, `hook.log` in either mode, `rejected.jsonl` in local mode) is `0600`. A mode only applies when a file is created, so each writer also clears group and other bits it finds on the directory or on the file it opens, which tightens files an earlier version created under the process umask.
 
 | File | Contents |
 |---|---|
