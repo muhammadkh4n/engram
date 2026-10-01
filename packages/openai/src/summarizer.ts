@@ -200,6 +200,16 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
 /** Chat model used when none is configured. */
 export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini'
 
+/**
+ * Docs scored per rerank call. At least the largest slate the recall engine
+ * sends (30 fused candidates plus a 15-row lexical reserve): a doc past the
+ * cap gets no score and ranks after every scored one.
+ */
+const RERANK_MAX_CANDIDATES = 50
+/** Reply budget per scored doc; a truncated scores array zeroes the tail. */
+const RERANK_REPLY_TOKENS_PER_DOC = 16
+const RERANK_MIN_REPLY_TOKENS = 400
+
 export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
 
 const SESSION_SUMMARY_SYSTEM_PROMPT = `You summarize Claude Code work sessions. Extract ONLY:
@@ -782,8 +792,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
     if (documents.length === 0) return []
     if (documents.length === 1) return [{ id: documents[0]!.id, score: 1.0 }]
 
-    // Cap at 25 candidates — beyond that, diminishing returns
-    const candidates = documents.slice(0, 25)
+    const candidates = documents.slice(0, RERANK_MAX_CANDIDATES)
 
     const docList = candidates
       .map((d, i) => `[${i}] ${d.content.slice(0, 300)}`)
@@ -813,7 +822,7 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
             content: `Query: "${query}"\n\nDocuments:\n${docList}`,
           },
         ],
-        max_tokens: 400,
+        max_tokens: Math.max(RERANK_MIN_REPLY_TOKENS, RERANK_REPLY_TOKENS_PER_DOC * candidates.length),
         temperature: 0,
         response_format: { type: 'json_object' },
       })

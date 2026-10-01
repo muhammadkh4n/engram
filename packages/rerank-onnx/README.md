@@ -63,7 +63,7 @@ createOnnxReranker({
   model: 'Alibaba-NLP/gte-reranker-modernbert-base', // or mixedbread-ai/mxbai-rerank-{large,base,xsmall}-v1
   dtype: 'q8',        // 'fp32' | 'fp16' | 'q8' | 'q4'
   batchSize: 8,       // pairs per forward pass
-  maxCandidates: 25,  // cap on docs reranked per call
+  maxCandidates: 50,  // cap on docs reranked per call; docs past it get no score
   maxLength: 512,     // max tokens per pair
   maxDocChars: 1200,  // chars per doc before tokenization
 })
@@ -78,7 +78,7 @@ createOnnxReranker({
 | `mixedbread-ai/mxbai-rerank-base-v1`                     | 184M   | Good | faster than large | lower |
 | `mixedbread-ai/mxbai-rerank-xsmall-v1`                   | 70M    | Decent | fastest mxbai | lowest |
 
-Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on the production CPU host; the mxbai base/xsmall rows were not measured there.
+Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on the production CPU host, with up to 25 docs per call; the mxbai base/xsmall rows were not measured there. The default `maxCandidates` is now 50, so that the largest slate recall sends (30 fused candidates plus a 15-row lexical reserve) is scored in full. Rerank time grows with the number of docs, so a full 45-doc slate takes longer than the p50 above.
 
 **Score scale:** each model's sigmoid output sits on its own scale (on the same recalls, 69.7% of gte scores are ≥ 0.5 vs 6.4% for large-v1). Scores only order candidates within one model; nothing may gate on an absolute rerank score.
 

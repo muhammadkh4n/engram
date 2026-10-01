@@ -185,50 +185,57 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       byType.set(type, list)
     }
 
-    const results: TypedMemory[] = []
+    const found = new Map<string, TypedMemory>()
+    const keep = (m: TypedMemory) => found.set(`${m.type}:${m.data.id}`, m)
 
-    const episodeIds = byType.get('episode')
-    if (episodeIds && episodeIds.length > 0) {
-      const episodes = await this._episodes!.getByIds(episodeIds)
-      for (const ep of episodes) results.push({ type: 'episode', data: ep })
+    for (const batch of idBatches(byType.get('episode'))) {
+      const episodes = await this._episodes!.getByIds(batch)
+      for (const ep of episodes) keep({ type: 'episode', data: ep })
     }
 
-    const digestIds = byType.get('digest')
-    if (digestIds && digestIds.length > 0) {
+    for (const batch of idBatches(byType.get('digest'))) {
       const { data, error } = await this.client
         .from('memory_digests')
         .select('*')
-        .in('id', digestIds)
+        .in('id', batch)
       if (error) throw new Error(`getByIds digest failed: ${error.message}`)
       for (const row of (data ?? []) as DigestRow[]) {
-        results.push({ type: 'digest', data: rowToDigest(row) })
+        keep({ type: 'digest', data: rowToDigest(row) })
       }
     }
 
-    const semanticIds = byType.get('semantic')
-    if (semanticIds && semanticIds.length > 0) {
+    for (const batch of idBatches(byType.get('semantic'))) {
       const { data, error } = await this.client
         .from('memory_semantic')
         .select('*')
-        .in('id', semanticIds)
+        .in('id', batch)
       if (error) throw new Error(`getByIds semantic failed: ${error.message}`)
       for (const row of (data ?? []) as SemanticRow[]) {
-        results.push({ type: 'semantic', data: rowToSemantic(row) })
+        keep({ type: 'semantic', data: rowToSemantic(row) })
       }
     }
 
-    const proceduralIds = byType.get('procedural')
-    if (proceduralIds && proceduralIds.length > 0) {
+    for (const batch of idBatches(byType.get('procedural'))) {
       const { data, error } = await this.client
         .from('memory_procedural')
         .select('*')
-        .in('id', proceduralIds)
+        .in('id', batch)
       if (error) throw new Error(`getByIds procedural failed: ${error.message}`)
       for (const row of (data ?? []) as ProceduralRow[]) {
-        results.push({ type: 'procedural', data: rowToProcedural(row) })
+        keep({ type: 'procedural', data: rowToProcedural(row) })
       }
     }
 
+    // An `in` filter returns rows in no particular order; callers get them
+    // back in the order they asked for, one per id.
+    const results: TypedMemory[] = []
+    for (const { id, type } of ids) {
+      const key = `${type}:${id}`
+      const m = found.get(key)
+      if (!m) continue
+      results.push(m)
+      found.delete(key)
+    }
     return results
   }
 
@@ -487,6 +494,19 @@ interface PgScanRow {
 }
 
 // ---------------------------------------------------------------------------
+// An `in` filter puts every id in the request URL (36 chars plus separator
+// each); 50 per request keeps the request line under common proxy limits.
+const GET_BY_IDS_BATCH_SIZE = 50
+
+function idBatches(ids: readonly string[] | undefined): string[][] {
+  const batches: string[][] = []
+  if (!ids) return batches
+  for (let i = 0; i < ids.length; i += GET_BY_IDS_BATCH_SIZE) {
+    batches.push(ids.slice(i, i + GET_BY_IDS_BATCH_SIZE))
+  }
+  return batches
+}
+
 // Inline row mappers for getById/getByIds (avoids cross-importing sub-stores)
 // ---------------------------------------------------------------------------
 

@@ -676,21 +676,31 @@ export async function recall(
       const scoreMap = new Map(reranked.map(r => [r.id, r.score]))
       const rerankWeight = signals.multiHop || signals.temporal ? 0.85 : 0.7
       const originalWeight = 1 - rerankWeight
-      memories = memories.map(m => {
+      // A reranker may return no score for some docs (an adapter cap, a
+      // dropped row). A blended score and a raw fused score are on different
+      // scales, so unscored candidates are never compared with scored ones:
+      // they follow every scored candidate, ordered by fused relevance.
+      let scored: RetrievedMemory[] = []
+      const unscored: RetrievedMemory[] = []
+      for (const m of memories) {
         const rerankScore = scoreMap.get(m.id)
-        if (rerankScore === undefined) return m
+        if (rerankScore === undefined) {
+          unscored.push(m)
+          continue
+        }
         const blended = rerankScore * rerankWeight + m.relevance * originalWeight
-        return { ...m, relevance: blended }
-      })
+        scored.push({ ...m, relevance: blended })
+      }
       // Re-apply the project boost to the BLENDED scores before truncation:
       // the pre-rerank boost survives the blend only as boost * originalWeight,
       // which lets a semantically similar cross-project candidate outrank a
-      // same-project one and take its slot in the cut below.
+      // same-project one and take its slot in the cut below. Unscored
+      // candidates keep their fused score, which already carries the boost.
       if (ranking) {
-        memories = applyProjectRanking(memories, ranking)
+        scored = applyProjectRanking(scored, ranking)
       }
-      memories = memories
-        .sort((a, b) => b.relevance - a.relevance)
+      const byRelevance = (a: RetrievedMemory, b: RetrievedMemory) => b.relevance - a.relevance
+      memories = [...scored.sort(byRelevance), ...unscored.sort(byRelevance)]
         .slice(0, strategy.maxResults)
     } catch (err) {
       // Non-fatal: use original ranking

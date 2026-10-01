@@ -110,13 +110,31 @@ function buildStorage(fx: Fixture, extra: Episode[] = []) {
   return storage
 }
 
+// The shipped rerank adapters score at most this many docs per call and drop
+// the rest; the stub below has the same shape.
+const ADAPTER_RERANK_CAP = 50
+
 function rerankSpy() {
   const received: Array<{ id: string; content: string }> = []
+  const scored = new Set<string>()
   const rerank = vi.fn(async (_query: string, docs: ReadonlyArray<{ id: string; content: string }>) => {
     received.push(...docs)
-    return docs.map((d) => ({ id: d.id, score: d.content.includes(KEY) ? 0.9 : 0.8 }))
+    const candidates = docs.slice(0, ADAPTER_RERANK_CAP)
+    for (const d of candidates) scored.add(d.id)
+    return candidates.map((d) => ({ id: d.id, score: d.content.includes(KEY) ? 0.9 : 0.8 }))
   })
-  return { rerank, received }
+  return { rerank, received, scored }
+}
+
+/** A reranker that scores only the first `count` docs, every one with `score`. */
+function partialRerank(count: number, score: number) {
+  const scored = new Set<string>()
+  const rerank = vi.fn(async (_query: string, docs: ReadonlyArray<{ id: string; content: string }>) => {
+    const candidates = docs.slice(0, count)
+    for (const d of candidates) scored.add(d.id)
+    return candidates.map((d) => ({ id: d.id, score }))
+  })
+  return { rerank, scored }
 }
 
 const isKeyed = (content: string) => content.includes(KEY)
@@ -238,6 +256,30 @@ describe('lexical-only candidates and the reranker', () => {
     expect(received).toHaveLength(MAX_RESULTS + RESERVE_ADDED)
     expect(new Set(received.map((d) => d.id)).size).toBe(received.length)
     expect(received.filter((d) => isKeyed(d.content))).toHaveLength(KEYED_COUNT)
+  })
+
+  it('a capped reranker scores every key-bearing row in the slate', async () => {
+    const { rerank, received, scored } = rerankSpy()
+    await runRecall({ rerank } as IntelligenceAdapter)
+    const keyedIds = received.filter((d) => isKeyed(d.content)).map((d) => d.id)
+    expect(keyedIds).toHaveLength(KEYED_COUNT)
+    expect(keyedIds.filter((id) => !scored.has(id))).toEqual([])
+    expect(scored.size).toBe(received.length)
+  })
+
+  it('a candidate the reranker left unscored ranks below every scored one, by fused relevance', async () => {
+    // Score 0 blends every scored row down to 0.3 x its fused relevance, so an
+    // unscored row compared on its raw fused score would outrank all of them.
+    const scoredCount = 25
+    const { rerank, scored } = partialRerank(scoredCount, 0)
+    const result = await runRecall({ rerank } as IntelligenceAdapter)
+    expect(rerank).toHaveBeenCalledTimes(1)
+    const ids = result.memories.map((m) => m.id)
+    expect(ids).toHaveLength(MAX_RESULTS)
+    expect(ids.slice(0, scoredCount).every((id) => scored.has(id))).toBe(true)
+    expect(ids.slice(scoredCount).some((id) => scored.has(id))).toBe(false)
+    const tail = result.memories.slice(scoredCount).map((m) => m.relevance)
+    expect(tail).toEqual([...tail].sort((a, b) => b - a))
   })
 
   it('after the rerank blend every key-bearing row ranks above every neighbour', async () => {
