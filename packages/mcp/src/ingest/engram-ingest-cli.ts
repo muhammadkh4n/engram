@@ -54,10 +54,10 @@
  * Both: ENGRAM_SALIENCE_DISABLED=1 exits without capturing.
  */
 
-import { readFileSync, realpathSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { CAPTURE_CONTENT_MAX_CHARS } from '../capture-route.js'
 import type { CaptureInput, CaptureOutcome } from './capture.js'
+import { isEntryPoint } from './entry-point.js'
 import {
   CLAIM_STALE_MS,
   TURN_TIMEOUT_MS,
@@ -340,12 +340,15 @@ async function runServerMode(
     content,
     source: args.source,
     role: args.turn,
-    ...(args.sessionId ? { session_id: args.sessionId } : {}),
     project_id: project,
     gate: !args.raw,
     dedup: !args.noDedup,
     dry_run: args.dryRun,
-    key: captureKey(args.source, args.sessionId, resolved.uuid ?? content),
+    // The server checks a key only within its session; without a session id
+    // a key would promise idempotency it cannot give, so dedup is the guard.
+    ...(args.sessionId
+      ? { session_id: args.sessionId, key: captureKey(args.source, args.sessionId, resolved.uuid ?? content) }
+      : {}),
     meta: { capturedAt: new Date().toISOString() },
   }
 
@@ -446,17 +449,7 @@ export async function runIngestCli(argv: readonly string[], env: CaptureEnv = pr
   }
 }
 
-function isEntryPoint(): boolean {
-  const entry = process.argv[1]
-  if (!entry) return false
-  try {
-    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
-  } catch {
-    return false
-  }
-}
-
-if (isEntryPoint()) {
+if (isEntryPoint(import.meta.url)) {
   // Hard timeout in case something upstream wedges (network, store, graph).
   // Exit cleanly so the spawning hook doesn't hold resources. Server mode
   // outlasts its own post plus the spool flush, so a flush is never cut off

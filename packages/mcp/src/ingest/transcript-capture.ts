@@ -130,7 +130,7 @@ export function appendHookLog(env: CaptureEnv, line: string): void {
   try {
     const dir = engramDir(env)
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    appendFileSync(join(dir, 'hook.log'), `${line}\n`)
+    appendFileSync(join(dir, 'hook.log'), `${line}\n`, { mode: 0o600 })
   } catch {
     // The line was already written to stderr.
   }

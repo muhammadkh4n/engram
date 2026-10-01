@@ -151,7 +151,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 - `ENGRAM_SERVER_URL` — the server's MCP endpoint, e.g. `http://host:3850/mcp`, shared with the MCP client config. A trailing `/mcp` (or `/capture`) path segment is replaced by `/capture`; any other URL gets `/capture` appended.
 - `ENGRAM_SERVER_TOKEN_FILE` — file holding the bearer token (trimmed; `~/` expands). Wins over `ENGRAM_SERVER_TOKEN`, the token inline. One of the two is required.
 - Request timeouts: 60 s for a turn, 180 s for a derive capture. The server keeps working after a client gives up and the key has no unique constraint, so a shorter timeout followed by a retry could store twice.
-- Every keyed capture carries a `session_id`, so a rerun of the same hook on the same input returns `replayed`.
+- A capture carries a `key` only when it also carries a `session_id`, so a rerun of the same hook on the same input returns `replayed`. Without a session id (ad-hoc `engram-ingest`, a hook input with no `session_id`) the client sends neither, and the server's dedup check is the only repeat guard.
 - Outcome classes: a 2xx with a pipeline outcome is sent; 400/413/422 or `retryable: false` is dead-lettered; network errors, timeouts, 5xx, 401/403 and 404/405 are spooled (a wrong URL or token is fixed on the client, and the captures wait for it).
 - `engram-ingest` exits 0 when the capture was sent or spooled, 1 when it was dead-lettered, 2 on conflicting flags.
 

@@ -169,7 +169,7 @@ describe('engram-ingest server mode', () => {
     expect(second['key']).toBe(first['key'])
   })
 
-  it('keys inline content by its text and cuts it to the route limit', async () => {
+  it('sends no key without a session id and cuts content to the route limit', async () => {
     const long = 'x'.repeat(100_050)
 
     expect(await ingest(['--content', long, '--source', 'cli'])).toBe(0)
@@ -177,8 +177,18 @@ describe('engram-ingest server mode', () => {
 
     const [cut, short] = stub.received as [Record<string, unknown>, Record<string, unknown>]
     expect((cut['content'] as string).length).toBe(100_000)
-    expect(cut['session_id']).toBeUndefined()
-    expect(short['key']).toBe(createHash('sha256').update(JSON.stringify(['cli', '', ASSISTANT_TURN])).digest('hex'))
+    expect(cut).not.toHaveProperty('session_id')
+    expect(cut).not.toHaveProperty('key')
+    expect(short).not.toHaveProperty('session_id')
+    expect(short).not.toHaveProperty('key')
+  })
+
+  it('keys inline content by its text when a session id is given', async () => {
+    expect(await ingest(['--content', ASSISTANT_TURN, '--source', 'cli', '--session-id', SESSION])).toBe(0)
+
+    const [sent] = stub.received as [Record<string, unknown>]
+    expect(sent['session_id']).toBe(SESSION)
+    expect(sent['key']).toBe(createHash('sha256').update(JSON.stringify(['cli', SESSION, ASSISTANT_TURN])).digest('hex'))
   })
 
   it('writes one rejection-log entry with the server verdict for a rejected capture', async () => {
@@ -220,6 +230,18 @@ describe('engram-ingest server mode', () => {
 
     expect(stub.received[0]).toMatchObject({ gate: false, dedup: false, dry_run: true })
     expect(rejectionLines()).toHaveLength(0)
+  })
+
+  it('logs a gated dry-run rejection as local mode does', async () => {
+    stub.reply = {
+      status: 200,
+      body: { outcome: 'rejected', model: MODEL, category: 'noise', confidence: 0.1, reason: 'routine status update' },
+    }
+
+    expect(await ingest(['--content', ASSISTANT_TURN, '--source', 'cli', '--dry-run'])).toBe(0)
+
+    expect(stub.received[0]).toMatchObject({ gate: true, dry_run: true })
+    expect(rejectionLines()).toHaveLength(1)
   })
 
   it('spools the capture and exits 0 when the server is down', async () => {

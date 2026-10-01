@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vites
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -289,7 +289,9 @@ describe('pre-compact in server mode', () => {
     expect(stdout).toEqual([
       JSON.stringify({ additionalContext: '[Engram Memory — preserved before compaction]\nMoving consolidation off the backup window.' }),
     ])
-    expect(readFileSync(join(h.home, '.engram', 'hook.log'), 'utf8')).toContain('[engram-compact] mode=server')
+    const hookLog = join(h.home, '.engram', 'hook.log')
+    expect(readFileSync(hookLog, 'utf8')).toContain('[engram-compact] mode=server')
+    expect(statSync(hookLog).mode & 0o777).toBe(0o600)
   })
 
   it('prints nothing when the server returns no context', async () => {
@@ -345,6 +347,7 @@ describe('session-summary hook process', () => {
         () => expect(readFileSync(hookLog, 'utf8')).toContain('[engram-summary] mode=server source=claude-code outcome=stored'),
         { timeout: 10_000, interval: 100 },
       )
+      expect(statSync(hookLog).mode & 0o777).toBe(0o600)
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

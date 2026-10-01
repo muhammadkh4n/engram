@@ -96,7 +96,7 @@ export function spawnSummaryWorker(
   try {
     const dir = engramDir(env)
     mkdirSync(dir, { recursive: true, mode: 0o700 })
-    logFd = openSync(join(dir, 'hook.log'), 'a')
+    logFd = openSync(join(dir, 'hook.log'), 'a', 0o600)
   } catch {
     // Without a log the worker still runs; its output is discarded.
   }
