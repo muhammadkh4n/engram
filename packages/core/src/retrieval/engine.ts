@@ -5,6 +5,14 @@ import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { AssociationManager } from '../systems/association-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
+import {
+  assemble,
+  emptyRecallPayload,
+  resolveRecallOutputPolicy,
+  type RecallPayload,
+  type RenderedItem,
+  type RenderedPayload,
+} from './output-policy.js'
 import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
@@ -73,8 +81,11 @@ export interface RecallResult {
   timings?: Record<string, number>
   /** Low-activation graph neighbours rendered under "Faint Associations" in
    *  `formatted`. Present only when spreading activation produced at least
-   *  one; they are not part of `associations`. */
+   *  one and the faint section is on; they are not part of `associations`. */
   faintAssociations?: RetrievedMemory[]
+  /** What `formatted` emitted under the output policy and where each item
+   *  sits in it. `memories` and `associations` stay the full ranked lists. */
+  payload: RecallPayload
 }
 
 export interface RecallOpts {
@@ -82,6 +93,10 @@ export interface RecallOpts {
   embedding: number[]
   intelligence?: IntelligenceAdapter
   sessionId?: string
+  /**
+   * Cap on the payload's estimated tokens, headers included. Overrides
+   * ENGRAM_RECALL_TOKEN_BUDGET. Must be a positive integer.
+   */
   tokenBudget?: number
   /**
    * Optional Neo4j graph. When null or omitted, spreading activation is
@@ -197,80 +212,46 @@ function formatTag(m: RetrievedMemory): string {
   return tagParts.join(' · ')
 }
 
-function formatMemories(
+/**
+ * Render each payload section's item lines. Nothing is rendered when the
+ * recall returned no memories and no associations: graph context alone is not
+ * a payload.
+ */
+export function renderRecallPayload(
   memories: RetrievedMemory[],
   associations: RetrievedMemory[],
   context: CompositeMemory | null = null,
   communitySummaries: string[] = [],
-): string {
-  if (memories.length === 0 && associations.length === 0) return ''
-
-  const lines: string[] = [
-    '## Engram — Recalled Conversation Memory',
-    '',
-    'IMPORTANT: The following are memories retrieved from past conversations. If the answer to the user\'s question is found below, USE IT directly. Do not say "I don\'t have this information" if it appears here.',
-    'Context tags (type, role, device, date) are for your reference — do not include them in responses unless the user asks about when/where/who.',
-    '',
-  ]
-
-  if (memories.length > 0) {
-    lines.push('### Recalled Memories\n')
-    for (const m of memories) {
-      lines.push(`- [${formatTag(m)}] ${m.content}`)
-    }
+): RenderedPayload {
+  if (memories.length === 0 && associations.length === 0) {
+    return { recalled: [], related: [], domain: [], context: [], faint: [] }
   }
 
-  if (associations.length > 0) {
-    lines.push('\n### Related Memories\n')
-    for (const a of associations) {
-      lines.push(`- [${formatTag(a)}] ${a.content}`)
-    }
-  }
+  const memoryItem = (m: RetrievedMemory): RenderedItem => ({ text: `- [${formatTag(m)}] ${m.content}`, id: m.id })
 
-  // --- Wave 5: Community domain context ---
-  if (communitySummaries.length > 0) {
-    lines.push('\n### Knowledge Domain Context\n')
-    for (const summary of communitySummaries) {
-      lines.push(`- ${summary}`)
-    }
-  }
-
-  // --- Wave 2: Graph context section ---
-  // Only present when Neo4j spreading activation ran. Backward compatible:
-  // when context is null, these sections are omitted entirely.
+  // Present only when Neo4j spreading activation ran.
+  const contextLines: RenderedItem[] = []
   if (context !== null) {
-    const hasContextLines =
-      context.speakers.length > 0 ||
-      context.emotionalContext.length > 0 ||
-      context.relatedTopics.length > 0 ||
-      context.temporalContext.length > 0
-
-    if (hasContextLines) {
-      lines.push('\n### Context\n')
-      if (context.speakers.length > 0) {
-        lines.push(`- Speakers: ${context.speakers.map((s) => s.name).join(', ')}`)
-      }
-      if (context.emotionalContext.length > 0) {
-        lines.push(`- Tone: ${context.emotionalContext.map((e) => e.label).join(', ')}`)
-      }
-      if (context.relatedTopics.length > 0) {
-        lines.push(`- Related topics: ${context.relatedTopics.join(', ')}`)
-      }
-      if (context.temporalContext.length > 0) {
-        const tc = context.temporalContext[0]
-        if (tc) lines.push(`- Time: ${tc.timeOfDay}, ${tc.session}`)
-      }
+    if (context.speakers.length > 0) {
+      contextLines.push({ text: `- Speakers: ${context.speakers.map((s) => s.name).join(', ')}` })
     }
-
-    if (context.faintAssociations.length > 0) {
-      lines.push('\n### Faint Associations\n')
-      for (const f of context.faintAssociations) {
-        lines.push(`- [${formatTag(f)}] ${f.content}`)
-      }
+    if (context.emotionalContext.length > 0) {
+      contextLines.push({ text: `- Tone: ${context.emotionalContext.map((e) => e.label).join(', ')}` })
     }
+    if (context.relatedTopics.length > 0) {
+      contextLines.push({ text: `- Related topics: ${context.relatedTopics.join(', ')}` })
+    }
+    const tc = context.temporalContext[0]
+    if (tc) contextLines.push({ text: `- Time: ${tc.timeOfDay}, ${tc.session}` })
   }
 
-  return lines.join('\n')
+  return {
+    recalled: memories.map(memoryItem),
+    related: associations.map(memoryItem),
+    domain: communitySummaries.map((summary) => ({ text: `- ${summary}` })),
+    context: contextLines,
+    faint: context === null ? [] : context.faintAssociations.map(memoryItem),
+  }
 }
 
 /**
@@ -427,6 +408,9 @@ export async function recall(
   // Read per call so the flag can be flipped without a restart.
   const timings: StageTimings = process.env['ENGRAM_RECALL_TIMING'] === '1' ? {} : null
   const recallStart = stageStart(timings)
+  // Read per call so a harness can switch the policy between recalls; a bad
+  // value fails here, before any search work.
+  const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -437,6 +421,7 @@ export async function recall(
       primed: [],
       estimatedTokens: 0,
       formatted: '',
+      payload: emptyRecallPayload(),
       ...finishTimings(timings, recallStart),
     }
   }
@@ -815,7 +800,12 @@ export async function recall(
 
   // Format results (includes Context section when graph ran successfully)
   const formatStart = stageStart(timings)
-  let formatted = formatMemories(memories, associations, compositeContext, communitySummaries)
+  const assembled = assemble(
+    renderRecallPayload(memories, associations, compositeContext, communitySummaries),
+    outputPolicy,
+  )
+  // Synthesis follows the payload and sits outside the budget.
+  let formatted = assembled.text
   if (synthesis) {
     formatted = formatted.length > 0 ? `${formatted}\n\n${synthesis.text}` : synthesis.text
   }
@@ -831,7 +821,8 @@ export async function recall(
     formatted,
     sessions,
     synthesis,
-    ...(compositeContext !== null && compositeContext.faintAssociations.length > 0
+    payload: assembled.payload,
+    ...(outputPolicy.faint && compositeContext !== null && compositeContext.faintAssociations.length > 0
       ? { faintAssociations: compositeContext.faintAssociations }
       : {}),
     ...finishTimings(timings, recallStart),

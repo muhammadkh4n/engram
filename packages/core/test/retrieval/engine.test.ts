@@ -576,3 +576,77 @@ describe('recall engine — ENGRAM_RECALL_TIMING', () => {
     expect(result.timings).toBeUndefined()
   })
 })
+
+describe('recall engine — output policy', () => {
+  const NAMES = ['ENGRAM_RECALL_EMIT_K', 'ENGRAM_RECALL_TOKEN_BUDGET', 'ENGRAM_RECALL_FAINT'] as const
+  const original = Object.fromEntries(NAMES.map((n) => [n, process.env[n]]))
+
+  afterEach(() => {
+    for (const n of NAMES) {
+      if (original[n] === undefined) delete process.env[n]
+      else process.env[n] = original[n]
+    }
+  })
+
+  function expectItemsIndexMemories(result: RecallResult): void {
+    const byId = new Map([...result.memories, ...result.associations].map((m) => [m.id, m]))
+    for (const it of result.payload.items) {
+      const line = result.formatted.slice(it.start, it.end)
+      expect(line.startsWith('- [')).toBe(true)
+      expect(line.endsWith(byId.get(it.id ?? '')?.content ?? '<missing>')).toBe(true)
+    }
+  }
+
+  it('emits every memory and reports the payload with the policy unset', async () => {
+    for (const n of NAMES) delete process.env[n]
+
+    const result = await recall('TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts())
+
+    expect(result.memories.length).toBeGreaterThan(1)
+    expect(result.payload.emittedMemories).toBe(result.memories.length)
+    expect(result.payload.truncated).toBe(false)
+    expect(result.estimatedTokens).toBe(Math.ceil(result.formatted.length / 4))
+    expectItemsIndexMemories(result)
+  })
+
+  it('emits only ENGRAM_RECALL_EMIT_K memories but returns the full ranked list', async () => {
+    process.env['ENGRAM_RECALL_EMIT_K'] = '1'
+
+    const result = await recall('TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts())
+
+    expect(result.memories.length).toBeGreaterThan(1)
+    expect(result.payload.emittedMemories).toBe(1)
+    expect(result.payload.items.map((i) => i.id)).toEqual([result.memories[0]?.id])
+    expect(result.formatted).not.toContain(result.memories[1]?.content)
+    expectItemsIndexMemories(result)
+  })
+
+  it('applies a per-call token budget over the env budget', async () => {
+    process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = '1000000'
+
+    const result = await recall(
+      'TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts({ tokenBudget: 1 }),
+    )
+
+    expect(result.payload.items).toHaveLength(1)
+    expect(result.payload.truncated).toBe(true)
+    expect(result.estimatedTokens).toBe(Math.ceil(result.formatted.length / 4))
+  })
+
+  it('fails before searching when the env policy is invalid', async () => {
+    process.env['ENGRAM_RECALL_EMIT_K'] = 'all'
+    const storage = createMockStorage()
+
+    await expect(recall('TypeScript strict mode', storage, new SensoryBuffer(), makeOpts()))
+      .rejects.toThrow('ENGRAM_RECALL_EMIT_K')
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+  })
+
+  it('returns an empty payload in skip mode', async () => {
+    const result = await recall('hi', createMockStorage(), new SensoryBuffer(), makeOpts({ strategy: RECALL_STRATEGIES.skip }))
+
+    expect(result.payload).toEqual({
+      emittedMemories: 0, emittedAssociations: 0, emittedFaint: 0, truncated: false, items: [],
+    })
+  })
+})

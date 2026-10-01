@@ -1,3 +1,5 @@
+import type { RecallPayload } from './retrieval/output-policy.js'
+
 // === Memory Types ===
 
 export type MemoryType = 'episode' | 'digest' | 'semantic' | 'procedural'
@@ -207,6 +209,9 @@ export interface RecallResult {
   timings?: Record<string, number>
   /** Mirrors retrieval/engine.ts RecallResult.faintAssociations. */
   faintAssociations?: RetrievedMemory[]
+  /** Mirrors retrieval/engine.ts RecallResult.payload. Always set by
+   *  Memory.recall; optional so hand-built results stay valid. */
+  payload?: RecallPayload
 }
 
 /** Memory tiers a forget can tombstone. Digests are derived summaries with no

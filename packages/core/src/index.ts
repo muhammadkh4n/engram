@@ -80,7 +80,26 @@ export {
 } from './resilience/timeout.js'
 export { withRetry } from './resilience/retry.js'
 export type { RetryOptions } from './resilience/retry.js'
-export { recall } from './retrieval/engine.js'
+export { recall, renderRecallPayload } from './retrieval/engine.js'
+export {
+  assemble,
+  emptyRecallPayload,
+  recallOutputPolicyFromEnv,
+  resolveRecallOutputPolicy,
+  DEFAULT_RECALL_OUTPUT_POLICY,
+  PAYLOAD_HEADER_LINES,
+  PAYLOAD_SECTION_HEADERS,
+  PAYLOAD_SECTION_ORDER,
+} from './retrieval/output-policy.js'
+export type {
+  AssembledPayload,
+  PayloadItem,
+  PayloadSection,
+  RecallOutputPolicy,
+  RecallPayload,
+  RenderedItem,
+  RenderedPayload,
+} from './retrieval/output-policy.js'
 export type { RecallOpts } from './retrieval/engine.js'
 export { unifiedSearch } from './retrieval/search.js'
 export { rankSessions } from './retrieval/session-ordering.js'

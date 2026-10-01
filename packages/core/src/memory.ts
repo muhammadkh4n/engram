@@ -707,6 +707,7 @@ export class Memory {
       synthesis: result.synthesis ?? null,
       ...(result.timings ? { timings: result.timings } : {}),
       ...(result.faintAssociations ? { faintAssociations: result.faintAssociations } : {}),
+      payload: result.payload,
     }
   }
 

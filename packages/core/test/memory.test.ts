@@ -399,6 +399,23 @@ describe('Memory — recall()', () => {
     expect(result.memories.length).toBeGreaterThan(0)
   })
 
+  it('passes the emitted payload through with a per-call token budget', async () => {
+    await memory.ingestBatch([
+      { role: 'user', content: 'What is the TypeScript strict mode?', sessionId: 's1' },
+      { role: 'assistant', content: 'TypeScript strict mode enables strict type checking', sessionId: 's1' },
+      { role: 'assistant', content: 'Set strict: true in tsconfig.json to turn on strict mode', sessionId: 's1' },
+    ])
+
+    const result = await memory.recall('What is TypeScript strict mode?', { tokenBudget: 1 })
+
+    expect(result.memories.length).toBeGreaterThan(1)
+    expect(result.payload?.emittedMemories).toBe(1)
+    expect(result.payload?.truncated).toBe(true)
+    const first = result.payload?.items[0]
+    expect(first?.id).toBe(result.memories[0]?.id)
+    expect(result.formatted.slice(first?.start, first?.end)).toContain(result.memories[0]?.content)
+  })
+
   it('SOCIAL intent returns empty memories', async () => {
     await memory.ingest({ role: 'user', content: 'hello there' })
 
