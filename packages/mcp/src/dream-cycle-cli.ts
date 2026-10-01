@@ -2,17 +2,11 @@
 /**
  * engram-dream-cycle — one-shot CLI that runs a single dream cycle and exits.
  *
- * Designed to be invoked by an external scheduler (e.g. systemd timer)
- * rather than running in-process inside the MCP HTTP server. Two reasons:
- *
- *   1. Cost predictability — dream cycle is the only LLM-heavy
- *      consolidation operation. Running it on a fixed schedule (e.g.
- *      nightly 03:00 UTC) produces a predictable billing pattern instead
- *      of "whenever someone restarts engram-mcp."
- *
- *   2. Failure isolation — a dream-cycle OOM, LLM rate-limit, or Neo4j
- *      Louvain failure should never take down the MCP serving process
- *      that real requests depend on.
+ * A manual one-shot run. The MCP server's consolidation worker schedules
+ * dream itself when it is due; use this CLI only to force a run by hand.
+ * It builds its intelligence from OPENAI_API_KEY with the default chat
+ * model, not the server's chat settings (model, base URL, provider
+ * preferences, reasoning), so its summaries can differ from scheduled runs.
  *
  * Required env:
  *   SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY

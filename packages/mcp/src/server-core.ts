@@ -25,6 +25,9 @@ import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
 
+/** Cycles the in-process consolidation worker schedules, each behind its own due gates. */
+export const CONSOLIDATION_WORKER_CYCLES = ['light', 'deep', 'dream', 'decay'] as const
+
 /**
  * Read the package version once at module load from the colocated package.json.
  * Resolves correctly from both `src/server-core.ts` (dev) and `dist/server-core.js`
@@ -361,12 +364,12 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   })
   await memory.initialize()
 
-  // v0.3.12: start the Phase 2 consolidation worker for cheap cycles only.
-  // dreamCycle is intentionally excluded — it runs via the separate
-  // engram-dream-cycle systemd timer for predictable cost + isolated
-  // failure. See results/research/2026-05-24-auto-consolidation-implementation-plan.md.
+  // The worker owns every cycle, dream included. Dream runs only when due
+  // (the daily time gate and the 100-new-episode delta gate) and uses the
+  // server's intelligence, as Memory.initialize() already does on every
+  // start. One scheduler, one model configuration.
   const worker = startConsolidationWorker(storage, intelligence, graph, {
-    cycles: ['light', 'deep', 'decay'],
+    cycles: [...CONSOLIDATION_WORKER_CYCLES],
     intervalMs: 60_000,
   })
   // Best-effort graceful shutdown — stops the interval so the process can exit
