@@ -382,6 +382,32 @@ END; $$;
 
 
 --
+-- Name: engram_access_count_quantile(text, double precision); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Interpolated q-quantile of access_count over one tier's live rows: not
+-- forgotten and, for semantic, not superseded. A NULL access_count counts as
+-- never accessed. An empty tier or an unknown memory type yields 0; callers
+-- validate the type and q before calling.
+CREATE OR REPLACE FUNCTION public.engram_access_count_quantile(p_memory_type text, p_q double precision) RETURNS double precision
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT COALESCE(percentile_cont(p_q) WITHIN GROUP (ORDER BY access_count), 0)::double precision
+  FROM (
+    SELECT COALESCE(e.access_count, 0) AS access_count FROM memory_episodes e
+    WHERE p_memory_type = 'episode' AND e.forgotten_at IS NULL
+    UNION ALL
+    SELECT COALESCE(s.access_count, 0) FROM memory_semantic s
+    WHERE p_memory_type = 'semantic' AND s.forgotten_at IS NULL AND s.superseded_by IS NULL
+    UNION ALL
+    SELECT COALESCE(p.access_count, 0) FROM memory_procedural p
+    WHERE p_memory_type = 'procedural' AND p.forgotten_at IS NULL
+  ) live
+$$;
+
+
+--
 -- Name: engram_mark_forgotten(text, uuid[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1448,6 +1474,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double 
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM PUBLIC;
@@ -1471,6 +1498,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM %I', role_name);
@@ -1489,6 +1517,7 @@ GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double p
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) TO service_role;

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
-import type { StorageAdapter, LookupOptions } from '@engram-mem/core'
+import type { StorageAdapter, LookupOptions, AccessQuantileTier } from '@engram-mem/core'
+import { assertAccessQuantileArgs } from '@engram-mem/core'
 import { cosineF32, blobToF32 } from './vector-search.js'
 import { runMigrations } from './migrations.js'
 import { SqliteEpisodeStorage } from './episodes.js'
@@ -564,6 +565,27 @@ export class SqliteStorageAdapter implements StorageAdapter {
     // digests: no forgotten_at column, never superseded — intentionally omitted.
 
     return results
+  }
+
+  /**
+   * Nearest-rank quantile: the value at offset floor(q·(n−1)) in ascending
+   * order. PostgreSQL's percentile_cont interpolates between the two ranks
+   * around q·(n−1), so the two backends can differ by at most one rank.
+   */
+  async accessCountQuantile(tier: AccessQuantileTier, q: number): Promise<number> {
+    assertAccessQuantileArgs(tier, q)
+    const db = this.assertDb()
+    const config = SCAN_TIER_CONFIG[tier]
+    let where = 'WHERE 1 = 1'
+    if (config.hasForgottenAt) where += ' AND forgotten_at IS NULL'
+    if (config.hasSupersededBy) where += ' AND superseded_by IS NULL'
+    const { n } = db.prepare(`SELECT COUNT(*) AS n FROM ${config.table} ${where}`).get() as { n: number }
+    if (n === 0) return 0
+    const offset = Math.floor(q * (n - 1))
+    const row = db
+      .prepare(`SELECT access_count FROM ${config.table} ${where} ORDER BY access_count LIMIT 1 OFFSET ?`)
+      .get(offset) as { access_count: number } | undefined
+    return row?.access_count ?? 0
   }
 }
 

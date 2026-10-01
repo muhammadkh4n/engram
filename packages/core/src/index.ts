@@ -36,8 +36,9 @@ export type {
   AssociationStorage,
   ConsolidationRunStorage,
   LookupOptions,
+  AccessQuantileTier,
 } from './adapters/storage.js'
-export { DuplicateCaptureKeyError, isDuplicateCaptureKey } from './adapters/storage.js'
+export { DuplicateCaptureKeyError, isDuplicateCaptureKey, assertAccessQuantileArgs } from './adapters/storage.js'
 export type {
   IntelligenceAdapter,
   SummarizeOptions,

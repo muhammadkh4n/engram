@@ -316,4 +316,28 @@ export interface StorageAdapter {
    * is never superseded.
    */
   listTombstonesSince?(since: Date): Promise<Array<{ id: string; type: MemoryType }>>
+
+  /**
+   * The q-quantile of `access_count` over the live rows of one tier: rows
+   * not forgotten and, for `semantic`, not superseded. An empty tier gives 0.
+   * Throws when `tier` is not one of the three tiers that count accesses or
+   * `q` is outside the open interval (0, 1). Adapters may approximate the
+   * quantile to within one rank of PostgreSQL's interpolated value.
+   */
+  accessCountQuantile?(tier: AccessQuantileTier, q: number): Promise<number>
+}
+
+/** Tiers that carry an access_count. Digests are never access-recorded. */
+export type AccessQuantileTier = 'episode' | 'semantic' | 'procedural'
+
+const ACCESS_QUANTILE_TIERS: readonly string[] = ['episode', 'semantic', 'procedural']
+
+/** Argument check shared by every `accessCountQuantile` implementation. */
+export function assertAccessQuantileArgs(tier: string, q: number): asserts tier is AccessQuantileTier {
+  if (!ACCESS_QUANTILE_TIERS.includes(tier)) {
+    throw new Error(`accessCountQuantile: tier must be episode, semantic or procedural, got ${JSON.stringify(tier)}`)
+  }
+  if (!Number.isFinite(q) || q <= 0 || q >= 1) {
+    throw new Error(`accessCountQuantile: q must be in (0, 1), got ${q}`)
+  }
 }

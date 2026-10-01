@@ -512,3 +512,92 @@ describe('SqliteStorageAdapter — full lifecycle integration', () => {
     expect(batchTypes).toEqual(['episode', 'procedural', 'semantic'])
   })
 })
+
+describe('SqliteStorageAdapter.accessCountQuantile', () => {
+  let adapter: SqliteStorageAdapter
+
+  beforeEach(async () => {
+    adapter = new SqliteStorageAdapter()
+    await adapter.initialize()
+  })
+
+  afterEach(async () => {
+    await adapter.dispose()
+  })
+
+  function setAccessCount(table: string, id: string, count: number): void {
+    const db = (adapter as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db
+    db.prepare(`UPDATE ${table} SET access_count = ? WHERE id = ?`).run(count, id)
+  }
+
+  async function insertEpisode(count: number): Promise<string> {
+    const ep = await adapter.episodes.insert({
+      sessionId: 'session-q',
+      role: 'user',
+      content: `routine note ${count}`,
+      salience: 0.5,
+      accessCount: 0,
+      lastAccessed: null,
+      consolidatedAt: null,
+      embedding: null,
+      entities: [],
+      metadata: {},
+    })
+    setAccessCount('episodes', ep.id, count)
+    return ep.id
+  }
+
+  async function insertSemantic(count: number): Promise<string> {
+    const sem = await adapter.semantic.insert({
+      topic: `topic ${count}`,
+      content: `fact ${count}`,
+      confidence: 0.5,
+      sourceDigestIds: [],
+      sourceEpisodeIds: [],
+      decayRate: 0.02,
+      supersedes: null,
+      supersededBy: null,
+      embedding: null,
+      metadata: {},
+    })
+    setAccessCount('semantic', sem.id, count)
+    return sem.id
+  }
+
+  it('returns the nearest-rank p99 over access counts 1..100', async () => {
+    for (let n = 1; n <= 100; n++) await insertEpisode(n)
+    // offset floor(0.99 * 99) = 98 -> the 99th smallest value
+    expect(await adapter.accessCountQuantile('episode', 0.99)).toBe(99)
+    expect(await adapter.accessCountQuantile('episode', 0.5)).toBe(50)
+  })
+
+  it('excludes forgotten rows', async () => {
+    const ids: string[] = []
+    for (let n = 1; n <= 100; n++) ids.push(await insertEpisode(n))
+    // Tombstone the five largest: live counts become 1..95
+    await adapter.episodes.markForgotten(ids.slice(95))
+    expect(await adapter.accessCountQuantile('episode', 0.99)).toBe(94)
+  })
+
+  it('excludes superseded semantic rows', async () => {
+    const ids: string[] = []
+    for (let n = 1; n <= 10; n++) ids.push(await insertSemantic(n))
+    const replacement = await insertSemantic(0)
+    await adapter.semantic.markSuperseded(ids[9]!, replacement)
+    // Live counts 0..9 (11 rows minus one superseded = 10): offset floor(0.99 * 9) = 8 -> 8
+    expect(await adapter.accessCountQuantile('semantic', 0.99)).toBe(8)
+  })
+
+  it('returns 0 for an empty tier', async () => {
+    await insertEpisode(42)
+    expect(await adapter.accessCountQuantile('procedural', 0.99)).toBe(0)
+  })
+
+  it('throws for q outside (0, 1) and for a tier without access counts', async () => {
+    await expect(adapter.accessCountQuantile('episode', 0)).rejects.toThrow(/q must be in \(0, 1\)/)
+    await expect(adapter.accessCountQuantile('episode', 1)).rejects.toThrow(/q must be in \(0, 1\)/)
+    await expect(
+      adapter.accessCountQuantile('digest' as unknown as 'episode', 0.5),
+    ).rejects.toThrow(/tier must be/)
+  })
+})
