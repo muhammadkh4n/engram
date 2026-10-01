@@ -168,6 +168,26 @@ describe('OpenAIEmbeddingService', () => {
       await expect(service.embed('blocked')).rejects.toBeInstanceOf(CircuitOpenError)
     })
 
+    it('rejects an embed on an open circuit without waiting on backoff timers', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
+        const breaker = service.getBreaker()
+        for (let i = 0; i < 5; i++) {
+          await breaker.execute(() => Promise.reject(new Error('simulated failure'))).catch(() => undefined)
+        }
+        expect(breaker.getState()).toBe('open')
+
+        // No timer is advanced: a retried open circuit would hang on its first backoff sleep.
+        await expect(service.embed('blocked')).rejects.toBeInstanceOf(CircuitOpenError)
+        await expect(service.embedBatch(['blocked'])).rejects.toBeInstanceOf(CircuitOpenError)
+        expect(vi.getTimerCount()).toBe(0)
+        expect(mockCreate).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('names the provider error that opened the circuit', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       try {

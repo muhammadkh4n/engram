@@ -10,6 +10,7 @@ import { computeRetrievalF1 } from '../metrics/f1.js'
 import { createBenchMemory } from '../memory-factory.js'
 import { mergeAssociationsIntoScored } from '../merge-associations.js'
 import { wipeBenchGraph } from '../bench-graph.js'
+import { assertRecallNotDegraded } from '../refuse-degraded.js'
 
 export class LoCoMoAdapter {
   async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
@@ -201,6 +202,7 @@ export class LoCoMoAdapter {
         // the graph the recall traverses is unaffected — only scoring narrows.
         if (opts?.categories && !opts.categories.includes(qa.category)) continue
         const recallResult = await memory.recall(qa.question)
+        assertRecallNotDegraded(recallResult, `${convId}: ${qa.question}`)
         const topMemories = mergeAssociationsIntoScored(
           recallResult, opts?.mergeAssociationsIntoTopK,
         ).slice(0, topK)

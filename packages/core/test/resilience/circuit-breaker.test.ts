@@ -93,7 +93,31 @@ describe('CircuitBreaker', () => {
       const err = await breaker.execute(() => Promise.resolve('nope')).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(CircuitOpenError);
       const message = (err as Error).message;
-      expect(message).toMatch(/^Circuit is open \(last failure: 503 server_overloaded: upstream overloaded\)\. \d+ms until retry\.$/);
+      expect(message).toMatch(/^Circuit is open, \d+ms until retry \(last failure: 503 server_overloaded: upstream overloaded\)\.$/);
+    });
+
+    it('redacts a bearer token in the failure line', async () => {
+      const token = 'sk-proj-Q2xYw8dK3mN5pR7tV9zB1cF4gH6jL0nS';
+      const failure = Object.assign(new Error(`401 rejected request with header Authorization: Bearer ${token}`), {
+        status: 401,
+      });
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(failure)); } catch {}
+      }
+      const err = await breaker.execute(() => Promise.resolve('nope')).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CircuitOpenError);
+      const message = (err as Error).message;
+      expect(message).not.toContain(token);
+      expect(message).not.toContain('Q2xYw8dK3mN5');
+      expect(message).toContain('last failure: 401: rejected request with header Authorization');
+    });
+
+    it('keeps the retry delay inside a 200-character cut of a long cause', async () => {
+      for (let i = 0; i < 3; i++) {
+        try { await breaker.execute(() => Promise.reject(new Error('y'.repeat(500)))); } catch {}
+      }
+      const err = (await breaker.execute(() => Promise.resolve(1)).catch((e: unknown) => e)) as Error;
+      expect(err.message.slice(0, 199)).toMatch(/^Circuit is open, \d+ms until retry /);
     });
 
     it('caps a long failure message and drops the cause after reset', async () => {

@@ -39,6 +39,7 @@ import { makeLlmProposeNextQuery } from '../propose-next-query.js'
 import { scoreRetrieval, aggregateArmMetrics } from '../scoring.js'
 import { iterativeRecall } from '../../retrieval/iterative.js'
 import { createBenchMemory } from '../../memory-factory.js'
+import { assertRecallNotDegraded } from '../../refuse-degraded.js'
 import type { MultiHopDataset, MultiHopItem, MultiHopPrediction } from '../types.js'
 import type { BenchmarkOpts } from '../../types.js'
 
@@ -122,8 +123,11 @@ async function main(): Promise<void> {
       const result = await iterativeRecall(
         item.question,
         {
-          recall: (query) =>
-            memory.recall(query, { strategyOverride: { maxResults: RECALL_POOL } }),
+          recall: async (query) => {
+            const recalled = await memory.recall(query, { strategyOverride: { maxResults: RECALL_POOL } })
+            assertRecallNotDegraded(recalled, `${item.id}: ${query}`)
+            return recalled
+          },
           proposeNextQuery,
         },
         { maxRounds: args.maxRounds, limit: RECALL_POOL },

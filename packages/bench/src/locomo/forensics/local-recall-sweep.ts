@@ -33,6 +33,7 @@
 import * as fs from 'node:fs'
 import { LoCoMoAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
+import { assertRecallNotDegraded } from '../../refuse-degraded.js'
 import type { LoCoMoConversationFile } from '../types.js'
 import type { BenchmarkOpts } from '../../types.js'
 
@@ -112,6 +113,7 @@ async function main(): Promise<void> {
         const result = await memory.recall(qa.question, {
           strategyOverride: { maxResults: args.maxResults },
         })
+        assertRecallNotDegraded(result, `${convId}: ${qa.question}`)
 
         // Collect rank-ordered dia_ids for THIS conv only.
         const retrievedDiaIds: string[] = []
