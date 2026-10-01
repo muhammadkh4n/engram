@@ -16,6 +16,7 @@
 import {
   AutoTokenizer,
   AutoModel,
+  Tensor,
   type PreTrainedTokenizer,
   type PreTrainedModel,
 } from '@huggingface/transformers'
@@ -37,7 +38,10 @@ export interface OnnxEmbedderOptions {
   queryTask?: string
   /** Texts per forward pass. Default: 16. */
   batchSize?: number
-  /** Max tokens per text; longer texts are truncated. Default: 512. */
+  /**
+   * Max tokens per text, end token included; longer texts lose content
+   * tokens from the tail and keep the end token. Default: 512.
+   */
   maxLength?: number
   /** Chars per text before tokenization (truncation guard). Default: 2000. */
   maxChars?: number
@@ -77,6 +81,10 @@ interface TensorLike {
 
 type CallableModel = { _call(inputs: unknown): Promise<{ last_hidden_state?: TensorLike }> }
 
+interface EncodingTokenizer {
+  encode(text: string, options?: { add_special_tokens?: boolean }): number[]
+}
+
 /** Qwen3-Embedding's query format: the instruction, a newline, then `Query:` with no space. */
 export function formatEmbedQuery(task: string, query: string): string {
   return `Instruct: ${task}\nQuery:${query}`
@@ -104,6 +112,53 @@ export function lastTokenIndices(mask: TensorLike): number[] {
   return indices
 }
 
+/**
+ * Token ids the tokenizer's post-processor appends after a single sequence's
+ * content (`<|endoftext|>` for Qwen3-Embedding), or [] when it appends none.
+ * Found by encoding a probe with and without special tokens rather than read
+ * from the config's `eos_token`, which can name a different token:
+ * Qwen3-Embedding's config says `<|im_end|>` while its post-processor
+ * appends `<|endoftext|>`, the token the model was trained to pool.
+ */
+export function trailingSpecialIds(tokenizer: EncodingTokenizer): number[] {
+  const probe = 'a'
+  const withSpecials = tokenizer.encode(probe)
+  const bare = tokenizer.encode(probe, { add_special_tokens: false })
+  for (let start = 0; start + bare.length <= withSpecials.length; start++) {
+    if (bare.every((id, i) => withSpecials[start + i] === id)) {
+      return withSpecials.slice(start + bare.length)
+    }
+  }
+  throw new Error('embedder: tokenizer output with special tokens does not contain the bare encoding')
+}
+
+/**
+ * The tokenizer truncates after its post-processor has appended the end
+ * token, so a text longer than max_length loses that token and last-token
+ * pooling would read a mid-sentence token instead. Returns a copy of the
+ * [batch, seq] input ids where every row's last attended positions hold
+ * `endIds`: a truncated row gives up its final content tokens to make room,
+ * so content plus end tokens still fit the limit. Rows that already end with
+ * `endIds` are copied unchanged, and the attention mask already covers the
+ * replaced positions.
+ */
+export function withEndTokens(inputIds: TensorLike, mask: TensorLike, endIds: number[]): BigInt64Array {
+  const seq = inputIds.dims[1]!
+  const data = BigInt64Array.from(inputIds.data, v => BigInt(v))
+  if (endIds.length === 0) return data
+  lastTokenIndices(mask).forEach((last, b) => {
+    const start = b * seq + last - endIds.length + 1
+    if (endIds.every((id, i) => data[start + i] === BigInt(id))) return
+    for (let i = 0; i < endIds.length; i++) {
+      if (start + i < b * seq || Number(mask.data[start + i]) === 0) {
+        throw new Error(`embedder: row ${b} has no room for its end token`)
+      }
+      data[start + i] = BigInt(endIds[i]!)
+    }
+  })
+  return data
+}
+
 function l2Normalize(vector: number[]): number[] {
   let sumSquares = 0
   for (const x of vector) sumSquares += x * x
@@ -124,10 +179,14 @@ export function createOnnxEmbedder(options: OnnxEmbedderOptions = {}): OnnxEmbed
   if (!Number.isInteger(batchSize) || batchSize < 1) {
     throw new Error(`embedder batchSize must be a positive integer, got ${batchSize}`)
   }
+  if (!Number.isInteger(maxLength) || maxLength < 1) {
+    throw new Error(`embedder maxLength must be a positive integer, got ${maxLength}`)
+  }
 
   let tokenizer: PreTrainedTokenizer | null = null
   let modelInstance: PreTrainedModel | null = null
   let hiddenSize: number | null = null
+  let endIds: number[] = []
   let loadPromise: Promise<void> | null = null
 
   async function ensureLoaded(): Promise<void> {
@@ -142,9 +201,16 @@ export function createOnnxEmbedder(options: OnnxEmbedderOptions = {}): OnnxEmbed
         if (!Number.isInteger(size) || size < 1) {
           throw new Error(`embedder model ${model} has no hidden_size in its config`)
         }
+        const trailing = trailingSpecialIds(tok as unknown as EncodingTokenizer)
+        if (trailing.length >= maxLength) {
+          throw new Error(
+            `embedder maxLength ${maxLength} leaves no room for content besides ${trailing.length} end token(s)`,
+          )
+        }
         tokenizer = tok
         modelInstance = mdl
         hiddenSize = size
+        endIds = trailing
       })().catch((err: unknown) => {
         loadPromise = null
         throw err
@@ -164,9 +230,14 @@ export function createOnnxEmbedder(options: OnnxEmbedderOptions = {}): OnnxEmbed
       truncation: true,
       max_length: maxLength,
       return_tensor: true,
-    }) as unknown as { attention_mask: TensorLike }
+    }) as unknown as { input_ids: TensorLike; attention_mask: TensorLike }
 
-    const output = await (modelInstance as unknown as CallableModel)._call(encoded)
+    const inputIds = new Tensor(
+      'int64',
+      withEndTokens(encoded.input_ids, encoded.attention_mask, endIds),
+      encoded.input_ids.dims,
+    )
+    const output = await (modelInstance as unknown as CallableModel)._call({ ...encoded, input_ids: inputIds })
     let hidden = output?.last_hidden_state
     if (!hidden?.data || hidden.dims?.length !== 3) {
       throw new Error(`embedder model ${model} returned no [batch, seq, hidden] last_hidden_state`)
@@ -229,6 +300,7 @@ export function createOnnxEmbedder(options: OnnxEmbedderOptions = {}): OnnxEmbed
       tokenizer = null
       modelInstance = null
       hiddenSize = null
+      endIds = []
       loadPromise = null
     },
   }
