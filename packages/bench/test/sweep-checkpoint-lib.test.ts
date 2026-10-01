@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { recallOutputPolicyFromEnv } from '@engram-mem/core'
 import {
   assertRowsInSelection,
+  buildRunIdentity,
   diffRunIdentity,
   formatCheckpointText,
   formatHeaderLine,
@@ -15,6 +16,7 @@ import {
   selectQuestions,
   partialPathFor,
   type RunIdentity,
+  type RunIdentityArgs,
 } from '../src/longmemeval/forensics/sweep-checkpoint-lib.js'
 
 const identity: RunIdentity = {
@@ -31,6 +33,9 @@ const identity: RunIdentity = {
   output_emit_k: null,
   output_token_budget: null,
   output_faint: true,
+  embed_backend: 'openai',
+  embed_model: 'text-embedding-3-small',
+  embed_dims: null,
 }
 
 // The identity fields a sweep derives from its ENGRAM_RECALL_* env.
@@ -78,6 +83,63 @@ describe('run identity header', () => {
   it('treats a field missing from an older header as a difference', () => {
     const { synthesize: _s, ...older } = identity
     expect(diffRunIdentity(older as unknown as RunIdentity, identity)).toBe('synthesize')
+  })
+})
+
+describe('buildRunIdentity', () => {
+  const plainArgs: RunIdentityArgs = {
+    data: '/data/lme.json',
+    limit: 0,
+    maxResults: 30,
+    noConsolidate: false,
+    noGraph: false,
+    noRerank: false,
+    synthesize: false,
+    contextMode: 'sessions',
+  }
+  const policy = { emit_k: null, token_budget: null, faint: true }
+
+  it('keeps every existing field for a run without embed flags and records the openai default embedder', () => {
+    expect(buildRunIdentity(plainArgs, undefined, policy)).toEqual({
+      data: '/data/lme.json',
+      context_mode: 'sessions',
+      reranker_backend: 'openai',
+      reranker_model: 'gpt-4o-mini',
+      graph: true,
+      consolidate: true,
+      vector_mode: 'full',
+      max_results: 30,
+      synthesize: false,
+      question_selection: 'all',
+      output_emit_k: null,
+      output_token_budget: null,
+      output_faint: true,
+      embed_backend: 'openai',
+      embed_model: 'text-embedding-3-small',
+      embed_dims: null,
+    })
+  })
+
+  it('records the onnx backend with its default model, and an explicit model and dims', () => {
+    const onnx = buildRunIdentity({ ...plainArgs, embedBackend: 'onnx' }, undefined, policy)
+    expect([onnx.embed_backend, onnx.embed_model, onnx.embed_dims])
+      .toEqual(['onnx', 'onnx-community/Qwen3-Embedding-0.6B-ONNX', null])
+    const large = buildRunIdentity({ ...plainArgs, embedModel: 'text-embedding-3-large', embedDims: 1536 }, undefined, policy)
+    expect([large.embed_backend, large.embed_model, large.embed_dims]).toEqual(['openai', 'text-embedding-3-large', 1536])
+  })
+
+  it('refuses a resume whose embedder backend, model or dims differ', () => {
+    const base = buildRunIdentity(plainArgs, undefined, policy)
+    expect(diffRunIdentity(base, buildRunIdentity({ ...plainArgs, embedBackend: 'onnx' }, undefined, policy))).toBe('embed_backend')
+    expect(diffRunIdentity(base, buildRunIdentity({ ...plainArgs, embedModel: 'text-embedding-3-large' }, undefined, policy)))
+      .toBe('embed_model')
+    expect(diffRunIdentity(base, buildRunIdentity({ ...plainArgs, embedDims: 512 }, undefined, policy))).toBe('embed_dims')
+    expect(diffRunIdentity(base, buildRunIdentity({ ...plainArgs }, undefined, policy))).toBeNull()
+  })
+
+  it('refuses to resume a checkpoint written before the embedder was recorded', () => {
+    const { embed_backend: _b, embed_model: _m, embed_dims: _d, ...older } = identity
+    expect(diffRunIdentity(older as unknown as RunIdentity, identity)).toBe('embed_backend')
   })
 })
 

@@ -1,5 +1,6 @@
 // Shared
 export type RerankerBackend = 'openai' | 'onnx' | 'none'
+export type EmbedBackend = 'openai' | 'onnx'
 
 export interface BenchmarkOpts {
   consolidate?: boolean  // default true
@@ -66,6 +67,20 @@ export interface BenchmarkOpts {
    *              fall back to the legacy path and corrupt the comparison.
    */
   vectorMode?: 'full' | 'engine'
+  /**
+   * Embedding backend. 'openai' (default) embeds through openaiIntelligence;
+   * 'onnx' replaces embed, embedBatch, embedQuery and dimensions with a local
+   * last-token-pooled ONNX embedder (Qwen3-Embedding by default), shared and
+   * loaded once per process. Chat, rerank and the rest stay on the base adapter.
+   */
+  embedBackend?: EmbedBackend
+  /** Embedding model id. openai: passed as embeddingModel; onnx: the HF model id. Unset = backend default. */
+  embedModel?: string
+  /**
+   * Embedding dimensions. openai: passed as embeddingDimensions. onnx: must
+   * equal the loaded model's hidden size, else createBenchMemory throws.
+   */
+  embedDims?: number
 }
 
 export interface BenchmarkMetrics {
