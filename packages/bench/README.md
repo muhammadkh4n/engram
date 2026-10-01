@@ -80,6 +80,31 @@ model `mixedbread-ai/mxbai-rerank-large-v1` (q8). To measure what production ran
 the resolved `rerankerBackend`, `rerankModel` and `embedModel`, and the judge copies them into its own
 `meta` alongside `chatModel` (the answer-generation model).
 
+### Output-budget arms from one sweep
+
+Two recall sweeps of the same system disagree on a large share of their top-5 sessions, so comparing
+output policies (token budget, emit-K, faint section) across separate sweeps measures retrieval churn as
+much as the policy. `src/longmemeval/forensics/reformat.ts` derives each arm from one recorded
+`--context-mode formatted` sweep instead:
+
+```bash
+npx tsx packages/bench/src/longmemeval/forensics/reformat.ts \
+  --sweep ./results/longmemeval/formatted-sweep.json \
+  --output ./results/longmemeval/formatted-budget-1500.json \
+  --token-budget 1500            # and/or --emit-k N, --faint off
+```
+
+Formatted rows record `payload_items` (section, offsets into `formatted`, dataset session),
+`context_tokens` and `truncated`; the sweep's run identity and `meta.output_policy` record the
+`ENGRAM_RECALL_*` policy it ran under. Reformat rebuilds each row's items from those offsets and
+re-assembles them with core's `assemble`, rewriting only `formatted`, `payload_items`, `context_chars`,
+`context_items`, `context_tokens`, `truncated` and `gold_ids_in_context`; retrieval fields are copied
+byte for byte. With no limits the rebuild reproduces every `formatted` exactly, and a row that does not
+is refused. The source must be a formatted sweep recorded with the policy unset. The output `meta`
+holds `derived_from` (path and sha256), `output_policy`, `retrieval_rerun: false` and `source_meta`.
+Judge it with `judge.ts --context-mode formatted`. The budget is measured on the recorded text, which
+has the per-question session namespace removed.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)
