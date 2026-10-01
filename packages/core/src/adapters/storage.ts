@@ -30,7 +30,37 @@ export interface LookupOptions {
   includeInactive?: boolean
 }
 
+/**
+ * The store already holds an episode in this session with this
+ * `metadata.captureKey`. Part of the `EpisodeStorage.insert` contract: a store
+ * that enforces capture-key uniqueness throws it, having written nothing, so
+ * the caller can treat the insert as a replay of the earlier delivery.
+ */
+export class DuplicateCaptureKeyError extends Error {
+  readonly sessionId: string
+  readonly key: string
+
+  constructor(sessionId: string, key: string, options?: { cause?: unknown }) {
+    super(`an episode with capture key ${key} is already stored for session ${sessionId}`, options)
+    this.name = 'DuplicateCaptureKeyError'
+    this.sessionId = sessionId
+    this.key = key
+  }
+}
+
+/**
+ * Matched by name as well as by class, so the check holds when the store
+ * adapter and the caller load separate copies of this package.
+ */
+export function isDuplicateCaptureKey(err: unknown): err is DuplicateCaptureKeyError {
+  return err instanceof DuplicateCaptureKeyError || (err instanceof Error && err.name === 'DuplicateCaptureKeyError')
+}
+
 export interface EpisodeStorage {
+  /**
+   * Throws `DuplicateCaptureKeyError` when the store enforces capture-key
+   * uniqueness and the session already holds `metadata.captureKey`.
+   */
   insert(episode: Omit<Episode, 'id' | 'createdAt'>): Promise<Episode>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
   /** See `LookupOptions`: tombstoned episodes are skipped unless `includeInactive`. */

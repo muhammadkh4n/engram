@@ -9,6 +9,7 @@
  */
 
 import {
+  isDuplicateCaptureKey,
   isEmptyClassifierReply,
   isUnclassifiableReply,
   type IntelligenceAdapter,
@@ -23,7 +24,11 @@ import { scrubModelInput } from './scrub-model-input.js'
 
 /** rawTurn keeps the start of the scrubbed turn for audit without storing whole transcripts twice. */
 export const RAW_TURN_MAX_CHARS = 4000
-/** A replayed key is only honoured inside this window, matching the dedup window. */
+/**
+ * The replay probe only looks this far back, matching the dedup window. A
+ * store that enforces capture-key uniqueness still refuses an older key at
+ * insert, and that is reported as a replay too.
+ */
 export const CAPTURE_KEY_WINDOW_DAYS = 7
 
 /** Recorded as the capture model of a turn stored without classification: no model saw it. */
@@ -280,15 +285,23 @@ async function captureUnseenKey(deps: CaptureDeps, input: CaptureInput, model: s
   }
 
   const memory = await deps.getMemory()
-  await memory.ingest(
-    {
-      content: classification.distilled,
-      role: input.role,
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      metadata: captureMetadata(model, input, classification, content, project),
-    },
-    project ? { projectId: project } : undefined,
-  )
+  try {
+    await memory.ingest(
+      {
+        content: classification.distilled,
+        role: input.role,
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        metadata: captureMetadata(model, input, classification, content, project),
+      },
+      project ? { projectId: project } : undefined,
+    )
+  } catch (err) {
+    // The probe is check-then-insert: a concurrent delivery of this capture
+    // can pass it too, and then the store refuses the second insert.
+    if (!isDuplicateCaptureKey(err)) throw err
+    deps.log?.(`replayed: key=${err.key} already stored for session ${err.sessionId}`)
+    return { outcome: 'replayed', model }
+  }
   deps.log?.(`stored as ${classification.category} in project=${project ?? '<shared>'}`)
   return { outcome: 'stored', ...decided }
 }

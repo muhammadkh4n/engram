@@ -1,10 +1,30 @@
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Episode, SearchOptions, SearchResult } from '@engram-mem/core'
-import { generateId } from '@engram-mem/core'
+import { DuplicateCaptureKeyError, generateId } from '@engram-mem/core'
 import type { EpisodeStorage, LookupOptions } from '@engram-mem/core'
 import { sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
+
+const UNIQUE_VIOLATION = '23505'
+/** Partial unique index on (session_id, metadata->>'captureKey') in schema.sql. */
+const CAPTURE_KEY_INDEX = 'idx_episodes_capture_key'
+
+interface PostgresError {
+  code?: string
+  message: string
+  details?: string | null
+}
+
+/**
+ * Postgres names the violated index, quoted, in the message of a 23505; the
+ * code decides the kind of failure and the quoted name decides which index.
+ */
+function isCaptureKeyViolation(error: PostgresError): boolean {
+  if (error.code !== UNIQUE_VIOLATION) return false
+  const quoted = `"${CAPTURE_KEY_INDEX}"`
+  return error.message.includes(quoted) || (error.details ?? '').includes(quoted)
+}
 
 export class PostgRestEpisodeStorage implements EpisodeStorage {
   /**
@@ -57,8 +77,32 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       .select()
       .single()
 
-    if (error) throw new Error(`Episode insert failed: ${error.message}`)
+    if (error) throw await this.failedInsertError(id, episode, error)
     return rowToEpisode(data as EpisodeRow, this.legacyMode)
+  }
+
+  /**
+   * The error to throw for a failed episode insert, after removing the
+   * memories registry row written for it. A cleanup failure is part of the
+   * thrown error, since it leaves that registry row orphaned.
+   */
+  private async failedInsertError(
+    id: string,
+    episode: Omit<Episode, 'id' | 'createdAt'>,
+    error: PostgresError,
+  ): Promise<Error> {
+    const insertFailure = `Episode insert failed: ${error.message}`
+    if (!this.legacyMode) {
+      const { error: cleanupErr } = await this.client.from('memories').delete().eq('id', id)
+      if (cleanupErr) {
+        return new Error(`${insertFailure}; removing its memories registry row ${id} also failed: ${cleanupErr.message}`)
+      }
+    }
+    const key = episode.metadata['captureKey']
+    if (isCaptureKeyViolation(error) && typeof key === 'string') {
+      return new DuplicateCaptureKeyError(episode.sessionId, key, { cause: error })
+    }
+    return new Error(insertFailure)
   }
 
   async search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]> {
