@@ -142,7 +142,53 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 - Status: 200 for every other pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 422 unclassifiable (`retryable: false`); 500 any other failure after validation, or a request body that could not be read (`retryable: true`, generic message, detail in the server log); 405 for methods other than POST.
 - The local `engram-ingest` CLI exits 1 on an unclassifiable turn, as on any other failure. It needs `OPENAI_API_KEY` whenever it calls a model or the store; `--raw --dry-run` calls neither and needs no credentials.
 
-Today only `engram-ingest` (git post-commit and the other local ingest callers) runs this pipeline in-process through `runCapture`. The pre-compact and session-summary hooks still use their own scripts; they switch to this route in a client follow-up.
+## Capture clients (hooks and ingest CLIs)
+
+`engram-ingest` (git post-commit, the Stop and UserPromptSubmit hooks), `engram-session-summary` (SessionEnd) and the pre-compact hook run in one of two modes.
+
+**Server mode** — `ENGRAM_SERVER_URL` is set. The client resolves the content, scrubs secrets and detects the project, then posts one request to `POST /capture`. The server runs the classifier, the digest (session summary, pre-compact) and the store with its own model configuration, so the laptop needs no `SUPABASE_*`, `OPENAI_API_KEY` or `NEO4J_*`.
+
+- `ENGRAM_SERVER_URL` — the server's MCP endpoint, e.g. `http://host:3850/mcp`, shared with the MCP client config. A trailing `/mcp` (or `/capture`) path segment is replaced by `/capture`; any other URL gets `/capture` appended.
+- `ENGRAM_SERVER_TOKEN_FILE` — file holding the bearer token (trimmed; `~/` expands). Wins over `ENGRAM_SERVER_TOKEN`, the token inline. One of the two is required.
+- Request timeouts: 60 s for a turn, 180 s for a derive capture. The server keeps working after a client gives up and the key has no unique constraint, so a shorter timeout followed by a retry could store twice.
+- Every keyed capture carries a `session_id`, so a rerun of the same hook on the same input returns `replayed`.
+- Outcome classes: a 2xx with a pipeline outcome is sent; 400/413/422 or `retryable: false` is dead-lettered; network errors, timeouts, 5xx, 401/403 and 404/405 are spooled (a wrong URL or token is fixed on the client, and the captures wait for it).
+- `engram-ingest` exits 0 when the capture was sent or spooled, 1 when it was dead-lettered, 2 on conflicting flags.
+
+**Local mode** — `ENGRAM_SERVER_URL` is unset. The same pipeline (`runCapture`) runs in-process against this machine's store and model credentials (`SUPABASE_URL`, `SUPABASE_KEY`, `OPENAI_API_KEY`, optional `NEO4J_*`, `ENGRAM_SALIENCE_THRESHOLD`). Model and store clients load only in this mode. There is no spool: a failure is logged and the capture is lost.
+
+**Files in `~/.engram/`** (server mode; all mode `0600`):
+
+| File | Contents |
+|---|---|
+| `spool.jsonl` | One `{"v":1,"at":"<ISO>","payload":{…}}` line per capture not yet sent. After the next successful post the client resends up to 20 entries, oldest first; on a retryable failure it spools its own capture and leaves the backlog alone. |
+| `spool.flushing.<pid>.<claimedAtMs>.<rand>.jsonl` | A flush claims the spool by renaming it, so two hooks firing together never send one entry twice. A claim older than 10 minutes (by the timestamp in its name) belongs to a dead flusher and is taken over. A flush stops before a post could outlive its claim and appends the rest back to the spool. |
+| `spool.dead.jsonl` | Captures the server refused permanently: `{"v":1,"at":"<ISO>","status":422,"message":"…","payload":{…}}` (`status` absent when there was none). Unreadable spool lines land here as `{"v":1,"at":…,"message":"unreadable spool line","raw":"…"}`. Nothing resends them. |
+| `capture-state.json` | Rewritten atomically after every attempt; health checks read it. Schema below. |
+| `hook.log` | One summary line per capture: `[label] mode=server source=… outcome=… ms=… spool=<entries left>`. |
+
+`capture-state.json`:
+
+```json
+{
+  "v": 1,
+  "createdAt": "2026-10-01T09:00:00.000Z",
+  "sources": {
+    "git-commit": {
+      "lastOkAt": "2026-10-01T09:12:03.000Z",
+      "lastStoredAt": "2026-10-01T09:12:03.000Z",
+      "lastErrorAt": "2026-10-01T08:40:11.000Z",
+      "lastError": "fetch failed"
+    }
+  }
+}
+```
+
+- `sources` is keyed by the capture's `source`. Every field is optional and absent until it first happens.
+- `lastOkAt`: the server answered with a pipeline outcome (stored, rejected, deduped, replayed, dry run).
+- `lastStoredAt`: the outcome was `stored`.
+- `lastErrorAt` / `lastError`: the last spooled or dead-lettered attempt and its message (at most 300 characters).
+- A source with `lastErrorAt` newer than `lastOkAt`, or a non-empty `spool.jsonl` whose oldest `at` is old, means captures are not reaching the server.
 
 ### memory_forget
 
