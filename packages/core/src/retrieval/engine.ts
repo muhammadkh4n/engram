@@ -749,13 +749,6 @@ export async function recall(
   // Stage 3: Topic priming
   const primed = stagePrime(memories, associations, sensory)
 
-  // Stage 4: Reconsolidation — fire-and-forget
-  // Wave 2: also strengthens traversed Neo4j edges when graph is non-null.
-  if (opts.reconsolidate !== false) {
-    const manager = new AssociationManager(storage.associations)
-    stageReconsolidate(memories, associations, storage, manager, graph)
-  }
-
   // Wave 5: Extract community summaries from activated community nodes.
   // Community nodes get nodeType='Community' from the updated spreadActivation().
   // They're in associations but we need their labels from graph or storage.
@@ -804,6 +797,22 @@ export async function recall(
     renderRecallPayload(memories, associations, compositeContext, communitySummaries),
     outputPolicy,
   )
+  // Reconsolidation — fire-and-forget, also strengthens traversed Neo4j
+  // edges when graph is non-null. Only what the payload emitted counts as a
+  // use: recording access on memories the caller never saw would keep raising
+  // their access counts, which feed ranking. Emission is a prefix of each
+  // ranked list, so the emitted items are the first N of each.
+  if (opts.reconsolidate !== false) {
+    const manager = new AssociationManager(storage.associations)
+    stageReconsolidate(
+      memories.slice(0, assembled.payload.emittedMemories),
+      associations.slice(0, assembled.payload.emittedAssociations),
+      storage,
+      manager,
+      graph,
+    )
+  }
+
   // Synthesis follows the payload and sits outside the budget.
   let formatted = assembled.text
   if (synthesis) {

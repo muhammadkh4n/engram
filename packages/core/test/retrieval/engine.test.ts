@@ -11,6 +11,7 @@ import {
 } from './mock-storage.js'
 import type { RecallStrategy, RetrievedMemory, TypedMemory, SearchResult } from '../../src/types.js'
 import type { IntelligenceAdapter } from '../../src/adapters/intelligence.js'
+import type { GraphPort } from '../../src/adapters/graph.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -648,5 +649,112 @@ describe('recall engine — output policy', () => {
     expect(result.payload).toEqual({
       emittedMemories: 0, emittedAssociations: 0, emittedFaint: 0, truncated: false, items: [],
     })
+  })
+})
+
+describe('recall engine — reconsolidation follows the emitted payload', () => {
+  const NAMES = ['ENGRAM_RECALL_EMIT_K', 'ENGRAM_RECALL_TOKEN_BUDGET', 'ENGRAM_RECALL_FAINT'] as const
+  const original = Object.fromEntries(NAMES.map((n) => [n, process.env[n]]))
+
+  beforeEach(() => {
+    for (const n of NAMES) delete process.env[n]
+  })
+
+  afterEach(() => {
+    for (const n of NAMES) {
+      if (original[n] === undefined) delete process.env[n]
+      else process.env[n] = original[n]
+    }
+  })
+
+  // Episodes only, so every emitted memory is recorded through
+  // episodes.recordAccess and the call list is the access list.
+  function episodeHits(count: number): SearchResult<TypedMemory>[] {
+    return Array.from({ length: count }, (_, i) => ({
+      item: {
+        type: 'episode' as const,
+        data: {
+          ...MOCK_EPISODE,
+          id: `ep-hit-${i}`,
+          content: `TypeScript strict mode note number ${i} with enough text to cost tokens`,
+        },
+      },
+      similarity: 0.9 - i * 0.05,
+    }))
+  }
+
+  function storageWithHits(count: number) {
+    return createMockStorage({ vectorSearchResults: episodeHits(count), textBoostResults: [] })
+  }
+
+  function accessedIds(storage: ReturnType<typeof createMockStorage>): string[] {
+    return vi.mocked(storage.episodes.recordAccess).mock.calls.map((c) => c[0] as string)
+  }
+
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+  async function deepRecall(storage: ReturnType<typeof createMockStorage>, overrides: Partial<RecallOpts> = {}) {
+    return recall('What is TypeScript strict mode?', storage, new SensoryBuffer(), makeOpts({
+      strategy: RECALL_STRATEGIES.deep,
+      ...overrides,
+    }))
+  }
+
+  it('records access for every memory and association with no policy', async () => {
+    const storage = storageWithHits(5)
+
+    const result = await deepRecall(storage)
+
+    expect(result.memories).toHaveLength(5)
+    expect(result.associations.map((a) => a.id)).toEqual(['ep-assoc-1'])
+    expect(accessedIds(storage)).toEqual([...result.memories, ...result.associations].map((m) => m.id))
+  })
+
+  it('records access only for the 3 memories a token budget emitted', async () => {
+    const unbounded = await deepRecall(storageWithHits(5), { reconsolidate: false })
+    const third = unbounded.payload.items[2]
+    expect(third?.section).toBe('recalled')
+    const budget = Math.ceil(unbounded.formatted.slice(0, third?.end).length / 4)
+    const storage = storageWithHits(5)
+
+    const result = await deepRecall(storage, { tokenBudget: budget })
+
+    expect(result.payload.emittedMemories).toBe(3)
+    expect(result.payload.emittedAssociations).toBe(0)
+    expect(result.memories).toHaveLength(5)
+    expect(accessedIds(storage)).toEqual(result.memories.slice(0, 3).map((m) => m.id))
+    await flush()
+    const coRecalled = vi.mocked(storage.associations.upsertCoRecalled).mock.calls.flatMap((c) => [c[0], c[2]])
+    expect(new Set(coRecalled)).toEqual(new Set(result.memories.slice(0, 3).map((m) => m.id)))
+  })
+
+  it('records access for the emitted memories and the emitted associations', async () => {
+    process.env['ENGRAM_RECALL_EMIT_K'] = '3'
+    const storage = storageWithHits(5)
+
+    const result = await deepRecall(storage)
+
+    expect(result.payload.emittedMemories).toBe(3)
+    expect(result.payload.emittedAssociations).toBe(1)
+    expect(accessedIds(storage)).toEqual([...result.memories.slice(0, 3), ...result.associations].map((m) => m.id))
+  })
+
+  it('writes nothing when reconsolidate is false', async () => {
+    const graph = { strengthenTraversedEdges: vi.fn().mockResolvedValue(undefined) } as unknown as GraphPort
+    const control = createMockStorage()
+    await recall('TypeScript strict mode', control, new SensoryBuffer(), makeOpts({ graph }))
+    await flush()
+    expect(graph.strengthenTraversedEdges).toHaveBeenCalled()
+    vi.mocked(graph.strengthenTraversedEdges).mockClear()
+    const storage = createMockStorage()
+
+    await recall('TypeScript strict mode', storage, new SensoryBuffer(), makeOpts({ graph, reconsolidate: false }))
+    await flush()
+
+    expect(storage.episodes.recordAccess).not.toHaveBeenCalled()
+    expect(storage.procedural.recordAccess).not.toHaveBeenCalled()
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+    expect(storage.associations.upsertCoRecalled).not.toHaveBeenCalled()
+    expect(graph.strengthenTraversedEdges).not.toHaveBeenCalled()
   })
 })

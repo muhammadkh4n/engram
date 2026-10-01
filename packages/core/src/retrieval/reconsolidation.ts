@@ -6,8 +6,9 @@ import type { AssociationManager } from '../systems/association-manager.js'
 /**
  * Stage 4 of recall: reconsolidation.
  *
- * Records access on returned memories, creates co_recalled SQL edges, and
- * (Wave 2) strengthens the Neo4j edges between consecutive returned memories
+ * Records access on the memories and associations the recall emitted to the
+ * caller, creates co_recalled SQL edges among the top emitted memories, and
+ * (Wave 2) strengthens the Neo4j edges between consecutive emitted memories
  * when a graph is provided. Fire-and-forget — failures are swallowed.
  *
  * The `graph` parameter is optional and defaults to null, so existing

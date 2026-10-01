@@ -646,6 +646,11 @@ export class Memory {
        *  searching. For callers that recall on every conversation turn;
        *  explicit lookups leave it off so any non-empty query is searched. */
       skipTrivial?: boolean
+      /** Record access, co-recalled edges and graph edge weights for the
+       *  emitted memories. Default true. Measurement harnesses and previews
+       *  pass false so a lookup does not change access counts, co-recall
+       *  edges or graph weights. */
+      reconsolidate?: boolean
     }
   ): Promise<RecallResult> {
     this.assertInitialized()
@@ -691,6 +696,7 @@ export class Memory {
       ...(opts?.projectStrict === true ? { projectStrict: true } : {}),
       ...(opts?.synthesize !== undefined ? { synthesize: opts.synthesize } : {}),
       ...(opts?.now !== undefined ? { now: opts.now } : {}),
+      ...(opts?.reconsolidate === false ? { reconsolidate: false } : {}),
     })
 
     // Tick sensory buffer: decay priming weights each turn

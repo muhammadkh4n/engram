@@ -416,6 +416,42 @@ describe('Memory — recall()', () => {
     expect(result.formatted.slice(first?.start, first?.end)).toContain(result.memories[0]?.content)
   })
 
+  it('records no access, co-recall edges or graph weights with reconsolidate false', async () => {
+    const storage = makeStorage()
+    const strengthenTraversedEdges = vi.fn().mockResolvedValue(undefined)
+    const graph = { isAvailable: async () => true, strengthenTraversedEdges } as unknown as GraphPort
+    const readOnly = createMemory({ storage, graph })
+    await readOnly.initialize()
+    await readOnly.ingestBatch([
+      { role: 'user', content: 'What is the TypeScript strict mode?', sessionId: 's1' },
+      { role: 'assistant', content: 'TypeScript strict mode enables strict type checking', sessionId: 's1' },
+      { role: 'assistant', content: 'Set strict: true in tsconfig.json to turn on strict mode', sessionId: 's1' },
+    ])
+    const spies = [
+      vi.spyOn(storage.episodes, 'recordAccess'),
+      vi.spyOn(storage.procedural, 'recordAccess'),
+      vi.spyOn(storage.semantic, 'recordAccessAndBoost'),
+      vi.spyOn(storage.associations, 'upsertCoRecalled'),
+    ]
+
+    const result = await readOnly.recall('What is TypeScript strict mode?', {
+      reconsolidate: false,
+      strategyOverride: { associations: false },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(result.memories.length).toBeGreaterThan(1)
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    expect(strengthenTraversedEdges).not.toHaveBeenCalled()
+
+    await readOnly.recall('What is TypeScript strict mode?', { strategyOverride: { associations: false } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(spies[0]).toHaveBeenCalled()
+    expect(strengthenTraversedEdges).toHaveBeenCalled()
+    await readOnly.dispose()
+  })
+
   it('SOCIAL intent returns empty memories', async () => {
     await memory.ingest({ role: 'user', content: 'hello there' })
 
