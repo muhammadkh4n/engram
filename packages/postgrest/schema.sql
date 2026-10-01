@@ -2,7 +2,11 @@
 -- Engram — Self-host PostgreSQL schema (idempotent)
 -- =============================================================================
 --
--- Apply via:   psql -U postgres -d engram -f schema.sql
+-- Apply via:   psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f schema.sql
+--
+-- The file must contain no psql meta-commands (backslash lines such as
+-- pg_dump's \restrict / \unrestrict), so that any psql client version and
+-- SQL editors such as Supabase's can run it as plain SQL.
 --
 -- This file is the canonical schema source of truth for self-host installs.
 -- It is GENERATED from a production dump (post-v0.4.0 rebrand) and made
@@ -31,7 +35,6 @@
 -- PostgreSQL database dump
 --
 
-\restrict tlEVnt8kGKkgOUYZKAXb1KawcsGvDr4beUlVChILStbye6OdwQxAhSvtcrV7MdF
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 17.10 (Debian 17.10-1.pgdg12+1)
@@ -52,6 +55,20 @@ SET row_security = off;
 -- mandatory: the dump preamble empties search_path, so an unqualified
 -- CREATE EXTENSION has no target schema and fails on a fresh database.
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+
+-- The vector RPCs set hnsw.iterative_scan and hnsw.max_scan_tuples, which
+-- pgvector only knows from 0.8.0; older versions reject them at apply or
+-- call time. Fail the apply early with an actionable message instead.
+DO $$
+DECLARE
+  installed text;
+BEGIN
+  SELECT extversion INTO installed FROM pg_extension WHERE extname = 'vector';
+  IF string_to_array(installed, '.')::int[] < '{0,8,0}'::int[] THEN
+    RAISE EXCEPTION 'pgvector % is installed; engram requires pgvector >= 0.8.0. Run ALTER EXTENSION vector UPDATE; (after installing a newer pgvector) and re-apply.', installed;
+  END IF;
+END
+$$;
 
 -- =============================================================================
 -- forget() tombstone — within-file ordering note
@@ -175,9 +192,14 @@ DROP FUNCTION IF EXISTS public.engram_hybrid_recall(text, public.vector, integer
 
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
+-- The vs CTEs rank by distance through the HNSW indexes, where session_id and
+-- superseded_by are post-filters; an iterative scan in strict order keeps
+-- them from truncating the candidate list or reordering its ranks.
 CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_query_embedding public.vector, p_match_count integer DEFAULT 10, p_full_text_weight double precision DEFAULT 1.0, p_semantic_weight double precision DEFAULT 1.0, p_rrf_k integer DEFAULT 60, p_session_id text DEFAULT NULL::text, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.iterative_scan TO 'strict_order'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
   SELECT * FROM (
     WITH ft AS (
@@ -283,9 +305,16 @@ DROP FUNCTION IF EXISTS public.engram_recall(public.vector, text, integer, doubl
 
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
+-- The similarity floor filters each tier's nearest p_match_count rows from
+-- outside the ordered subquery (its LIMIT keeps Postgres from pushing the
+-- filter in). Inside an iterative HNSW scan a floor few rows pass would keep
+-- the scan walking up to max_scan_tuples; outside it the result is the same,
+-- because rows that pass the floor are always among the nearest ones.
 CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector, p_session_id text DEFAULT NULL::text, p_match_count integer DEFAULT 10, p_min_similarity double precision DEFAULT 0.3, p_include_episodes boolean DEFAULT true, p_include_digests boolean DEFAULT true, p_include_semantic boolean DEFAULT true, p_include_procedural boolean DEFAULT true, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
+    SET hnsw.iterative_scan TO 'strict_order'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
   SELECT * FROM (
     SELECT id, 'episode'::text, content, salience::float, access_count, created_at,
@@ -294,38 +323,38 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
     WHERE p_include_episodes AND embedding IS NOT NULL
       AND forgotten_at IS NULL
       AND (p_session_id IS NULL OR session_id = p_session_id)
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) ep
+  WHERE ep.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'digest'::text, summary, 0.5::float, 0, created_at,
-           (1-(embedding<=>p_query_embedding))::float, key_topics, project_id, session_id
+           (1-(embedding<=>p_query_embedding))::float AS similarity, key_topics, project_id, session_id
     FROM memory_digests
     WHERE p_include_digests AND embedding IS NOT NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) dg
+  WHERE dg.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'semantic'::text, content, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id, NULL::text
+           (1-(embedding<=>p_query_embedding))::float AS similarity, ARRAY[]::text[], project_id, NULL::text
     FROM memory_semantic
     WHERE p_include_semantic AND embedding IS NOT NULL AND superseded_by IS NULL
       AND forgotten_at IS NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) sm
+  WHERE sm.similarity >= p_min_similarity
   UNION ALL
   SELECT * FROM (
     SELECT id, 'procedural'::text, procedure, confidence::float, access_count, created_at,
-           (1-(embedding<=>p_query_embedding))::float, ARRAY[]::text[], project_id, NULL::text
+           (1-(embedding<=>p_query_embedding))::float AS similarity, ARRAY[]::text[], project_id, NULL::text
     FROM memory_procedural
     WHERE p_include_procedural AND embedding IS NOT NULL
       AND forgotten_at IS NULL
-      AND (1-(embedding<=>p_query_embedding)) >= p_min_similarity
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) pr
+  WHERE pr.similarity >= p_min_similarity
 $$;
 
 
@@ -526,31 +555,45 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- RETURNS TABLE gained project_id (Wave 5) and then session_id (synthesis Stage 1), so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text, text);
 
--- Exact-vs-approximate tradeoff: the old function body scanned every row
--- (exact, sequential scan); the per-tier subquery shape below lets the
--- planner drive each tier from its HNSW index instead (approximate nearest
--- neighbor). Recall is now governed by `hnsw.ef_search` (the number of
--- candidates HNSW examines per index scan) rather than by touching every
--- row, so a true top-k match can be missed if it falls outside the
--- ef_search candidate window. The `p_session_id` /
--- `forgotten_at` / `superseded_by` predicates are post-filters applied to
--- that candidate stream, not filters that widen it — a narrow filter
--- combined with a low ef_search compounds the truncation risk.
+-- Each tier is its own nearest-N subquery, so the planner chooses the access
+-- path per tier: on a small tier it uses an exact sequential scan and sort; on
+-- a large one it drives the ORDER BY from the tier's HNSW index.
+--
+-- On the index path only the partial index predicate (`forgotten_at IS NULL`
+-- on episodes, semantic and procedural; none on digests) is part of the
+-- index. Every other condition (`p_session_id`, semantic `superseded_by IS
+-- NULL`) is a post-filter applied to the candidates the scan returns. A
+-- plain HNSW scan returns at most `hnsw.ef_search` candidates (default 40),
+-- so a selective post-filter can leave far fewer rows than the LIMIT asked
+-- for.
 --
 -- `SET hnsw.ef_search TO '150'`: callers pass p_match_count up to 120 (core
 -- recall's vector-search leg requests strategy.maxResults * 4, and
--- maxResults tops out at 30 for the deep-sleep/light-sleep intents — see
+-- maxResults tops out at 30 for the deep-sleep/light-sleep intents; see
 -- packages/core/src/retrieval/search.ts and packages/core/src/intent/
--- intents.ts). Postgres's pgvector HNSW returns at most ef_search candidates
--- per index scan (default 40) regardless of the query's LIMIT, so without an
--- explicit floor a deep recall call silently truncates below what it asked
--- for. 150 covers the 120 ceiling with headroom.
+-- intents.ts). 150 covers the 120 ceiling with headroom for the unfiltered
+-- case.
+--
+-- `SET hnsw.iterative_scan TO 'strict_order'`: when post-filters reject
+-- candidates, the scan keeps pulling further candidates from the graph until
+-- the LIMIT is filled or `hnsw.max_scan_tuples` tuples were visited.
+-- `strict_order` keeps the returned rows in exact distance order, which the
+-- per-tier LIMIT relies on (`relaxed_order` may return them out of order).
+--
+-- `SET hnsw.max_scan_tuples TO '20000'` bounds the work a filter that few
+-- rows pass can cause; this is pgvector's default, pinned so a server-level
+-- change cannot widen it silently.
+--
+-- hnsw.iterative_scan and hnsw.max_scan_tuples require pgvector >= 0.8.0.
+--
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     SET hnsw.ef_search TO '150'
+    SET hnsw.iterative_scan TO 'strict_order'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
   SELECT * FROM (
     SELECT * FROM (
@@ -1362,5 +1405,4 @@ $smoke$;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict tlEVnt8kGKkgOUYZKAXb1KawcsGvDr4beUlVChILStbye6OdwQxAhSvtcrV7MdF
 
