@@ -805,3 +805,52 @@ describe('PostgRestStorageAdapter', () => {
     expect(mock.from).toHaveBeenCalledWith('memory_semantic')
   })
 })
+
+describe('PostgRestStorageAdapter.accessCountQuantile', () => {
+  function buildWithRpc(result: MockResult) {
+    const mock = makeMockClient()
+    mock.rpc.mockResolvedValue(result)
+    const adapter = new PostgRestStorageAdapter({ url: 'https://fake.supabase.co', key: 'k' })
+    ;(adapter as unknown as { client: unknown }).client = mock
+    ;(adapter as unknown as { _episodes: unknown })._episodes = {}
+    return { adapter, mock }
+  }
+
+  it('calls engram_access_count_quantile with the tier and q', async () => {
+    const { adapter, mock } = buildWithRpc({ data: 163, error: null })
+    const value = await adapter.accessCountQuantile('episode', 0.99)
+    expect(mock.rpc).toHaveBeenCalledWith('engram_access_count_quantile', {
+      p_memory_type: 'episode',
+      p_q: 0.99,
+    })
+    expect(value).toBe(163)
+  })
+
+  it('returns 0 when the function returns null for an empty tier', async () => {
+    const { adapter } = buildWithRpc({ data: null, error: null })
+    expect(await adapter.accessCountQuantile('semantic', 0.99)).toBe(0)
+  })
+
+  it('surfaces an RPC error', async () => {
+    const { adapter } = buildWithRpc({ data: null, error: { message: 'boom' } })
+    await expect(adapter.accessCountQuantile('procedural', 0.5)).rejects.toThrow(/boom/)
+  })
+
+  it('throws for q of 0 or 1 and an unknown tier without calling the RPC', async () => {
+    const { adapter, mock } = buildWithRpc({ data: 1, error: null })
+    await expect(adapter.accessCountQuantile('episode', 0)).rejects.toThrow(/q must be in \(0, 1\)/)
+    await expect(adapter.accessCountQuantile('episode', 1)).rejects.toThrow(/q must be in \(0, 1\)/)
+    await expect(
+      adapter.accessCountQuantile('digest' as unknown as 'episode', 0.5),
+    ).rejects.toThrow(/tier must be/)
+    expect(mock.rpc).not.toHaveBeenCalled()
+  })
+
+  it('schema defines the function with its privilege statements', () => {
+    const sql = getMigrationSQL()
+    expect(sql).toMatch(
+      /CREATE OR REPLACE FUNCTION public\.engram_access_count_quantile\(p_memory_type text, p_q double precision\)/,
+    )
+    expect(sql).toContain('percentile_cont(p_q) WITHIN GROUP (ORDER BY access_count)')
+  })
+})

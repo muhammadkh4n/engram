@@ -172,7 +172,7 @@ export class SqliteSemanticStorage implements SemanticStorage {
         `UPDATE semantic
          SET access_count = access_count + 1,
              last_accessed = julianday('now'),
-             confidence = MAX(0.05, MIN(1.0, confidence + ?))
+             confidence = MAX(0.0, MIN(1.0, confidence + ?))
          WHERE id = ?`
       )
       .run(confidenceBoost, id)

@@ -7,6 +7,7 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
 import { cosineSimilarity } from '../ingestion/near-duplicate.js'
+import { applyRankPriors, RANK_PRIORS_OFF, type RankPriorSwitches } from './rank-priors.js'
 
 // ---------------------------------------------------------------------------
 // Content extraction helpers
@@ -177,6 +178,9 @@ export interface UnifiedSearchOpts {
    *  descending boost order (at most this many). Default 0: the output is the
    *  fused cut alone. */
   lexicalReserve?: number
+  /** Hub-damping and semantic-confidence priors multiplied into every
+   *  scored candidate before the cut. Default: both off. */
+  rankPriors?: RankPriorSwitches
 }
 
 /** Lexical-leg error messages already written to stderr by this process.
@@ -224,7 +228,7 @@ function rescueCosine(query: readonly number[], row: readonly number[] | null | 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
   const {
     query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
-    lexicalReserve = 0,
+    lexicalReserve = 0, rankPriors = RANK_PRIORS_OFF,
   } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
@@ -274,6 +278,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   // Step 3: Score + rank
   const scored: RetrievedMemory[] = []
   const scoredIds = new Set<string>()
+  const typedById = new Map<string, TypedMemory>()
 
   if (vectorResults.length > 0) {
     // Primary path: score vector results with optional BM25 boost
@@ -308,6 +313,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         sessionId: extractSessionId(typed),
       })
       scoredIds.add(typed.data.id)
+      typedById.set(typed.data.id, typed)
     }
 
     // BM25 rescue: add keyword-matched candidates that vector search missed.
@@ -354,6 +360,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         sessionId: extractSessionId(typed),
       })
       scoredIds.add(typed.data.id)
+      typedById.set(typed.data.id, typed)
     }
   } else if (terms.length > 0) {
     // Fallback: text-only search via per-tier .search() methods.
@@ -419,10 +426,12 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         projectId: typed.data.projectId ?? null,
         sessionId: extractSessionId(typed),
       })
+      typedById.set(typed.data.id, typed)
     }
   }
 
-  const ranked = projectRanking ? applyProjectRanking(scored, projectRanking) : scored
+  const primed = await applyRankPriors(scored, typedById, rankPriors, storage)
+  const ranked = projectRanking ? applyProjectRanking(primed, projectRanking) : primed
   const cut = ranked
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, strategy.maxResults)

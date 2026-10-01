@@ -1,6 +1,7 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
-import type { StorageAdapter, LookupOptions } from '@engram-mem/core'
+import type { StorageAdapter, LookupOptions, AccessQuantileTier } from '@engram-mem/core'
+import { assertAccessQuantileArgs } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
 import { PostgRestDigestStorage } from './digests.js'
 import { PostgRestSemanticStorage } from './semantic.js'
@@ -526,6 +527,18 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       for (const row of page) ids.push(row.id)
       after = page[page.length - 1]!.id
     }
+  }
+
+  async accessCountQuantile(tier: AccessQuantileTier, q: number): Promise<number> {
+    assertAccessQuantileArgs(tier, q)
+    this.assertInitialized()
+    const { data, error } = await this.client.rpc('engram_access_count_quantile', {
+      p_memory_type: tier,
+      p_q: q,
+    })
+    if (error) throw new Error(`accessCountQuantile(${tier}) failed: ${error.message}`)
+    const value = Number(data ?? 0)
+    return Number.isFinite(value) ? value : 0
   }
 
   private assertInitialized(): void {

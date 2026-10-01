@@ -15,6 +15,7 @@ import {
 } from './output-policy.js'
 import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
+import { rankPriorSwitchesFromEnv } from './rank-priors.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
 import { stagePrime } from './priming.js'
@@ -411,6 +412,7 @@ export async function recall(
   // Read per call so a harness can switch the policy between recalls; a bad
   // value fails here, before any search work.
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
+  const rankPriors = rankPriorSwitchesFromEnv(process.env)
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -467,6 +469,7 @@ export async function recall(
     ...(ranking ? { projectRanking: ranking } : {}),
     onLexicalError: () => markLexicalError(timings),
     lexicalReserve,
+    rankPriors,
   })
   stageEnd(timings, 'search', searchStart)
 
@@ -505,6 +508,7 @@ export async function recall(
           ...(ranking ? { projectRanking: ranking } : {}),
           onLexicalError: () => markLexicalError(timings),
           lexicalReserve,
+          rankPriors,
         })
 
         memories = fuseByReciprocalRank(memories, hydeMemories, slateSize)
@@ -689,7 +693,11 @@ export async function recall(
           unscored.push(m)
           continue
         }
-        const blended = rerankScore * rerankWeight + m.relevance * originalWeight
+        // The fused relevance already carries the rank prior, but only at
+        // originalWeight; the prior is applied to the rerank score as well so
+        // it is not diluted by the reranker's share of the blend.
+        const rerankComponent = m.rankPrior === undefined ? rerankScore : rerankScore * m.rankPrior
+        const blended = rerankComponent * rerankWeight + m.relevance * originalWeight
         scored.push({ ...m, relevance: blended })
       }
       // Re-apply the project boost to the BLENDED scores before truncation:
