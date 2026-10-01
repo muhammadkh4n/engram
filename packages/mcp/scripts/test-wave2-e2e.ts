@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /**
+ * Runs against live stores; a manual script, not part of the published package.
+ *
  * Wave 2 end-to-end validation.
  *
  * Runs against live Supabase + Neo4j (same creds the production MCP uses).
@@ -21,9 +23,9 @@
  *      traverses it
  *   7. Cleanup
  *
- * Usage:
- *   node dist/test-wave2-e2e.js            # full suite
- *   node dist/test-wave2-e2e.js --keep     # skip final cleanup (inspect state)
+ * Usage (source ~/.engram/env first):
+ *   npx tsx packages/mcp/scripts/test-wave2-e2e.ts           # full suite
+ *   npx tsx packages/mcp/scripts/test-wave2-e2e.ts --keep    # skip final cleanup (inspect state)
  *
  * Required env: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY,
  *               NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
@@ -736,7 +738,7 @@ async function main(): Promise<void> {
     await sleep(500)
 
     // Use the dedup module directly against a near-duplicate
-    const { findDuplicate } = await import('./ingest/dedup.js')
+    const { findDuplicate } = await import('../src/ingest/dedup.js')
     const result = await findDuplicate(
       'Sarah suggests the decay parameter should be 0.6 for Wave 2 activation',
       storage,

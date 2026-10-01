@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
+ * Runs against live stores; a manual script, not part of the published package.
+ *
  * Wave 3 consolidation integration test against production Neo4j + Supabase.
  *
  * Runs each consolidation cycle and reports results.
  * Requires: SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
  *
- * Usage: source ~/.engram/env && npx tsx packages/mcp/src/test-wave3-consolidation.ts
+ * Usage: source ~/.engram/env && npx tsx packages/mcp/scripts/test-wave3-consolidation.ts
  */
 
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
