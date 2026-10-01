@@ -758,3 +758,109 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     expect(graph.strengthenTraversedEdges).not.toHaveBeenCalled()
   })
 })
+
+describe('recall engine — rank priors', () => {
+  const NAMES = ['ENGRAM_RECALL_HUB_DAMPING', 'ENGRAM_RECALL_SEMANTIC_CONFIDENCE', 'ENGRAM_MMR_PRE_RERANK'] as const
+  const original = Object.fromEntries(NAMES.map((n) => [n, process.env[n]]))
+  const NOW = new Date('2026-06-01T12:00:00Z')
+
+  beforeEach(() => {
+    for (const n of NAMES) delete process.env[n]
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    for (const n of NAMES) {
+      if (original[n] === undefined) delete process.env[n]
+      else process.env[n] = original[n]
+    }
+  })
+
+  const createdAt = new Date(NOW.getTime() - 24 * 3_600_000)
+  const hubVector: SearchResult<TypedMemory>[] = [
+    { item: { type: 'episode', data: { ...MOCK_EPISODE, id: 'hub', content: 'general deploy notes', accessCount: 551, createdAt } }, similarity: 0.8 },
+    { item: { type: 'episode', data: { ...MOCK_EPISODE, id: 'specific', content: 'billing worker blue-green deploy', accessCount: 0, createdAt } }, similarity: 0.75 },
+  ]
+
+  function hubStorage() {
+    return {
+      ...createMockStorage({ vectorSearchResults: hubVector, textBoostResults: [] }),
+      accessCountQuantile: vi.fn().mockResolvedValue(163),
+    }
+  }
+
+  const RERANK: Record<string, number> = { hub: 0.9, specific: 0.6 }
+  const rerankIntelligence = (): IntelligenceAdapter => ({
+    rerank: vi.fn(async (_q: string, docs: ReadonlyArray<{ id: string }>) => docs.map((d) => ({ id: d.id, score: RERANK[d.id]! }))),
+  })
+
+  it('applies the prior to the rerank component, not to the blended total', async () => {
+    process.env['ENGRAM_RECALL_HUB_DAMPING'] = 'on'
+    const prior = 1 / (1 + Math.log(551 / 163))
+    const fused = await recall('billing worker deploy', hubStorage(), new SensoryBuffer(), makeOpts({ reconsolidate: false }))
+    const fusedById = new Map(fused.memories.map((m) => [m.id, m]))
+    expect(fusedById.get('hub')?.rankPrior).toBeCloseTo(prior, 12)
+
+    const result = await recall('billing worker deploy', hubStorage(), new SensoryBuffer(), makeOpts({
+      intelligence: rerankIntelligence(),
+      reconsolidate: false,
+    }))
+
+    const byId = new Map(result.memories.map((m) => [m.id, m]))
+    expect(byId.get('hub')!.relevance).toBeCloseTo(0.7 * 0.9 * prior + 0.3 * fusedById.get('hub')!.relevance, 12)
+    expect(byId.get('specific')!.relevance).toBeCloseTo(0.7 * 0.6 + 0.3 * fusedById.get('specific')!.relevance, 12)
+    expect(result.memories.map((m) => m.id)).toEqual(['specific', 'hub'])
+  })
+
+  it('returns byte-identical output with the switches off and unset', async () => {
+    const unset = await recall('billing worker deploy', hubStorage(), new SensoryBuffer(), makeOpts({
+      intelligence: rerankIntelligence(), reconsolidate: false,
+    }))
+    process.env['ENGRAM_RECALL_HUB_DAMPING'] = 'off'
+    process.env['ENGRAM_RECALL_SEMANTIC_CONFIDENCE'] = 'off'
+    const storage = hubStorage()
+
+    const off = await recall('billing worker deploy', storage, new SensoryBuffer(), makeOpts({
+      intelligence: rerankIntelligence(), reconsolidate: false,
+    }))
+
+    expect(off.memories).toEqual(unset.memories)
+    expect(off.formatted).toBe(unset.formatted)
+    expect(off.memories.map((m) => m.id)).toEqual(['hub', 'specific'])
+    expect(storage.accessCountQuantile).not.toHaveBeenCalled()
+  })
+
+  it('makes one quantile call for two recalls within ten minutes', async () => {
+    process.env['ENGRAM_RECALL_HUB_DAMPING'] = 'on'
+    const storage = hubStorage()
+
+    await recall('billing worker deploy', storage, new SensoryBuffer(), makeOpts({ reconsolidate: false }))
+    vi.setSystemTime(new Date(NOW.getTime() + 9 * 60_000))
+    await recall('billing worker deploy', storage, new SensoryBuffer(), makeOpts({ reconsolidate: false }))
+
+    expect(storage.accessCountQuantile).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails before searching on an invalid switch value', async () => {
+    process.env['ENGRAM_RECALL_SEMANTIC_CONFIDENCE'] = 'yes'
+    const storage = hubStorage()
+
+    await expect(recall('billing worker deploy', storage, new SensoryBuffer(), makeOpts()))
+      .rejects.toThrow(/ENGRAM_RECALL_SEMANTIC_CONFIDENCE/)
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+  })
+
+  it('records access on a recalled semantic memory without changing its confidence', async () => {
+    const storage = createMockStorage({
+      vectorSearchResults: [{ item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 }],
+      textBoostResults: [],
+    })
+
+    await recall('TypeScript strict mode', storage, new SensoryBuffer(), makeOpts())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith(MOCK_SEMANTIC.id, 0)
+  })
+})

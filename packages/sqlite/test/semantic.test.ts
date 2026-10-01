@@ -65,6 +65,28 @@ describe('SqliteSemanticStorage', () => {
     expect(updated.item.lastAccessed).toBeInstanceOf(Date)
   })
 
+  it('recordAccessAndBoost with a zero boost leaves confidence unchanged and clamps to [0, 1]', async () => {
+    const mem = await store.insert({
+      topic: 'fact', content: 'Rust borrows are checked at compile time',
+      confidence: 0.03, sourceDigestIds: [], sourceEpisodeIds: [],
+      decayRate: 0.02, supersedes: null, supersededBy: null,
+      embedding: null, metadata: {},
+    })
+
+    await store.recordAccessAndBoost(mem.id, 0)
+    let found = (await store.search('Rust borrows compile')).find(r => r.item.id === mem.id)!
+    expect(found.item.confidence).toBe(0.03)
+    expect(found.item.accessCount).toBe(1)
+
+    await store.recordAccessAndBoost(mem.id, -0.5)
+    found = (await store.search('Rust borrows compile')).find(r => r.item.id === mem.id)!
+    expect(found.item.confidence).toBe(0)
+
+    await store.recordAccessAndBoost(mem.id, 2)
+    found = (await store.search('Rust borrows compile')).find(r => r.item.id === mem.id)!
+    expect(found.item.confidence).toBe(1)
+  })
+
   it('batchDecay lowers confidence of unaccessed memories', async () => {
     const mem = await store.insert({
       topic: 'fact', content: 'Old unaccessed fact',

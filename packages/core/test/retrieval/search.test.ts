@@ -403,3 +403,141 @@ describe('unifiedSearch — lexical-only candidates', () => {
     expect(storage.getByIds).not.toHaveBeenCalled()
   })
 })
+
+describe('unifiedSearch — rank priors', () => {
+  const NOW = new Date('2026-06-01T12:00:00Z')
+  const CREATED_AT = new Date(NOW.getTime() - 24 * 3_600_000)
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(NOW)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function ep(id: string, content: string, accessCount: number): Episode {
+    return {
+      id,
+      sessionId: `sess-${id}`,
+      role: 'user',
+      content,
+      salience: 0.5,
+      accessCount,
+      lastAccessed: null,
+      consolidatedAt: null,
+      embedding: null,
+      entities: [],
+      metadata: {},
+      createdAt: CREATED_AT,
+      projectId: null,
+    }
+  }
+
+  const hub = ep('hub', 'general notes about the deploy setup', 551)
+  const specific = ep('specific', 'the billing worker deploy uses a blue-green switch', 0)
+
+  function storageWith(quantile: number, vector: SearchResult<TypedMemory>[] = [
+    { item: { type: 'episode', data: hub }, similarity: 0.8 },
+    { item: { type: 'episode', data: specific }, similarity: 0.75 },
+  ]) {
+    return {
+      ...createMockStorage({ vectorSearchResults: vector, textBoostResults: [] }),
+      accessCountQuantile: vi.fn().mockResolvedValue(quantile),
+    }
+  }
+
+  function search(storage: ReturnType<typeof storageWith>, rankPriors?: { hubDamping: boolean; semanticConfidence: boolean }) {
+    return unifiedSearch({
+      query: 'billing worker deploy',
+      embedding: [0.1, 0.2],
+      strategy: LIGHT_STRATEGY,
+      storage,
+      sensory: new SensoryBuffer(),
+      ...(rankPriors ? { rankPriors } : {}),
+    })
+  }
+
+  it('drops a 551-access hub below a specific match once hub damping is on', async () => {
+    const off = await search(storageWith(163))
+    expect(off.map((m) => m.id)).toEqual(['hub', 'specific'])
+
+    const on = await search(storageWith(163), { hubDamping: true, semanticConfidence: false })
+
+    expect(on.map((m) => m.id)).toEqual(['specific', 'hub'])
+    const hubOn = on.find((m) => m.id === 'hub')!
+    const hubOff = off.find((m) => m.id === 'hub')!
+    expect(hubOn.rankPrior).toBeCloseTo(1 / (1 + Math.log(551 / 163)), 10)
+    expect(hubOn.relevance).toBeCloseTo(hubOff.relevance * hubOn.rankPrior!, 12)
+    expect(on.find((m) => m.id === 'specific')).not.toHaveProperty('rankPrior')
+  })
+
+  it('damps a hub found only through the lexical leg', async () => {
+    const storage = {
+      ...createMockStorage({
+        vectorSearchResults: [{ item: { type: 'episode', data: specific }, similarity: 0.75 }],
+        textBoostResults: [{ id: 'hub', type: 'episode', boost: 0.5 }],
+      }),
+      accessCountQuantile: vi.fn().mockResolvedValue(163),
+    }
+    vi.mocked(storage.getByIds).mockResolvedValue([{ type: 'episode', data: hub }])
+
+    const result = await search(storage, { hubDamping: true, semanticConfidence: false })
+
+    expect(result.find((m) => m.id === 'hub')?.rankPrior).toBeCloseTo(1 / (1 + Math.log(551 / 163)), 10)
+  })
+
+  it('leaves a digest unaffected', async () => {
+    const digest: TypedMemory = {
+      type: 'digest',
+      data: {
+        id: 'dig', sessionId: 's', summary: 'billing deploy digest', keyTopics: [], sourceEpisodeIds: [],
+        sourceDigestIds: [], level: 1, embedding: null, metadata: {}, createdAt: CREATED_AT, projectId: null,
+      },
+    }
+    const storage = storageWith(163, [{ item: digest, similarity: 0.8 }, { item: { type: 'episode', data: specific }, similarity: 0.7 }])
+    const off = await search(storage)
+
+    const on = await search(storage, { hubDamping: true, semanticConfidence: true })
+
+    expect(on.find((m) => m.id === 'dig')).toEqual(off.find((m) => m.id === 'dig'))
+  })
+
+  it('scales a low-confidence semantic row by 0.5 + 0.5 * confidence', async () => {
+    const fact: TypedMemory = {
+      type: 'semantic',
+      data: {
+        id: 'fact', topic: 'deploy', content: 'billing deploys are blue-green', confidence: 0.05,
+        sourceDigestIds: [], sourceEpisodeIds: [], accessCount: 0, lastAccessed: null, decayRate: 0.02,
+        supersedes: null, supersededBy: null, embedding: null, metadata: {}, createdAt: CREATED_AT,
+        updatedAt: CREATED_AT, projectId: null,
+      },
+    }
+    const storage = storageWith(11, [{ item: fact, similarity: 0.8 }])
+    const off = await search(storage)
+
+    const on = await search(storage, { hubDamping: false, semanticConfidence: true })
+
+    expect(on[0]!.rankPrior).toBeCloseTo(0.525, 12)
+    expect(on[0]!.relevance).toBeCloseTo(off[0]!.relevance * 0.525, 12)
+    expect(storage.accessCountQuantile).not.toHaveBeenCalled()
+  })
+
+  it('returns identical order and relevance on the shared fixtures with both switches off', async () => {
+    const plain = createMockStorage()
+    const withMethod = { ...createMockStorage(), accessCountQuantile: vi.fn().mockResolvedValue(1) }
+
+    const baseline = await unifiedSearch({
+      query: 'TypeScript strict mode', embedding: [0.1, 0.2], strategy: DEEP_STRATEGY, storage: plain, sensory: new SensoryBuffer(),
+    })
+    const off = await unifiedSearch({
+      query: 'TypeScript strict mode', embedding: [0.1, 0.2], strategy: DEEP_STRATEGY, storage: withMethod, sensory: new SensoryBuffer(),
+      rankPriors: { hubDamping: false, semanticConfidence: false },
+    })
+
+    expect(baseline.length).toBeGreaterThan(1)
+    expect(off).toEqual(baseline)
+    expect(withMethod.accessCountQuantile).not.toHaveBeenCalled()
+  })
+})

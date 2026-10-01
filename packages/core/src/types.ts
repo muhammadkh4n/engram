@@ -260,6 +260,9 @@ export interface RetrievedMemory {
    *  semantic/procedural tiers and for rows whose adapter path did not carry
    *  a session id (legacy RPC rows map '' → null). */
   sessionId?: string | null
+  /** Ranking prior (hub damping × semantic confidence) multiplied into this
+   *  candidate's score; absent when no prior applied or it was 1. */
+  rankPrior?: number
 }
 
 /** A1 session-completeness ranking entry (additive recall enrichment).

@@ -373,10 +373,10 @@ BEGIN
     UPDATE memory_episodes SET access_count = access_count + 1, last_accessed = now() WHERE id = p_id;
   ELSIF p_memory_type = 'semantic' THEN
     UPDATE memory_semantic SET access_count = access_count + 1, last_accessed = now(),
-      confidence = LEAST(1.0, confidence + p_conf_boost), updated_at = now() WHERE id = p_id;
+      confidence = GREATEST(0.0, LEAST(1.0, confidence + p_conf_boost)), updated_at = now() WHERE id = p_id;
   ELSIF p_memory_type = 'procedural' THEN
     UPDATE memory_procedural SET access_count = access_count + 1, last_accessed = now(),
-      confidence = LEAST(1.0, confidence + p_conf_boost), updated_at = now() WHERE id = p_id;
+      confidence = GREATEST(0.0, LEAST(1.0, confidence + p_conf_boost)), updated_at = now() WHERE id = p_id;
   END IF;
 END; $$;
 

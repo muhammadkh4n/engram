@@ -25,7 +25,10 @@ export function stageReconsolidate(
   const accessUpdates = [...recalled, ...associated].map(async (memory) => {
     switch (memory.type) {
       case 'semantic':
-        await storage.semantic.recordAccessAndBoost(memory.id, 0.05)
+        // Being recalled is not evidence for a fact: confidence comes from
+        // its sources and decay, and feeds the ranking prior. A per-recall
+        // boost would let retrieval reinforce its own ranking.
+        await storage.semantic.recordAccessAndBoost(memory.id, 0)
         break
       case 'procedural':
         await storage.procedural.recordAccess(memory.id)
