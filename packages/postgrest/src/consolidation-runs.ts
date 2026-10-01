@@ -80,6 +80,18 @@ export class PostgRestConsolidationRunStorage implements ConsolidationRunStorage
     return row ? rowToRun(row) : null
   }
 
+  async getRecentFinished(cycle: Cycle, limit: number): Promise<ConsolidationRun[]> {
+    const { data, error } = await this.client
+      .from('memory_consolidation_runs')
+      .select('*')
+      .eq('cycle', cycle)
+      .in('status', ['completed', 'failed'])
+      .order('started_at', { ascending: false })
+      .limit(limit)
+    if (error) throw error
+    return (data as RunRow[] | null ?? []).map(rowToRun)
+  }
+
   async getRecent(limit = 20): Promise<ConsolidationRun[]> {
     const { data, error } = await this.client
       .from('memory_consolidation_runs')

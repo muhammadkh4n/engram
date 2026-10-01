@@ -211,18 +211,26 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
     // sm-1 reappears here (forgotten AND superseded since `since`) — must dedupe to one entry.
     const smSupersededChain = createChainable({ data: [{ id: 'sm-2' }, { id: 'sm-1' }], error: null })
 
+    const empty = () => createChainable({ data: [], error: null })
+
     fromFn
       .mockReturnValueOnce(epChain)
+      .mockReturnValueOnce(empty())
       .mockReturnValueOnce(smForgottenChain)
+      .mockReturnValueOnce(empty())
       .mockReturnValueOnce(prChain)
+      .mockReturnValueOnce(empty())
       .mockReturnValueOnce(smSupersededChain)
+      .mockReturnValueOnce(empty())
 
     const results = await adapter.listTombstonesSince!(since)
 
-    expect(fromFn).toHaveBeenNthCalledWith(1, 'memory_episodes')
-    expect(fromFn).toHaveBeenNthCalledWith(2, 'memory_semantic')
-    expect(fromFn).toHaveBeenNthCalledWith(3, 'memory_procedural')
-    expect(fromFn).toHaveBeenNthCalledWith(4, 'memory_semantic')
+    expect(fromFn.mock.calls.map((c) => c[0])).toEqual([
+      'memory_episodes', 'memory_episodes',
+      'memory_semantic', 'memory_semantic',
+      'memory_procedural', 'memory_procedural',
+      'memory_semantic', 'memory_semantic',
+    ])
     expect(fromFn).not.toHaveBeenCalledWith('memory_digests')
 
     expect(epChain.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
@@ -237,6 +245,45 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
       { id: 'pr-1', type: 'procedural' },
       { id: 'sm-2', type: 'semantic' },
     ])
+  })
+
+  it('pages each table by id until an empty page, so a server row cap cannot drop tombstones', async () => {
+    const { adapter, fromFn } = buildAdapter()
+    const since = new Date('2026-01-01T00:00:00.000Z')
+    // A server capped at two rows per response: full pages until the table runs out.
+    const page1 = createChainable({ data: [{ id: 'ep-1' }, { id: 'ep-2' }], error: null })
+    const page2 = createChainable({ data: [{ id: 'ep-3' }, { id: 'ep-4' }], error: null })
+    const page3 = createChainable({ data: [{ id: 'ep-5' }], error: null })
+    const page4 = createChainable({ data: [], error: null })
+    const supersededPage1 = createChainable({ data: [{ id: 'sm-8' }, { id: 'sm-9' }], error: null })
+    const supersededPage2 = createChainable({ data: [], error: null })
+
+    fromFn.mockImplementation(() => createChainable({ data: [], error: null }))
+    fromFn
+      .mockReturnValueOnce(page1)
+      .mockReturnValueOnce(page2)
+      .mockReturnValueOnce(page3)
+      .mockReturnValueOnce(page4)
+      .mockReturnValueOnce(createChainable({ data: [], error: null }))
+      .mockReturnValueOnce(createChainable({ data: [], error: null }))
+      .mockReturnValueOnce(supersededPage1)
+      .mockReturnValueOnce(supersededPage2)
+
+    const results = await adapter.listTombstonesSince!(since)
+
+    expect(results.map((r) => r.id)).toEqual(['ep-1', 'ep-2', 'ep-3', 'ep-4', 'ep-5', 'sm-8', 'sm-9'])
+    for (const page of [page1, page2, page3, page4]) {
+      expect(page.order).toHaveBeenCalledWith('id', { ascending: true })
+      expect(page.limit).toHaveBeenCalled()
+      expect(page.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
+    }
+    expect(page1.gt).not.toHaveBeenCalled()
+    expect(page2.gt).toHaveBeenCalledWith('id', 'ep-2')
+    expect(page3.gt).toHaveBeenCalledWith('id', 'ep-4')
+    expect(page4.gt).toHaveBeenCalledWith('id', 'ep-5')
+    expect(supersededPage2.gt).toHaveBeenCalledWith('id', 'sm-9')
+    expect(supersededPage2.not).toHaveBeenCalledWith('superseded_by', 'is', null)
+    expect(fromFn).toHaveBeenCalledTimes(8)
   })
 
   it('propagates a query error', async () => {

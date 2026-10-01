@@ -1425,6 +1425,28 @@ export class NeuralGraph {
   }
 
   /**
+   * Remove the stale memberships of Community nodes a partial run rewrote.
+   * Each listed community was restamped with the run's generatedAt, so a
+   * MEMBER_OF edge into it carrying another stamp is left from an earlier
+   * Louvain assignment. Community nodes are never deleted here, and
+   * communities not listed keep every edge.
+   */
+  async trimCommunityMemberships(opts: {
+    generatedAt: string
+    communityIds: string[]
+  }): Promise<{ membershipsRemoved: number }> {
+    if (opts.communityIds.length === 0) return { membershipsRemoved: 0 }
+    const result = await this.runCypherWrite(`
+      MATCH ()-[r:MEMBER_OF]->(c:Community)
+      WHERE c.id IN $communityIds
+        AND (r.generatedAt IS NULL OR r.generatedAt <> $generatedAt)
+      DELETE r
+    `, { generatedAt: opts.generatedAt, communityIds: opts.communityIds })
+    const counters = result.summary?.counters?.updates?.()
+    return { membershipsRemoved: counters?.relationshipsDeleted ?? 0 }
+  }
+
+  /**
    * Query community summaries from Neo4j for MCP tool responses.
    */
   async queryCommunities(opts?: {
