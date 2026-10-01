@@ -107,17 +107,17 @@ describe('parseEmbedArgs', () => {
 })
 
 describe('resolveEmbedSettings', () => {
-  it('defaults to openai text-embedding-3-small at the native width', () => {
-    expect(resolveEmbedSettings({})).toEqual({ backend: 'openai', model: BENCH_EMBED_MODEL, dims: null })
+  it('defaults to openai text-embedding-3-small and records the resolved width', () => {
+    expect(resolveEmbedSettings({}, 1536)).toEqual({ backend: 'openai', model: BENCH_EMBED_MODEL, dims: 1536 })
   })
 
   it('defaults onnx to the embedder package default model', () => {
-    expect(resolveEmbedSettings({ embedBackend: 'onnx' }).model).toBe(DEFAULT_ONNX_EMBED_MODEL)
+    expect(resolveEmbedSettings({ embedBackend: 'onnx' }, 1024).model).toBe(DEFAULT_ONNX_EMBED_MODEL)
     expect(DEFAULT_ONNX_EMBED_MODEL).toBe(DEFAULT_EMBED_MODEL)
   })
 
   it('keeps an explicit model and dims', () => {
-    expect(resolveEmbedSettings({ embedModel: 'text-embedding-3-large', embedDims: 1536 }))
+    expect(resolveEmbedSettings({ embedModel: 'text-embedding-3-large', embedDims: 1536 }, 1536))
       .toEqual({ backend: 'openai', model: 'text-embedding-3-large', dims: 1536 })
   })
 })

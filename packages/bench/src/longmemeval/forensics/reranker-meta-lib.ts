@@ -21,11 +21,11 @@ export interface EmbedArgs {
   embedDims?: number
 }
 
-/** Resolved embedder settings; dims null = the model's native width. */
+/** Resolved embedder settings; dims is the width the vectors are built at. */
 export interface EmbedSettings {
   backend: EmbedBackend
   model: string
-  dims: number | null
+  dims: number
 }
 
 /**
@@ -65,11 +65,15 @@ export function parseEmbedArgs(argv: readonly string[]): EmbedArgs {
   }
 }
 
-/** The backend, model and dims a run embeds with, defaults applied. */
-export function resolveEmbedSettings(args: EmbedArgs): EmbedSettings {
+/**
+ * The backend, model and dims a run embeds with, defaults applied. `dims` is
+ * the width the vectors are built at, resolved by the caller from the wired
+ * embedder (this module stays free of runtime imports).
+ */
+export function resolveEmbedSettings(args: EmbedArgs, dims: number): EmbedSettings {
   const backend = args.embedBackend ?? 'openai'
   const model = args.embedModel ?? (backend === 'onnx' ? DEFAULT_ONNX_EMBED_MODEL : BENCH_EMBED_MODEL)
-  return { backend, model, dims: args.embedDims ?? null }
+  return { backend, model, dims }
 }
 
 const BACKENDS: readonly RerankerBackend[] = ['openai', 'onnx', 'none']

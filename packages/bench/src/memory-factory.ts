@@ -11,6 +11,7 @@ import {
 } from '@engram-mem/rerank-onnx'
 import { withRecallEngine, recallEngineOf } from '@engram-mem/recall-engine'
 import type { BenchmarkOpts, EmbedBackend } from './types.js'
+import { openaiEmbedDims } from './embed-dims.js'
 import { tryCreateBenchGraph } from './bench-graph.js'
 import type { BenchMemoryHandle } from './bench-memory-handle.js'
 
@@ -194,6 +195,27 @@ async function loadSharedEmbedder(model: string): Promise<OnnxEmbedder> {
   return sharedOnnxEmbedder.embedder
 }
 
+/**
+ * The width this run's vectors are built at: for openai the requested width or
+ * the service default, for onnx the loaded model's hidden size (which a
+ * requested width must equal). Loads the shared onnx embedder.
+ */
+export async function resolveEmbedDims(opts: BenchmarkOpts | undefined): Promise<number> {
+  if ((opts?.embedBackend ?? 'openai') === 'openai') return openaiEmbedDims(opts?.embedDims)
+  const model = opts?.embedModel ?? DEFAULT_EMBED_MODEL
+  return checkedOnnxDims(model, await loadSharedEmbedder(model), opts?.embedDims)
+}
+
+function checkedOnnxDims(model: string, embedder: OnnxEmbedder, requested: number | undefined): number {
+  const dims = embedder.dimensions()
+  if (requested !== undefined && requested !== dims) {
+    throw new Error(
+      `[engram-bench] --embed-dims ${requested} does not match ${model}, which produces ${dims}-dim embeddings.`,
+    )
+  }
+  return dims
+}
+
 async function composeEmbedding(
   base: IntelligenceAdapter | undefined,
   embedBackend: EmbedBackend,
@@ -203,12 +225,7 @@ async function composeEmbedding(
 
   const model = opts?.embedModel ?? DEFAULT_EMBED_MODEL
   const embedder = await loadSharedEmbedder(model)
-  const dims = embedder.dimensions()
-  if (opts?.embedDims !== undefined && opts.embedDims !== dims) {
-    throw new Error(
-      `[engram-bench] --embed-dims ${opts.embedDims} does not match ${model}, which produces ${dims}-dim embeddings.`,
-    )
-  }
+  const dims = checkedOnnxDims(model, embedder, opts?.embedDims)
   // A local embedder needs no API key, so it still wires when the base
   // adapter is absent; recall then runs on embeddings alone.
   return {

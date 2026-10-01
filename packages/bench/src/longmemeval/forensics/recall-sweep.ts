@@ -44,7 +44,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { LongMemEvalAdapter } from '../adapter.js'
-import { createBenchMemory } from '../../memory-factory.js'
+import { createBenchMemory, resolveEmbedDims } from '../../memory-factory.js'
 import { parseContextMode, runSweepRecall, type ContextMode, type FormattedContextFields } from './context-modes.js'
 import { buildSynthesisField, type SynthesisBlock } from './synthesis-row.js'
 import { parseEventDate, recallOutputPolicyFromEnv } from '@engram-mem/core'
@@ -122,10 +122,6 @@ async function main(): Promise<void> {
   const questions = exitOnError(() => selectQuestions(allQs, { limit: args.limit, ...(selection ? { ids: selection.ids } : {}) }))
   console.log(`Loaded ${allQs.length} questions, evaluating ${questions.length}`)
   console.log(`Config: maxResults=${args.maxResults}, consolidate=${!args.noConsolidate}, graph=${!args.noGraph}, rerank=${args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')}${args.onnxRerankerModel ? ` (${args.onnxRerankerModel})` : ''}, vectorMode=${args.vectorMode ?? 'full'}, synthesize=${args.synthesize}, contextMode=${args.contextMode}`)
-  const embed = resolveEmbedSettings(args)
-  console.log(`Embedding: ${embed.backend} ${embed.model}${embed.dims !== null ? ` @${embed.dims}` : ''}`)
-  console.log(`K values: ${K_VALUES.join(', ')}`)
-  console.log()
 
   const benchOpts: BenchmarkOpts = {
     consolidate: !args.noConsolidate,
@@ -140,10 +136,18 @@ async function main(): Promise<void> {
     ...(args.embedDims !== undefined ? { embedDims: args.embedDims } : {}),
   }
 
+  // Resolved before the identity so a resume compares the width the vectors
+  // are actually built at, not the raw flag.
+  const embedDims = await resolveEmbedDims(benchOpts)
+  const embed = resolveEmbedSettings(args, embedDims)
+  console.log(`Embedding: ${embed.backend} ${embed.model} @${embed.dims}`)
+  console.log(`K values: ${K_VALUES.join(', ')}`)
+  console.log()
+
   // Recall reads the same env per call, so this is the policy every row was assembled under.
   const outputPolicy = exitOnError(() => outputPolicyRecord(recallOutputPolicyFromEnv(process.env)))
   const partialPath = partialPathFor(args.output)
-  const identity = buildRunIdentity(args, selection?.sha256, outputPolicy)
+  const identity = buildRunIdentity(args, selection?.sha256, outputPolicy, embedDims)
   const resumedRows = openCheckpoint(partialPath, identity, args.resume === true)
   exitOnError(() => assertRowsInSelection(questions, resumedRows))
   const todo = pendingQuestions(questions, new Set(resumedRows.map((r) => r.question_id)))

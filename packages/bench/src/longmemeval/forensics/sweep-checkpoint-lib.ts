@@ -26,10 +26,10 @@ export interface RunIdentity {
   output_emit_k: number | null
   output_token_budget: number | null
   output_faint: boolean
-  /** Embedder backend, resolved model id and requested width (null = the model's native width). */
+  /** Embedder backend, resolved model id and the width the vectors are built at. */
   embed_backend: string
   embed_model: string
-  embed_dims: number | null
+  embed_dims: number
 }
 
 /** Structural mirror of core's RecallOutputPolicy. */
@@ -76,12 +76,13 @@ export function buildRunIdentity(
   args: RunIdentityArgs,
   idsSha256: string | undefined,
   outputPolicy: OutputPolicyRecord,
+  embedDims: number,
 ): RunIdentity {
   const backend: RerankerBackend = args.rerankerBackend ?? (args.noRerank ? 'none' : 'openai')
   const questionSelection = idsSha256 !== undefined
     ? `ids:${idsSha256}`
     : args.limit > 0 ? `limit:${args.limit}` : 'all'
-  const embed = resolveEmbedSettings(args)
+  const embed = resolveEmbedSettings(args, embedDims)
   return {
     data: path.resolve(args.data),
     context_mode: args.contextMode,

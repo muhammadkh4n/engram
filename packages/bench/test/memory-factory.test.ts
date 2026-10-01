@@ -69,7 +69,7 @@ vi.mock('@engram-mem/rerank-onnx', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@engram-mem/rerank-onnx')>()),
   createOnnxEmbedder: fakes.createOnnxEmbedder,
 }))
-import { createBenchMemory } from '../src/memory-factory.js'
+import { createBenchMemory, resolveEmbedDims } from '../src/memory-factory.js'
 import type { BenchMemoryHandle } from '../src/bench-memory-handle.js'
 
 // Must match the recall-engine codec's DEFAULT_DIMS
@@ -266,6 +266,12 @@ describe('createBenchMemory: embedding backend', () => {
     const intelligence = intelligenceOf(handle)!
     expect(await intelligence.embedQuery!('q')).toEqual([3, 1])
     expect(intelligence.summarize).toBeUndefined()
+  })
+
+  it('resolves the onnx width from the loaded model and refuses a different requested width', async () => {
+    await expect(resolveEmbedDims({ embedBackend: 'onnx', embedModel: 'org/embed-c' })).resolves.toBe(1024)
+    await expect(resolveEmbedDims({ embedBackend: 'onnx', embedModel: 'org/embed-c', embedDims: 768 }))
+      .rejects.toThrow(/produces 1024/)
   })
 
   it('refuses embedDims that differ from the ONNX model width', async () => {
