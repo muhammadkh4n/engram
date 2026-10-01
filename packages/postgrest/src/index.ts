@@ -13,7 +13,7 @@
  * with @deprecated tags for one-version backward compatibility.
  */
 export { PostgRestStorageAdapter } from './adapter.js'
-export type { PostgRestAdapterOptions } from './adapter.js'
+export type { PostgRestAdapterOptions, LexicalMode } from './adapter.js'
 export { getSchemaSQL, getMigrationSQL } from './migrations.js'
 
 import { PostgRestStorageAdapter } from './adapter.js'
