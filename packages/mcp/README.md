@@ -46,6 +46,16 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_SALIENCE_THRESHOLD` — server env for the capture route and the local ingest CLIs: the salience classifier's confidence cut, `0`..`1`, default `0.7`. A capture the classifier marks not worth storing, or scores below it, is rejected.
 - `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
+Recall output policy (server-wide; every variable unset means an unbounded payload, the same text as before these settings existed):
+
+- `ENGRAM_RECALL_EMIT_K` — positive integer: emit only the first K Recalled memories.
+- `ENGRAM_RECALL_TOKEN_BUDGET` — positive integer: cap the recall text at this many estimated tokens (`ceil(chars / 4)`), headers included. The per-call `token_budget` argument of `memory_recall` overrides it.
+- `ENGRAM_RECALL_FAINT` — `on` (default) or `off`: emit the Faint Associations section.
+
+An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable; the resolved policy is logged once at startup.
+
+The payload is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole, and a section heading is written only with its first item. Access counts, co-recall edges and graph weights are recorded only for the memories and associations the payload emitted.
+
 **Optional (enables Neo4j neural graph):**
 - `NEO4J_URI` — e.g., `bolt://localhost:7687`
 - `NEO4J_USER` — default: `neo4j`
@@ -80,11 +90,16 @@ Search memory for content relevant to a query.
 ```json
 {
   "query": "What deployment preferences did we discuss?",
-  "session_id": "optional-session-id"
+  "session_id": "optional-session-id",
+  "token_budget": 4000
 }
 ```
 
-**Returns:** Formatted memories with attribution (role, date, session). Includes direct matches and associated memories found via graph walk.
+`token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset).
+
+**Returns:** Formatted memories with attribution (role, date, session). Includes direct matches and associated memories found via graph walk, in the section order and under the prefix rule described in the recall output policy above.
+
+With `ENGRAM_RECALL_TIMING=1` the server writes one `[recall]` line per call to stderr: stage timings in milliseconds (`total expand search hyde pattern mmr rerank graph`, then any `graph.*` sub-stages sorted; a stage that did not run is absent), `items=` (the ranked pool), `chars=`, `emitted=` (Recalled memories in the payload), `tokens=` (estimated tokens of the payload) and `truncated=1` when the token budget cut it short.
 
 **When Claude uses it:** Automatically before answering questions about past work, decisions, or preferences. Also when you reference a previous session ("remember when...", "what did we decide about...").
 
@@ -375,7 +390,7 @@ A: Memories are only retrieved after they're ingested and consolidated. Wait a m
 
 **Q: High token estimates**
 
-A: Use `tokenBudget` option to limit results. Memories are ranked by relevance, so top results are highest value. Or configure `AUTO_CONSOLIDATE=true` to create digests (summaries) that reduce token count.
+A: Set `ENGRAM_RECALL_TOKEN_BUDGET` (or `ENGRAM_RECALL_EMIT_K`) on the server, or pass `token_budget` to `memory_recall` for one call. Memories are ranked by relevance and the payload keeps a prefix of that ranking, so the top results always survive. Or configure `AUTO_CONSOLIDATE=true` to create digests (summaries) that reduce token count.
 
 **Q: "Missing required environment variable"**
 

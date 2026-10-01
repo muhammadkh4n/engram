@@ -124,14 +124,21 @@ Options:
 ```typescript
 interface RecallOptions {
   embedding?: number[]    // Pre-computed embedding (skip embedding service call)
-  tokenBudget?: number    // Max tokens for assembled context
+  tokenBudget?: number    // Cap on estimateTokens(formatted); overrides ENGRAM_RECALL_TOKEN_BUDGET
   projectId?: string      // Per-call project scope (overrides the instance default)
   synthesize?: boolean | SynthesizeOpts  // Opt-in synthesis block (see below)
   now?: Date              // Anchor for now-relative temporal arithmetic in synthesis
+  reconsolidate?: boolean // Default true; false makes the recall read-only
 }
 
 const result = await memory.recall(query, { tokenBudget: 2000 })
 ```
+
+`tokenBudget` bounds the `formatted` text, not retrieval: `memories` and `associations` still hold the full ranked lists, and `result.payload` says what the text carried (`emittedMemories`, `emittedAssociations`, `emittedFaint`, `truncated`, and the character span of each emitted item). It must be a positive integer (a `RangeError` otherwise) and takes precedence over the `ENGRAM_RECALL_TOKEN_BUDGET` environment variable. Tokens are estimated as `ceil(chars / 4)`, headers included.
+
+The text is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole. Two more environment variables shape the text: `ENGRAM_RECALL_EMIT_K` (emit only the first K Recalled memories) and `ENGRAM_RECALL_FAINT` (`on` by default, `off` drops the Faint Associations section). Unset, empty or absent, each means no limit, so `formatted` is the same unbounded text as before; a malformed value throws, naming the variable.
+
+Access counts, co-recalled edges and graph edge weights are recorded only for the memories and associations the text emitted. `reconsolidate: false` records nothing, for measurement harnesses and previews that must not change those counts.
 
 ##### Synthesize mode (v0.6)
 
@@ -407,7 +414,7 @@ A: Check that messages were ingested with matching sessionId (or default). Wait 
 
 **Q: High token estimate**
 
-A: Use `tokenBudget` option to limit results. Memories are ranked by relevance, so top results are most valuable.
+A: Pass `tokenBudget` (or set `ENGRAM_RECALL_TOKEN_BUDGET` / `ENGRAM_RECALL_EMIT_K`) to bound `formatted`. Memories are ranked by relevance and the text keeps a prefix of that ranking, so the top results always survive.
 
 **Q: Sensory buffer not restored**
 
