@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { SummarizeOptions } from '@engram-mem/core'
-import { UnclassifiableReplyError, isUnclassifiableReply } from '@engram-mem/core'
+import { EmptyClassifierReplyError, UnclassifiableReplyError, isUnclassifiableReply } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.
@@ -607,7 +607,7 @@ describe('OpenAISummarizer.extractSalience failures', () => {
 
     const err = await s.extractSalience(TURN, { turnRole: 'user' }).catch((e: unknown) => e)
 
-    expect(err).toBeInstanceOf(Error)
+    expect(err).toBeInstanceOf(EmptyClassifierReplyError)
     expect((err as Error).message).toMatch(/extractSalience: empty classifier reply/)
     expect(isUnclassifiableReply(err)).toBe(false)
   })

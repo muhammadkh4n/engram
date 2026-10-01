@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
+  EmptyClassifierReplyError,
   UnclassifiableReplyError,
   type Memory,
   type SalienceClassification,
@@ -164,6 +165,29 @@ describe('runCapture classification', () => {
       reason: 'unclassifiable',
       message: 'classifier output is not a JSON object',
     })
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
+  it('retries an empty classifier reply once and stores the second verdict', async () => {
+    const h = makeHarness()
+    h.extractSalience.mockRejectedValueOnce(new EmptyClassifierReplyError('empty classifier reply (finish_reason=length)'))
+
+    const out = await runCapture(h.deps, input())
+
+    expect(h.extractSalience).toHaveBeenCalledTimes(2)
+    expect(out.outcome).toBe('stored')
+    expect(h.ingest).toHaveBeenCalledOnce()
+  })
+
+  it('propagates a second empty classifier reply as a failed call, not unclassifiable', async () => {
+    const h = makeHarness()
+    const onRejected = vi.fn()
+    h.extractSalience.mockRejectedValue(new EmptyClassifierReplyError('empty classifier reply (finish_reason=stop)'))
+
+    await expect(runCapture({ ...h.deps, onRejected }, input())).rejects.toBeInstanceOf(EmptyClassifierReplyError)
+
+    expect(h.extractSalience).toHaveBeenCalledTimes(2)
     expect(onRejected).not.toHaveBeenCalled()
     expect(h.ingest).not.toHaveBeenCalled()
   })

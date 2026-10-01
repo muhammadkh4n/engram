@@ -11,7 +11,7 @@ import type {
   EvidenceItem,
   EvidenceSelection,
 } from '@engram-mem/core'
-import { UnclassifiableReplyError } from '@engram-mem/core'
+import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
 
 export interface OpenAISummarizerOptions {
@@ -617,7 +617,7 @@ export class OpenAISummarizer {
       // that spent max_tokens before answering. Unlike an unreadable verdict,
       // resending the same turn later can succeed, so it fails like the call.
       if (raw.trim() === '') {
-        throw new Error(
+        throw new EmptyClassifierReplyError(
           `extractSalience: empty classifier reply (finish_reason=${choice?.finish_reason ?? 'none'})`,
         )
       }

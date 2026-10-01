@@ -241,3 +241,21 @@ export class UnclassifiableReplyError extends Error {
 export function isUnclassifiableReply(err: unknown): err is UnclassifiableReplyError {
   return err instanceof UnclassifiableReplyError || (err instanceof Error && err.name === 'UnclassifiableReplyError')
 }
+
+/**
+ * The classifier call answered 200 with no visible text (null, empty or
+ * whitespace content), as from a provider glitch or a reasoning model that
+ * spent max_tokens before replying. Unlike an unreadable reply, resending the
+ * same turn later can succeed, so callers treat it as a failed call.
+ */
+export class EmptyClassifierReplyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EmptyClassifierReplyError'
+  }
+}
+
+/** Matched by name as well as by class, like isUnclassifiableReply. */
+export function isEmptyClassifierReply(err: unknown): err is EmptyClassifierReplyError {
+  return err instanceof EmptyClassifierReplyError || (err instanceof Error && err.name === 'EmptyClassifierReplyError')
+}

@@ -251,14 +251,14 @@ describe('runCaptureRequest turns', () => {
     expect(h.ingest).not.toHaveBeenCalled()
   })
 
-  it('answers 500 retryable when the classifier returns an empty reply', async () => {
+  it('answers 500 retryable when the classifier returns an empty reply twice', async () => {
     const h = makeHarness()
-    const { create, onRejected } = withChatReplies(h, ['   '])
+    const { create, onRejected } = withChatReplies(h, ['   ', ''])
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
 
     const res = await runCaptureRequest(h.deps, body())
 
-    expect(create).toHaveBeenCalledOnce()
+    expect(create).toHaveBeenCalledTimes(2)
     expect(res.status).toBe(500)
     expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: 'capture failed; retry later' })
     expect(h.log).toHaveBeenCalledWith(expect.stringContaining('empty classifier reply'))
