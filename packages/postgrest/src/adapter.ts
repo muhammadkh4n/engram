@@ -287,16 +287,15 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     projectId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     this.assertInitialized()
-    if (terms.length === 0) return []
 
-    const sanitized = terms
-      .map(t => t.replace(/[^a-zA-Z0-9]/g, ''))
-      .filter(t => t.length > 0)
-    if (sanitized.length === 0) return []
-    const queryTerms = sanitized.join(' | ')
+    // Terms go to Postgres as typed. The tsquery is built server-side with the
+    // same text-search configuration that indexed the rows, so separators in
+    // identifiers (aca-2613, gpt-4o, node.js) survive into matching lexemes.
+    const uniqueTerms = [...new Set(terms.filter(t => t.length > 0))]
+    if (uniqueTerms.length === 0) return []
 
-    const { data, error } = await this.client.rpc('engram_text_boost', {
-      p_query_terms: queryTerms,
+    const { data, error } = await this.client.rpc('engram_text_match', {
+      p_terms: uniqueTerms,
       p_match_count: opts?.limit ?? 30,
       p_session_id: opts?.sessionId ?? null,
       p_project_id: opts?.projectId ?? null,

@@ -729,6 +729,7 @@ describe('PostgRestStorageAdapter', () => {
     expect(sql).toContain('engram_hybrid_recall')
     expect(sql).toContain('engram_vector_search')
     expect(sql).toContain('engram_text_boost')
+    expect(sql).toContain('engram_text_match')
     // idempotency markers — must be re-runnable safely
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS')
     expect(sql).toContain('CREATE OR REPLACE FUNCTION')

@@ -36,6 +36,7 @@ const RECALL_FUNCTIONS = [
   { name: 'engram_hybrid_recall', forgottenGates: 6, supersededGates: 2 },
   { name: 'engram_recall', forgottenGates: 3, supersededGates: 1 },
   { name: 'engram_text_boost', forgottenGates: 3, supersededGates: 1 },
+  { name: 'engram_text_match', forgottenGates: 3, supersededGates: 1 },
   { name: 'engram_vector_search', forgottenGates: 3, supersededGates: 1 },
 ] as const
 
