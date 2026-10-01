@@ -269,6 +269,20 @@ function formatMemories(
   return lines.join('\n')
 }
 
+/**
+ * Share of the result size reserved for lexical matches that missed the fused
+ * cut. A cross-encoder can judge an exact-term match whose embedding is not
+ * among the nearest neighbours only if that match is in its input; half the
+ * output size bounds the extra rerank work (15 more docs at 30).
+ */
+const LEXICAL_RESERVE_SHARE = 0.5
+
+/** Lexical reserve for a recall. Without a reranker the reserve would only be
+ *  cut again before it could change anything, so it is 0. */
+function lexicalReserveFor(maxResults: number, hasReranker: boolean): number {
+  return hasReranker ? Math.ceil(maxResults * LEXICAL_RESERVE_SHARE) : 0
+}
+
 // ---------------------------------------------------------------------------
 // Shim: map RecallStrategy -> RetrievalStrategy for stageAssociate
 // ---------------------------------------------------------------------------
@@ -446,6 +460,11 @@ export async function recall(
   }
 
   // Stage 1: Unified vector-first search
+  // The slate is what the reranker sees: the fused cut plus the lexical
+  // reserve. Every cut before the reranker keeps the slate; the output is
+  // cut back to maxResults after it.
+  const lexicalReserve = lexicalReserveFor(strategy.maxResults, intelligence?.rerank !== undefined)
+  const slateSize = strategy.maxResults + lexicalReserve
   const searchStart = stageStart(timings)
   let memories = await unifiedSearch({
     query,
@@ -458,6 +477,7 @@ export async function recall(
     projectId,
     ...(ranking ? { projectRanking: ranking } : {}),
     onLexicalError: () => markLexicalError(timings),
+    lexicalReserve,
   })
   stageEnd(timings, 'search', searchStart)
 
@@ -495,9 +515,10 @@ export async function recall(
           projectId,
           ...(ranking ? { projectRanking: ranking } : {}),
           onLexicalError: () => markLexicalError(timings),
+          lexicalReserve,
         })
 
-        memories = fuseByReciprocalRank(memories, hydeMemories, strategy.maxResults)
+        memories = fuseByReciprocalRank(memories, hydeMemories, slateSize)
       }
     } catch (err) {
       // HyDE failed — use direct results
@@ -609,7 +630,7 @@ export async function recall(
           }
           memories = Array.from(merged.values())
             .sort((a, b) => b.relevance - a.relevance)
-            .slice(0, strategy.maxResults)
+            .slice(0, slateSize)
         }
       }
     } catch (err) {
@@ -677,6 +698,9 @@ export async function recall(
     }
     stageEnd(timings, 'rerank', rerankStart)
   }
+  // The slate may exceed maxResults by the lexical reserve; a reranker that
+  // threw leaves it uncut above.
+  memories = memories.slice(0, strategy.maxResults)
 
   // Stage 2: Association expansion
   // Wave 2: Try Neo4j spreading activation. Fall back to SQL walk if:

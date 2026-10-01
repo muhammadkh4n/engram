@@ -173,6 +173,10 @@ export interface UnifiedSearchOpts {
   /** Called when storage.textBoost throws. The recall continues with an
    *  empty lexical leg; the caller can mark the failure in its diagnostics. */
   onLexicalError?: (err: unknown) => void
+  /** Lexical hits that missed the `maxResults` cut, appended after it in
+   *  descending boost order (at most this many). Default 0: the output is the
+   *  fused cut alone. */
+  lexicalReserve?: number
 }
 
 /** Lexical-leg error messages already written to stderr by this process.
@@ -220,6 +224,7 @@ function rescueCosine(query: readonly number[], row: readonly number[] | null | 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
   const {
     query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
+    lexicalReserve = 0,
   } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
@@ -232,7 +237,9 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const hasVectorSearch = typeof storage.vectorSearch === 'function'
   const hasTextBoost = typeof storage.textBoost === 'function'
 
-  // Wider candidate pool — more candidates into reranker = better ordering
+  // Vector and lexical candidates are fused into one scored list and cut to
+  // maxResults. When a reranker follows, the lexical reserve joins that cut,
+  // so exact-term matches outside the nearest neighbours still reach it.
   const vectorLimit = strategy.maxResults * 4
 
   const vectorResults = hasVectorSearch && embedding.length > 0
@@ -416,7 +423,35 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   }
 
   const ranked = projectRanking ? applyProjectRanking(scored, projectRanking) : scored
-  return ranked
+  const cut = ranked
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, strategy.maxResults)
+  if (lexicalReserve <= 0 || boostResults.length === 0) return cut
+  return [...cut, ...lexicalReserveRows(ranked, cut, boostResults, lexicalReserve)]
+}
+
+/**
+ * Lexical hits that missed the fused cut, strongest boost first. Drawn from
+ * the project-ranked list, so a row that strict scoping dropped stays out;
+ * each keeps its fused score.
+ */
+function lexicalReserveRows(
+  ranked: readonly RetrievedMemory[],
+  cut: readonly RetrievedMemory[],
+  boostResults: ReadonlyArray<{ id: string; boost: number }>,
+  reserve: number,
+): RetrievedMemory[] {
+  const rankedById = new Map(ranked.map((m) => [m.id, m]))
+  const taken = new Set(cut.map((m) => m.id))
+  const rows: RetrievedMemory[] = []
+  const byBoost = [...boostResults].sort((a, b) => b.boost - a.boost)
+  for (const { id } of byBoost) {
+    if (rows.length >= reserve) break
+    if (taken.has(id)) continue
+    const m = rankedById.get(id)
+    if (!m) continue
+    rows.push(m)
+    taken.add(id)
+  }
+  return rows
 }
