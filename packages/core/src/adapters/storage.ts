@@ -75,6 +75,14 @@ export interface SemanticStorage {
     memory: Omit<SemanticMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount' | 'lastAccessed'>
   ): Promise<SemanticMemory>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<SemanticMemory>[]>
+  /**
+   * The `limit` live (not forgotten, not superseded), embedded memories
+   * nearest to `embedding`, with `similarity` = cosine similarity, sorted
+   * descending. Unlike `search`, whose hybrid scores are fused ranks, the
+   * scores here are comparable to a fixed cosine threshold. PostgREST items
+   * carry only the recall-row fields (no topic, sources or embedding).
+   */
+  findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]>
   getUnaccessed(days: number): Promise<SemanticMemory[]>
   /**
    * Ids of every live (not tombstoned, not superseded) semantic memory above

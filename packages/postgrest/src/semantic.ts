@@ -77,20 +77,13 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       }
 
       // Embedding only — fall back to pure vector search
-      const { data, error } = await this.client.rpc('engram_recall', {
-        p_query_embedding: embedding,
-        p_session_id: null,
-        p_match_count: limit,
-        p_min_similarity: opts?.minScore ?? 0.15,
-        p_include_episodes: false,
-        p_include_digests: false,
-        p_include_semantic: true,
-        p_include_procedural: false,
-        p_project_id: opts?.projectId ?? null,
-      })
-      if (error) throw new Error(`Semantic search (vector) failed: ${error.message}`)
-
-      const rows = (data ?? []) as RecallRow[]
+      const rows = await this.vectorRecall(
+        embedding,
+        limit,
+        opts?.minScore ?? 0.15,
+        opts?.projectId ?? null,
+        'Semantic search (vector)',
+      )
       return rows.map((r) => ({
         item: recallRowToSemantic(r),
         similarity: r.similarity,
@@ -112,6 +105,39 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       item: rowToSemantic(r),
       similarity: 0.5,
     }))
+  }
+
+  async findNearest(embedding: number[], limit: number): Promise<SearchResult<SemanticMemory>[]> {
+    // A floor of -1 admits every cosine value, so the nearest rows come back
+    // however far they are; the caller applies its own threshold.
+    const rows = await this.vectorRecall(embedding, limit, -1, null, 'Semantic findNearest')
+    // engram_recall orders each tier's leg but has no outer ORDER BY.
+    return rows
+      .map((r) => ({ item: recallRowToSemantic(r), similarity: r.similarity }))
+      .sort((a, b) => b.similarity - a.similarity)
+  }
+
+  /** Cosine-only semantic leg of engram_recall, across every session. */
+  private async vectorRecall(
+    embedding: number[],
+    limit: number,
+    minSimilarity: number,
+    projectId: string | null,
+    label: string,
+  ): Promise<RecallRow[]> {
+    const { data, error } = await this.client.rpc('engram_recall', {
+      p_query_embedding: embedding,
+      p_session_id: null,
+      p_match_count: limit,
+      p_min_similarity: minSimilarity,
+      p_include_episodes: false,
+      p_include_digests: false,
+      p_include_semantic: true,
+      p_include_procedural: false,
+      p_project_id: projectId,
+    })
+    if (error) throw new Error(`${label} failed: ${error.message}`)
+    return (data ?? []) as RecallRow[]
   }
 
   async getUnaccessed(days: number): Promise<SemanticMemory[]> {

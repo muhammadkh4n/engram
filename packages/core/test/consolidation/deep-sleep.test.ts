@@ -268,16 +268,16 @@ describe('deepSleep', () => {
   // -------------------------------------------------------------------------
 
   describe('deduplication skips existing knowledge', () => {
-    it('increments deduplicated count when similarity > 0.92', async () => {
+    it('increments deduplicated count when an existing memory has the same content', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.' }),
         makeDigest({ summary: 'I like strict TypeScript.' }),
         makeDigest({ summary: 'Filler content.' }),
       ]
 
-      // Simulate existing memory with high similarity
+      // Existing memory with the candidate's exact content
       const semanticSearchResults = [
-        makeSemanticSearchResult('existing-sem-1', 'I prefer TypeScript.', 0.95),
+        makeSemanticSearchResult('existing-sem-1', 'TypeScript', 0.95),
       ]
 
       const storage = makeMockStorage({
@@ -298,7 +298,7 @@ describe('deepSleep', () => {
       ]
 
       const semanticSearchResults = [
-        makeSemanticSearchResult('existing-sem-1', 'I prefer TypeScript.', 0.95),
+        makeSemanticSearchResult('existing-sem-1', 'TypeScript', 0.95),
       ]
 
       const storage = makeMockStorage({
@@ -319,8 +319,8 @@ describe('deepSleep', () => {
       ]
 
       const semanticSearchResults = [
-        makeSemanticSearchResult('existing-sem-1', 'I prefer TypeScript.', 0.95),
-        makeSemanticSearchResult('existing-sem-2', 'I like TypeScript.', 0.96),
+        makeSemanticSearchResult('existing-sem-1', 'TypeScript', 0.95),
+        makeSemanticSearchResult('existing-sem-2', 'TypeScript', 0.96),
       ]
 
       const storage = makeMockStorage({
@@ -335,63 +335,102 @@ describe('deepSleep', () => {
       expect(storage.semantic.insert).not.toHaveBeenCalled()
     })
 
-    it('uses cosine threshold 0.88 when an embedding adapter is available', async () => {
+    it('deduplicates on findNearest cosine above 0.88 when an embedding is available', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.' }),
         makeDigest({ summary: 'Filler.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      // 0.89 is below the old BM25 threshold (0.92) but above the new
-      // cosine threshold (0.88). With embeddings available, this should
-      // now be treated as a duplicate.
-      const semanticSearchResults = [
-        makeSemanticSearchResult('existing-sem-1', 'TypeScript is preferred by me.', 0.89),
-      ]
-
       const storage = makeMockStorage({
         initialDigests: digests,
-        semanticSearchResults,
+        semanticNearestResults: [
+          makeSemanticSearchResult('existing-sem-1', 'TypeScript is preferred by me.', 0.89),
+        ],
       })
 
       const embed = vi.fn(async (_text: string) => [0.1, 0.2, 0.3])
-      const intelligence = { embed }
 
-      const result = await deepSleep(storage, intelligence, { minDigests: 3 })
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
 
-      expect(embed).toHaveBeenCalled()
-      expect(storage.semantic.search).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ embedding: [0.1, 0.2, 0.3] }),
-      )
-      expect(result.deduplicated).toBeGreaterThanOrEqual(1)
+      expect(storage.semantic.findNearest).toHaveBeenCalledWith([0.1, 0.2, 0.3], 5)
+      expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('existing-sem-1', 0.1)
+      expect(result.deduplicated).toBe(1)
+      expect(storage.semantic.insert).not.toHaveBeenCalled()
     })
 
-    it('keeps BM25 threshold 0.92 when no embedding adapter is available', async () => {
+    it('inserts when only the hybrid search score is high and the nearest cosine is low', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.' }),
         makeDigest({ summary: 'Filler.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      // 0.89 would dedup with the cosine threshold, but without an
-      // embedding adapter the BM25-only 0.92 threshold still applies.
-      const semanticSearchResults = [
-        makeSemanticSearchResult('existing-sem-1', 'I prefer TypeScript.', 0.89),
+      // A fused rank score of 1.0 only says the row ranked first in both
+      // legs; its cosine to the candidate is 0.5.
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        semanticSearchResults: [
+          makeSemanticSearchResult('existing-sem-1', 'Rust has a borrow checker', 1.0),
+        ],
+        semanticNearestResults: [
+          makeSemanticSearchResult('existing-sem-1', 'Rust has a borrow checker', 0.5),
+        ],
+      })
+
+      const embed = vi.fn(async (_text: string) => [0.1, 0.2, 0.3])
+
+      const result = await deepSleep(storage, { embed }, { minDigests: 3 })
+
+      expect(result.deduplicated).toBe(0)
+      expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+      expect(storage.semantic.insert).toHaveBeenCalled()
+    })
+
+    it('inserts without an embedding when a high-scoring search hit has other content', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
       ]
 
       const storage = makeMockStorage({
         initialDigests: digests,
-        semanticSearchResults,
+        semanticSearchResults: [
+          makeSemanticSearchResult('existing-sem-1', 'TypeScript has structural typing', 0.99),
+        ],
       })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
+      expect(storage.semantic.findNearest).not.toHaveBeenCalled()
       expect(result.deduplicated).toBe(0)
       expect(storage.semantic.insert).toHaveBeenCalled()
     })
 
-    it('inserts when similarity is below deduplication threshold (0.92)', async () => {
+    it('deduplicates without an embedding on content equal after normalisation', async () => {
+      const digests: Digest[] = [
+        makeDigest({ summary: 'I prefer TypeScript.' }),
+        makeDigest({ summary: 'Filler.' }),
+        makeDigest({ summary: 'More filler.' }),
+      ]
+
+      const storage = makeMockStorage({
+        initialDigests: digests,
+        semanticSearchResults: [
+          makeSemanticSearchResult('existing-sem-1', '  typescript ', 0.5),
+        ],
+      })
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 })
+
+      expect(result.deduplicated).toBe(1)
+      expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('existing-sem-1', 0.1)
+      expect(storage.semantic.insert).not.toHaveBeenCalled()
+    })
+
+
+    it('inserts when no existing memory is a duplicate', async () => {
       const digests: Digest[] = [
         makeDigest({ summary: 'I prefer TypeScript.' }),
         makeDigest({ summary: 'Some other information.' }),

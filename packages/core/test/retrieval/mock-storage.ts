@@ -212,6 +212,7 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
   const semantic: SemanticStorage = {
     insert: vi.fn(),
     search: vi.fn().mockResolvedValue(semanticResults),
+    findNearest: vi.fn().mockResolvedValue([]),
     getUnaccessed: vi.fn().mockResolvedValue([]),
     recordAccessAndBoost: vi.fn().mockResolvedValue(undefined),
     markSuperseded: vi.fn().mockResolvedValue(undefined),
