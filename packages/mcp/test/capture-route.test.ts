@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { Memory, SalienceClassification, StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
+import {
+  DuplicateCaptureKeyError,
+  type Memory,
+  type SalienceClassification,
+  type StorageAdapter,
+  type IntelligenceAdapter,
+} from '@engram-mem/core'
 import type { CaptureDeps } from '../src/ingest/capture.js'
 import { OpenAISummarizer } from '@engram-mem/openai'
 import {
@@ -72,6 +78,21 @@ function body(overrides: Record<string, unknown> = {}): Record<string, unknown> 
 function ingestedMetadata(ingest: ReturnType<typeof vi.fn>): Record<string, unknown> {
   const [message] = ingest.mock.calls[0] as [{ metadata: Record<string, unknown> }]
   return message.metadata
+}
+
+/**
+ * A store whose probe never sees the other delivery, as when a spooled retry
+ * races the original request: only the insert can collide on the key.
+ */
+function storeRefusingDuplicateKeys(ingest: ReturnType<typeof vi.fn>): string[] {
+  const rows: string[] = []
+  ingest.mockImplementation(async (message: unknown) => {
+    const { sessionId, metadata } = message as { sessionId: string; metadata: Record<string, unknown> }
+    const key = metadata['captureKey'] as string
+    if (rows.includes(key)) throw new DuplicateCaptureKeyError(sessionId, key)
+    rows.push(key)
+  })
+  return rows
 }
 
 const savedSources = process.env['ENGRAM_SECRET_SOURCES_FILE']
@@ -342,6 +363,20 @@ describe('runCaptureRequest turns', () => {
     expect(h.ingest).toHaveBeenCalledTimes(1)
     expect(h.extractSalience).toHaveBeenCalledTimes(1)
   })
+
+  it('reports a delivery that loses the insert race to the same key as a replay', async () => {
+    const h = makeHarness()
+    const rows = storeRefusingDuplicateKeys(h.ingest)
+
+    const first = await runCaptureRequest(h.deps, body({ key: 'commit-abc123' }))
+    const second = await runCaptureRequest(h.deps, body({ key: 'commit-abc123' }))
+
+    expect(first.body.outcome).toBe('stored')
+    expect(second).toEqual({ status: 200, body: { outcome: 'replayed', model: 'test-chat-model' } })
+    expect(rows).toEqual(['commit-abc123'])
+    expect(h.findIdByCaptureKey).toHaveBeenCalledTimes(2)
+    expect(h.extractSalience).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('runCaptureRequest derive', () => {
@@ -426,6 +461,18 @@ describe('runCaptureRequest derive', () => {
 
     expect(res.body).toEqual({ outcome: 'replayed', model: 'test-chat-model' })
     expect(h.digestTranscript).not.toHaveBeenCalled()
+  })
+
+  it('reports a derive delivery that loses the insert race as a replay and keeps its context', async () => {
+    const h = makeHarness()
+    const rows = storeRefusingDuplicateKeys(h.ingest)
+    const request = body({ content: EXCERPT, derive: 'pre-compact', key: 'compact-8' })
+
+    await runCaptureRequest(h.deps, request)
+    const second = await runCaptureRequest(h.deps, request)
+
+    expect(second.body).toEqual({ outcome: 'replayed', model: 'test-chat-model', context: 'Working on stop-hook timeouts.' })
+    expect(rows).toEqual(['compact-8'])
   })
 
   it('probes a new derive key once and stores it under the capture model', async () => {
