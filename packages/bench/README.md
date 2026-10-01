@@ -95,13 +95,16 @@ npx tsx packages/bench/src/longmemeval/forensics/reformat.ts \
 ```
 
 Formatted rows record `payload_items` (section, offsets into `formatted`, dataset session),
-`context_tokens` and `truncated`; the sweep's run identity and `meta.output_policy` record the
+`context_tokens` and `truncated`. `context_tokens` is measured on the stored text (session namespace
+removed), and `context_items` and `gold_ids_in_context` count only emitted items, so a direct sweep
+under a policy and a reformat to that policy record the same fields. The sweep's run identity and `meta.output_policy` record the
 `ENGRAM_RECALL_*` policy it ran under. Reformat rebuilds each row's items from those offsets and
 re-assembles them with core's `assemble`, rewriting only `formatted`, `payload_items`, `context_chars`,
 `context_items`, `context_tokens`, `truncated` and `gold_ids_in_context`; retrieval fields are copied
 byte for byte. With no limits the rebuild reproduces every `formatted` exactly, and a row that does not
 is refused. The source must be a formatted sweep recorded with the policy unset. The output `meta`
-holds `derived_from` (path and sha256), `output_policy`, `retrieval_rerun: false` and `source_meta`.
+holds `derived_from` (path and sha256), `output_policy`, `retrieval_rerun: false`, `source_meta`, and
+the source's `rerankerBackend`, `rerankModel` and `embedModel`, which the judge copies into its output.
 Judge it with `judge.ts --context-mode formatted`. The budget is measured on the recorded text, which
 has the per-question session namespace removed.
 

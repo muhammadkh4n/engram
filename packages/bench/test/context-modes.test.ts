@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { estimateTokens } from '@engram-mem/core'
 import {
-  goldIdsInContext,
+  goldIdsInPayload,
   relevanceTop,
   parseContextMode,
   productionRecallOptions,
@@ -114,26 +115,15 @@ describe('parseContextMode', () => {
   })
 })
 
-describe('goldIdsInContext', () => {
-  it('finds gold ids across recalled, related and faint memories, in gold order', () => {
-    const result = stubResult({
-      memories: [{ id: 'm1', metadata: { lmeSessionId: 'sess_a' } }],
-      associations: [{ metadata: { lmeSessionId: 'sess_c' } }],
-      faintAssociations: [{ metadata: { lmeSessionId: 'sess_d' } }],
-    })
-    expect(goldIdsInContext(result, ['sess_d', 'sess_x', 'sess_c', 'sess_a'])).toEqual(['sess_d', 'sess_c', 'sess_a'])
+describe('goldIdsInPayload', () => {
+  it('finds gold ids among the emitted items of every section, in gold order', () => {
+    const items = [{ session: 'sess_a' }, { session: null }, { session: 'sess_c' }, { session: 'sess_d' }]
+    expect(goldIdsInPayload(items, ['sess_d', 'sess_x', 'sess_c', 'sess_a'])).toEqual(['sess_d', 'sess_c', 'sess_a'])
   })
 
-  it('ignores memories without a dataset session id and repeated gold ids', () => {
-    const result = stubResult({
-      memories: [{ id: 'm1' }, { id: 'm2', metadata: { lmeSessionId: 42 } }, { id: 'm3', metadata: { lmeSessionId: 'sess_a' } }],
-      associations: [{ metadata: {} }],
-    })
-    expect(goldIdsInContext(result, ['sess_a', 'sess_a', 'sess_b'])).toEqual(['sess_a'])
-  })
-
-  it('treats absent association lists as empty', () => {
-    expect(goldIdsInContext(stubResult({ memories: [] }), ['sess_a'])).toEqual([])
+  it('ignores repeated gold ids and an empty payload', () => {
+    expect(goldIdsInPayload([{ session: 'sess_a' }, { session: 'sess_a' }], ['sess_a', 'sess_a', 'sess_b'])).toEqual(['sess_a'])
+    expect(goldIdsInPayload([], ['sess_a'])).toEqual([])
   })
 })
 
@@ -187,23 +177,36 @@ describe('runSweepRecall — formatted mode', () => {
     expect(out.formattedFields?.formatted).not.toContain(`lme:${QID}:`)
   })
 
-  it('counts characters of the stored string and items from result.memories', async () => {
+  it('counts characters of the stored string and the emitted recalled items', async () => {
     const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
     const stored = out.formattedFields!.formatted
     expect(out.formattedFields?.context_chars).toBe(stored.length)
     expect(out.formattedFields?.context_chars).toBe(PAYLOAD.length - `lme:${QID}:`.length)
-    expect(out.formattedFields?.context_items).toBe(3)
+    // m3 was recalled but no item renders it, so the reader never sees it.
+    expect(out.formattedFields?.context_items).toBe(2)
   })
 
   it('counts a gold id reached only through a faint association and leaves the payload untouched', async () => {
     const result = stubResult({
       memories: [{ id: 'm1', metadata: { lmeSessionId: 'sess_a' } }],
-      associations: [{ metadata: { lmeSessionId: 'sess_c' } }],
-      faintAssociations: [{ metadata: { lmeSessionId: 'sess_z' } }],
+      associations: [{ id: 'r1', metadata: { lmeSessionId: 'sess_c' } }],
+      faintAssociations: [{ id: 'f1', metadata: { lmeSessionId: 'sess_z' } }],
     })
     const out = await runSweepRecall(stubMemory(result), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
     expect(out.formattedFields?.gold_ids_in_context).toEqual(['sess_z'])
     expect(out.formattedFields?.formatted).toBe(PAYLOAD.split(`lme:${QID}:`).join(''))
+  })
+
+  it('leaves out a gold session whose memory was recalled but not emitted', async () => {
+    const result = stubResult({
+      memories: [
+        { id: 'm1', metadata: { lmeSessionId: 'sess_a' } },
+        { id: 'm9', metadata: { lmeSessionId: 'sess_z' } },
+      ],
+      payload: { truncated: true, items: [rawItem('recalled', 'm1')] },
+    })
+    const out = await runSweepRecall(stubMemory(result), QUESTION, { contextMode: 'formatted', maxK: 30, synthesize: false })
+    expect(out.formattedFields?.gold_ids_in_context).toEqual([])
     expect(out.formattedFields?.context_items).toBe(1)
   })
 
@@ -247,7 +250,7 @@ describe('runSweepRecall — formatted mode payload items', () => {
       payload: { truncated: true, items: PAYLOAD_ITEMS },
     })
 
-  it('records section, offsets and dataset session per item, plus the token estimate and truncation flag', async () => {
+  it('records section, offsets and dataset session per item, the stored-text token estimate and the truncation flag', async () => {
     const out = await runSweepRecall(stubMemory(withLinks()), QUESTION, FORMATTED)
     const fields = out.formattedFields!
     expect(fields.payload_items.map(({ section, session }) => ({ section, session }))).toEqual([
@@ -256,7 +259,9 @@ describe('runSweepRecall — formatted mode payload items', () => {
       { section: 'related', session: 'sess_c' },
       { section: 'faint', session: 'sess_z' },
     ])
-    expect(fields.context_tokens).toBe(123)
+    // Measured on the namespace-stripped text the judge reads, not core's raw estimate.
+    expect(fields.context_tokens).toBe(estimateTokens(fields.formatted))
+    expect(fields.context_tokens).not.toBe(estimateTokens(PAYLOAD))
     expect(fields.truncated).toBe(true)
   })
 
@@ -281,14 +286,12 @@ describe('runSweepRecall — formatted mode payload items', () => {
   it('records truncated false when the budget did not stop assembly', async () => {
     const out = await runSweepRecall(stubMemory(stubResult()), QUESTION, FORMATTED)
     expect(out.formattedFields!.truncated).toBe(false)
-    expect(out.formattedFields!.context_tokens).toBe(97)
+    expect(out.formattedFields!.context_tokens).toBe(estimateTokens(out.formattedFields!.formatted))
   })
 
-  it('refuses a recall result without payload items or a token estimate', async () => {
+  it('refuses a recall result without payload items', async () => {
     const { payload: _p, ...noPayload } = stubResult()
     await expect(runSweepRecall(stubMemory(noPayload), QUESTION, FORMATTED)).rejects.toThrow(/no "payload"/)
-    const { estimatedTokens: _t, ...noTokens } = stubResult()
-    await expect(runSweepRecall(stubMemory(noTokens), QUESTION, FORMATTED)).rejects.toThrow(/estimatedTokens/)
   })
 
   it('refuses an item offset outside the payload', async () => {

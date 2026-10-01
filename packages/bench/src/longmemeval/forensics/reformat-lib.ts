@@ -20,7 +20,7 @@ import {
   type RenderedItem,
   type RenderedPayload,
 } from '@engram-mem/core'
-import type { RecordedPayloadItem } from './context-modes.js'
+import { goldIdsInPayload, type RecordedPayloadItem } from './context-modes.js'
 import { outputPolicyRecord, type OutputPolicyRecord } from './sweep-checkpoint-lib.js'
 
 export interface ReformatArgs {
@@ -147,10 +147,33 @@ export function rebuildRendered(row: ReformatRow): RenderedPayload {
     }
     sections[item.section as PayloadSection].push({ text: text.slice(item.start, item.end), id: String(i) })
   })
-  if (assemble(sections).text !== text) {
-    throw new Error(`row ${row.question_id}: payload_items do not reassemble to the recorded formatted text`)
+  const reassembled = assemble(sections).text
+  if (reassembled !== text) {
+    throw new Error(`row ${row.question_id}: payload_items do not reassemble to the recorded formatted text; ${describeFirstDifference(text, reassembled, items)}`)
   }
   return sections
+}
+
+/**
+ * Where a reassembly first departs from the recorded text: the line number and
+ * both versions of that line, naming it a header line when no item covers it
+ * in the recorded text.
+ */
+export function describeFirstDifference(
+  recorded: string,
+  reassembled: string,
+  items: ReadonlyArray<Pick<RecordedPayloadItem, 'start' | 'end'>>,
+): string {
+  const want = recorded.split('\n')
+  const got = reassembled.split('\n')
+  let i = 0
+  while (i < want.length && i < got.length && want[i] === got[i]) i++
+  const lineStart = want.slice(0, i).reduce((n, line) => n + line.length + 1, 0)
+  const lineEnd = i < want.length ? lineStart + want[i]!.length : lineStart
+  const isItemLine = lineStart < lineEnd && items.some((item) => item.start < lineEnd && lineStart < item.end)
+  const kind = isItemLine ? 'item line' : 'header lines differ at line'
+  const show = (lines: string[]): string => (i < lines.length ? JSON.stringify(lines[i]) : '<end of text>')
+  return `${kind} ${i + 1}: recorded ${show(want)}, reassembled ${show(got)}`
 }
 
 /** The row under `policy`: payload fields recomputed, every other field kept as recorded. */
@@ -164,14 +187,12 @@ export function reformatRow(row: ReformatRow, policy: RecallOutputPolicy): Refor
     end: item.end,
     session: source[Number(item.id)]!.session,
   }))
-  const emittedSessions = new Set(payloadItems.map((item) => item.session))
-  const gold = row.gold_session_ids
   return {
     ...row,
     formatted: text,
     context_chars: text.length,
     context_items: payload.emittedMemories,
-    gold_ids_in_context: gold.filter((id, i) => emittedSessions.has(id) && gold.indexOf(id) === i),
+    gold_ids_in_context: goldIdsInPayload(payloadItems, row.gold_session_ids),
     payload_items: payloadItems,
     context_tokens: estimateTokens(text),
     truncated: payload.truncated,
@@ -183,6 +204,17 @@ export interface SourceFile {
   bytes: Buffer
 }
 
+/**
+ * Model ids the judge copies from a sweep's top-level meta into its output.
+ * A derived arm ran no retrieval of its own, so it carries the source's ids.
+ */
+const MODEL_META_KEYS = ['rerankerBackend', 'rerankModel', 'embedModel'] as const
+
+function sourceModelMeta(meta: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (meta === undefined) return {}
+  return Object.fromEntries(MODEL_META_KEYS.filter((key) => key in meta).map((key) => [key, meta[key]]))
+}
+
 export function reformatSweep(source: SourceFile, policy: RecallOutputPolicy): ReformatSweep {
   const sweep = JSON.parse(source.bytes.toString('utf8')) as ReformatSweep
   assertReformattableSweep(sweep)
@@ -190,6 +222,7 @@ export function reformatSweep(source: SourceFile, policy: RecallOutputPolicy): R
   return {
     ...sweep,
     meta: {
+      ...sourceModelMeta(sweep.meta),
       derived_from: { path: source.path, sha256: createHash('sha256').update(source.bytes).digest('hex') },
       output_policy: outputPolicyRecord(policy),
       retrieval_rerun: false,
