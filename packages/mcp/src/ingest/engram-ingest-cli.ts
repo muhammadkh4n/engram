@@ -36,7 +36,7 @@
  *   --session-id <string>         Session ID to attach to the memory
  *   --raw                          Skip classifier; store content as-is
  *   --no-dedup                    Skip dedup check [Phase 2]
- *   --classifier-model <name>     Override model (default: gpt-4o-mini)
+ *   --classifier-model <name>     Override model (default: the summarizer's default chat model)
  *   --threshold <0..1>            Classifier confidence threshold (default: env or 0.7)
  *   --dry-run                      Classify and log only; do not write
  *   --verbose                      Emit classifier decision to stderr
@@ -50,14 +50,11 @@ import { readFileSync } from 'node:fs'
 import { createMemory } from '@engram-mem/core'
 import type { Memory } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence } from '@engram-mem/openai'
+import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
 import { resolveProject } from './project-detect.js'
 import { logRejection } from './rejection-log.js'
 import { runCapture } from './capture.js'
-
-/** The summarizer's default chat model, used by extractSalience when no override is given. */
-const DEFAULT_CLASSIFIER_MODEL = 'gpt-4o-mini'
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -345,7 +342,7 @@ async function main(): Promise<void> {
         storage: getStorage,
         intelligence: classifier,
         threshold: args.threshold,
-        captureModel: args.classifierModel ?? DEFAULT_CLASSIFIER_MODEL,
+        captureModel: args.classifierModel ?? DEFAULT_CHAT_MODEL,
         logPrefix: '[engram-ingest]',
         ...(args.verbose ? { log: (line: string) => log(true, line) } : {}),
         onRejected: (rejected) => {

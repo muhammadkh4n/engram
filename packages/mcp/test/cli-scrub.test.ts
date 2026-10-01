@@ -64,6 +64,7 @@ vi.mock('@engram-mem/postgrest', () => ({
 
 vi.mock('@engram-mem/openai', () => ({
   openaiIntelligence: () => ({ extractSalience: h.extractSalience, embed: vi.fn() }),
+  DEFAULT_CHAT_MODEL: 'default-chat-model',
 }))
 
 vi.mock('../src/graph-helper.js', () => ({ tryCreateGraph: vi.fn().mockResolvedValue(null) }))
@@ -189,6 +190,43 @@ describe('engram-ingest CLI', () => {
     expect(entry.contentPreview).toContain('API_KEY=[REDACTED:OPENAI_API_KEY]')
     expect(entry.contentPreview).not.toContain(FAKE_KEY)
     expect(exitSpy).toHaveBeenCalledWith(0)
+  })
+
+  it('exits non-zero with the message when the classifier fails, logging no rejection', async () => {
+    h.extractSalience.mockRejectedValue(new Error('chat endpoint returned 502'))
+    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
+
+    await import('../src/ingest/engram-ingest-cli.js')
+    await vi.waitFor(() => expect(exitSpy).toHaveBeenCalled())
+
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    expect(stderrLines.join('')).toContain('chat endpoint returned 502')
+    expect(h.logRejection).not.toHaveBeenCalled()
+    expect(h.memoryIngest).not.toHaveBeenCalled()
+  })
+
+  it('records the default chat model as the capture model', async () => {
+    h.extractSalience.mockImplementation(async (content: string) => ({
+      store: true, category: 'fact', confidence: 0.9, distilled: content, reason: 'decision',
+    }))
+    process.argv = ['node', 'engram-ingest', '--content', turn, '--turn', 'user', '--no-dedup']
+
+    await import('../src/ingest/engram-ingest-cli.js')
+    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+
+    const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
+    expect(ingested.metadata['captureModel']).toBe('default-chat-model')
+  })
+
+  it('records a raw capture as seen by no model', async () => {
+    process.argv = ['node', 'engram-ingest', '--raw', '--content', 'feat: stream the transcript read', '--source', 'git-commit', '--no-dedup']
+
+    await import('../src/ingest/engram-ingest-cli.js')
+    await vi.waitFor(() => expect(h.memoryDispose).toHaveBeenCalled())
+
+    expect(h.extractSalience).not.toHaveBeenCalled()
+    const ingested = h.memoryIngest.mock.calls[0]![0] as { metadata: Record<string, unknown> }
+    expect(ingested.metadata['captureModel']).toBe('raw')
   })
 })
 

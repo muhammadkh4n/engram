@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { Memory, SalienceClassification, StorageAdapter, IntelligenceAdapter } from '@engram-mem/core'
 import type { CaptureDeps } from '../src/ingest/capture.js'
+import { OpenAISummarizer } from '@engram-mem/openai'
 import { runCaptureRequest, CAPTURE_CONTENT_MAX_CHARS, type CaptureRouteDeps } from '../src/capture-route.js'
 
 const TURN =
@@ -24,18 +25,30 @@ function makeHarness() {
   const search = vi.fn(async () => [] as unknown[])
   const recordAccess = vi.fn(async () => undefined)
   const getBySession = vi.fn(async () => [] as unknown[])
+  const findIdByCaptureKey = vi.fn(async (): Promise<string | null> => null)
   const ingest = vi.fn(async () => undefined)
   const getMemory = vi.fn(async () => ({ ingest }) as unknown as Memory)
   const captureDeps: CaptureDeps = {
     getMemory,
-    storage: { episodes: { search, recordAccess, getBySession } } as unknown as StorageAdapter,
+    storage: { episodes: { search, recordAccess, getBySession, findIdByCaptureKey } } as unknown as StorageAdapter,
     intelligence: { extractSalience, digestTranscript, embed } as unknown as IntelligenceAdapter,
     threshold: 0.7,
     captureModel: 'test-chat-model',
   }
   const resolveDeps = vi.fn(async () => captureDeps)
   const deps: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: resolveDeps }
-  return { deps, resolveDeps, extractSalience, digestTranscript, search, getBySession, ingest, getMemory }
+  return {
+    deps,
+    captureDeps,
+    resolveDeps,
+    extractSalience,
+    digestTranscript,
+    search,
+    getBySession,
+    findIdByCaptureKey,
+    ingest,
+    getMemory,
+  }
 }
 
 function body(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -123,6 +136,36 @@ describe('runCaptureRequest turns', () => {
     })
   })
 
+  it('reports a failing chat model as a retryable error, not a rejection', async () => {
+    const h = makeHarness()
+    // The real summarizer on a stubbed chat client: its handling of an API
+    // error decides whether the capture is retried or silently dropped.
+    const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+    const create = vi.fn(async () => {
+      throw new Error('429 rate limited')
+    })
+    ;(summarizer as unknown as { client: unknown }).client = { chat: { completions: { create } } }
+    const onRejected = vi.fn()
+    h.resolveDeps.mockResolvedValueOnce({
+      ...h.captureDeps,
+      intelligence: {
+        extractSalience: (content: string, opts: Parameters<OpenAISummarizer['extractSalience']>[1]) =>
+          summarizer.extractSalience(content, opts),
+        embed: vi.fn(async () => [0.1]),
+      } as unknown as IntelligenceAdapter,
+      onRejected,
+    })
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    const res = await runCaptureRequest(h.deps, body())
+
+    expect(create).toHaveBeenCalledOnce()
+    expect(res.status).toBe(500)
+    expect(res.body).toMatchObject({ outcome: 'error', retryable: true, message: '429 rate limited' })
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
+  })
+
   it('reports a failure to open the stores as retryable', async () => {
     const h = makeHarness()
     h.resolveDeps.mockRejectedValueOnce(new Error('connect ECONNREFUSED'))
@@ -168,10 +211,13 @@ describe('runCaptureRequest turns', () => {
 
   it('does not ingest a replayed key twice', async () => {
     const h = makeHarness()
-    const stored: unknown[] = []
-    h.getBySession.mockImplementation(async () => stored)
+    const storedKeys = new Set<string>()
+    h.findIdByCaptureKey.mockImplementation(async (_session: string, key: string) =>
+      storedKeys.has(key) ? 'ep-1' : null,
+    )
     h.ingest.mockImplementation(async (message: unknown) => {
-      stored.push({ ...(message as object), createdAt: new Date() })
+      const key = (message as { metadata: Record<string, unknown> }).metadata['captureKey']
+      if (typeof key === 'string') storedKeys.add(key)
     })
 
     const first = await runCaptureRequest(h.deps, body({ key: 'commit-abc123' }))
@@ -245,11 +291,23 @@ describe('runCaptureRequest derive', () => {
 
   it('answers a replayed derive key before paying for a digest', async () => {
     const h = makeHarness()
-    h.getBySession.mockResolvedValueOnce([{ metadata: { captureKey: 'compact-7' }, createdAt: new Date() }])
+    h.findIdByCaptureKey.mockResolvedValueOnce('ep-7')
 
     const res = await runCaptureRequest(h.deps, body({ content: EXCERPT, derive: 'pre-compact', key: 'compact-7' }))
 
     expect(res.body).toEqual({ outcome: 'replayed', model: 'test-chat-model' })
     expect(h.digestTranscript).not.toHaveBeenCalled()
+  })
+
+  it('probes a new derive key once and stores it under the capture model', async () => {
+    const h = makeHarness()
+
+    const res = await runCaptureRequest(h.deps, body({ content: EXCERPT, derive: 'session-summary', key: 'summary-9' }))
+
+    expect(res.body.outcome).toBe('stored')
+    expect(h.findIdByCaptureKey).toHaveBeenCalledOnce()
+    expect(h.findIdByCaptureKey.mock.calls[0]!.slice(0, 2)).toEqual(['sess-route-1', 'summary-9'])
+    expect(h.getBySession).not.toHaveBeenCalled()
+    expect(ingestedMetadata(h.ingest)).toMatchObject({ captureKey: 'summary-9', captureModel: 'test-chat-model' })
   })
 })

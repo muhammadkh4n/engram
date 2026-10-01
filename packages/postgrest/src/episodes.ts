@@ -181,6 +181,19 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, this.legacyMode))
   }
 
+  async findIdByCaptureKey(sessionId: string, key: string, opts: { since: Date }): Promise<string | null> {
+    const { data, error } = await this.client
+      .from('memory_episodes')
+      .select('id')
+      .eq('session_id', sessionId)
+      .gte('created_at', opts.since.toISOString())
+      .eq('metadata->>captureKey', key)
+      .limit(1)
+    if (error) throw new Error(`Episode findIdByCaptureKey failed: ${error.message}`)
+    const rows = (data ?? []) as Array<{ id: string }>
+    return rows[0]?.id ?? null
+  }
+
   async getUnconsolidated(sessionId: string): Promise<Episode[]> {
     if (this.legacyMode) {
       // Legacy schema lacks consolidated_at and salience — return all unprocessed

@@ -138,6 +138,11 @@ export interface IntelligenceAdapter {
    *
    * Implementations MUST default to rejection. The caller only stores
    * when both `store === true` and `confidence >= threshold` (typically 0.7).
+   *
+   * Returns `store: false` only for a real verdict from the classifier. When
+   * no verdict was reached (the model call failed, or its output could not
+   * be parsed) the promise rejects, so the caller can retry the turn rather
+   * than drop it as a rejection.
    */
   extractSalience?(
     content: string,

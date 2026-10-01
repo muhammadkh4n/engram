@@ -487,3 +487,44 @@ describe('OpenAISummarizer', () => {
     )
   })
 })
+
+describe('OpenAISummarizer.extractSalience failures', () => {
+  const TURN = 'We moved the ingest worker to a systemd timer and removed the pm2 cron entry.'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+  })
+
+  it('returns a real verdict from a well-formed reply', async () => {
+    mockChatCreate.mockResolvedValueOnce(
+      makeChatResponse(JSON.stringify({ store: false, category: 'none', confidence: 0.9, distilled: '', reason: 'chit-chat' })),
+    )
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).resolves.toMatchObject({
+      store: false,
+      confidence: 0.9,
+      reason: 'chit-chat',
+    })
+  })
+
+  it('rethrows a chat API error instead of returning a rejection', async () => {
+    mockChatCreate.mockRejectedValueOnce(new Error('429 rate limited'))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow('429 rate limited')
+  })
+
+  it.each([
+    ['unparseable text', 'not json at all'],
+    ['an empty reply', ''],
+    ['a JSON array', '[true]'],
+    ['an object without a store verdict', '{"category":"noise"}'],
+  ])('throws a parse error on %s', async (_label, reply) => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await expect(s.extractSalience(TURN, { turnRole: 'user' })).rejects.toThrow(/extractSalience: .*classifier output/)
+  })
+})

@@ -24,10 +24,13 @@ function makeHarness() {
   const search = vi.fn(async () => [] as unknown[])
   const recordAccess = vi.fn(async () => undefined)
   const getBySession = vi.fn(async () => [] as unknown[])
+  const findIdByCaptureKey = vi.fn(async (): Promise<string | null> => null)
   const ingest = vi.fn(async () => undefined)
   const memory = { ingest } as unknown as Memory
   const getMemory = vi.fn(async () => memory)
-  const storage = { episodes: { search, recordAccess, getBySession } } as unknown as StorageAdapter
+  const storage = {
+    episodes: { search, recordAccess, getBySession, findIdByCaptureKey },
+  } as unknown as StorageAdapter
   const intelligence = { extractSalience, embed } as unknown as IntelligenceAdapter
   const deps: CaptureDeps = {
     getMemory,
@@ -36,7 +39,7 @@ function makeHarness() {
     threshold: 0.7,
     captureModel: 'test-chat-model',
   }
-  return { deps, extractSalience, embed, search, recordAccess, getBySession, ingest, getMemory }
+  return { deps, extractSalience, embed, search, recordAccess, getBySession, findIdByCaptureKey, ingest, getMemory }
 }
 
 function input(overrides: Partial<CaptureInput> = {}): CaptureInput {
@@ -120,10 +123,23 @@ describe('runCapture classification', () => {
     const out = await runCapture(h.deps, input({ gate: false }))
 
     expect(h.extractSalience).not.toHaveBeenCalled()
-    expect(out).toMatchObject({ outcome: 'stored', category: 'fact', confidence: 1, reason: 'raw_mode' })
+    expect(out).toMatchObject({ outcome: 'stored', model: 'raw', category: 'fact', confidence: 1, reason: 'raw_mode' })
     const { message } = ingestedCall(h.ingest)
     expect(message.content).toBe(TURN)
     expect(message.metadata['salienceCategory']).toBe('fact')
+    // No model saw the stored text.
+    expect(message.metadata['captureModel']).toBe('raw')
+  })
+
+  it('propagates a classifier failure without calling onRejected or storing', async () => {
+    const h = makeHarness()
+    const onRejected = vi.fn()
+    h.extractSalience.mockRejectedValue(new Error('extractSalience: classifier output is not a JSON object'))
+
+    await expect(runCapture({ ...h.deps, onRejected }, input())).rejects.toThrow('not a JSON object')
+
+    expect(onRejected).not.toHaveBeenCalled()
+    expect(h.ingest).not.toHaveBeenCalled()
   })
 
   it('stores a preference shared even when the turn carries a project', async () => {
@@ -265,30 +281,31 @@ describe('runCapture stored metadata', () => {
 describe('runCapture idempotency', () => {
   it('replays a key already stored in the session without calling the classifier', async () => {
     const h = makeHarness()
-    h.getBySession.mockResolvedValue([
-      { id: 'ep-1', metadata: { captureKey: 'other-key' } },
-      { id: 'ep-2', metadata: { captureKey: 'commit-4f2a9c1' } },
-    ])
+    h.findIdByCaptureKey.mockResolvedValue('ep-2')
 
     const out = await runCapture(h.deps, input({ key: 'commit-4f2a9c1' }))
 
     expect(out).toEqual({ outcome: 'replayed', model: 'test-chat-model' })
     expect(h.extractSalience).not.toHaveBeenCalled()
     expect(h.ingest).not.toHaveBeenCalled()
-    const [sessionId, opts] = h.getBySession.mock.calls[0] as [string, { since: Date }]
+    expect(h.findIdByCaptureKey).toHaveBeenCalledOnce()
+    const [sessionId, key, opts] = h.findIdByCaptureKey.mock.calls[0] as unknown as [string, string, { since: Date }]
     expect(sessionId).toBe('sess-capture-1')
+    expect(key).toBe('commit-4f2a9c1')
     const ageMs = Date.now() - opts.since.getTime()
     expect(ageMs).toBeGreaterThanOrEqual(7 * DAY_MS)
     expect(ageMs).toBeLessThan(7 * DAY_MS + 60_000)
+    // The probe filters in the store; the session is never loaded.
+    expect(h.getBySession).not.toHaveBeenCalled()
   })
 
   it('captures normally when the key has not been stored', async () => {
     const h = makeHarness()
-    h.getBySession.mockResolvedValue([{ id: 'ep-1', metadata: { captureKey: 'other-key' } }])
 
     const out = await runCapture(h.deps, input({ key: 'commit-4f2a9c1' }))
 
     expect(out.outcome).toBe('stored')
+    expect(h.findIdByCaptureKey).toHaveBeenCalledOnce()
   })
 
   it('does not look up the session without a key', async () => {
@@ -296,6 +313,6 @@ describe('runCapture idempotency', () => {
 
     await runCapture(h.deps, input())
 
-    expect(h.getBySession).not.toHaveBeenCalled()
+    expect(h.findIdByCaptureKey).not.toHaveBeenCalled()
   })
 })

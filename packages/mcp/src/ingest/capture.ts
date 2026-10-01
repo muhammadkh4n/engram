@@ -24,6 +24,9 @@ export const RAW_TURN_MAX_CHARS = 4000
 /** A replayed key is only honoured inside this window, matching the dedup window. */
 export const CAPTURE_KEY_WINDOW_DAYS = 7
 
+/** Recorded as the capture model of a turn stored without classification: no model saw it. */
+export const RAW_CAPTURE_MODEL = 'raw'
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 export type CaptureRole = 'user' | 'assistant' | 'system'
@@ -123,9 +126,11 @@ async function resolveStorage(storage: CaptureDeps['storage']): Promise<StorageA
 
 async function findReplay(deps: CaptureDeps, sessionId: string, key: string): Promise<boolean> {
   const storage = await resolveStorage(deps.storage)
+  if (!storage.episodes.findIdByCaptureKey) {
+    throw new Error('storage adapter lacks findIdByCaptureKey')
+  }
   const since = new Date(Date.now() - CAPTURE_KEY_WINDOW_DAYS * DAY_MS)
-  const episodes = await storage.episodes.getBySession(sessionId, { since })
-  return episodes.some((e) => e.metadata?.['captureKey'] === key)
+  return (await storage.episodes.findIdByCaptureKey(sessionId, key, { since })) !== null
 }
 
 async function classify(
@@ -169,7 +174,7 @@ async function checkDuplicate(
 }
 
 function captureMetadata(
-  deps: CaptureDeps,
+  model: string,
   input: CaptureInput,
   classification: SalienceClassification,
   content: string,
@@ -185,20 +190,28 @@ function captureMetadata(
     source: input.source,
     ...(project ? { project } : {}),
     rawTurn: content.slice(0, RAW_TURN_MAX_CHARS),
-    captureModel: deps.captureModel,
+    captureModel: model,
     ...(input.key ? { captureKey: input.key } : {}),
   }
 }
 
 export async function runCapture(deps: CaptureDeps, input: CaptureInput): Promise<CaptureOutcome> {
-  const model = deps.captureModel
+  const model = input.gate ? deps.captureModel : RAW_CAPTURE_MODEL
 
   // A retried capture must not pay for a second classification.
   if (input.key && input.sessionId && (await findReplay(deps, input.sessionId, input.key))) {
     deps.log?.(`replayed: key=${input.key} already stored for session ${input.sessionId}`)
     return { outcome: 'replayed', model }
   }
+  return captureUnseenKey(deps, input, model)
+}
 
+/**
+ * The pipeline after the idempotency check. The classifier's errors
+ * propagate: a failed or unparseable classification is no verdict, so the
+ * caller reports it as retryable instead of logging a rejection.
+ */
+async function captureUnseenKey(deps: CaptureDeps, input: CaptureInput, model: string): Promise<CaptureOutcome> {
   // Every later consumer (classifier, rejection callback, dedup embedding,
   // rawTurn metadata) reads this scrubbed copy.
   const content = await scrubModelInput(input.content, deps.logPrefix ?? '[engram-capture]')
@@ -239,7 +252,7 @@ export async function runCapture(deps: CaptureDeps, input: CaptureInput): Promis
       content: classification.distilled,
       role: input.role,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      metadata: captureMetadata(deps, input, classification, content, project),
+      metadata: captureMetadata(model, input, classification, content, project),
     },
     project ? { projectId: project } : undefined,
   )
@@ -305,7 +318,10 @@ export async function runDerivedCapture(
     return { outcome: 'rejected', model, reason: 'empty_digest' }
   }
 
-  const outcome = await runCapture(deps, {
+  // The replay check above already covered this key; the digest was made
+  // by the capture model, so it is recorded as the model even though the
+  // salience gate does not run.
+  const outcome = await captureUnseenKey(deps, {
     content: digested,
     role: 'system',
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -316,6 +332,6 @@ export async function runDerivedCapture(
     dryRun: input.dryRun,
     ...(input.key ? { key: input.key } : {}),
     meta: derivedMetadata(input.derive, input.meta),
-  })
+  }, model)
   return input.derive === 'pre-compact' ? { ...outcome, context: digest.context } : outcome
 }

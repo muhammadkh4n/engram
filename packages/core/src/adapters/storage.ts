@@ -21,6 +21,13 @@ export interface EpisodeStorage {
   search(query: string, opts?: SearchOptions): Promise<SearchResult<Episode>[]>
   getByIds(ids: string[]): Promise<Episode[]>
   getBySession(sessionId: string, opts?: { since?: Date }): Promise<Episode[]>
+  /**
+   * Id of one episode in the session created at or after `since` whose
+   * `metadata.captureKey` equals `key`, or null. An idempotency probe: it
+   * reads at most one row and filters in the store, never loading the
+   * session's episodes.
+   */
+  findIdByCaptureKey?(sessionId: string, key: string, opts: { since: Date }): Promise<string | null>
   getUnconsolidated(sessionId: string): Promise<Episode[]>
   getUnconsolidatedSessions(): Promise<string[]>
   markConsolidated(ids: string[]): Promise<void>

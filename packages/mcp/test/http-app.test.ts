@@ -113,7 +113,8 @@ describe('POST /capture', () => {
     expect(res.headers.get('content-type')).toBe('application/json')
     expect(await res.json()).toEqual({
       outcome: 'rejected',
-      model: 'test-chat-model',
+      // gate:false never reaches a classifier, so no model saw the capture.
+      model: 'raw',
       category: 'none',
       confidence: 0,
       reason: 'too_short',

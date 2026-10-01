@@ -572,10 +572,10 @@ export class OpenAISummarizer {
   /**
    * Salience classification for the Layer 1 & 2 memory ingestion gate.
    *
-   * Uses gpt-4o-mini with JSON response format. Default-rejects: returns
-   * store=false with low confidence when in doubt. On any API or parse
-   * failure, returns a rejection result rather than throwing so the
-   * caller's ingestion pipeline is not blocked.
+   * Uses the configured chat model with JSON response format. Default-rejects:
+   * the model returns store=false with low confidence when in doubt. A chat
+   * API error or unparseable output throws, so the caller can retry the
+   * capture instead of recording a verdict the model never gave.
    */
   async extractSalience(
     content: string,
@@ -597,6 +597,7 @@ export class OpenAISummarizer {
 
     const userMessage = buildSalienceUserMessage(trimmed, opts)
 
+    let raw: string
     try {
       const resp = await this.chatCreate('extractSalience', {
         model: this.model,
@@ -608,21 +609,14 @@ export class OpenAISummarizer {
         temperature: 0.1,
         response_format: { type: 'json_object' },
       })
-
-      const raw = resp.choices[0]?.message?.content ?? '{}'
-      return this.parseSalience(raw)
+      raw = resp.choices[0]?.message?.content ?? ''
     } catch (err) {
       process.stderr.write(
         `[openai] extractSalience failed: ${err instanceof Error ? err.message : String(err)}\n`,
       )
-      return {
-        store: false,
-        category: 'none',
-        confidence: 0,
-        distilled: '',
-        reason: 'classifier_error',
-      }
+      throw err
     }
+    return this.parseSalience(raw)
   }
 
   private parseSalience(raw: string): SalienceClassification {
@@ -632,36 +626,42 @@ export class OpenAISummarizer {
       'emotional_signal', 'none',
     ])
 
+    let parsed: unknown
     try {
-      const parsed: unknown = JSON.parse(raw)
-      if (typeof parsed !== 'object' || parsed === null) {
-        return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
-      }
-      const obj = parsed as Record<string, unknown>
-
-      const store = obj['store'] === true
-      const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
-      const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
-        ? (rawCategory as SalienceCategory)
-        : 'none'
-      const confidence =
-        typeof obj['confidence'] === 'number'
-          ? Math.min(1, Math.max(0, obj['confidence']))
-          : 0
-      const distilled = typeof obj['distilled'] === 'string' ? obj['distilled'].trim() : ''
-      const reason = typeof obj['reason'] === 'string' ? obj['reason'] : ''
-
-      // Guardrail: if the classifier says store but gives no distilled text
-      // or the distilled text is shorter than the minimum useful length,
-      // reject it. Prevents empty writes.
-      if (store && distilled.length < 15) {
-        return { store: false, category, confidence, distilled: '', reason: 'empty_distilled' }
-      }
-
-      return { store, category, confidence, distilled, reason }
-    } catch {
-      return { store: false, category: 'none', confidence: 0, distilled: '', reason: 'parse_error' }
+      parsed = JSON.parse(raw)
+    } catch (err) {
+      throw new Error(
+        `extractSalience: unparseable classifier output (${err instanceof Error ? err.message : String(err)})`,
+      )
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('extractSalience: classifier output is not a JSON object')
+    }
+    const obj = parsed as Record<string, unknown>
+    if (typeof obj['store'] !== 'boolean') {
+      throw new Error('extractSalience: classifier output has no boolean "store" verdict')
+    }
+
+    const store = obj['store']
+    const rawCategory = typeof obj['category'] === 'string' ? obj['category'] : 'none'
+    const category: SalienceCategory = validCategories.has(rawCategory as SalienceCategory)
+      ? (rawCategory as SalienceCategory)
+      : 'none'
+    const confidence =
+      typeof obj['confidence'] === 'number'
+        ? Math.min(1, Math.max(0, obj['confidence']))
+        : 0
+    const distilled = typeof obj['distilled'] === 'string' ? obj['distilled'].trim() : ''
+    const reason = typeof obj['reason'] === 'string' ? obj['reason'] : ''
+
+    // Guardrail: if the classifier says store but gives no distilled text
+    // or the distilled text is shorter than the minimum useful length,
+    // reject it. Prevents empty writes.
+    if (store && distilled.length < 15) {
+      return { store: false, category, confidence, distilled: '', reason: 'empty_distilled' }
+    }
+
+    return { store, category, confidence, distilled, reason }
   }
 
   private parseExtractedEntities(raw: string): ExtractedEntity[] {
