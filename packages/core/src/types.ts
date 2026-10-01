@@ -195,9 +195,13 @@ export interface TierPriority {
 
 /** Retrieval legs a recall had to run without. `vector`: the query could not
  *  be embedded, so vector search and HyDE were skipped; the value is the
- *  embedder's error, one line, credentials redacted. */
+ *  embedder's error, one line, credentials redacted. `lexical`: in that same
+ *  recall the keyword search (textBoost) failed too, so the results come from
+ *  the per-tier plain text match; the value is its error, one line,
+ *  credentials redacted. */
 export interface RecallDegradation {
   vector: string
+  lexical?: string
 }
 
 export interface RecallResult {

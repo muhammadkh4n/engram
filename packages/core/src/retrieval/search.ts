@@ -280,7 +280,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   }
 
   // Storage adapters without vectorSearch, or without textBoost, degrade to
-  // the legacy per-tier text search below.
+  // the per-tier text search below.
   const hasVectorSearch = typeof storage.vectorSearch === 'function'
   const hasTextBoost = typeof storage.textBoost === 'function'
   const hasQueryVector = embedding.length > 0 && !vectorUnavailable
@@ -325,7 +325,11 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const scoredIds = new Set<string>()
   const typedById = new Map<string, TypedMemory>()
 
-  if (vectorResults.length > 0 || hasTextBoost) {
+  // The per-tier text search below runs whenever both candidate sources come
+  // back empty. Without a query vector an empty lexical leg means either no
+  // keyword match or a failed textBoost call (lexicalLeg returns [] on error);
+  // in both cases the plain text match is the only search left.
+  if (vectorResults.length > 0 || boostResults.length > 0) {
     // Primary path: score vector results with optional BM25 boost
     for (const { item: typed, similarity } of vectorResults) {
       scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory))
@@ -361,8 +365,8 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       typedById.set(typed.data.id, typed)
     }
   } else if (terms.length > 0) {
-    // Legacy fallback for storage without textBoost or vectorSearch: text-only
-    // search via the per-tier .search() methods.
+    // Text-only search via the per-tier .search() methods: storage without
+    // textBoost or vectorSearch, or a recall whose candidate sources are empty.
     const limit = strategy.maxResults * 2
     const searchQuery = terms.join(' ')
 

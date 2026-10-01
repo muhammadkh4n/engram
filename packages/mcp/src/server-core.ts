@@ -21,7 +21,7 @@ import {
   startConsolidationWorker,
   MAX_FORGET_IDS,
   recallOutputPolicyFromEnv,
-  vectorUnavailableNotice,
+  degradedRecallNotice,
 } from '@engram-mem/core'
 import type {
   StorageAdapter,
@@ -703,11 +703,11 @@ export async function runMemoryRecall(
   }
 
   if (!result.formatted || result.memories.length === 0) {
-    return toolText(
-      result.degraded
-        ? `${vectorUnavailableNotice(result.degraded.vector)}\nNo keyword matches.`
-        : 'No relevant memories found.',
-    )
+    if (!result.degraded) return toolText('No relevant memories found.')
+    // After a failed keyword search only the plain text match ran, so "no
+    // keyword matches" would be a claim nothing checked.
+    const emptyLine = result.degraded.lexical === undefined ? 'No keyword matches.' : 'No text matches.'
+    return toolText(`${degradedRecallNotice(result.degraded)}\n${emptyLine}`)
   }
 
   return toolText(result.formatted)

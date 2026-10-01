@@ -9,13 +9,14 @@ import {
   assemble,
   emptyRecallPayload,
   resolveRecallOutputPolicy,
-  vectorUnavailableNotice,
+  degradedRecallNotice,
   type RecallPayload,
   type RenderedItem,
   type RenderedPayload,
 } from './output-policy.js'
 import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
+import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
@@ -158,7 +159,9 @@ export interface RecallOpts {
    * Why the query could not be embedded (one line, credentials redacted).
    * The recall then runs on the lexical leg only: HyDE is skipped so the
    * failing embedder is not called again, the payload leads with a notice
-   * naming the reason, and the result carries `degraded.vector`.
+   * naming the reason, and the result carries `degraded.vector`. If the
+   * lexical leg fails as well, the per-tier text search answers and the result
+   * also carries `degraded.lexical`.
    */
   vectorUnavailable?: string
 }
@@ -394,6 +397,18 @@ function markVectorError(timings: StageTimings): void {
   timings['vectorError'] = 1
 }
 
+/** What the recall ran without. A failed lexical leg counts only when the
+ *  query had no vector: the per-tier text search then answered in its place.
+ *  With a vector, vector search still answers and the timings flag suffices. */
+async function recallDegradation(
+  vectorUnavailable: string | undefined,
+  lexicalFailure: { err: unknown } | undefined,
+): Promise<RecallDegradation | undefined> {
+  if (vectorUnavailable === undefined) return undefined
+  if (lexicalFailure === undefined) return { vector: vectorUnavailable }
+  return { vector: vectorUnavailable, lexical: await failureReason(lexicalFailure.err, 'keyword search error') }
+}
+
 function finishTimings(timings: StageTimings, recallStart: number): { timings?: Record<string, number> } {
   if (timings === null) return {}
   return { timings: { ...timings, total: performance.now() - recallStart } }
@@ -475,6 +490,7 @@ export async function recall(
   const lexicalReserve = lexicalReserveFor(strategy.maxResults, intelligence?.rerank !== undefined)
   const slateSize = strategy.maxResults + lexicalReserve
   const searchStart = stageStart(timings)
+  let lexicalFailure: { err: unknown } | undefined
   let memories = await unifiedSearch({
     query,
     embedding,
@@ -485,12 +501,16 @@ export async function recall(
     expandedTerms,
     projectId,
     ...(ranking ? { projectRanking: ranking } : {}),
-    onLexicalError: () => markLexicalError(timings),
+    onLexicalError: (err) => {
+      markLexicalError(timings)
+      lexicalFailure ??= { err }
+    },
     lexicalReserve,
     rankPriors,
     ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
   })
   stageEnd(timings, 'search', searchStart)
+  const degraded = await recallDegradation(vectorUnavailable, lexicalFailure)
 
   // HyDE: fires on weak direct-match scores OR multi-hop / temporal queries.
   // Multi-hop and temporal queries often have decent vector scores on ONE hop
@@ -824,7 +844,7 @@ export async function recall(
   const assembled = assemble(
     renderRecallPayload(memories, associations, compositeContext, communitySummaries),
     outputPolicy,
-    vectorUnavailable !== undefined ? vectorUnavailableNotice(vectorUnavailable) : undefined,
+    degraded !== undefined ? degradedRecallNotice(degraded) : undefined,
   )
   // Reconsolidation — fire-and-forget, also strengthens traversed Neo4j
   // edges when graph is non-null. Only what the payload emitted counts as a
@@ -863,7 +883,7 @@ export async function recall(
     ...(outputPolicy.faint && compositeContext !== null && compositeContext.faintAssociations.length > 0
       ? { faintAssociations: compositeContext.faintAssociations }
       : {}),
-    ...(vectorUnavailable !== undefined ? { degraded: { vector: vectorUnavailable } } : {}),
+    ...(degraded !== undefined ? { degraded } : {}),
     ...finishTimings(timings, recallStart),
   }
 }

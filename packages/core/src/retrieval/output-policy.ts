@@ -1,4 +1,5 @@
 import { estimateTokens } from '../utils/tokens.js'
+import type { RecallDegradation } from '../types.js'
 
 // ---------------------------------------------------------------------------
 // Recall payload: rendered sections in, bounded text out
@@ -34,6 +35,14 @@ export const PAYLOAD_SECTION_HEADERS: Readonly<Record<PayloadSection, string>> =
  *  lexical leg ran. Tells the reader why results may miss paraphrases. */
 export function vectorUnavailableNotice(reason: string): string {
   return `> Semantic search unavailable (${reason}); these results come from keyword search only.`
+}
+
+/** First line of a degraded recall. When the keyword search failed as well,
+ *  the results come from a plain text match, and the notice names both
+ *  failures so an empty or thin answer is not read as authoritative. */
+export function degradedRecallNotice(degraded: RecallDegradation): string {
+  if (degraded.lexical === undefined) return vectorUnavailableNotice(degraded.vector)
+  return `> Semantic and keyword search unavailable (semantic: ${degraded.vector}; keyword: ${degraded.lexical}); these results come from a plain text match only.`
 }
 
 export interface RenderedItem {

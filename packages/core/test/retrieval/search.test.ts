@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { unifiedSearch, isRecallFailureNoise } from '../../src/retrieval/search.js'
-import { createMockStorage } from './mock-storage.js'
+import {
+  createMockStorage,
+  DIGEST_SEARCH_RESULTS,
+  EPISODE_SEARCH_RESULTS,
+  SEMANTIC_SEARCH_RESULTS,
+} from './mock-storage.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
 import type { Episode, MemoryType, RecallStrategy, SearchResult, TypedMemory } from '../../src/types.js'
 
@@ -667,6 +672,66 @@ describe('unifiedSearch — no query vector', () => {
     expect(storage.episodes.search).not.toHaveBeenCalled()
     expect(result.map((r) => r.id)).toEqual(['lex-target', 'lex-weak'])
     expect(result[0]?.relevance).toBeCloseTo(expectedScore(1, LIGHT_STRATEGY.recencyBias), 10)
+  })
+
+  describe('when the lexical leg yields no candidates', () => {
+    const TEXT_SEARCH_IDS = [...EPISODE_SEARCH_RESULTS, ...DIGEST_SEARCH_RESULTS, ...SEMANTIC_SEARCH_RESULTS]
+      .map((hit) => hit.item.id)
+      .sort()
+
+    function runTextFallback(storage: ReturnType<typeof createMockStorage>, onLexicalError?: (err: unknown) => void) {
+      return unifiedSearch({
+        query: 'typescript strict mode',
+        embedding: [0, 1, 0, 0],
+        strategy: LIGHT_STRATEGY,
+        storage,
+        sensory: new SensoryBuffer(),
+        projectId: 'engram',
+        vectorUnavailable: true,
+        ...(onLexicalError ? { onLexicalError } : {}),
+      })
+    }
+
+    it('falls back to the per-tier text search when textBoost matches nothing', async () => {
+      const storage = createMockStorage({ textBoostResults: [] })
+
+      const result = await runTextFallback(storage)
+
+      expect(storage.vectorSearch).not.toHaveBeenCalled()
+      expect(storage.textBoost).toHaveBeenCalledTimes(1)
+      const searchOpts = { limit: LIGHT_STRATEGY.maxResults * 2, projectId: 'engram' }
+      expect(storage.episodes.search).toHaveBeenCalledWith('typescript strict mode', searchOpts)
+      expect(storage.digests.search).toHaveBeenCalledWith('typescript strict mode', searchOpts)
+      expect(storage.semantic.search).toHaveBeenCalledWith('typescript strict mode', searchOpts)
+      expect(result.map((r) => r.id).sort()).toEqual(TEXT_SEARCH_IDS)
+    })
+
+    it('falls back to the per-tier text search when textBoost throws', async () => {
+      const storage = createMockStorage()
+      storage.textBoost = vi.fn().mockRejectedValue(new Error('canceling statement due to statement timeout'))
+      const onLexicalError = vi.fn()
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const result = await runTextFallback(storage, onLexicalError)
+
+        expect(onLexicalError).toHaveBeenCalledTimes(1)
+        expect(storage.episodes.search).toHaveBeenCalledTimes(1)
+        expect(storage.digests.search).toHaveBeenCalledTimes(1)
+        expect(storage.semantic.search).toHaveBeenCalledTimes(1)
+        expect(result.map((r) => r.id).sort()).toEqual(TEXT_SEARCH_IDS)
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
+
+    it('still scores lexical candidates the lexical way when textBoost returns rows', async () => {
+      const { storage, result } = await run([], { projectId: 'engram' })
+
+      expect(result.map((r) => r.id)).toEqual(['lex-target', 'lex-weak'])
+      expect(storage.episodes.search).not.toHaveBeenCalled()
+      expect(storage.digests.search).not.toHaveBeenCalled()
+      expect(storage.semantic.search).not.toHaveBeenCalled()
+    })
   })
 
   it('keeps the per-tier text search for storage without textBoost', async () => {
