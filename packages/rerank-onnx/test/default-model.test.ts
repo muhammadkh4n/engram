@@ -6,7 +6,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const calls = vi.hoisted(() => ({
   tokenizerModels: [] as string[],
   modelLoads: [] as Array<{ model: string; options: unknown }>,
+  // Handed out in order, logitsPerPair values for each pair in a pass.
   nextLogits: [] as number[],
+  logitsPerPair: 1,
   // When set, every pair gets this logit, however the docs are batched.
   perPairLogit: null as number | null,
 }))
@@ -26,7 +28,7 @@ vi.mock('@huggingface/transformers', () => ({
           logits: {
             data: Float32Array.from(
               calls.perPairLogit === null
-                ? calls.nextLogits
+                ? calls.nextLogits.splice(0, inputs.pairs * calls.logitsPerPair)
                 : new Array<number>(inputs.pairs).fill(calls.perPairLogit),
             ),
           },
@@ -45,6 +47,7 @@ describe('createOnnxReranker defaults and scoring (stubbed runtime)', () => {
     calls.tokenizerModels.length = 0
     calls.modelLoads.length = 0
     calls.nextLogits = []
+    calls.logitsPerPair = 1
     calls.perPairLogit = null
   })
 
@@ -82,6 +85,7 @@ describe('createOnnxReranker defaults and scoring (stubbed runtime)', () => {
   })
 
   it('rejects a head that emits more than one logit per pair', async () => {
+    calls.logitsPerPair = 2
     calls.nextLogits = [0.1, 0.9, 0.2, 0.8]
     const reranker = createOnnxReranker()
     await expect(

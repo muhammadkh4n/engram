@@ -62,12 +62,13 @@ const memory = createMemory({
 createOnnxReranker({
   model: 'Alibaba-NLP/gte-reranker-modernbert-base', // or mixedbread-ai/mxbai-rerank-{large,base,xsmall}-v1
   dtype: 'q8',        // 'fp32' | 'fp16' | 'q8' | 'q4'
-  batchSize: 8,       // pairs per forward pass
   maxCandidates: 50,  // cap on docs reranked per call; docs past it get no score
   maxLength: 512,     // max tokens per pair
   maxDocChars: 1200,  // chars per doc before tokenization
 })
 ```
+
+**One pair per forward pass:** each (query, document) pair is scored in its own unpadded forward pass, so a document's score depends only on the query and the document, never on the other documents in the call, their order or their count. The q8 weights quantize activations dynamically with one scale per tensor, so pairs that share a pass, and pad positions, change each other's scores: on a 45-document slate, batches of 8 moved scores by up to 0.19 and reordered ranks, and padding every pair to a fixed length or to length buckets did not remove the drift. fp32 weights are batch-invariant to about 2e-7, but pair-by-pair scoring is used for every dtype. On a 16-thread laptop CPU, scoring 45 documents pair by pair was no slower than the old batches of 8 (median 10.6 s vs 12.7 s on a loaded machine; 3.8 s vs 8.5 s on a quieter run).
 
 ## Model variants
 
@@ -78,7 +79,7 @@ createOnnxReranker({
 | `mixedbread-ai/mxbai-rerank-base-v1`                     | 184M   | Good | faster than large | lower |
 | `mixedbread-ai/mxbai-rerank-xsmall-v1`                   | 70M    | Decent | fastest mxbai | lowest |
 
-Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on the production CPU host, with up to 25 docs per call; the mxbai base/xsmall rows were not measured there. The default `maxCandidates` is now 50, so that the largest slate recall sends (30 fused candidates plus a 15-row lexical reserve) is scored in full. Rerank time grows with the number of docs, so a full 45-doc slate takes longer than the p50 above.
+Rerank p50 and RSS (after 50 queries) were measured at q8 in the MCP server on the production CPU host, with up to 25 docs per call and the earlier batch-of-8 scorer; the mxbai base/xsmall rows were not measured there. The default `maxCandidates` is now 50, so that the largest slate recall sends (30 fused candidates plus a 15-row lexical reserve) is scored in full. Rerank time grows with the number of docs, so a full 45-doc slate takes longer than the p50 above.
 
 **Score scale:** each model's sigmoid output sits on its own scale (on the same recalls, 69.7% of gte scores are ≥ 0.5 vs 6.4% for large-v1). Scores only order candidates within one model; nothing may gate on an absolute rerank score.
 

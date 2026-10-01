@@ -13,7 +13,6 @@ describe('createOnnxReranker', () => {
     reranker = createOnnxReranker({
       model: TEST_MODEL,
       dtype: 'q8',
-      batchSize: 4,
     })
     await reranker.load()
   }, 180000)
@@ -31,9 +30,16 @@ describe('createOnnxReranker', () => {
     expect(result).toEqual([])
   })
 
-  it('returns perfect score for a single document', async () => {
-    const result = await reranker.rerank('anything', [{ id: 'x', content: 'the quick brown fox' }])
-    expect(result).toEqual([{ id: 'x', score: 1.0 }])
+  it('scores a lone document with the model, as it scores it beside others', async () => {
+    const doc = { id: 'x', content: 'the quick brown fox' }
+    const neighbour = {
+      id: 'y',
+      content: 'A much longer and unrelated sentence about the weather in a small coastal town during the autumn.',
+    }
+    const alone = await reranker.rerank('anything', [doc])
+    const beside = await reranker.rerank('anything', [neighbour, doc])
+    expect(alone.map(r => r.id)).toEqual(['x'])
+    expect(Math.abs(alone[0]!.score - beside[1]!.score)).toBeLessThanOrEqual(1e-6)
   })
 
   it('scores a relevant doc higher than an irrelevant one', async () => {
@@ -50,7 +56,7 @@ describe('createOnnxReranker', () => {
     expect(byId['irrelevant']).toBeLessThan(0.5)
   })
 
-  it('handles multiple batches', async () => {
+  it('scores every document of a 10-document slate', async () => {
     const query = 'What color is grass?'
     const docs = Array.from({ length: 10 }, (_, i) => ({
       id: `doc-${i}`,

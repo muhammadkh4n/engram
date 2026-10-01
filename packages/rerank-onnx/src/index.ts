@@ -41,8 +41,6 @@ export interface OnnxRerankerOptions {
   model?: string
   /** ONNX weight dtype. 'q8' is ~4x smaller than fp32 with small quality loss. Default: 'q8'. */
   dtype?: OnnxDType
-  /** Pairs per forward pass. Default: 8. */
-  batchSize?: number
   /**
    * Max candidates reranked per call; docs past the cap get no score.
    * Default: 50, at least the largest slate the recall engine sends
@@ -75,7 +73,6 @@ export interface OnnxReranker {
 
 export const DEFAULT_RERANK_MODEL = 'Alibaba-NLP/gte-reranker-modernbert-base'
 const DEFAULT_DTYPE: OnnxDType = 'q8'
-const DEFAULT_BATCH_SIZE = 8
 const DEFAULT_MAX_CANDIDATES = 50
 const DEFAULT_MAX_LENGTH = 512
 const DEFAULT_MAX_DOC_CHARS = 1200
@@ -83,7 +80,6 @@ const DEFAULT_MAX_DOC_CHARS = 1200
 export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReranker {
   const model = options.model ?? DEFAULT_RERANK_MODEL
   const dtype = options.dtype ?? DEFAULT_DTYPE
-  const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE
   const maxCandidates = options.maxCandidates ?? DEFAULT_MAX_CANDIDATES
   const maxLength = options.maxLength ?? DEFAULT_MAX_LENGTH
   const maxDocChars = options.maxDocChars ?? DEFAULT_MAX_DOC_CHARS
@@ -107,20 +103,24 @@ export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReran
     await loadPromise
   }
 
-  async function scoreBatch(query: string, docs: string[]): Promise<number[]> {
-    if (docs.length === 0) return []
+  // Each (query, document) pair runs in its own forward pass, unpadded. The
+  // q8 weights quantize activations dynamically with one scale per tensor
+  // (DynamicQuantizeLinear feeding MatMulInteger), so pad positions and the
+  // other pairs in a pass shift every pair's score: on a 45-document slate,
+  // batches of 8 moved scores by up to 0.19 and reordered ranks, and padding
+  // a lone pair to a fixed length moved it by up to 0.2. A pass holding one
+  // unpadded pair makes the score a function of the query and the document
+  // alone, and on CPU it is also faster than padded batches.
+  async function scorePair(query: string, document: string): Promise<number> {
     await ensureLoaded()
     if (!tokenizer || !modelInstance) throw new Error('reranker not loaded')
-
-    const truncatedDocs = docs.map(d => d.slice(0, maxDocChars))
-    const queries = truncatedDocs.map(() => query)
 
     // Call _call directly: transformers.js makes the tokenizer object
     // callable via a Proxy, but TypeScript types don't reflect that,
     // so we go through the documented method instead.
-    const encoded = tokenizer._call(queries, {
-      text_pair: truncatedDocs,
-      padding: true,
+    const encoded = tokenizer._call([query], {
+      text_pair: [document.slice(0, maxDocChars)],
+      padding: false,
       truncation: true,
       max_length: maxLength,
       return_tensor: true,
@@ -136,38 +136,30 @@ export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReran
     }
     // Both supported families (gte-reranker-modernbert, mxbai-rerank-v1) emit
     // one relevance logit per pair. A multi-label head would flatten to
-    // several values per pair and silently misalign scores with documents.
-    if (logits.data.length !== docs.length) {
+    // several values per pair and give a score that is not a relevance logit.
+    if (logits.data.length !== 1) {
       throw new Error(
-        `reranker model ${model} returned ${logits.data.length} logits for ${docs.length} pairs; expected one logit per pair`,
+        `reranker model ${model} returned ${logits.data.length} logits for one pair; expected one logit per pair`,
       )
     }
 
     // Sigmoid maps the logit to [0, 1]; higher is more relevant. The scale
     // is model-specific, so scores only order candidates within one model.
-    return Array.from(logits.data, (x: number) => sigmoid(Number(x)))
+    return sigmoid(Number(logits.data[0]))
   }
 
   async function rerank(
     query: string,
     documents: ReadonlyArray<{ id: string; content: string }>,
   ): Promise<RerankResult[]> {
-    if (documents.length === 0) return []
-    if (documents.length === 1) return [{ id: documents[0]!.id, score: 1.0 }]
-
     const candidates = documents.slice(0, maxCandidates)
-    const scores: number[] = new Array(candidates.length)
-
-    for (let start = 0; start < candidates.length; start += batchSize) {
-      const end = Math.min(start + batchSize, candidates.length)
-      const batch = candidates.slice(start, end).map(c => c.content)
-      const batchScores = await scoreBatch(query, batch)
-      for (let i = 0; i < batchScores.length; i++) {
-        scores[start + i] = batchScores[i]!
-      }
+    const results: RerankResult[] = []
+    // Sequential on purpose: ONNX Runtime already spreads one pass across
+    // its intra-op threads, so concurrent passes only contend for them.
+    for (const candidate of candidates) {
+      results.push({ id: candidate.id, score: await scorePair(query, candidate.content) })
     }
-
-    return candidates.map((c, i) => ({ id: c.id, score: scores[i] ?? 0 }))
+    return results
   }
 
   return {
