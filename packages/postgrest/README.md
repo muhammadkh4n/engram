@@ -13,7 +13,7 @@ npm install @engram-mem/openai  # recommended — for embeddings + reranking
 
 ## Two deployment options
 
-**Requirements:** PostgreSQL 17 and pgvector >= 0.8.0. `schema.sql` is a PostgreSQL 17 dump, and its vector RPCs use pgvector's iterative HNSW scans; the schema refuses to apply on an older pgvector.
+**Requirements:** PostgreSQL 17 and pgvector >= 0.8.0. `schema.sql` is a PostgreSQL 17 dump, and its vector RPCs use pgvector's iterative HNSW scans; on an older pgvector the guard aborts the apply when it is run as documented: `psql -v ON_ERROR_STOP=1 -1` stops at the error and rolls back, and so does the Supabase SQL editor. A plain `psql < schema.sql` prints the error and keeps going.
 
 ### Option A — Supabase (hosted)
 
@@ -23,7 +23,7 @@ The original target. Zero infrastructure to manage; pay for compute add-ons as y
 # 1. Create a project at https://supabase.com
 # 2. Enable pgvector (already on by default in current Supabase)
 # 3. Apply the schema (single idempotent file, bundled in this package):
-psql "$DATABASE_URL" -f node_modules/@engram-mem/postgrest/schema.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f node_modules/@engram-mem/postgrest/schema.sql
 ```
 
 ```typescript
@@ -56,7 +56,7 @@ docker run -d --name engram-postgres \
 
 # Apply the schema — one idempotent file, ships in the package
 # (create the service_role / authenticator roles first, per the runbook)
-docker exec -i engram-postgres psql -U postgres -d engram \
+docker exec -i engram-postgres psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 \
   < node_modules/@engram-mem/postgrest/schema.sql
 
 # PostgREST
@@ -98,7 +98,7 @@ interface PostgRestAdapterOptions {
 
 Engram ships a single idempotent `schema.sql` — bundled in this npm package and also at `packages/postgrest/schema.sql` in the repo. It applies identically to Supabase-hosted and self-hosted Postgres and is safe to re-run (`CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`, `DROP POLICY … ; CREATE POLICY …`). The only Supabase-ism is `service_role` GRANTs and RLS policies — for self-hosted, create that role once before applying.
 
-> **Upgrading an existing deployment:** `schema.sql` changes recall-function signatures across versions (e.g. v0.5.0 added `p_project_id` for project isolation). After re-applying it, **reload PostgREST's schema cache** — `psql -c "NOTIFY pgrst, 'reload schema';"` or restart the PostgREST container — otherwise the updated adapter's calls fail with *"Could not find the function … in the schema cache."* Fresh installs don't need this; PostgREST loads the schema on startup.
+> **Upgrading an existing deployment:** `schema.sql` changes recall-function signatures across versions (e.g. v0.5.0 added `p_project_id` for project isolation). Re-apply it with the same flags as a fresh install (`psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f schema.sql`) so a failed statement rolls the whole apply back. After re-applying it, **reload PostgREST's schema cache** — `psql -c "NOTIFY pgrst, 'reload schema';"` or restart the PostgREST container — otherwise the updated adapter's calls fail with *"Could not find the function … in the schema cache."* Fresh installs don't need this; PostgREST loads the schema on startup.
 
 Tables (all in `public`):
 - `memory_episodes` — raw turns with embeddings
