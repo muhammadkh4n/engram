@@ -37,6 +37,7 @@ export type {
   ConsolidationRunStorage,
   LookupOptions,
 } from './adapters/storage.js'
+export { DuplicateCaptureKeyError, isDuplicateCaptureKey } from './adapters/storage.js'
 export type {
   IntelligenceAdapter,
   SummarizeOptions,

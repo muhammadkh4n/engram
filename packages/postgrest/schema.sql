@@ -1110,6 +1110,19 @@ CREATE INDEX IF NOT EXISTS idx_digests_session ON public.memory_digests USING bt
 
 
 --
+-- Name: idx_episodes_capture_key; Type: INDEX; Schema: public; Owner: -
+--
+-- The capture route's replay probe is check-then-insert: two deliveries of
+-- one capture (a spooled retry racing the original request that timed out on
+-- the client but finished on the server) can both miss it. Only the store can
+-- make them collide, so a capture key is unique per session here, and the
+-- adapter reports the collision as a replay.
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_episodes_capture_key ON public.memory_episodes (session_id, (metadata->>'captureKey')) WHERE metadata ? 'captureKey';
+
+
+--
 -- Name: idx_episodes_created; Type: INDEX; Schema: public; Owner: -
 --
 
