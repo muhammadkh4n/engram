@@ -129,6 +129,12 @@ describe('formatRecallTimingLine', () => {
   it('prints only total and counts when no optional stage ran', () => {
     expect(formatRecallTimingLine({ total: 3.2 }, 0, 0)).toBe('[recall] total=3 items=0 chars=0')
   })
+
+  it('marks a failed lexical leg as lexical=error', () => {
+    expect(formatRecallTimingLine({ total: 3.2, search: 1.1, lexicalError: 1 }, 2, 40)).toBe(
+      '[recall] total=3 search=1 lexical=error items=2 chars=40',
+    )
+  })
 })
 
 describe('recallOptionsFromArgs', () => {

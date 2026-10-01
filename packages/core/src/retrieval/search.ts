@@ -169,10 +169,49 @@ export interface UnifiedSearchOpts {
   /** Project/group boost applied before the maxResults cut, so same-project
    *  candidates are not crowded out of the slate the reranker sees. */
   projectRanking?: ProjectRanking
+  /** Called when storage.textBoost throws. The recall continues with an
+   *  empty lexical leg; the caller can mark the failure in its diagnostics. */
+  onLexicalError?: (err: unknown) => void
+}
+
+/** Lexical-leg error messages already written to stderr by this process.
+ *  A persistent failure (e.g. a missing RPC) would otherwise log on every
+ *  recall. */
+const loggedLexicalErrors = new Set<string>()
+
+function reportLexicalError(err: unknown, onLexicalError?: (err: unknown) => void): void {
+  const message = err instanceof Error ? err.message : String(err)
+  if (!loggedLexicalErrors.has(message)) {
+    loggedLexicalErrors.add(message)
+    console.error(`[engram] lexical leg failed: ${message}`)
+  }
+  onLexicalError?.(err)
+}
+
+/**
+ * Lexical candidates from storage.textBoost. A failure here (schema not yet
+ * applied, transient database error) empties the lexical leg only: vector
+ * search alone still answers the recall, and the error is logged and
+ * reported rather than swallowed.
+ */
+async function lexicalLeg(
+  storage: StorageAdapter,
+  terms: string[],
+  opts: Parameters<StorageAdapter['textBoost']>[1],
+  onLexicalError?: (err: unknown) => void,
+): ReturnType<StorageAdapter['textBoost']> {
+  try {
+    return await storage.textBoost(terms, opts)
+  } catch (err) {
+    reportLexicalError(err, onLexicalError)
+    return []
+  }
 }
 
 export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedMemory[]> {
-  const { query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking } = opts
+  const {
+    query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
+  } = opts
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
@@ -199,11 +238,16 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   const terms = extractTerms(query, expandedTerms)
   const bm25Limit = strategy.maxResults * 5
   const boostResults = terms.length > 0 && hasTextBoost
-    ? await storage.textBoost(terms, {
-        limit: bm25Limit,
-        sessionId,
-        ...(projectId !== undefined ? { projectId } : {}),
-      })
+    ? await lexicalLeg(
+        storage,
+        terms,
+        {
+          limit: bm25Limit,
+          sessionId,
+          ...(projectId !== undefined ? { projectId } : {}),
+        },
+        onLexicalError,
+      )
     : []
 
   const boostMap = new Map<string, number>()

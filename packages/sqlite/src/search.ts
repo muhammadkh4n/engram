@@ -27,8 +27,10 @@ export function sanitizeFtsQuery(query: string): string {
 
   if (tokens.length === 0) return '""'
 
-  // Join with OR — BM25 ranks results by how many tokens match
-  return orOfFtsStrings(tokens)
+  // Join with OR — BM25 ranks results by how many tokens match. Tokens made
+  // only of control characters strip to nothing, and an empty MATCH string is
+  // an FTS5 syntax error, so fall back to the match-nothing expression.
+  return orOfFtsStrings(tokens) || '""'
 }
 
 /**
