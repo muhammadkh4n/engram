@@ -2,6 +2,29 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import { extractCounters } from './graph-counters.js'
+import { existingRelTypes } from './graph-schema.js'
+
+type Orientation = 'NATURAL' | 'REVERSE' | 'UNDIRECTED'
+
+/**
+ * Relationship types PageRank runs over, with the direction score flows.
+ *
+ * DERIVES_FROM points from a derived fact to its evidence (semantic → digest
+ * → episode). Reversed, evidence passes score toward what was derived from
+ * it, so a fact backed by more digests and episodes ranks higher; in the
+ * natural direction nothing points into a semantic node and every fact
+ * would get the same minimum score.
+ *
+ * Co-recall edges are deliberately left out: they live only in the SQL
+ * association table, and projecting them would turn recall popularity into
+ * confidence. CONTEXTUAL is left out because its edges end at Entity and
+ * Person nodes, which the Memory-only node projection does not load.
+ */
+const PAGERANK_RELATIONSHIPS: Readonly<Record<string, Orientation>> = {
+  DERIVES_FROM: 'REVERSE',
+  TEMPORAL: 'UNDIRECTED',
+  TOPICAL: 'UNDIRECTED',
+}
 
 export interface DecayPassOptions {
   semanticDecayRate?: number
@@ -58,57 +81,10 @@ export async function decayPass(
   let maxPageRank = 1
 
   if (gdsAvailable && graph?.runCypher) {
-    try {
-      // Drop stale projection
-      try { await graph.runCypher(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
-
-      // Op1: Project + run PageRank
-      await graph.runCypher(`
-        CALL gds.graph.project(
-          'decay-graph',
-          'Memory',
-          ['TEMPORAL', 'TOPICAL', 'CONTEXTUAL', 'DERIVES_FROM', 'CO_RECALLED']
-        )
-        YIELD graphName, nodeCount, relationshipCount
-        RETURN graphName, nodeCount, relationshipCount
-      `)
-
-      const prResult = await graph.runCypher(`
-        CALL gds.pageRank.write('decay-graph', {
-          writeProperty: 'pageRank',
-          dampingFactor: 0.85,
-          maxIterations: 20,
-          tolerance: 0.0000001
-        })
-        YIELD nodePropertiesWritten, ranIterations, didConverge, centralityDistribution
-        RETURN nodePropertiesWritten, centralityDistribution.max AS maxPageRank, centralityDistribution.mean AS meanPageRank
-      `)
-
-      const maxPR = prResult.records[0]?.get('maxPageRank')
-      maxPageRank = typeof maxPR === 'number' ? maxPR : Number(maxPR ?? 1)
-      if (maxPageRank <= 0) maxPageRank = 1
-
-      // Drop projection
-      try { await graph.runCypher(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
-
-      // Op2: Fetch PageRank scores for memories that will be decayed
-      const prScores = await graph.runCypher(`
-        MATCH (m:Memory)
-        WHERE m.pageRank IS NOT NULL
-          AND m.memoryType IN ['semantic', 'procedural']
-        RETURN m.id AS memoryId, m.memoryType AS memoryType, m.pageRank AS pageRank
-      `)
-
-      for (const record of prScores.records as Array<{ get(key: string): unknown }>) {
-        const id = record.get('memoryId') as string
-        const pr = record.get('pageRank')
-        pageRankMap.set(id, typeof pr === 'number' ? pr : Number(pr ?? 0))
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`[decay-pass] PageRank computation failed, using base rates: ${msg}`)
-      try { await graph?.runCypher!(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
-      pageRankMap = new Map()
+    const pageRank = await computePageRank(graph)
+    if (pageRank) {
+      pageRankMap = pageRank.scores
+      maxPageRank = pageRank.maxPageRank
     }
   }
 
@@ -225,5 +201,93 @@ export async function decayPass(
     edgesPruned,
     graphEdgesPruned,
     isolatedNodesDeprioritized,
+  }
+}
+
+interface PageRankScores {
+  scores: Map<string, number>
+  maxPageRank: number
+}
+
+/**
+ * Op1 + Op2: project the Memory graph, write PageRank onto its nodes, and read
+ * back the scores of semantic and procedural memories. Returns null when
+ * nothing could be projected or GDS failed; the caller then decays flat.
+ */
+async function computePageRank(graph: GraphPort): Promise<PageRankScores | null> {
+  // gds.graph.project rejects the whole projection when any listed type is
+  // absent from the database, so project only the types that exist.
+  const relTypes = await existingRelTypes(graph, Object.keys(PAGERANK_RELATIONSHIPS))
+  if (relTypes.length === 0) {
+    console.log('[decay-pass] PageRank skipped: none of the projected relationship types exist in the graph')
+    return null
+  }
+  // Keys come from PAGERANK_RELATIONSHIPS, never from input, so inlining is safe.
+  const relProjection = relTypes
+    .map((t) => `${t}: {orientation: '${PAGERANK_RELATIONSHIPS[t]}'}`)
+    .join(', ')
+
+  try {
+    // Drop stale projection
+    try { await graph.runCypher!(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
+
+    const projectResult = await graph.runCypher!(`
+      CALL gds.graph.project(
+        'decay-graph',
+        'Memory',
+        {${relProjection}}
+      )
+      YIELD graphName, nodeCount, relationshipCount
+      RETURN graphName, nodeCount, relationshipCount
+    `)
+
+    const prResult = await graph.runCypher!(`
+      CALL gds.pageRank.write('decay-graph', {
+        writeProperty: 'pageRank',
+        dampingFactor: 0.85,
+        maxIterations: 20,
+        tolerance: 0.0000001
+      })
+      YIELD nodePropertiesWritten, ranIterations, didConverge, centralityDistribution
+      RETURN nodePropertiesWritten, centralityDistribution.max AS maxPageRank, centralityDistribution.mean AS meanPageRank
+    `)
+
+    const projected = projectResult.records[0]
+    const written = prResult.records[0]
+    const relsLabel = relTypes.map((t) => `${t}:${PAGERANK_RELATIONSHIPS[t]}`).join(',')
+    console.log(
+      `[decay-pass] PageRank: rels=${relsLabel}` +
+      ` nodes=${Number(projected?.get('nodeCount') ?? 0)}` +
+      ` relationships=${Number(projected?.get('relationshipCount') ?? 0)}` +
+      ` written=${Number(written?.get('nodePropertiesWritten') ?? 0)}`,
+    )
+
+    const maxPR = written?.get('maxPageRank')
+    let maxPageRank = typeof maxPR === 'number' ? maxPR : Number(maxPR ?? 1)
+    if (!(maxPageRank > 0)) maxPageRank = 1
+
+    // Drop projection
+    try { await graph.runCypher!(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
+
+    // Op2: Fetch PageRank scores for memories that will be decayed
+    const prScores = await graph.runCypher!(`
+      MATCH (m:Memory)
+      WHERE m.pageRank IS NOT NULL
+        AND m.memoryType IN ['semantic', 'procedural']
+      RETURN m.id AS memoryId, m.memoryType AS memoryType, m.pageRank AS pageRank
+    `)
+
+    const scores = new Map<string, number>()
+    for (const record of prScores.records as Array<{ get(key: string): unknown }>) {
+      const id = record.get('memoryId') as string
+      const pr = record.get('pageRank')
+      scores.set(id, typeof pr === 'number' ? pr : Number(pr ?? 0))
+    }
+    return { scores, maxPageRank }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[decay-pass] PageRank computation failed, using base rates: ${msg}`)
+    try { await graph.runCypher!(`CALL gds.graph.drop('decay-graph', false)`) } catch { /* ok */ }
+    return null
   }
 }
