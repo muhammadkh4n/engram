@@ -166,6 +166,16 @@ export interface GraphPort {
     memberNodeIds: string[]
   }): Promise<void>
 
+  /**
+   * Remove MEMBER_OF edges and Community nodes in scope (one project, or every
+   * community when projectId is null) whose generatedAt differs from the
+   * given run's.
+   */
+  replaceCommunityMemberships?(opts: {
+    generatedAt: string
+    projectId: string | null
+  }): Promise<{ membershipsRemoved: number; communitiesRemoved: number }>
+
   /** Wave 5: Query community summaries from Neo4j for MCP tool responses. */
   queryCommunities?(opts?: {
     projectId?: string

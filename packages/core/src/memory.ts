@@ -856,15 +856,12 @@ export class Memory {
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,
-      edgesPruned: decayResult.edgesPruned ?? 0,
       graphNodesCreated: graphNodesCreated > 0 ? graphNodesCreated : undefined,
       graphEdgesCreated: graphEdgesCreated > 0 ? graphEdgesCreated : undefined,
       communitiesDetected: dreamResult.communitiesDetected,
       bridgeNodesFound: dreamResult.bridgeNodesFound,
       replayEdgesCreated: dreamResult.replayEdgesCreated,
       causalEdgesCreated: dreamResult.causalEdgesCreated,
-      graphEdgesPruned: decayResult.graphEdgesPruned,
-      isolatedNodesDeprioritized: decayResult.isolatedNodesDeprioritized,
     }
   }
 

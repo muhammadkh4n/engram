@@ -82,21 +82,6 @@ export class PostgRestAssociationStorage implements AssociationStorage {
     if (error) throw new Error(`Association upsertCoRecalled failed: ${error.message}`)
   }
 
-  async pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number> {
-    const cutoff = new Date(Date.now() - opts.olderThanDays * 86400000).toISOString()
-
-    const { data, error } = await this.client
-      .from('memory_associations')
-      .delete()
-      .lt('strength', opts.maxStrength)
-      .or(`last_activated.is.null,last_activated.lt.${cutoff}`)
-      .neq('edge_type', 'derives_from')
-      .select()
-
-    if (error) throw new Error(`Association pruneWeak failed: ${error.message}`)
-    return (data ?? []).length
-  }
-
   async discoverTopicalEdges(opts: {
     daysLookback: number
     maxNew: number

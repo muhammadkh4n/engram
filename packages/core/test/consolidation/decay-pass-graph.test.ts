@@ -147,3 +147,40 @@ describe('decayPass PageRank projection', () => {
     expect(result.semanticDecayed).toBe(3)
   })
 })
+
+describe('decayPass graph writes', () => {
+  beforeEach(() => {
+    resetIdCounter()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function allCypher(graph: GraphPort): string[] {
+    const read = vi.mocked(graph.runCypher!).mock.calls.map((c) => c[0] as string)
+    const write = vi.mocked(graph.runCypherWrite!).mock.calls.map((c) => c[0] as string)
+    return [...read, ...write]
+  }
+
+  it.each([
+    ['with GDS', true],
+    ['without GDS', false],
+  ])('issues no DELETE and touches no isolated node %s', async (_label, gds) => {
+    const storage = makeMockStorage()
+    const { graph } = makeMockGraph({ relTypes: ['DERIVES_FROM', 'TEMPORAL', 'TOPICAL'] })
+    vi.mocked(graph.isGdsAvailable!).mockResolvedValue(gds)
+
+    const result = await decayPass(storage, {}, graph)
+
+    const cypher = allCypher(graph)
+    expect(cypher.some((q) => /\bDELETE\b/i.test(q))).toBe(false)
+    expect(cypher.some((q) => q.includes('NOT (m)--()'))).toBe(false)
+    expect(graph.runCypherWrite).not.toHaveBeenCalled()
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+    expect(result).not.toHaveProperty('graphEdgesPruned')
+    expect(result).not.toHaveProperty('isolatedNodesDeprioritized')
+  })
+})

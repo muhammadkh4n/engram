@@ -158,6 +158,7 @@ export async function dreamCycle(
   // Operation 1: Community Detection (Louvain via GDS)
   // -----------------------------------------------------------------------
   if (gdsAvailable && graph?.runCypher) {
+    let louvainSucceeded = false
     try {
       // Clear old community assignments
       await graph.runCypherWrite!(`
@@ -211,6 +212,7 @@ export async function dreamCycle(
       `)
       const communityCount = louvainResult.records[0]?.get('communityCount')
       communitiesDetected = typeof communityCount === 'number' ? communityCount : Number(communityCount ?? 0)
+      louvainSucceeded = true
 
       // Drop projection
       try { await graph.runCypher(`CALL gds.graph.drop('memory-graph', false)`) } catch { /* ok */ }
@@ -240,6 +242,10 @@ export async function dreamCycle(
       typeof graph?.getCommunityContext === 'function' &&
       typeof graph?.upsertCommunityNode === 'function'
     ) {
+      // One stamp for the whole run: memberships and Community nodes written
+      // by this run carry it, and the replacement below removes the rest.
+      const runGeneratedAt = new Date().toISOString()
+      let summariesCompleted = false
       try {
         const allCommunities = await graph.getCommunityMembers!({
           minSize: minCommunitySize,
@@ -323,7 +329,7 @@ export async function dreamCycle(
             topTopics,
             topPersons,
             dominantEmotion,
-            generatedAt: new Date().toISOString(),
+            generatedAt: runGeneratedAt,
             projectId: opts?.projectId ?? null,
             memberNodeIds,
           })
@@ -341,9 +347,31 @@ export async function dreamCycle(
 
           communitySummariesGenerated++
         }
+        summariesCompleted = true
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         console.warn(`[dream-cycle] Community summary generation failed: ${msg}`)
+      }
+
+      // Edges leave the graph only as replaced memberships or with a purged
+      // node; age is never evidence against an edge. Louvain renumbers
+      // communities on every run, so a membership this run did not restamp
+      // points at a dead assignment. A failed Louvain or an interrupted
+      // summary loop leaves the previous assignment in place untouched.
+      if (louvainSucceeded && summariesCompleted && typeof graph.replaceCommunityMemberships === 'function') {
+        try {
+          const removed = await graph.replaceCommunityMemberships({
+            generatedAt: runGeneratedAt,
+            projectId: opts?.projectId ?? null,
+          })
+          console.log(
+            `[dream-cycle] Community replacement: memberships=${removed.membershipsRemoved}` +
+            ` communities=${removed.communitiesRemoved} scope=${opts?.projectId ?? 'all'}`,
+          )
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          console.warn(`[dream-cycle] Community membership replacement failed: ${msg}`)
+        }
       }
     }
   } else if (graphAvailable) {

@@ -1,7 +1,6 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
-import { extractCounters } from './graph-counters.js'
 import { existingRelTypes } from './graph-schema.js'
 
 type Orientation = 'NATURAL' | 'REVERSE' | 'UNDIRECTED'
@@ -31,28 +30,23 @@ export interface DecayPassOptions {
   proceduralDecayRate?: number
   semanticDaysThreshold?: number
   proceduralDaysThreshold?: number
-  edgePruneThreshold?: number
-  edgePruneDays?: number
 }
 
 /**
- * Decay Pass (Monthly) — Ebbinghaus Forgetting Curve.
+ * Decay Pass — Ebbinghaus forgetting curve over SQL confidence.
  *
- * Brain analogy: Synaptic pruning. Unused neural pathways weaken. The brain
- * doesn't delete memories — it deprioritizes them.
+ * Decay lowers confidence and never removes anything: no graph edge, no
+ * association row, no node. Edge age is not evidence against an edge —
+ * consolidation writes its edges once and nothing increments their
+ * traversal count, so an age rule would cut the links of any project that
+ * pauses for a while.
  *
  * When Neo4j GDS is available:
  *   Op1: PageRank via GDS — writes pageRank onto Memory nodes
  *   Op2: Fetch PageRank scores for SQL decay modulation
  *   Op3: Gradient decay — effectiveRate = baseRate * (1 - clamp(pr/maxPR, 0, 0.8))
  *
- * When Neo4j is available (GDS not required):
- *   Op4: Edge pruning — remove never-traversed edges older than 60 days
- *   Op5: Isolated node deprioritization — floor confidence on disconnected nodes
- *
- * Always runs:
- *   SQL batch decay (uniform rate when no PageRank available)
- *   SQL edge pruning via pruneWeak()
+ * Otherwise: uniform SQL batch decay.
  */
 export async function decayPass(
   storage: StorageAdapter,
@@ -63,16 +57,12 @@ export async function decayPass(
   const proceduralBaseRate = opts?.proceduralDecayRate ?? 0.01
   const semanticDays = opts?.semanticDaysThreshold ?? 30
   const proceduralDays = opts?.proceduralDaysThreshold ?? 60
-  const edgePruneThreshold = opts?.edgePruneThreshold ?? 0.05
-  const edgePruneDays = opts?.edgePruneDays ?? 90
 
   const graphAvailable = graph?.runCypher && graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
   const gdsAvailable = graphAvailable && graph?.isGdsAvailable ? await graph.isGdsAvailable().catch(() => false) : false
 
   let semanticDecayed = 0
   let proceduralDecayed = 0
-  let graphEdgesPruned: number | undefined
-  let isolatedNodesDeprioritized: number | undefined
 
   // -----------------------------------------------------------------------
   // Operations 1-3: PageRank gradient decay (requires GDS)
@@ -128,79 +118,10 @@ export async function decayPass(
     })
   }
 
-  // SQL edge pruning (always runs)
-  const edgesPruned = await storage.associations.pruneWeak({
-    maxStrength: edgePruneThreshold,
-    olderThanDays: edgePruneDays,
-  })
-
-  // -----------------------------------------------------------------------
-  // Op4: Edge pruning in Neo4j (no GDS required)
-  // -----------------------------------------------------------------------
-  if (graphAvailable && graph?.runCypherWrite) {
-    try {
-      const cutoffDate = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
-      const pruneResult = await graph.runCypherWrite(`
-        MATCH ()-[r]->()
-        WHERE r.traversalCount = 0
-          AND r.createdAt < $cutoffDate
-          AND type(r) <> 'DERIVES_FROM'
-        DELETE r
-      `, { cutoffDate })
-      graphEdgesPruned = extractCounters(pruneResult).relationshipsDeleted
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`[decay-pass] Neo4j edge pruning failed: ${msg}`)
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Op5: Isolated node deprioritization (no GDS required)
-  // -----------------------------------------------------------------------
-  if (graphAvailable && graph?.runCypher) {
-    try {
-      const isolatedResult = await graph.runCypher(`
-        MATCH (m:Memory)
-        WHERE NOT (m)--()
-          AND m.memoryType IN ['semantic', 'procedural']
-        RETURN m.id AS memoryId, m.memoryType AS memoryType
-      `)
-
-      let isolatedCount = 0
-      const now = new Date().toISOString()
-
-      for (const record of isolatedResult.records as Array<{ get(key: string): unknown }>) {
-        const memoryId = record.get('memoryId') as string
-        const memoryType = record.get('memoryType') as string
-
-        if (memoryType === 'semantic') {
-          // Floor confidence to 0.01
-          await storage.semantic.recordAccessAndBoost(memoryId, -0.99)
-        }
-
-        // Mark deprioritized in Neo4j
-        await graph.runCypherWrite!(`
-          MATCH (m:Memory {id: $memoryId})
-          SET m.deprioritizedAt = $now
-        `, { memoryId, now })
-
-        isolatedCount++
-      }
-
-      isolatedNodesDeprioritized = isolatedCount
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`[decay-pass] Isolated node deprioritization failed: ${msg}`)
-    }
-  }
-
   return {
     cycle: 'decay',
     semanticDecayed,
     proceduralDecayed,
-    edgesPruned,
-    graphEdgesPruned,
-    isolatedNodesDeprioritized,
   }
 }
 

@@ -387,7 +387,6 @@ export interface ConsolidateResult {
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number
-  edgesPruned?: number
   // Graph fields — present when Neo4j graph is active
   graphNodesCreated?: number
   graphEdgesCreated?: number
@@ -396,8 +395,6 @@ export interface ConsolidateResult {
   bridgeNodesFound?: number
   replayEdgesCreated?: number
   causalEdgesCreated?: number
-  graphEdgesPruned?: number
-  isolatedNodesDeprioritized?: number
   // Wave 5 additions:
   communitySummariesGenerated?: number
   // v0.3.12 additions — consolidation observability + cost ceilings:
@@ -441,7 +438,6 @@ export interface EngineConfig {
       intervalMs?: number
       semanticDecayRate?: number
       proceduralDecayRate?: number
-      edgePruneThreshold?: number
     }
   }
   tokenizer?: (text: string) => number

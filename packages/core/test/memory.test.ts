@@ -515,7 +515,6 @@ describe('Memory — consolidate()', () => {
     expect(result).toHaveProperty('associationsCreated')
     expect(result).toHaveProperty('semanticDecayed')
     expect(result).toHaveProperty('proceduralDecayed')
-    expect(result).toHaveProperty('edgesPruned')
   })
 
   it('consolidate() with no argument defaults to all', async () => {

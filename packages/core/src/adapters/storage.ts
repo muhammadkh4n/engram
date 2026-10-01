@@ -120,7 +120,6 @@ export interface AssociationStorage {
     targetId: string,
     targetType: MemoryType
   ): Promise<void>
-  pruneWeak(opts: { maxStrength: number; olderThanDays: number }): Promise<number>
   discoverTopicalEdges(opts: {
     daysLookback: number
     maxNew: number
