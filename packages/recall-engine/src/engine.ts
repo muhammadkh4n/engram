@@ -558,12 +558,11 @@ export class RecallEngine {
     for (const r of resolved) {
       const row = byKey.get(`${r.type}:${r.id}`)
       if (!row) continue // hydration didn't return it (deleted/raced away)
-      // A forget/supersede that raced in during the hydration await: the
-      // hydrated row objects don't expose forgotten_at (and getByIds does
-      // not filter it), so the observable signals are (a) our own store's
-      // tombstone, set by write-through noteForget/noteSupersede or a
-      // reconcile that completed meanwhile, and (b) the supersededBy field
-      // semantic rows DO expose.
+      // getByIds already skips tombstoned and superseded rows. These checks
+      // cover a forget/supersede that raced in during the hydration await:
+      // (a) our own store's tombstone, set by write-through
+      // noteForget/noteSupersede or a reconcile that completed meanwhile, and
+      // (b) the supersededBy field semantic rows expose.
       if (!this.store.has(r.id)) continue
       if (row.type === 'semantic' && row.data.supersededBy !== null) continue
 
