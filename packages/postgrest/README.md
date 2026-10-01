@@ -115,6 +115,40 @@ Tables (all in `public`):
 
 Vector indexes use HNSW (`m=16, ef_construction=64` defaults — tune for your scale).
 
+## Lexical ranking
+
+The keyword leg of recall runs in one of two modes, chosen once at startup and logged to stderr:
+
+- `[engram] lexical ranking: bm25 (pg_textsearch)` — `bm25.sql` is applied and `engram_bm25_match` ranks matches with BM25 (k1=1.2, b=0.75), so rare terms weigh more than common ones.
+- `[engram] lexical ranking: ts_rank_cd (pg_textsearch not installed)` — the default: `engram_text_match` ranks with `ts_rank_cd`, which has no inverse document frequency.
+
+The adapter probes for `engram_bm25_match` when it initializes and keeps that mode until the process restarts.
+
+### Enabling BM25
+
+1. Run Postgres 17 or 18 with the [`pg_textsearch`](https://github.com/timescale/pg_textsearch) extension loaded at server start. Either build the bundled image, which is `pgvector/pgvector:0.8.2-pg17` plus pg_textsearch 1.4.0 (source pinned by SHA-256):
+   ```bash
+   docker build -t engram-postgres:bm25 packages/postgrest/docker
+   ```
+   or build the extension into your own server and set `shared_preload_libraries = 'pg_textsearch'` (the image passes `-c shared_preload_libraries=pg_textsearch`). Changing it needs a Postgres restart.
+2. Apply `bm25.sql` **after** `schema.sql`, with the same flags:
+   ```bash
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f schema.sql
+   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -1 -f bm25.sql
+   ```
+3. Reload PostgREST's schema cache: `psql "$DATABASE_URL" -c "NOTIFY pgrst, 'reload schema';"`.
+4. Restart the engram service so it probes again and switches to `bm25`.
+
+### How it scores
+
+- **Statistics are per tier.** Each memory table (episodes, digests, semantic, procedural) has its own BM25 index, so document frequencies and lengths come from that tier alone. The tiers' results are merged by one sort on score, the same way the `ts_rank_cd` path merges them.
+- **No phrase positions.** pg_textsearch stores no term positions, so a hyphenated identifier such as `ACA-2613` is scored by its parts (`aca`, `2613`); matching terms add up, and the rare part carries the IDF.
+- **Memory.** `pg_textsearch.memory_limit` defaults to 2GB. Set it lower on small hosts, e.g. `-c pg_textsearch.memory_limit=256MB`.
+
+### Rollback
+
+Run `DROP EXTENSION pg_textsearch CASCADE;` **before** moving the database to an image or server without the library. Inserts into a table that carries a BM25 index fail while the library is missing, and a dump that holds BM25 indexes restores only where the extension exists. After the drop, reload PostgREST's schema cache and restart the engram service; it falls back to `ts_rank_cd`.
+
 ## Migrating from `@engram-mem/supabase`
 
 The old package is now a thin re-export shim. **Your existing code works unchanged in v0.4.x.** You'll see TSDoc deprecation warnings in your IDE and an `npm deprecate` notice on install. To take the rename whenever convenient:
