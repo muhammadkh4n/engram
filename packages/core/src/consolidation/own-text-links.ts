@@ -116,10 +116,55 @@ export async function linkDigestContext(
   }
 }
 
+type CypherRead = NonNullable<GraphPort['runCypher']>
+
 /**
- * Links a fact to the context nodes of its source digests that the fact's
- * own topic and content name, with the strongest digest link damped by one
- * hop. An existing link only ever gains weight.
+ * Context nodes of the episodes a fact cites, scored by the share of cited
+ * episodes that link each node. Citations are the narrowest evidence of what
+ * a fact is about: a digest covers a whole session, its cited episodes only
+ * the turns the statement came from.
+ */
+async function citedEpisodeCandidates(
+  runCypher: CypherRead,
+  sourceEpisodeIds: ReadonlyArray<string>,
+): Promise<ScoredCandidate[]> {
+  const cited = [...new Set(sourceEpisodeIds)]
+  const read = await runCypher(`
+    MATCH (ep:Memory)-[:SPOKE|CONTEXTUAL|TOPICAL]->(ctx)
+    WHERE ep.id IN $sourceEpisodeIds
+      AND (ctx:Person OR ctx:Entity OR ctx:Topic)
+    WITH ctx, count(DISTINCT ep) AS frequency
+    RETURN elementId(ctx) AS nodeId, ctx.name AS name, frequency
+    ORDER BY nodeId
+  `, { sourceEpisodeIds: cited })
+  return toCandidates(read, 'frequency').map(candidate => ({
+    ...candidate,
+    score: (candidate.score ?? 0) / cited.length,
+  }))
+}
+
+/** Context nodes of a fact's source digests, scored by the strongest digest link. */
+async function sourceDigestCandidates(
+  runCypher: CypherRead,
+  sourceDigestIds: ReadonlyArray<string>,
+): Promise<ScoredCandidate[]> {
+  const read = await runCypher(`
+    MATCH (dig:Memory)-[r:CONTEXTUAL]->(ctx)
+    WHERE dig.id IN $sourceDigestIds
+      AND (ctx:Person OR ctx:Entity OR ctx:Topic)
+    WITH ctx, max(r.weight) AS weight
+    RETURN elementId(ctx) AS nodeId, ctx.name AS name, weight
+    ORDER BY nodeId
+  `, { sourceDigestIds: [...sourceDigestIds] })
+  return toCandidates(read, 'weight')
+}
+
+/**
+ * Links a fact to the context nodes that its own topic and content name.
+ * Candidates come from the episodes the fact cites, weighted by the share of
+ * them that link the node; a fact without citations falls back to its source
+ * digests' links at the strongest digest weight. Either score is damped by
+ * one hop. An existing link only ever gains weight.
  */
 export async function linkFactContext(
   graph: GraphPort,
@@ -127,21 +172,16 @@ export async function linkFactContext(
     semanticId: string
     text: string
     sourceDigestIds: string[]
+    sourceEpisodeIds?: ReadonlyArray<string>
     now: string
   },
 ): Promise<ContextLinkCounts> {
   if (!graph.runCypher || !graph.runCypherWrite) return NO_LINKS
 
-  const read = await graph.runCypher(`
-    MATCH (dig:Memory)-[r:CONTEXTUAL]->(ctx)
-    WHERE dig.id IN $sourceDigestIds
-      AND (ctx:Person OR ctx:Entity OR ctx:Topic)
-    WITH ctx, max(r.weight) AS weight
-    RETURN elementId(ctx) AS nodeId, ctx.name AS name, weight
-    ORDER BY nodeId
-  `, { sourceDigestIds: input.sourceDigestIds })
-
-  const candidates = toCandidates(read, 'weight')
+  const runCypher = graph.runCypher.bind(graph)
+  const candidates = input.sourceEpisodeIds && input.sourceEpisodeIds.length > 0
+    ? await citedEpisodeCandidates(runCypher, input.sourceEpisodeIds)
+    : await sourceDigestCandidates(runCypher, input.sourceDigestIds)
   const kept = keepNamed(input.text, candidates)
   const dropped = candidates.length - kept.length
   if (kept.length === 0) return { kept: 0, dropped, relationshipsCreated: 0 }

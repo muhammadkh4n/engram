@@ -538,11 +538,13 @@ async function writeSemanticGraph(
     `, { sourceDigestIds: candidate.sourceDigestIds, semanticId, now })
     counts.graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
 
-    // Step 3: Context of the source digests that the fact's own text names
+    // Step 3: Context of the cited episodes (else the source digests) that
+    // the fact's own text names
     const ctxLinks = await linkFactContext(graph, {
       semanticId,
       text: `${candidate.topic} ${candidate.content}`,
       sourceDigestIds: candidate.sourceDigestIds,
+      sourceEpisodeIds: candidate.sourceEpisodeIds,
       now,
     })
     counts.graphEdgesCreated += ctxLinks.relationshipsCreated
