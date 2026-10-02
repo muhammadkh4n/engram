@@ -37,6 +37,8 @@ import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
+import { recallLogFromEnv } from './recall-log.js'
+import type { RecallLog } from './recall-log.js'
 
 /** Cycles the in-process consolidation worker schedules, each behind its own due gates. */
 export const CONSOLIDATION_WORKER_CYCLES = ['light', 'deep', 'dream', 'decay'] as const
@@ -276,6 +278,8 @@ interface MemoryStack {
   /** The stores the memory was built on, shared with the capture route so both use one config. */
   storage: StorageAdapter
   intelligence: IntelligenceAdapter
+  /** Set when ENGRAM_RECALL_LOG names a file. */
+  recallLog: RecallLog | null
 }
 
 const getMemoryStack = sharedInit(buildMemoryStack)
@@ -318,6 +322,8 @@ export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env
 
 async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyAtStartup()
+  const recallLog = recallLogFromEnv()
+  if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
 
   const supabaseUrl = requireEnv('SUPABASE_URL')
   const supabaseKey = requireEnv('SUPABASE_KEY')
@@ -405,7 +411,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   process.once('SIGTERM', () => worker.stop())
   process.once('SIGINT', () => worker.stop())
 
-  return { memory, storage, intelligence }
+  return { memory, storage, intelligence, recallLog }
 }
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
@@ -680,6 +686,7 @@ function toolError(message: string): ToolTextResult {
 export async function runMemoryRecall(
   mem: Pick<Memory, 'recall'>,
   args: Record<string, unknown>,
+  recallLog: RecallLog | null = null,
 ): Promise<ToolTextResult> {
   const query = args['query']
   if (typeof query !== 'string' || query.trim().length === 0) {
@@ -690,6 +697,7 @@ export async function runMemoryRecall(
   if ('error' in recallOpts) return toolError(recallOpts.error)
 
   const result = await mem.recall(query.trim(), recallOpts)
+  recallLog?.record(query.trim(), args, recallOpts.projectId, result)
 
   if (result.timings) {
     // stderr: stdout carries the stdio JSON-RPC stream.
@@ -805,7 +813,10 @@ export function createEngramServer(): Server {
     try {
       const mem = await getMemory()
 
-      if (name === 'memory_recall') return await runMemoryRecall(mem, args)
+      if (name === 'memory_recall') {
+        const { recallLog } = await getMemoryStack()
+        return await runMemoryRecall(mem, args, recallLog)
+      }
 
       if (name === 'memory_ingest') {
         const content = args['content']
