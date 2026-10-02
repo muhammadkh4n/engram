@@ -325,6 +325,7 @@ describe('Memory — ingest() with intelligence adapter', () => {
     // dedup is opt-in (default off); enable it for this test.
     const memory = createMemory({ storage, intelligence, dedupeThreshold: 0.95 })
     await memory.initialize()
+    const recordAccess = vi.spyOn(storage.episodes, 'recordAccess')
 
     await memory.ingest({ role: 'user', content: 'alpha one', sessionId: 'sep' })
     await memory.ingest({ role: 'user', content: 'alpha two', sessionId: 'sep' })
@@ -332,7 +333,10 @@ describe('Memory — ingest() with intelligence adapter', () => {
     // The near-identical second turn is merged, not stored again.
     let episodes = await storage.episodes.getBySession('sep')
     expect(episodes).toHaveLength(1)
-    // ...and the surviving original is reinforced (recordAccess bumped it once).
+    // ...and the surviving original is reinforced: the duplicate is a
+    // recurrence, so it bumps the access count once.
+    expect(recordAccess).toHaveBeenCalledTimes(1)
+    expect(recordAccess).toHaveBeenCalledWith(episodes[0].id)
     expect(episodes[0].accessCount).toBe(1)
 
     // A distinct turn is kept separate.
@@ -416,12 +420,15 @@ describe('Memory — recall()', () => {
     expect(result.formatted.slice(first?.start, first?.end)).toContain(result.memories[0]?.content)
   })
 
-  it('records no access, co-recall edges or graph weights with reconsolidate false', async () => {
+  it('records no exposure, access, co-recall edges or graph weights with reconsolidate false', async () => {
     const storage = makeStorage()
     const strengthenTraversedEdges = vi.fn().mockResolvedValue(undefined)
     const graph = { isAvailable: async () => true, strengthenTraversedEdges } as unknown as GraphPort
     const readOnly = createMemory({ storage, graph })
     await readOnly.initialize()
+    // The SQLite store has no exposure columns; a stub stands in for one that does.
+    const recordShown = vi.fn(async (_ids: string[]) => {})
+    storage.episodes.recordShown = recordShown
     await readOnly.ingestBatch([
       { role: 'user', content: 'What is the TypeScript strict mode?', sessionId: 's1' },
       { role: 'assistant', content: 'TypeScript strict mode enables strict type checking', sessionId: 's1' },
@@ -442,12 +449,17 @@ describe('Memory — recall()', () => {
 
     expect(result.memories.length).toBeGreaterThan(1)
     for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    expect(recordShown).not.toHaveBeenCalled()
     expect(strengthenTraversedEdges).not.toHaveBeenCalled()
 
-    await readOnly.recall('What is TypeScript strict mode?', { strategyOverride: { associations: false } })
+    const shown = await readOnly.recall('What is TypeScript strict mode?', { strategyOverride: { associations: false } })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(spies[0]).toHaveBeenCalled()
+    // A recall records exposure only; access counts stay for recurrence.
+    expect(recordShown).toHaveBeenCalledTimes(1)
+    expect(recordShown).toHaveBeenCalledWith(shown.memories.map((m) => m.id))
+    expect(spies[0]).not.toHaveBeenCalled()
+    expect(spies[3]).toHaveBeenCalled()
     expect(strengthenTraversedEdges).toHaveBeenCalled()
     await readOnly.dispose()
   })

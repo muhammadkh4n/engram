@@ -150,10 +150,11 @@ export interface RecallOpts {
    *  assumed when absent — now-relative lines are simply omitted. */
   now?: Date
   /**
-   * Record access, co-recalled edges and graph edge strengthening for the
-   * returned memories. Default true. A read-only lookup (a forget preview)
-   * passes false: counting it as a use would raise the rank of the very
-   * memories the caller is about to forget.
+   * Record exposure (shown count), co-recalled edges and graph edge
+   * strengthening for the returned memories. Default true. A read-only
+   * lookup (a forget preview) passes false: it is not a display to the
+   * caller, and co-recall edges would raise the rank of the very memories
+   * the caller is about to forget.
    */
   reconsolidate?: boolean
   /**
@@ -852,10 +853,10 @@ export async function recall(
     degraded !== undefined ? degradedRecallNotice(degraded) : undefined,
   )
   // Reconsolidation — fire-and-forget, also strengthens traversed Neo4j
-  // edges when graph is non-null. Only what the payload emitted counts as a
-  // use: recording access on memories the caller never saw would keep raising
-  // their access counts, which feed ranking. Emission is a prefix of each
-  // ranked list, so the emitted items are the first N of each.
+  // edges when graph is non-null. Only what the payload emitted was shown:
+  // recording exposure or co-recall on memories the caller never saw would
+  // misstate what was displayed. Emission is a prefix of each ranked list,
+  // so the emitted items are the first N of each.
   if (opts.reconsolidate !== false) {
     const manager = new AssociationManager(storage.associations)
     stageReconsolidate(

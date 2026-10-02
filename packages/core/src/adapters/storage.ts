@@ -76,6 +76,11 @@ export interface EpisodeStorage {
   getUnconsolidated(sessionId: string): Promise<Episode[]>
   getUnconsolidatedSessions(): Promise<string[]>
   markConsolidated(ids: string[]): Promise<void>
+  /**
+   * Record a recurrence: the same content arrived again (a duplicate
+   * ingest). accessCount + 1 and lastAccessed = now. Recall does not call
+   * this; what recall shows is exposure (recordShown).
+   */
   recordAccess(id: string): Promise<void>
   /**
    * Record that recall emitted these memories: shownCount + 1 and lastShown =
@@ -127,6 +132,12 @@ export interface SemanticStorage {
    * server-capped first page. Falls back to getUnaccessed when not implemented.
    */
   listDecayCandidateIds?(days: number): Promise<string[]>
+  /**
+   * Record a recurrence: consolidation extracted the same fact again.
+   * accessCount + 1, lastAccessed = now, and confidence raised by
+   * `confidenceBoost` (clamped to [0, 1]). Recall does not call this; what
+   * recall shows is exposure (recordShown).
+   */
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
   /**
    * Record that recall emitted these memories: shownCount + 1 and lastShown =
@@ -174,6 +185,11 @@ export interface ProceduralStorage {
    * trigger, source episodes or embedding).
    */
   findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]>
+  /**
+   * Record a recurrence of this procedure: accessCount + 1 and lastAccessed =
+   * now. Recall does not call this; what recall shows is exposure
+   * (recordShown). A re-observed procedure goes through incrementObservation.
+   */
   recordAccess(id: string): Promise<void>
   /**
    * Record that recall emitted these memories: shownCount + 1 and lastShown =

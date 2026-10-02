@@ -88,8 +88,9 @@ export interface MemoryOptions {
   /**
    * Pattern separation (Gap 1): near-duplicate merge at ingest. When an
    * incoming episode's embedding is ≥ this cosine threshold to a recent
-   * same-session episode, the existing memory is reinforced (recordAccess)
-   * instead of storing a redundant copy — mimicking dentate-gyrus separation,
+   * same-session episode, the existing memory is reinforced (recordAccess:
+   * the duplicate is a recurrence, so its access count rises) instead of
+   * storing a redundant copy — mimicking dentate-gyrus separation,
    * where redundant encodings collapse and distinct ones stay separate.
    * Range (0, 1]; a value ≤ 0 disables the merge. Defaults to OFF (0) — the
    * recall benefit is not yet validated, so this is opt-in; ~0.95 is the
@@ -647,10 +648,10 @@ export class Memory {
        *  searching. For callers that recall on every conversation turn;
        *  explicit lookups leave it off so any non-empty query is searched. */
       skipTrivial?: boolean
-      /** Record access, co-recalled edges and graph edge weights for the
-       *  emitted memories. Default true. Measurement harnesses and previews
-       *  pass false so a lookup does not change access counts, co-recall
-       *  edges or graph weights. */
+      /** Record exposure (shown count), co-recalled edges and graph edge
+       *  weights for the emitted memories. Default true. Measurement
+       *  harnesses and previews pass false so a lookup does not change shown
+       *  counts, co-recall edges or graph weights. */
       reconsolidate?: boolean
     }
   ): Promise<RecallResult> {

@@ -68,6 +68,11 @@ export interface Episode {
   role: 'user' | 'assistant' | 'system'
   content: string
   salience: number
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
   /**
@@ -106,6 +111,11 @@ export interface SemanticMemory {
   confidence: number
   sourceDigestIds: string[]
   sourceEpisodeIds: string[]
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
   /**
@@ -134,6 +144,11 @@ export interface ProceduralMemory {
   observationCount: number
   lastObserved: Date
   firstObserved: Date
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
   /**

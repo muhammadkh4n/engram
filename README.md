@@ -156,7 +156,7 @@ When you call `recall(query)`:
 1. **Recall** — BM25 or vector search across all tiers
 2. **Association Walk** — Follow edges to discover related memories
 3. **Priming** — Boost topics from recent recalls
-4. **Reconsolidation** — Bump up accessed memories' importance
+4. **Reconsolidation** — Record which memories the recall showed (exposure); display does not strengthen them
 
 ### Four Consolidation Cycles
 
@@ -471,12 +471,15 @@ Higher salience = higher recall weight and slower decay.
 
 ### Reconsolidation
 
-When a memory is accessed during recall, Engram:
-- Increments access count
-- Updates last access timestamp
-- **Reconsolidates** it: boosts confidence for semantic, increments observation count for procedural
+When recall shows a memory (emits it in the returned text), Engram records exposure:
+- Increments its shown count
+- Updates its last-shown timestamp
 
-This mimics biological memory: accessing a memory makes it stronger.
+It also links the top co-recalled memories and, when a graph is configured, strengthens the edges between them.
+
+Being shown does not strengthen a memory. Its access count, which feeds a small ranking bonus, counts recurrence: the same content arriving again (a near-duplicate ingest) or consolidation re-extracting a known fact, which also raises that fact's confidence. On PostgREST, decay spares a memory that was shown or recurred within the decay window; the SQLite store records no exposure.
+
+`reconsolidate: false` makes a recall read-only.
 
 ### Lossless Design
 
