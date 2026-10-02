@@ -140,6 +140,7 @@ describe('parseReconcileArgs', () => {
       apply: false,
       deleteMissing: false,
       deleteOrphans: false,
+      pruneContextLinks: false,
       undoLog: null,
       undo: null,
       pageSize: 1000,
@@ -183,6 +184,18 @@ describe('parseReconcileArgs', () => {
 
   it('rejects a delete flag without --apply', () => {
     expect(() => parseReconcileArgs(['--delete-orphans', '--undo-log', 'u.jsonl'])).toThrow(/require --apply/)
+  })
+
+  it('accepts --prune-context-links only with --apply and an undo log, and never with --undo', () => {
+    expect(parseReconcileArgs(['--apply', '--prune-context-links', '--undo-log', 'u.jsonl'])).toMatchObject({
+      apply: true,
+      pruneContextLinks: true,
+    })
+    expect(parseReconcileArgs(['--apply', '--undo-log', 'u.jsonl']).pruneContextLinks).toBe(false)
+    expect(() => parseReconcileArgs(['--prune-context-links', '--undo-log', 'u.jsonl'])).toThrow(/require --apply/)
+    expect(() => parseReconcileArgs(['--apply', '--prune-context-links'])).toThrow(/--undo-log/)
+    expect(() => parseReconcileArgs(['--prune-context-links'])).toThrow(ReconcileArgsError)
+    expect(() => parseReconcileArgs(['--undo', 'u.jsonl', '--prune-context-links'])).toThrow(/--undo/)
   })
 
   it.each([
@@ -273,6 +286,8 @@ function fakeGraph(
 ): ReconcileGraph & { nodes: GraphMemoryNode[]; links: FakeLink[] } {
   const ctxNames = new Map(initialLinks.map((l) => [l.ctxId, l.name]))
   const state = {
+    /** Context nodes by id; the fake uses one id as both element id and `id` property. */
+    ctxNodes: new Set(initialLinks.map((l) => l.ctxId)),
     nodes: initial.map((n) => ({ ...n })),
     links: initialLinks.map((l) => ({ ...l, props: { ...l.props } })),
     async fetchContextPage(after: string | null, limit: number): Promise<ContextLinkNode[]> {
@@ -286,7 +301,13 @@ function fakeGraph(
           forgotten: n.forgotten,
           edges: state.links
             .filter((l) => l.memoryId === n.id && l.type === 'CONTEXTUAL')
-            .map((l) => ({ ctxId: l.ctxId, name: l.name, props: { ...l.props } })),
+            .map((l) => ({
+              ctxId: l.ctxId,
+              ctxLabel: 'Entity' as const,
+              ctxNodeId: l.ctxId,
+              name: l.name,
+              props: { ...l.props },
+            })),
         }))
     },
     async remainingLiveLinks(rows: ReadonlyArray<{ ctxId: string; prunedMemoryIds: string[] }>) {
@@ -314,11 +335,13 @@ function fakeGraph(
       let n = 0
       for (const line of lines) {
         if (!state.nodes.some((node) => node.id === line.memoryId)) continue
-        const name = ctxNames.get(line.ctxId) ?? null
+        if (!state.ctxNodes.has(line.ctxNodeId)) continue
+        const ctxId = line.ctxNodeId
+        const name = ctxNames.get(ctxId) ?? null
         state.links = state.links.filter(
-          (l) => !(l.type === 'CONTEXTUAL' && l.memoryId === line.memoryId && l.ctxId === line.ctxId),
+          (l) => !(l.type === 'CONTEXTUAL' && l.memoryId === line.memoryId && l.ctxId === ctxId),
         )
-        state.links.push({ memoryId: line.memoryId, ctxId: line.ctxId, name, type: 'CONTEXTUAL', props: { ...line.props } })
+        state.links.push({ memoryId: line.memoryId, ctxId, name, type: 'CONTEXTUAL', props: { ...line.props } })
         n++
       }
       return n
@@ -656,6 +679,8 @@ const PRUNED = [
   { memoryId: 'd-1', ctxId: 'ctx-kam' },
 ]
 
+const PRUNE_ARGS = ['--apply', '--prune-context-links', '--undo-log', 'u.jsonl']
+
 const pairKey = (l: { memoryId: string; ctxId: string }): string => `${l.memoryId}->${l.ctxId}`
 const contextPairs = (links: readonly FakeLink[]): string[] =>
   links.filter((l) => l.type === 'CONTEXTUAL').map(pairKey).sort()
@@ -676,6 +701,7 @@ describe('context links', () => {
     expect(logs).toHaveLength(1)
     expect(logs[0]).toContain('semantic live      nodes 2, edges 5, kept 2, pruned 3, left with 0 links 1')
     expect(logs[0]).toContain('nodes without a SQL row (skipped): 1')
+    expect(logs[0]).toContain('context link prune not requested')
     for (const leak of ['s-1', 's-ghost', 'd-1', CTX_TEXTS['s-1']!]) expect(logs[0]).not.toContain(leak)
   })
 
@@ -690,7 +716,7 @@ describe('context links', () => {
 
   it('--apply prunes exactly the unnamed edges, each batch after its undo lines, and nothing else when other checks are clean', async () => {
     const { events, graph, logs, run } = harness(
-      ['--apply', '--undo-log', 'u.jsonl', '--batch-size', '2'],
+      ['--apply', '--prune-context-links', '--undo-log', 'u.jsonl', '--batch-size', '2'],
       CTX_NODES,
       CTX_TABLES,
       CTX_LINKS,
@@ -711,7 +737,14 @@ describe('context links', () => {
       )
     })
     const undo = events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
-    expect(undo).toContainEqual({ op: 'ctx', memoryId: 's-2', ctxId: 'ctx-solo', props: EDGE_PROPS })
+    expect(undo).toContainEqual({
+      op: 'ctx',
+      memoryId: 's-2',
+      ctxId: 'ctx-solo',
+      ctxLabel: 'Entity',
+      ctxNodeId: 'ctx-solo',
+      props: EDGE_PROPS,
+    })
 
     expect(outcome.contextLinks.pruned).toBe(5)
     expect(outcome.written).toEqual({ stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
@@ -724,7 +757,7 @@ describe('context links', () => {
   })
 
   it('undo re-creates every pruned edge with its properties and leaves other undo lines alone', async () => {
-    const applied = harness(['--apply', '--undo-log', 'u.jsonl'], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+    const applied = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
     await applied.run()
     const lines = applied.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
     const undoText =
@@ -734,16 +767,61 @@ describe('context links', () => {
 
     const result = await undoContextLinks(applied.graph, (l) => logs.push(l), undoText, 2)
 
-    expect(result).toEqual({ restored: 5, requested: 5, other: 1 })
+    expect(result).toEqual({ restored: 5, requested: 5, unmatched: 0, other: 1 })
     const byPair = (links: readonly FakeLink[]) =>
       Object.fromEntries(links.filter((l) => l.type === 'CONTEXTUAL').map((l) => [pairKey(l), l.props]))
     expect(byPair(applied.graph.links)).toEqual(byPair(CTX_LINKS))
     expect(logs[0]).toContain('context links restored: 5 of 5')
+    expect(logs[0]).toContain('unmatched (memory or context node not found): 0')
     expect(logs[0]).toContain('other undo lines left as they are: 1')
   })
 
+  it('undo counts a line whose context node no longer exists as unmatched', async () => {
+    const applied = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+    await applied.run()
+    const lines = applied.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    applied.graph.ctxNodes.delete('ctx-solo')
+    const logs: string[] = []
+
+    const result = await undoContextLinks(
+      applied.graph,
+      (l) => logs.push(l),
+      lines.map((l) => JSON.stringify(l)).join('\n'),
+      10,
+    )
+
+    expect(result).toEqual({ restored: 4, requested: 5, unmatched: 1, other: 0 })
+    expect(contextPairs(applied.graph.links)).not.toContain('s-2->ctx-solo')
+    expect(logs[0]).toContain('unmatched (memory or context node not found): 1')
+  })
+
+  it('undo refuses a ctx line whose label is not a context label', async () => {
+    const line = { op: 'ctx', memoryId: 's-1', ctxId: 'x', ctxLabel: 'Memory`) DETACH DELETE (n', ctxNodeId: 'x', props: {} }
+    const graph = fakeGraph(CTX_NODES, [], CTX_LINKS)
+
+    await expect(undoContextLinks(graph, () => {}, JSON.stringify(line), 10)).rejects.toThrow(/unknown context label/)
+    await expect(
+      undoContextLinks(graph, () => {}, JSON.stringify({ ...line, ctxLabel: 'Entity', ctxNodeId: undefined }), 10),
+    ).rejects.toThrow(/malformed ctx line/)
+  })
+
+  it('--apply without --prune-context-links deletes no context link but still reports the planned prune', async () => {
+    const { events, graph, logs, run } = harness(['--apply', '--undo-log', 'u.jsonl'], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+
+    const outcome = await run()
+
+    expect(events.filter((e) => e.kind === 'ctx')).toEqual([])
+    expect(events.flatMap((e) => (e.kind === 'undo' ? e.lines : [])).filter((l) => l.op === 'ctx')).toEqual([])
+    expect(contextPairs(graph.links)).toEqual(contextPairs(CTX_LINKS))
+    expect(outcome.contextLinks.pruned).toBe(0)
+    expect(outcome.contextLinks.before.tiers.semantic.live.pruned).toBe(3)
+    expect(outcome.contextLinks.after?.tiers.semantic.live.pruned).toBe(3)
+    expect(logs[0]).toContain('context link prune not requested')
+    expect(logs).toContainEqual(expect.stringContaining('context links pruned 0 (not requested)'))
+  })
+
   it('a node without a SQL row keeps every link', async () => {
-    const { graph, run } = harness(['--apply', '--undo-log', 'u.jsonl'], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+    const { graph, run } = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
 
     await run()
 

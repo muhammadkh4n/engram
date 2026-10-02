@@ -145,6 +145,8 @@ export interface ReconcileArgs {
   apply: boolean
   deleteMissing: boolean
   deleteOrphans: boolean
+  /** With --apply: delete the context links the memory's own text does not name. */
+  pruneContextLinks: boolean
   undoLog: string | null
   /** Undo log to replay: re-creates the context links it records, writes nothing else. */
   undo: string | null
@@ -181,6 +183,7 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
     apply: false,
     deleteMissing: false,
     deleteOrphans: false,
+    pruneContextLinks: false,
     undoLog: null,
     undo: null,
     pageSize: 1000,
@@ -193,6 +196,7 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
     if (a === '--apply') args.apply = true
     else if (a === '--delete-missing') args.deleteMissing = true
     else if (a === '--delete-orphans') args.deleteOrphans = true
+    else if (a === '--prune-context-links') args.pruneContextLinks = true
     else if (a === '--undo-log') args.undoLog = requiredValue(argv[++i], 'undo-log')
     else if (a === '--undo') args.undo = requiredValue(argv[++i], 'undo')
     else if (a === '--page-size') args.pageSize = positiveInt(argv[++i], 'page-size')
@@ -201,16 +205,20 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
     else throw new ReconcileArgsError(`unknown argument "${a}"`)
   }
 
-  const writes = args.apply || args.deleteMissing || args.deleteOrphans
+  const writes = args.apply || args.deleteMissing || args.deleteOrphans || args.pruneContextLinks
   if (args.undo !== null && (writes || args.undoLog !== null)) {
-    throw new ReconcileArgsError('--undo replays an undo log on its own: drop --apply, the delete flags and --undo-log')
+    throw new ReconcileArgsError(
+      '--undo replays an undo log on its own: drop --apply, the delete and prune flags and --undo-log',
+    )
   }
   if (writes && args.undoLog === null) {
-    throw new ReconcileArgsError('--apply, --delete-missing and --delete-orphans require --undo-log <path>')
+    throw new ReconcileArgsError(
+      '--apply, --delete-missing, --delete-orphans and --prune-context-links require --undo-log <path>',
+    )
   }
-  // A delete flag alone would otherwise read as a dry run that still deletes.
-  if ((args.deleteMissing || args.deleteOrphans) && !args.apply) {
-    throw new ReconcileArgsError('--delete-missing and --delete-orphans require --apply')
+  // A delete or prune flag alone would otherwise read as a dry run that still deletes.
+  if ((args.deleteMissing || args.deleteOrphans || args.pruneContextLinks) && !args.apply) {
+    throw new ReconcileArgsError('--delete-missing, --delete-orphans and --prune-context-links require --apply')
   }
   return args
 }
@@ -378,7 +386,10 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   const nodes = await readGraphNodes(deps.graph, nodePageSize)
   const before = planReconcile(rows, nodes)
   const contextBefore = await planContextLinks(deps.sql, deps.graph, contextPageSize)
-  deps.log(`${formatReconcileReport(before)}\n${formatContextReport(contextBefore)}`)
+  const pruneNote = args.pruneContextLinks
+    ? ''
+    : '\ncontext link prune not requested: nothing above is deleted without --apply --prune-context-links'
+  deps.log(`${formatReconcileReport(before)}\n${formatContextReport(contextBefore)}${pruneNote}`)
 
   const written = { stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 }
   if (!args.apply) return { before, after: null, written, contextLinks: { before: contextBefore, after: null, pruned: 0 } }
@@ -419,11 +430,13 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   }
 
   // Runs after the tier repair, so a node's memoryType already matches its row.
-  const pruned = await pruneContextLinks(deps.sql, deps.graph, deps.appendUndo, contextPageSize, args.batchSize)
+  const pruned = args.pruneContextLinks
+    ? await pruneContextLinks(deps.sql, deps.graph, deps.appendUndo, contextPageSize, args.batchSize)
+    : 0
 
   deps.log(
     `written: stamped ${written.stamped}, projects ${written.projects}, tiers ${written.tiers}, ` +
-      `deleted ${written.deleted}, context links pruned ${pruned}, ` +
+      `deleted ${written.deleted}, context links pruned ${args.pruneContextLinks ? pruned : '0 (not requested)'}, ` +
       `skipped (changed since snapshot) ${written.skippedChangedSinceSnapshot}`,
   )
   const after = planReconcile(rows, await readGraphNodes(deps.graph, nodePageSize))

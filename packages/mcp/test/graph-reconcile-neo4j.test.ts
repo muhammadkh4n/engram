@@ -43,8 +43,10 @@ describe('splitEdgeProps', () => {
 
 describe('restoreContextCypher', () => {
   it('merges the edge, replaces its properties and sets each integer through toInteger', () => {
-    const cypher = restoreContextCypher(['traversalCount', 'odd`key', 'traversalCount'])
+    const cypher = restoreContextCypher('Person', ['traversalCount', 'odd`key', 'traversalCount'])
 
+    expect(cypher).toContain('MATCH (ctx:Person {id: row.ctxNodeId})')
+    expect(cypher).not.toContain('elementId')
     expect(cypher).toContain('MERGE (m)-[r:CONTEXTUAL]->(ctx)')
     expect(cypher).toContain('SET r = row.plain')
     expect(cypher.match(/toInteger\(row\.ints\.`traversalCount`\)/g)).toHaveLength(1)
@@ -52,6 +54,10 @@ describe('restoreContextCypher', () => {
   })
 
   it('sets no integer when the batch has none', () => {
-    expect(restoreContextCypher([])).not.toContain('toInteger')
+    expect(restoreContextCypher('Topic', [])).not.toContain('toInteger')
+  })
+
+  it('refuses a label outside Person, Entity and Topic', () => {
+    expect(() => restoreContextCypher('Memory' as never, [])).toThrow(/unknown context label/)
   })
 })

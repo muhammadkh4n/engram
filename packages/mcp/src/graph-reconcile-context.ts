@@ -14,9 +14,21 @@ export type TextTier = 'semantic' | 'digest'
 
 export const TEXT_TIERS: readonly TextTier[] = ['semantic', 'digest']
 
+/** The node labels a context link points to; the only labels an undo line may name. */
+export const CONTEXT_LABELS = ['Person', 'Entity', 'Topic'] as const
+
+export type ContextLabel = (typeof CONTEXT_LABELS)[number]
+
+export function isContextLabel(value: unknown): value is ContextLabel {
+  return typeof value === 'string' && (CONTEXT_LABELS as readonly string[]).includes(value)
+}
+
 export interface ContextEdge {
-  /** Element id of the Person, Entity or Topic node. */
+  /** Element id of the Person, Entity or Topic node; valid only within one run. */
   ctxId: string
+  /** The node's label and its `id` property, unique per label: the key an undo line restores by. */
+  ctxLabel: ContextLabel
+  ctxNodeId: string
   name: string | null
   /** Every property of the relationship, encoded by the graph adapter so it can write them back. */
   props: Record<string, unknown>
@@ -47,10 +59,17 @@ export interface ContextLinkRef {
   ctxId: string
 }
 
+/**
+ * Keyed by the context node's label and `id` property: Neo4j may hand a
+ * deleted node's element id to a new node, so `ctxId` is recorded but never
+ * used to restore.
+ */
 export interface ContextUndoLine {
   op: 'ctx'
   memoryId: string
   ctxId: string
+  ctxLabel: ContextLabel
+  ctxNodeId: string
   props: Record<string, unknown>
 }
 
@@ -72,7 +91,11 @@ export interface ContextLinkGraph {
   remainingLiveLinks(rows: ReadonlyArray<{ ctxId: string; prunedMemoryIds: string[] }>): Promise<RemainingLiveLinks[]>
   /** Deletes the CONTEXTUAL edge from each memory to each context node; returns the number deleted. */
   deleteContextLinks(links: readonly ContextLinkRef[]): Promise<number>
-  /** Re-creates each edge with exactly the logged properties; returns the number written. */
+  /**
+   * Re-creates each edge with exactly the logged properties, matching the
+   * memory by id and the context node by label and id; returns the number of
+   * lines whose two nodes were both found.
+   */
   restoreContextLinks(lines: readonly ContextUndoLine[]): Promise<number>
 }
 
@@ -223,7 +246,14 @@ export async function pruneContextLinks(
   let deleted = 0
   await forEachContextPage(sql, graph, pageSize, async ({ decisions }) => {
     const lines: ContextUndoLine[] = decisions.flatMap((d) =>
-      d.pruned.map((e) => ({ op: 'ctx' as const, memoryId: d.node.id, ctxId: e.ctxId, props: e.props })),
+      d.pruned.map((e) => ({
+        op: 'ctx' as const,
+        memoryId: d.node.id,
+        ctxId: e.ctxId,
+        ctxLabel: e.ctxLabel,
+        ctxNodeId: e.ctxNodeId,
+        props: e.props,
+      })),
     )
     for (let i = 0; i < lines.length; i += batchSize) {
       const batch = lines.slice(i, i + batchSize)
@@ -254,33 +284,44 @@ export function parseContextUndoLog(text: string): { lines: ContextUndoLine[]; o
       other++
       return
     }
-    const { memoryId, ctxId, props } = parsed
-    if (typeof memoryId !== 'string' || typeof ctxId !== 'string' || !isRecord(props)) {
+    const { memoryId, ctxId, ctxLabel, ctxNodeId, props } = parsed
+    if (
+      typeof memoryId !== 'string' ||
+      typeof ctxId !== 'string' ||
+      typeof ctxNodeId !== 'string' ||
+      !isRecord(props)
+    ) {
       throw new Error(`undo log line ${i + 1} is a malformed ctx line`)
     }
-    lines.push({ op: 'ctx', memoryId, ctxId, props })
+    // The label is interpolated into Cypher, so only the known context labels pass.
+    if (!isContextLabel(ctxLabel)) throw new Error(`undo log line ${i + 1} names an unknown context label`)
+    lines.push({ op: 'ctx', memoryId, ctxId, ctxLabel, ctxNodeId, props })
   })
   return { lines, other }
 }
 
-/** Re-creates every pruned edge of an undo log, in batches. */
+/**
+ * Re-creates every pruned edge of an undo log, in batches. A line whose
+ * memory or context node no longer exists is counted as unmatched.
+ */
 export async function undoContextLinks(
   graph: ContextLinkGraph,
   log: (line: string) => void,
   undoText: string,
   batchSize: number,
-): Promise<{ restored: number; requested: number; other: number }> {
+): Promise<{ restored: number; requested: number; unmatched: number; other: number }> {
   const { lines, other } = parseContextUndoLog(undoText)
   let restored = 0
   for (let i = 0; i < lines.length; i += batchSize) {
     restored += await graph.restoreContextLinks(lines.slice(i, i + batchSize))
   }
+  const unmatched = lines.length - restored
   log(
-    `context links restored: ${restored} of ${lines.length}` +
-      (restored < lines.length ? ' (the rest name a memory or context node that no longer exists)' : '') +
-      `\nother undo lines left as they are: ${other}`,
+    `context links restored: ${restored} of ${lines.length}\n` +
+      `unmatched (memory or context node not found): ${unmatched}\n` +
+      `other undo lines left as they are: ${other}`,
   )
-  return { restored, requested: lines.length, other }
+  return { restored, requested: lines.length, unmatched, other }
 }
 
 /** Counts only, except the names of context nodes the prune would leave without a live link. */

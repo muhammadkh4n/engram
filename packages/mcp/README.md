@@ -450,6 +450,20 @@ The package includes CLI utilities for advanced use cases:
     `graph_forgotten_at` restores the graph; a node forgotten before the apply keeps its own stamp. The decay pass
     re-stamps a superseded fact's node, so restore SQL before the graph. The same applies to the facts
     `engram-semantic-dedup` retires.
+- `engram-graph-reconcile` — Reconcile the Neo4j Memory nodes with the SQL memory tables, which are the source of
+  truth. Dry run by default; prints counts only.
+  - `--apply --undo-log PATH` stamps `forgottenAt` on the nodes of forgotten or superseded rows and sets `projectId`
+    and `memoryType` from SQL. `--delete-missing` and `--delete-orphans` (with `--apply`) also delete nodes with no
+    SQL row and orphans of dead or absent rows; a delete is undone only from a Neo4j dump.
+  - Context links: every run reports, per tier and split live/retired, the CONTEXTUAL edges from digest and
+    semantic nodes to Person/Entity/Topic nodes that the memory's own text (digest summary; fact topic and content)
+    does not name, plus the entities that would lose their last link from a live memory. `--apply` alone never
+    deletes one; only `--apply --prune-context-links --undo-log PATH` does, and a run without the flag says the
+    prune was not requested.
+  - Every write appends its undo lines to the undo log before its batch runs. `--undo PATH` re-creates every pruned
+    context link the log records, with all its properties, finding the context node by its label and `id` (an
+    element id may be reused after a delete). A line whose memory or context node no longer exists is reported as
+    `unmatched` and makes the run exit non-zero. Stamp, project and tier lines are undone by hand.
 
 ## Troubleshooting
 
