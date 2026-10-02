@@ -117,6 +117,38 @@ export interface EvidenceSelection {
   }>
 }
 
+// ---------------------------------------------------------------------------
+// Semantic-fact supersession
+// ---------------------------------------------------------------------------
+
+/** The newly consolidated fact, the most recent statement on its subject. */
+export interface SupersessionFact {
+  topic: string
+  content: string
+}
+
+/** A stored live fact that the new fact may replace or repeat. */
+export interface SupersessionCandidate {
+  id: string
+  topic: string
+  content: string
+  /** When the candidate was stored; a Date or an ISO timestamp string. */
+  createdAt: Date | string
+}
+
+/**
+ * Verdict over a candidate set. Every id is one of the candidates' ids; an id
+ * appears in at most one list. A candidate in neither list is unrelated, adds
+ * detail, or is compatible with the new fact.
+ */
+export interface SupersessionVerdict {
+  /** Candidates the new fact makes no longer true: a changed decision, an
+   *  updated value, a reversed preference. */
+  replaces: string[]
+  /** Candidates that state the same claim as the new fact. */
+  same: string[]
+}
+
 export interface IntelligenceAdapter {
   embed?(text: string): Promise<number[]>
   embedBatch?(texts: string[]): Promise<number[][]>
@@ -211,6 +243,18 @@ export interface IntelligenceAdapter {
     evidence: ReadonlyArray<EvidenceItem>,
     opts: { mode: 'temporal' | 'aggregation' },
   ): Promise<EvidenceSelection>
+  /**
+   * Judge whether a new semantic fact replaces or repeats stored facts.
+   * Conservative: a candidate the model is unsure about is in neither list.
+   * Resolves `{replaces: [], same: []}` without a model call when
+   * `candidates` is empty, and when the reply cannot be read as a verdict.
+   * A failed model call rejects, so the caller can fall back to another
+   * supersession check.
+   */
+  judgeSupersession?(
+    fact: SupersessionFact,
+    candidates: ReadonlyArray<SupersessionCandidate>,
+  ): Promise<SupersessionVerdict>
   /**
    * Digest a conversation transcript excerpt into storable memory.
    *

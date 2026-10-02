@@ -51,6 +51,9 @@ export type {
   SalienceOpts,
   EvidenceItem,
   EvidenceSelection,
+  SupersessionFact,
+  SupersessionCandidate,
+  SupersessionVerdict,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,

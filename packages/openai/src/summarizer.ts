@@ -10,6 +10,9 @@ import type {
   SalienceOpts,
   EvidenceItem,
   EvidenceSelection,
+  SupersessionFact,
+  SupersessionCandidate,
+  SupersessionVerdict,
 } from '@engram-mem/core'
 import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
@@ -210,7 +213,23 @@ const RERANK_MAX_CANDIDATES = 50
 const RERANK_REPLY_TOKENS_PER_DOC = 16
 const RERANK_MIN_REPLY_TOKENS = 400
 
-export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
+const SUPERSESSION_SYSTEM_PROMPT = `You maintain a memory of facts about a user and their work. A NEW FACT has just been stated. It is the most recent statement on its subject. Compare it with each STORED FACT (each shows when it was stored) and decide:
+
+- "replaces": the new fact makes the stored fact no longer true. Examples: a decision was changed, a value was updated, a preference was reversed, a tool or setting was switched to something else.
+- "same": the stored fact states the same claim as the new fact, possibly in other words.
+- Neither list: the stored fact is about a different subject, adds or omits detail, or can be true at the same time as the new fact.
+
+Be conservative. Retiring a fact that is still true loses memory. When you are unsure about a stored fact, put it in neither list.
+
+Use only the ids shown in STORED FACTS, each in at most one list. Reply with only JSON, exactly this shape:
+{"replaces": ["<id>"], "same": ["<id>"]}
+When no stored fact is replaced or repeated, reply {"replaces": [], "same": []}.`
+
+/** Reply budget: the JSON frame plus one quoted id per candidate. */
+const SUPERSESSION_REPLY_BASE_TOKENS = 60
+const SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE = 40
+
+export type TranscriptDigestKind ='session-summary' | 'pre-compact'
 
 const SESSION_SUMMARY_SYSTEM_PROMPT = `You summarize Claude Code work sessions. Extract ONLY:
 - Key decisions made
@@ -524,6 +543,51 @@ export class OpenAISummarizer {
     const raw = resp.choices[0]?.message?.content ?? '{}'
     const parsed = JSON.parse(raw) as { items?: unknown }
     return { items: Array.isArray(parsed.items) ? (parsed.items as EvidenceSelection['items']) : [] }
+  }
+
+  /**
+   * Semantic-fact supersession (see IntelligenceAdapter.judgeSupersession).
+   * The verdict only ever names candidate ids: anything else the model
+   * returns is dropped. An unreadable reply yields an empty verdict, which
+   * keeps every candidate live; a failed call rejects.
+   */
+  async judgeSupersession(
+    fact: SupersessionFact,
+    candidates: ReadonlyArray<SupersessionCandidate>,
+  ): Promise<SupersessionVerdict> {
+    if (candidates.length === 0) return emptyVerdict()
+
+    const lines = candidates.map(
+      (c) => `- id: ${c.id}\n  stored: ${formatStoredAt(c.createdAt)}\n  topic: ${c.topic}\n  fact: ${c.content}`,
+    )
+    const user = [
+      'NEW FACT (stated most recently):',
+      `  topic: ${fact.topic}`,
+      `  fact: ${fact.content}`,
+      '',
+      'STORED FACTS:',
+      ...lines,
+    ].join('\n')
+
+    const resp = await this.chatCreate('judgeSupersession', {
+      model: this.model,
+      messages: [
+        { role: 'system', content: SUPERSESSION_SYSTEM_PROMPT },
+        { role: 'user', content: user },
+      ],
+      max_tokens: SUPERSESSION_REPLY_BASE_TOKENS + SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE * candidates.length,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    })
+    const raw = resp.choices[0]?.message?.content ?? ''
+    try {
+      return parseSupersessionVerdict(raw, candidates)
+    } catch {
+      process.stderr.write(
+        `[openai] judgeSupersession reply unreadable (${raw.length} chars, ${candidates.length} candidates); no fact retired\n`,
+      )
+      return emptyVerdict()
+    }
   }
 
   async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
@@ -953,6 +1017,46 @@ function isSalienceVerdict(value: unknown): boolean {
 /** A list holding at least one object; `[]` and `[1]` in prose are not candidates. */
 function isCandidateList(value: unknown): boolean {
   return Array.isArray(value) && value.some(isPlainObject)
+}
+
+function emptyVerdict(): SupersessionVerdict {
+  return { replaces: [], same: [] }
+}
+
+function isSupersessionVerdict(value: unknown): boolean {
+  if (!isPlainObject(value)) return false
+  const { replaces, same } = value
+  if (replaces === undefined && same === undefined) return false
+  return (replaces === undefined || Array.isArray(replaces)) && (same === undefined || Array.isArray(same))
+}
+
+/**
+ * Keeps only ids from the candidate set, once each. An id the model put in
+ * both lists is a self-contradicting verdict and lands in neither, so the
+ * candidate stays live and the new fact is stored as new.
+ */
+function parseSupersessionVerdict(
+  raw: string,
+  candidates: ReadonlyArray<SupersessionCandidate>,
+): SupersessionVerdict {
+  const parsed = extractJsonReply(raw, isSupersessionVerdict) as { replaces?: unknown[]; same?: unknown[] }
+  const known = new Set(candidates.map((c) => c.id))
+  const pick = (list: unknown[] | undefined): string[] => [
+    ...new Set((list ?? []).filter((id): id is string => typeof id === 'string' && known.has(id))),
+  ]
+  const replaces = pick(parsed.replaces)
+  const same = pick(parsed.same)
+  const both = new Set(replaces.filter((id) => same.includes(id)))
+  return {
+    replaces: replaces.filter((id) => !both.has(id)),
+    same: same.filter((id) => !both.has(id)),
+  }
+}
+
+/** ISO timestamp of a stored fact, or `unknown date` when it does not parse. */
+function formatStoredAt(createdAt: Date | string): string {
+  const ms = createdAt instanceof Date ? createdAt.getTime() : Date.parse(createdAt)
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : 'unknown date'
 }
 
 const MAX_EXPANSION_TERMS = 5
