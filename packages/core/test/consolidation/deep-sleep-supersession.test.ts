@@ -11,6 +11,7 @@ import type {
   SupersessionFact,
   SupersessionVerdict,
 } from '../../src/adapters/intelligence.js'
+import { supersessionRuleOutcome } from '../../src/adapters/intelligence.js'
 import type { GraphPort } from '../../src/adapters/graph.js'
 import type { Digest, SearchResult, SemanticMemory } from '../../src/types.js'
 import { makeDigest, makeEpisode, makeMockStorage, resetIdCounter } from './mock-storage.js'
@@ -64,6 +65,11 @@ function plainDigests(projectId: string | null = null): Digest[] {
   ]
 }
 
+/** Every fact labelled a current state, the kinds under which a conflict may retire. */
+function allState(...ids: string[]): SupersessionVerdict['kinds'] {
+  return Object.fromEntries(['new', ...ids].map(id => [id, 'state' as const]))
+}
+
 type Judge = (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => Promise<SupersessionVerdict>
 
 function intelligenceWith(content: string, judge?: Judge): IntelligenceAdapter & {
@@ -75,7 +81,7 @@ function intelligenceWith(content: string, judge?: Judge): IntelligenceAdapter &
   return {
     embed: vi.fn(async () => VECTOR),
     extractKnowledge,
-    judgeSupersession: vi.fn(judge ?? (async () => ({ same: [], conflicts: [] }))),
+    judgeSupersession: vi.fn(judge ?? (async () => ({ same: [], conflicts: [], kinds: {} }))),
   }
 }
 
@@ -102,7 +108,7 @@ describe('deep sleep fact supersession', () => {
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
       })
-      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['old-1'], same: [] }))
+      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['old-1'], same: [], kinds: allState('old-1') }))
 
       const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
 
@@ -186,7 +192,7 @@ describe('deep sleep fact supersession', () => {
       })
       const intelligence = intelligenceWith(
         'The reranker is gte.',
-        async () => ({ conflicts: ['old-1', 'stranger', 'old-2'], same: [] }),
+        async () => ({ conflicts: ['old-1', 'stranger', 'old-2'], same: [], kinds: allState('old-1', 'stranger', 'old-2') }),
       )
       const graph = graphStub()
 
@@ -208,7 +214,7 @@ describe('deep sleep fact supersession', () => {
         initialDigests: plainDigests('engram'),
         semanticNearestResults: [neighbour('other-1', 'The reranker is bge.', 0.95, { projectId: 'ouija' })],
       })
-      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['other-1'], same: [] }))
+      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['other-1'], same: [], kinds: allState('other-1') }))
 
       const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
 
@@ -334,7 +340,7 @@ describe('deep sleep fact supersession', () => {
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
       })
-      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['old-1'], same: [] }))
+      const intelligence = intelligenceWith('The reranker is gte.', async () => ({ conflicts: ['old-1'], same: [], kinds: allState('old-1') }))
 
       const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: REGEX })
 
@@ -356,7 +362,7 @@ describe('deep sleep fact supersession', () => {
         semanticSearchResults: [neighbour('existing-1', 'I like JavaScript.', 0.5)],
         semanticNearestResults: [neighbour('existing-1', 'I like JavaScript.', 0.7)],
       })
-      const judge = vi.fn(async () => ({ conflicts: ['existing-1'], same: [] }))
+      const judge = vi.fn(async () => ({ conflicts: ['existing-1'], same: [], kinds: allState('existing-1') }))
       const intelligence: IntelligenceAdapter = { embed: vi.fn(async () => VECTOR), judgeSupersession: judge }
 
       const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: OFF })
@@ -421,7 +427,7 @@ describe('deep sleep fact supersession', () => {
           initialDigests: plainDigests(),
           semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
         })
-        const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['old-1'] }))
+        const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['old-1'], kinds: allState('old-1') }))
 
         const result = await deepSleep(storage, intelligence, { minDigests: 3 })
 
@@ -459,6 +465,7 @@ describe('deep sleep supersession direction from statement time', () => {
       judgeSupersession: vi.fn(async (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => ({
         same: candidates.filter(c => c.content === fact.content).map(c => c.id),
         conflicts: candidates.filter(c => c.content !== fact.content).map(c => c.id),
+        kinds: allState(...candidates.map(c => c.id)),
       })),
     }
   }
@@ -533,7 +540,7 @@ describe('deep sleep supersession direction from statement time', () => {
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('newer-1', 'The reranker is bge.', 0.95, { createdAt: new Date('2026-09-25T10:00:00Z') })],
     })
-    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['newer-1'] }))
+    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['newer-1'], kinds: allState('newer-1') }))
 
     const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
 
@@ -548,7 +555,7 @@ describe('deep sleep supersession direction from statement time', () => {
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('same-time', 'The reranker is bge.', 0.95, { createdAt: DIGEST_AT })],
     })
-    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['same-time'] }))
+    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['same-time'], kinds: allState('same-time') }))
 
     const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
 
@@ -602,7 +609,7 @@ describe('deep sleep supersession direction from statement time', () => {
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
     })
-    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['old-1'] }))
+    const intelligence = intelligenceWith('The reranker is gte.', async () => ({ same: [], conflicts: ['old-1'], kinds: allState('old-1') }))
     const memory = createMemory({ storage, intelligence, supersession: LLM })
     await memory.initialize()
 
@@ -611,5 +618,209 @@ describe('deep sleep supersession direction from statement time', () => {
     expect(intelligence.judgeSupersession).toHaveBeenCalledTimes(1)
     expect(result.superseded).toBe(1)
     await memory.dispose()
+  })
+})
+
+describe('deep sleep supersession retires only current-state facts', () => {
+  beforeEach(() => {
+    resetIdCounter()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const LATER = new Date('2026-09-25T10:00:00Z')
+
+  async function runWith(
+    neighbours: SearchResult<SemanticMemory>[],
+    verdict: Partial<SupersessionVerdict>,
+  ): Promise<{ storage: ReturnType<typeof makeMockStorage>; result: Awaited<ReturnType<typeof deepSleep>> }> {
+    const storage = makeMockStorage({ initialDigests: plainDigests(), semanticNearestResults: neighbours })
+    const intelligence = intelligenceWith('The reranker is gte.', async () => verdict as SupersessionVerdict)
+    const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
+    return { storage, result }
+  }
+
+  function expectStoredAsNewOnly(storage: ReturnType<typeof makeMockStorage>): void {
+    expect(storage.semantic.insert).toHaveBeenCalledTimes(1)
+    expect(storage.semantic.insert).toHaveBeenCalledWith(expect.objectContaining({ supersedes: null }))
+    expect(storage.semantic.markSuperseded).not.toHaveBeenCalled()
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+  }
+
+  it('retires an earlier state that a later state conflicts with, as before', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The reranker is bge.', 0.95)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'state', 'old-1': 'state' },
+    })
+    expect(storage.semantic.markSuperseded).toHaveBeenCalledWith('old-1', storage.semantic._memories[0].id)
+    expect(result).toEqual(expect.objectContaining({ promoted: 1, superseded: 1, keptNotState: 0 }))
+  })
+
+  it('lets a later event retire an earlier state', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The migration is in progress.', 0.9)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'event', 'old-1': 'state' },
+    })
+    expect(storage.semantic.markSuperseded).toHaveBeenCalledWith('old-1', storage.semantic._memories[0].id)
+    expect(result).toEqual(expect.objectContaining({ superseded: 1, keptNotState: 0 }))
+  })
+
+  it('never retires an earlier event, and stores the later fact as new even above the duplicate cosine', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'Stage one of the rollout completed.', 0.95)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'state', 'old-1': 'event' },
+    })
+    expectStoredAsNewOnly(storage)
+    expect(result).toEqual(
+      expect.objectContaining({ promoted: 1, superseded: 0, deduplicated: 0, stale: 0, tie: 0, keptNotState: 1 }),
+    )
+  })
+
+  it('never lets a later plan retire a state', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The table migration completed.', 0.9)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'plan', 'old-1': 'state' },
+    })
+    expectStoredAsNewOnly(storage)
+    expect(result).toEqual(expect.objectContaining({ superseded: 0, keptNotState: 1 }))
+  })
+
+  it('does not make a candidate stale when the later stored fact is a plan or the candidate an event', async () => {
+    const laterPlan = await runWith([neighbour('later-1', 'The reranker will move to bge.', 0.9, { createdAt: LATER })], {
+      same: [], conflicts: ['later-1'], kinds: { new: 'state', 'later-1': 'plan' },
+    })
+    expectStoredAsNewOnly(laterPlan.storage)
+    expect(laterPlan.result).toEqual(expect.objectContaining({ stale: 0, keptNotState: 1 }))
+
+    const earlierEvent = await runWith([neighbour('later-1', 'The reranker is bge.', 0.9, { createdAt: LATER })], {
+      same: [], conflicts: ['later-1'], kinds: { new: 'event', 'later-1': 'state' },
+    })
+    expect(earlierEvent.result).toEqual(expect.objectContaining({ promoted: 1, stale: 0, keptNotState: 1 }))
+  })
+
+  it('still drops a state candidate that a later stored event ends', async () => {
+    const { storage, result } = await runWith([neighbour('later-1', 'The reranker moved to bge.', 0.9, { createdAt: LATER })], {
+      same: [], conflicts: ['later-1'], kinds: { new: 'state', 'later-1': 'event' },
+    })
+    expect(storage.semantic.insert).not.toHaveBeenCalled()
+    expect(result).toEqual(expect.objectContaining({ stale: 1, keptNotState: 0 }))
+  })
+
+  it('is a tie at the same statement time only when both facts are states', async () => {
+    const mixed = await runWith([neighbour('same-time', 'The reranker moved to bge.', 0.9, { createdAt: DIGEST_AT })], {
+      same: [], conflicts: ['same-time'], kinds: { new: 'state', 'same-time': 'event' },
+    })
+    expectStoredAsNewOnly(mixed.storage)
+    expect(mixed.result).toEqual(expect.objectContaining({ tie: 0, keptNotState: 1 }))
+  })
+
+  it.each([
+    ['no kinds at all', undefined],
+    ['an empty kinds map', {}],
+    ['a missing new-fact kind', { 'old-1': 'state' }],
+    ['a missing stored-fact kind', { new: 'state' }],
+    ['invalid kind values', { new: 'current', 'old-1': 'STATE' }],
+    ['an uppercase kind', { new: 'State', 'old-1': 'state' }],
+  ])('counts a conflict with %s as kindMissing, apart from keptNotState, and changes nothing', async (_label, kinds) => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The reranker is bge.', 0.95)], {
+      same: [], conflicts: ['old-1'], kinds: kinds as SupersessionVerdict['kinds'],
+    })
+    expectStoredAsNewOnly(storage)
+    expect(result).toEqual(expect.objectContaining({ superseded: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 1 }))
+  })
+
+  it('logs one warning line per run when kinds are missing, and none when every kind is valid', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const kindLines = () => warn.mock.calls.filter(([line]) => String(line).includes('no valid kind'))
+
+    const { result } = await runWith(
+      [neighbour('old-1', 'The reranker is bge.', 0.95), neighbour('old-2', 'The reranker is mxbai.', 0.9)],
+      { same: [], conflicts: ['old-1', 'old-2'], kinds: { new: 'state' } },
+    )
+    expect(result.kindMissing).toBe(2)
+    expect(kindLines()).toHaveLength(1)
+    expect(String(kindLines()[0]![0])).toContain('2 conflict(s)')
+
+    warn.mockClear()
+    await runWith([neighbour('old-1', 'The reranker is bge.', 0.95)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'state', 'old-1': 'event' },
+    })
+    expect(kindLines()).toHaveLength(0)
+  })
+
+  it('still deduplicates an exact-text duplicate the judge wrongly calls a conflict', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The reranker is  GTE.', 0.85)], {
+      same: [], conflicts: ['old-1'], kinds: allState('old-1'),
+    })
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('old-1', 0.1)
+    expect(storage.semantic.insert).not.toHaveBeenCalled()
+    expect(storage.semantic.markSuperseded).not.toHaveBeenCalled()
+    expect(result).toEqual(expect.objectContaining({ deduplicated: 1, superseded: 0, keptNotState: 0, kindMissing: 0 }))
+  })
+
+  it('a kept conflict next to a neighbour the judge calls the same claim gives a duplicate of that one', async () => {
+    const { storage, result } = await runWith(
+      [neighbour('event-1', 'Stage one of the rollout completed.', 0.95), neighbour('same-1', 'Reranker: gte.', 0.8)],
+      { same: ['same-1'], conflicts: ['event-1'], kinds: { new: 'state', 'event-1': 'event', 'same-1': 'state' } },
+    )
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('same-1', 0.1)
+    expect(storage.semantic.insert).not.toHaveBeenCalled()
+    expect(storage.semantic.markSuperseded).not.toHaveBeenCalled()
+    expect(result).toEqual(expect.objectContaining({ deduplicated: 1, keptNotState: 1, kindMissing: 0 }))
+  })
+
+  it('counts each kept conflict and retires only the allowed ones', async () => {
+    const { storage, result } = await runWith(
+      [
+        neighbour('state-1', 'The reranker is bge.', 0.9),
+        neighbour('event-1', 'The reranker was benchmarked.', 0.8),
+        neighbour('plan-1', 'The reranker will be replaced.', 0.7),
+        neighbour('unrelated', 'Embeddings use 1536 dimensions.', 0.65),
+      ],
+      {
+        same: [],
+        conflicts: ['state-1', 'event-1', 'plan-1'],
+        kinds: { new: 'state', 'state-1': 'state', 'event-1': 'event', 'plan-1': 'plan', unrelated: 'state' },
+      },
+    )
+    const newId = storage.semantic._memories[0].id
+    expect(vi.mocked(storage.semantic.markSuperseded).mock.calls).toEqual([['state-1', newId]])
+    expect(storage.semantic.insert).toHaveBeenCalledWith(expect.objectContaining({ supersedes: 'state-1' }))
+    expect(result).toEqual(expect.objectContaining({ promoted: 1, superseded: 1, keptNotState: 2, supersessionJudged: 1 }))
+  })
+
+  it('reports keptNotState from consolidate()', async () => {
+    const storage = makeMockStorage({
+      initialDigests: plainDigests(),
+      semanticNearestResults: [neighbour('old-1', 'Stage one of the rollout completed.', 0.95)],
+    })
+    const intelligence = intelligenceWith('The reranker is gte.', async () => ({
+      same: [], conflicts: ['old-1'], kinds: { new: 'state', 'old-1': 'event' },
+    }))
+    const memory = createMemory({ storage, intelligence, supersession: LLM })
+    await memory.initialize()
+
+    const result = await memory.consolidate('deep')
+
+    expect(result.keptNotState).toBe(1)
+    expect(result.kindMissing).toBe(0)
+    expect(result.superseded).toBe(0)
+    await memory.dispose()
+  })
+})
+
+describe('supersessionRuleOutcome', () => {
+  it.each([
+    ['state', 'state', 'retire'],
+    ['state', 'event', 'retire'],
+    ['state', 'plan', 'kept-later-not-current'],
+    ['state', undefined, 'kept-kind-missing'],
+    ['state', 'State', 'kept-kind-missing'],
+    ['event', 'state', 'kept-earlier-not-state'],
+    ['plan', 'state', 'kept-earlier-not-state'],
+    [undefined, 'state', 'kept-kind-missing'],
+    ['current', 'event', 'kept-kind-missing'],
+    ['event', 'Plan', 'kept-kind-missing'],
+    ['__proto__', 'state', 'kept-kind-missing'],
+  ])('earlier %s, later %s: %s', (earlier, later, outcome) => {
+    expect(supersessionRuleOutcome(earlier, later)).toBe(outcome)
   })
 })

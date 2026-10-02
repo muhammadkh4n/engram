@@ -123,12 +123,19 @@ interface JudgeCall {
   candidates: SupersessionCandidate[]
 }
 
+function allState(ids: string[]): SupersessionVerdict['kinds'] {
+  return Object.fromEntries(['new', ...ids].map((id) => [id, 'state' as const]))
+}
+
 function stubJudge(decide: (fact: SupersessionFact, ids: string[]) => Partial<SupersessionVerdict> = () => ({})) {
   const calls: JudgeCall[] = []
   const judge = async (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => {
     calls.push({ fact, candidates: [...candidates] })
-    const v = decide(fact, candidates.map((c) => c.id))
-    return { same: v.same ?? [], conflicts: v.conflicts ?? [] }
+    const ids = candidates.map((c) => c.id)
+    const v = decide(fact, ids)
+    // Unless a test says otherwise every fact is a current state, the kinds
+    // under which a conflict may retire.
+    return { same: v.same ?? [], conflicts: v.conflicts ?? [], kinds: v.kinds ?? allState(ids) }
   }
   return { judge, calls }
 }
@@ -338,7 +345,7 @@ describe('runFactSupersessionBackfill — verdicts', () => {
     let n = 0
     const judge = async (_f: SupersessionFact, c: ReadonlyArray<SupersessionCandidate>) => {
       if (n++ === 0) throw new Error('upstream said: secret beta')
-      return { conflicts: [c[0]!.id], same: [] }
+      return { conflicts: [c[0]!.id], same: [], kinds: allState([c[0]!.id]) }
     }
     const result = await propose(store, judge, { ...DRY, warn: (l) => warnings.push(l) })
 
@@ -348,6 +355,97 @@ describe('runFactSupersessionBackfill — verdicts', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('a3')
     expect(warnings[0]).not.toContain('secret')
+  })
+})
+
+describe('runFactSupersessionBackfill — only a current-state fact is retired', () => {
+  type Kinds = SupersessionVerdict['kinds']
+  const conflictWith = (kinds: (ids: string[]) => Kinds) => stubJudge((_f, ids) => ({ conflicts: ids, kinds: kinds(ids) }))
+
+  it('proposes retiring an earlier state that a later state or event conflicts with', async () => {
+    for (const newKind of ['state', 'event'] as const) {
+      const store = new StubStore([fact('a1', 1), fact('a2', 2)])
+      const result = await propose(store, conflictWith(() => ({ new: newKind, a1: 'state' })).judge)
+      expect(result.proposals).toEqual([expect.objectContaining({ newId: 'a2', oldId: 'a1', newKind, oldKind: 'state' })])
+      expect(result.ruleOutcomes).toEqual({ retire: 1, 'kept-earlier-not-state': 0, 'kept-later-not-current': 0, 'kept-kind-missing': 0 })
+    }
+  })
+
+  it('never proposes retiring an earlier event or plan', async () => {
+    for (const oldKind of ['event', 'plan'] as const) {
+      const store = new StubStore([fact('a1', 1), fact('a2', 2)])
+      const result = await propose(store, conflictWith(() => ({ new: 'state', a1: oldKind })).judge)
+      expect(result.proposals).toEqual([])
+      expect(result.ruleOutcomes).toEqual({ retire: 0, 'kept-earlier-not-state': 1, 'kept-later-not-current': 0, 'kept-kind-missing': 0 })
+      expect(result.bands.reduce((n, b) => n + b.proposals, 0)).toBe(0)
+    }
+  })
+
+  it('never lets a later plan retire anything', async () => {
+    const store = new StubStore([fact('a1', 1), fact('a2', 2)])
+    const result = await propose(store, conflictWith(() => ({ new: 'plan', a1: 'state' })).judge)
+    expect(result.proposals).toEqual([])
+    expect(result.ruleOutcomes).toEqual({ retire: 0, 'kept-earlier-not-state': 0, 'kept-later-not-current': 1, 'kept-kind-missing': 0 })
+  })
+
+  it.each([
+    ['no kinds', {}],
+    ['no kind for the new fact', { a1: 'state' }],
+    ['no kind for the earlier fact', { new: 'state' }],
+    ['invalid kinds', { new: 'current', a1: 'STATE' }],
+  ])('counts a conflict with %s as kept-kind-missing, apart from the rule outcomes', async (_label, kinds) => {
+    const store = new StubStore([fact('a1', 1), fact('a2', 2)])
+    const result = await propose(store, conflictWith(() => kinds as Kinds).judge)
+    expect(result.proposals).toEqual([])
+    expect(result.ruleOutcomes).toEqual({
+      retire: 0,
+      'kept-earlier-not-state': 0,
+      'kept-later-not-current': 0,
+      'kept-kind-missing': 1,
+    })
+  })
+
+  it('one verdict that retires one pool fact and keeps another counts each outcome and band', async () => {
+    const store = new StubStore([
+      fact('a1', 1, { embedding: at(0.9) }),
+      fact('a2', 2, { embedding: at(0.75, 2) }),
+      fact('a3', 3, { embedding: at(0.65, 3) }),
+      fact('a4', 4),
+    ])
+    const { judge } = stubJudge((f) =>
+      f.topic === 'topic a4'
+        ? { conflicts: ['a1', 'a2', 'a3'], kinds: { new: 'state', a1: 'state', a2: 'event' } }
+        : { conflicts: [], kinds: {} },
+    )
+    const result = await propose(store, judge)
+
+    expect(result.proposals.map((p) => [p.newId, p.oldId])).toEqual([['a4', 'a1']])
+    expect(result.ruleOutcomes).toEqual({
+      retire: 1,
+      'kept-earlier-not-state': 1,
+      'kept-later-not-current': 0,
+      'kept-kind-missing': 1,
+    })
+    const band = (name: string) => result.bands.find((b) => b.band === name)!
+    expect(band('0.88-0.95')).toMatchObject({ pairs: 1, proposals: 1 })
+    expect(band('0.70-0.80')).toMatchObject({ pairs: 1, proposals: 0 })
+    expect(band('<0.70')).toMatchObject({ pairs: 1, proposals: 0 })
+    expect(result.bands.reduce((n, b) => n + b.proposals, 0)).toBe(1)
+  })
+
+  it('keeps a fact whose conflict was not retired live, so it is judged in turn', async () => {
+    // a3 conflicts with a2, an event: a2 stays live and is judged against a1.
+    const store = new StubStore([fact('a1', 1), fact('a2', 2), fact('a3', 3)])
+    const { judge, calls } = stubJudge((f) =>
+      f.topic === 'topic a3'
+        ? { conflicts: ['a2'], kinds: { new: 'state', a1: 'state', a2: 'event' } }
+        : { conflicts: [], kinds: {} },
+    )
+    const result = await propose(store, judge)
+    expect(calls.map((c) => c.fact.topic)).toEqual(['topic a3', 'topic a2'])
+    expect(calls[1]!.candidates.map((c) => c.id)).toEqual(['a1'])
+    expect(result.proposals).toEqual([])
+    expect(result.ruleOutcomes).toEqual({ retire: 0, 'kept-earlier-not-state': 1, 'kept-later-not-current': 0, 'kept-kind-missing': 0 })
   })
 })
 
@@ -387,7 +485,7 @@ describe('dry run, then apply from the reviewed report', () => {
   async function dryRunReport(store: StubStore, judge = conflictAll().judge) {
     const result = await propose(store, judge)
     const report = JSON.parse(JSON.stringify(reportEntries(result, result.proposals))) as unknown
-    return { result, report: parseReviewedProposals(report) }
+    return { result, report: parseReviewedProposals(report).proposals }
   }
 
   it('a dry run proposes, carries updated_at and content hashes, and writes nothing', async () => {
@@ -533,20 +631,49 @@ describe('parseReviewedProposals', () => {
     newContentHash: 'a'.repeat(64),
     oldContentHash: 'b'.repeat(64),
     newContent: 'reviewed text is ignored',
+    newKind: 'state',
+    oldKind: 'state',
   }
 
   it('keeps only what the apply step needs', () => {
-    expect(parseReviewedProposals([good])).toEqual([
-      {
-        newId: 'n',
-        oldId: 'o',
-        cosine: 0.9,
-        newUpdatedAt: good.newUpdatedAt,
-        oldUpdatedAt: OLD_UPDATED_AT,
-        newContentHash: good.newContentHash,
-        oldContentHash: good.oldContentHash,
-      },
+    expect(parseReviewedProposals([good])).toEqual({
+      proposals: [
+        {
+          newId: 'n',
+          oldId: 'o',
+          cosine: 0.9,
+          newUpdatedAt: good.newUpdatedAt,
+          oldUpdatedAt: OLD_UPDATED_AT,
+          newContentHash: good.newContentHash,
+          oldContentHash: good.oldContentHash,
+        },
+      ],
+      rejected: [],
+    })
+  })
+
+  it('refuses a report written without kinds as a whole', () => {
+    const { newKind: _n, oldKind: _o, ...withoutKinds } = good
+    const message = 'the report carries no fact kinds, so the state rule cannot be checked; regenerate the dry run on this version'
+    expect(() => parseReviewedProposals([withoutKinds, withoutKinds])).toThrow(message)
+    expect(() => parseReviewedProposals([good, { ...withoutKinds, newId: 'm' }])).toThrow(message)
+  })
+
+  it('re-runs the state rule and rejects, and lists, every entry it does not let retire', () => {
+    const report = parseReviewedProposals([
+      { ...good, newId: 'event-new', newKind: 'event' },
+      { ...good, newId: 'plan-new', newKind: 'plan' },
+      { ...good, newId: 'old-event', oldKind: 'event' },
+      { ...good, newId: 'old-plan', oldKind: 'plan' },
     ])
+    expect(report.proposals.map((p) => p.newId)).toEqual(['event-new'])
+    expect(report.rejected).toEqual([
+      { newId: 'plan-new', oldId: 'o', newKind: 'plan', oldKind: 'state', outcome: 'kept-later-not-current' },
+      { newId: 'old-event', oldId: 'o', newKind: 'state', oldKind: 'event', outcome: 'kept-earlier-not-state' },
+      { newId: 'old-plan', oldId: 'o', newKind: 'state', oldKind: 'plan', outcome: 'kept-earlier-not-state' },
+    ])
+    const summary = JSON.parse(applySummaryJson({ reviewed: 1, applied: 1, skipped: [] }, report.rejected))
+    expect(summary).toMatchObject({ mode: 'apply', applied: 1, rejected: report.rejected })
   })
 
   it.each([
@@ -555,6 +682,8 @@ describe('parseReviewedProposals', () => {
     ['an unparseable updated_at', [{ ...good, newUpdatedAt: 'yesterday' }], /entry 0: newUpdatedAt/],
     ['a self pair', [{ ...good, oldId: 'n' }], /same fact/],
     ['a missing cosine', [good, { ...good, cosine: null }], /entry 1: cosine/],
+    ['an uppercase kind', [{ ...good, oldKind: 'State' }], /entry 0: oldKind must be one of state, event, plan/],
+    ['one missing kind', [good, { ...good, newKind: undefined }], /entry 1: newKind must be one of/],
   ])('rejects %s', (_name, raw, message) => {
     expect(() => parseReviewedProposals(raw)).toThrow(message)
   })
@@ -616,9 +745,17 @@ describe('output', () => {
       oldStatedAt: '2026-03-01T10:00:00.000Z',
     })
     expect(parsed.bands).toContainEqual({ band: '0.88-0.95', pairs: 1, proposals: 1 })
+    expect(parsed.proposals[0]).toMatchObject({ newKind: 'state', oldKind: 'state' })
+    expect(JSON.parse(json).ruleOutcomes).toEqual({ retire: 1, 'kept-earlier-not-state': 0, 'kept-later-not-current': 0, 'kept-kind-missing': 0 })
 
     const report = reportEntries(result, result.proposals)
-    expect(report[0]).toMatchObject({ newContent: 'private two', oldContent: 'private one', oldTopic: 'topic a1' })
+    expect(report[0]).toMatchObject({
+      newContent: 'private two',
+      oldContent: 'private one',
+      oldTopic: 'topic a1',
+      newKind: 'state',
+      oldKind: 'state',
+    })
   })
 
   it('bands split at 0.70, 0.80, 0.88 and 0.95', () => {

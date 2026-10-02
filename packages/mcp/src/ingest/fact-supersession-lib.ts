@@ -19,16 +19,22 @@
  *     live facts of its own project (a shared, NULL-project fact pairs only
  *     with shared facts) stated strictly earlier, at cosine >= the floor,
  *     nearest first, at most POOL_MAX;
- *   - the judge names the relation only. Every pool fact was stated earlier,
- *     so a conflict proposes retiring the pool fact; `same` and unrelated
- *     facts are left alone (both rows are already stored);
+ *   - the judge names the relation and each fact's kind (state, event or
+ *     plan). Every pool fact was stated earlier, so a conflict proposes
+ *     retiring the pool fact when core's `supersessionRuleOutcome` allows it:
+ *     the pool fact is a state and the fact a state or an event. Any other
+ *     conflict, including one where either kind is missing or invalid, is
+ *     counted by its rule outcome and left alone, as are `same` and unrelated
+ *     facts (both rows are already stored);
  *   - a fact proposed for retirement is neither judged nor offered again.
  * Each proposal carries both rows' `updated_at` and a hash of their text, so
  * the apply step can tell whether a row changed after it was reviewed.
  *
  * Applying writes exactly the proposals of a reviewed report and calls no
- * judge. A pair is skipped, and listed, when either row is missing, no longer
- * live, or changed since the report. A write sets only `superseded_by` and
+ * judge. Every entry must carry both kinds, and the kind rule runs again on
+ * them, so a report written before the rule existed, or edited since, cannot
+ * retire a fact the rule keeps. A pair is skipped, and listed, when either
+ * row is missing, no longer live, or changed since the report. A write sets only `superseded_by` and
  * bumps `updated_at` (how the recall-engine index and the graph reconcile find
  * supersessions), conditional on the old row still being live and unchanged,
  * so clearing `superseded_by` restores the SQL row exactly.
@@ -44,8 +50,21 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import type { PostgrestClient } from '@supabase/postgrest-js'
-import { epochMs, supersessionSettingsFromEnv } from '@engram-mem/core'
-import type { StatementClock, SupersessionCandidate, SupersessionFact, SupersessionVerdict } from '@engram-mem/core'
+import {
+  SUPERSESSION_NEW_FACT_KEY,
+  epochMs,
+  isSupersessionFactKind,
+  supersessionRuleOutcome,
+  supersessionSettingsFromEnv,
+} from '@engram-mem/core'
+import type {
+  StatementClock,
+  SupersessionCandidate,
+  SupersessionFact,
+  SupersessionFactKind,
+  SupersessionRuleOutcome,
+  SupersessionVerdict,
+} from '@engram-mem/core'
 
 /** Candidates offered to the judge per fact; matches deep sleep's pool size. */
 export const POOL_MAX = 5
@@ -144,13 +163,16 @@ export interface Proposal {
   newContentHash: string
   oldContentHash: string
   projectId: string | null
+  /** The judge's kind for each fact; the rule retires only a `state` old fact. */
+  newKind: SupersessionFactKind
+  oldKind: SupersessionFactKind
 }
 
 export interface BandSummary {
   band: string
   /** Candidate pairs offered to the judge in this band. */
   pairs: number
-  /** Pairs the judge said conflict, proposed for retirement. */
+  /** Conflicting pairs the kind rule lets retire, proposed for retirement. */
   proposals: number
 }
 
@@ -164,6 +186,8 @@ export interface FactBackfillResult {
   /** True when a fact still needed a judgement after `maxCalls` calls. */
   stoppedAtCap: boolean
   proposals: Proposal[]
+  /** Every conflict the judge named, by what the kind rule made of it. */
+  ruleOutcomes: Record<SupersessionRuleOutcome, number>
   bands: BandSummary[]
   /** Topic and content of every fact named in a proposal, for the local report only. */
   texts: ReadonlyMap<string, { topic: string; content: string }>
@@ -322,7 +346,12 @@ function groupByProject(facts: readonly Fact[]): Map<string | null, Fact[]> {
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
-function proposalOf(fact: Fact, entry: PoolEntry): Proposal {
+function proposalOf(
+  fact: Fact,
+  entry: PoolEntry,
+  newKind: SupersessionFactKind,
+  oldKind: SupersessionFactKind,
+): Proposal {
   return {
     newId: fact.id,
     oldId: entry.fact.id,
@@ -334,6 +363,8 @@ function proposalOf(fact: Fact, entry: PoolEntry): Proposal {
     newContentHash: fact.contentHash,
     oldContentHash: entry.fact.contentHash,
     projectId: fact.projectId,
+    newKind,
+    oldKind,
   }
 }
 
@@ -365,6 +396,12 @@ export async function runFactSupersessionBackfill(
   let calls = 0
   let judgeErrors = 0
   let stoppedAtCap = false
+  const ruleOutcomes: Record<SupersessionRuleOutcome, number> = {
+    retire: 0,
+    'kept-earlier-not-state': 0,
+    'kept-later-not-current': 0,
+    'kept-kind-missing': 0,
+  }
 
   for (const fact of ordered) {
     if (retired.has(fact.id)) continue
@@ -391,13 +428,20 @@ export async function runFactSupersessionBackfill(
       continue
     }
 
-    // Every pool fact was stated earlier than `fact`, so a conflict retires the pool fact.
+    // Every pool fact was stated earlier than `fact`: a conflict retires the
+    // pool fact when it is a state and `fact` a state or an event.
     const conflicts = new Set(verdict.conflicts)
+    const kinds = verdict.kinds ?? {}
+    const newKind = kinds[SUPERSESSION_NEW_FACT_KEY]
     for (const entry of pool) {
       if (!conflicts.has(entry.fact.id) || retired.has(entry.fact.id)) continue
+      const oldKind = kinds[entry.fact.id]
+      const outcome = supersessionRuleOutcome(oldKind, newKind)
+      ruleOutcomes[outcome]++
+      if (outcome !== 'retire') continue
       retired.add(entry.fact.id)
       bandCounts.get(similarityBand(entry.cosine))!.proposals++
-      proposals.push(proposalOf(fact, entry))
+      proposals.push(proposalOf(fact, entry, newKind!, oldKind!))
       texts.set(fact.id, { topic: fact.topic, content: fact.content })
       texts.set(entry.fact.id, { topic: entry.fact.topic, content: entry.fact.content })
     }
@@ -410,6 +454,7 @@ export async function runFactSupersessionBackfill(
     judgeErrors,
     stoppedAtCap,
     proposals,
+    ruleOutcomes,
     bands: [...bandCounts].map(([band, c]) => ({ band, ...c })),
     texts,
   }
@@ -424,6 +469,23 @@ export type ReviewedProposal = Pick<
   Proposal,
   'newId' | 'oldId' | 'cosine' | 'newUpdatedAt' | 'oldUpdatedAt' | 'newContentHash' | 'oldContentHash'
 >
+
+/** A report entry whose kinds the rule does not let retire; never written. */
+export interface RejectedProposal {
+  newId: string
+  oldId: string
+  newKind: SupersessionFactKind
+  oldKind: SupersessionFactKind
+  outcome: Exclude<SupersessionRuleOutcome, 'retire'>
+}
+
+/** A dry-run report as the apply step reads it. */
+export interface ReviewedReport {
+  /** Entries the kind rule lets retire, in report order. */
+  proposals: ReviewedProposal[]
+  /** Entries it does not; listed in the apply summary, never applied. */
+  rejected: RejectedProposal[]
+}
 
 export type SkipReason =
   | 'new-missing'
@@ -466,13 +528,28 @@ function contentHash(entry: Record<string, unknown>, key: string, at: string): s
   return v
 }
 
+export const REPORT_WITHOUT_KINDS_MESSAGE =
+  'the report carries no fact kinds, so the state rule cannot be checked; regenerate the dry run on this version'
+
+function factKind(entry: Record<string, unknown>, key: string, at: string): SupersessionFactKind {
+  const v = entry[key]
+  if (!isSupersessionFactKind(v)) throw new Error(`${at}: ${key} must be one of state, event, plan`)
+  return v
+}
+
 /**
- * The proposals of a dry-run report (the JSON array `--report` writes).
- * Throws on the first malformed entry, so a bad file fails before any write.
+ * The proposals of a dry-run report (the JSON array `--report` writes),
+ * split by the kind rule. A report with an entry that has neither kind
+ * predates the rule and is refused as a whole. Throws on the first malformed
+ * entry, so a bad file fails before any write.
  */
-export function parseReviewedProposals(raw: unknown): ReviewedProposal[] {
+export function parseReviewedProposals(raw: unknown): ReviewedReport {
   if (!Array.isArray(raw)) throw new Error('report must be a JSON array of proposals')
-  return raw.map((item, i) => {
+  const hasNoKinds = (item: unknown): boolean =>
+    typeof item === 'object' && item !== null && !('newKind' in item) && !('oldKind' in item)
+  if (raw.some(hasNoKinds)) throw new Error(REPORT_WITHOUT_KINDS_MESSAGE)
+  const report: ReviewedReport = { proposals: [], rejected: [] }
+  raw.forEach((item, i) => {
     const at = `report entry ${i}`
     if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error(`${at}: not an object`)
     const entry = item as Record<string, unknown>
@@ -481,7 +558,7 @@ export function parseReviewedProposals(raw: unknown): ReviewedProposal[] {
     if (newId === oldId) throw new Error(`${at}: newId and oldId are the same fact`)
     const cos = entry['cosine']
     if (typeof cos !== 'number' || !Number.isFinite(cos)) throw new Error(`${at}: cosine must be a number`)
-    return {
+    const proposal: ReviewedProposal = {
       newId,
       oldId,
       cosine: cos,
@@ -490,7 +567,14 @@ export function parseReviewedProposals(raw: unknown): ReviewedProposal[] {
       newContentHash: contentHash(entry, 'newContentHash', at),
       oldContentHash: contentHash(entry, 'oldContentHash', at),
     }
+    const newKind = factKind(entry, 'newKind', at)
+    const oldKind = factKind(entry, 'oldKind', at)
+    // The old fact is the earlier statement of every proposal.
+    const outcome = supersessionRuleOutcome(oldKind, newKind)
+    if (outcome === 'retire') report.proposals.push(proposal)
+    else report.rejected.push({ newId, oldId, newKind, oldKind, outcome })
   })
+  return report
 }
 
 function rowCheck(
@@ -552,6 +636,7 @@ export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillO
       calls: result.calls,
       judgeErrors: result.judgeErrors,
       stoppedAtCap: result.stoppedAtCap,
+      ruleOutcomes: result.ruleOutcomes,
       bands: result.bands,
       proposals: result.proposals.map((p) => ({ ...p, cosine: Number(p.cosine.toFixed(6)) })),
     },
@@ -560,9 +645,9 @@ export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillO
   )
 }
 
-/** Ids, reasons and counts only: safe for stdout. */
-export function applySummaryJson(result: ApplyResult): string {
-  return JSON.stringify({ mode: 'apply', ...result }, null, 2)
+/** Ids, kinds, reasons and counts only: safe for stdout. */
+export function applySummaryJson(result: ApplyResult, rejected: ReadonlyArray<RejectedProposal> = []): string {
+  return JSON.stringify({ mode: 'apply', ...result, rejected }, null, 2)
 }
 
 /** `n` proposals drawn without replacement (all of them when n is null or larger). */

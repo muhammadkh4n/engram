@@ -65,11 +65,23 @@ describe('OpenAISummarizer.judgeSupersession', () => {
   })
   afterEach(() => stderr.mockRestore())
 
-  it('returns the same and conflicts lists from a JSON verdict', async () => {
-    mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ conflicts: [OLD], same: [DUP] })))
+  it('returns the same and conflicts lists and the kinds from a JSON verdict', async () => {
+    mockChatCreate.mockResolvedValueOnce(
+      makeChatResponse(
+        JSON.stringify({
+          conflicts: [OLD],
+          same: [DUP],
+          kinds: { new: 'event', [OLD]: 'state', [DUP]: 'event', [OTHER]: 'plan' },
+        }),
+      ),
+    )
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
     const verdict = await s.judgeSupersession(FACT, CANDIDATES)
-    expect(verdict).toEqual({ conflicts: [OLD], same: [DUP] })
+    expect(verdict).toEqual({
+      conflicts: [OLD],
+      same: [DUP],
+      kinds: { new: 'event', [OLD]: 'state', [DUP]: 'event', [OTHER]: 'plan' },
+    })
     expect(stderr).not.toHaveBeenCalled()
   })
 
@@ -78,13 +90,13 @@ describe('OpenAISummarizer.judgeSupersession', () => {
       makeChatResponse(`Here is the verdict:\n\`\`\`json\n{"conflicts": ["${OLD}"], "same": []}\n\`\`\`\nDone.`),
     )
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [] })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: {} })
   })
 
   it('treats a missing list as empty', async () => {
     mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ conflicts: [OLD] })))
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [] })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: {} })
   })
 
   it('drops ids that are not in the candidate set and non-string entries', async () => {
@@ -97,7 +109,46 @@ describe('OpenAISummarizer.judgeSupersession', () => {
       ),
     )
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [DUP] })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [DUP], kinds: {} })
+  })
+
+  it('keeps only valid kinds of the new fact and known candidates', async () => {
+    mockChatCreate.mockResolvedValueOnce(
+      makeChatResponse(
+        JSON.stringify({
+          conflicts: [OLD],
+          same: [],
+          kinds: {
+            new: 'State',
+            [OLD]: 'state',
+            [DUP]: 'current',
+            [OTHER]: 7,
+            '0199a1b2-0000-7000-8000-00000000dead': 'state',
+          },
+        }),
+      ),
+    )
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: { [OLD]: 'state' } })
+    expect(stderr).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an array', ['state']],
+    ['a string', 'state'],
+    ['null', null],
+  ])('keeps the lists and reads no kinds when kinds is %s', async (_label, kinds) => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ conflicts: [OLD], same: [], kinds })))
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: {} })
+  })
+
+  it('does not read inherited keys as kinds', async () => {
+    mockChatCreate.mockResolvedValueOnce(
+      makeChatResponse(`{"conflicts": ["${OLD}"], "same": [], "kinds": {"__proto__": {"new": "state"}}}`),
+    )
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: {} })
   })
 
   it('removes repeated ids and leaves an id named in both lists in neither', async () => {
@@ -105,7 +156,7 @@ describe('OpenAISummarizer.judgeSupersession', () => {
       makeChatResponse(JSON.stringify({ conflicts: [OLD, OLD, DUP], same: [DUP, OTHER, OTHER] })),
     )
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [OTHER] })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [OTHER], kinds: {} })
   })
 
   it.each([
@@ -119,7 +170,7 @@ describe('OpenAISummarizer.judgeSupersession', () => {
   ])('returns an empty verdict and warns once without content for %s', async (_label, reply) => {
     mockChatCreate.mockResolvedValueOnce(makeChatResponse(reply))
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [], same: [] })
+    expect(await s.judgeSupersession(FACT, CANDIDATES)).toEqual({ conflicts: [], same: [], kinds: {} })
     expect(stderr).toHaveBeenCalledTimes(1)
     const line = String(stderr.mock.calls[0]![0])
     expect(line).toContain('judgeSupersession')
@@ -133,7 +184,7 @@ describe('OpenAISummarizer.judgeSupersession', () => {
 
   it('makes no call when the candidate list is empty', async () => {
     const s = new OpenAISummarizer({ apiKey: 'test-key' })
-    expect(await s.judgeSupersession(FACT, [])).toEqual({ conflicts: [], same: [] })
+    expect(await s.judgeSupersession(FACT, [])).toEqual({ conflicts: [], same: [], kinds: {} })
     expect(mockChatCreate).not.toHaveBeenCalled()
   })
 
@@ -198,9 +249,34 @@ describe('OpenAISummarizer.judgeSupersession', () => {
     expect(body.temperature).toBe(0)
     expect(body.response_format).toEqual({ type: 'json_object' })
     const system = body.messages.find((m) => m.role === 'system')!.content
-    expect(system).toContain('{"same": [], "conflicts": []}')
+    expect(system).toContain('{"same": [], "conflicts": [], "kinds": {"new": "<kind>"')
     expect(system).toMatch(/unsure/i)
     expect(system).toMatch(/only JSON/i)
+  })
+
+  it('asks for a same-subject conflict and a state, event or plan label for every fact', async () => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse('{"conflicts": [], "same": [], "kinds": {}}'))
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    await s.judgeSupersession(FACT, CANDIDATES)
+    const system = sentBody().messages.find((m) => m.role === 'system')!.content
+    expect(system).toContain('the current value of the same attribute of the same subject')
+    expect(system).toMatch(/different review, run, release, PR aspect, workload or component is a different subject/)
+    for (const kind of ['"state"', '"event"', '"plan"']) expect(system).toContain(kind)
+    expect(system).toContain('the key "new"')
+  })
+
+  it('defines a decision in force as a state and lists no decision among events', async () => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse('{"conflicts": [], "same": [], "kinds": {}}'))
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    await s.judgeSupersession(FACT, CANDIDATES)
+    const system = sentBody().messages.find((m) => m.role === 'system')!.content
+    const definition = (kind: string): string => system.split('\n').find((line) => line.startsWith(`- "${kind}":`))!
+
+    expect(definition('state')).toContain('a decision or choice in force')
+    expect(definition('state')).toContain('"Decided to use X" is a state.')
+    expect(definition('event')).toContain('a one-off happening')
+    expect(definition('event')).not.toMatch(/decid/i)
+    expect(system).not.toContain('decided then')
   })
 })
 
@@ -210,7 +286,7 @@ describe('openaiIntelligence.judgeSupersession', () => {
   it('delegates to the summarizer', async () => {
     mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ conflicts: [OLD], same: [] })))
     const adapter = openaiIntelligence({ apiKey: 'test-key' })
-    expect(await adapter.judgeSupersession!(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [] })
+    expect(await adapter.judgeSupersession!(FACT, CANDIDATES)).toEqual({ conflicts: [OLD], same: [], kinds: {} })
     expect(mockChatCreate).toHaveBeenCalledTimes(1)
   })
 })

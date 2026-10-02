@@ -18,7 +18,9 @@
  * says so.
  *
  * --apply --from-report writes exactly the proposals in a reviewed report and
- * calls no judge. A pair whose rows changed since the report (updated_at or
+ * calls no judge. Every entry must carry both facts' kinds and pass the kind
+ * rule again: a report without kinds is refused, and an entry the rule keeps
+ * is listed as rejected and not written. A pair whose rows changed since the report (updated_at or
  * text), or where either row is no longer live, is skipped and listed. Each
  * write sets `superseded_by` and bumps `updated_at`, and appends
  * (old id, new id, cosine) to the rollback CSV named with --rollback.
@@ -54,7 +56,7 @@ import {
   sampleProposals,
   summaryJson,
   type CliOptions,
-  type ReviewedProposal,
+  type ReviewedReport,
   type RollbackSink,
   type SupersessionJudge,
 } from './fact-supersession-lib.js'
@@ -94,7 +96,7 @@ function buildJudge(apiKey: string): SupersessionJudge {
   return intelligence.judgeSupersession.bind(intelligence)
 }
 
-function readReport(path: string): ReviewedProposal[] {
+function readReport(path: string): ReviewedReport {
   let raw: unknown
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'))
@@ -145,16 +147,18 @@ async function dryRun(opts: DryRunOptions, url: string, key: string): Promise<vo
 }
 
 async function apply(opts: ApplyOptions, url: string, key: string): Promise<void> {
-  const proposals = readReport(opts.fromReportPath)
+  const { proposals, rejected } = readReport(opts.fromReportPath)
   const rollback = fileRollbackSink(opts.rollbackPath)
   const client = new PostgrestClient(url, { headers: { Authorization: `Bearer ${key}`, apikey: key } })
 
-  console.error(`${TAG} mode=APPLY report=${opts.fromReportPath} proposals=${proposals.length}`)
-  const result = await applyReviewedProposals(createPostgrestFactStore(client), proposals, rollback)
-  console.log(applySummaryJson(result))
   console.error(
-    `${TAG} applied ${result.applied} of ${result.reviewed} reviewed proposals, skipped ${result.skipped.length}; ` +
-      `rollback CSV: ${opts.rollbackPath}`,
+    `${TAG} mode=APPLY report=${opts.fromReportPath} proposals=${proposals.length} rejected-by-rule=${rejected.length}`,
+  )
+  const result = await applyReviewedProposals(createPostgrestFactStore(client), proposals, rollback)
+  console.log(applySummaryJson(result, rejected))
+  console.error(
+    `${TAG} applied ${result.applied} of ${result.reviewed} proposals the state rule allows, skipped ` +
+      `${result.skipped.length}, rejected ${rejected.length} the rule keeps; rollback CSV: ${opts.rollbackPath}`,
   )
 }
 
