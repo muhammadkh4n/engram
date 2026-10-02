@@ -1,0 +1,55 @@
+{
+  "meta": {
+    "a": "./results/longmemeval/r3-g0-formatted-judge-2026-10.json",
+    "b": "./results/longmemeval/r3-g0-formatted-judge-repeat-2026-10.json",
+    "generated_at": "2026-10-02T01:27:53.842Z"
+  },
+  "paired": 500,
+  "unmatched_a": 0,
+  "unmatched_b": 0,
+  "answers_changed": 346,
+  "answer_change_rate": 0.692,
+  "verdicts_changed": 66,
+  "strict": {
+    "n10": 35,
+    "n01": 23,
+    "p": 0.1480058007602055
+  },
+  "lenient": {
+    "n10": 26,
+    "n01": 18,
+    "p": 0.29121523654589343
+  },
+  "by_type": {
+    "single-session-user": {
+      "paired": 70,
+      "answers_changed": 37,
+      "verdicts_changed": 5
+    },
+    "multi-session": {
+      "paired": 133,
+      "answers_changed": 99,
+      "verdicts_changed": 21
+    },
+    "single-session-preference": {
+      "paired": 30,
+      "answers_changed": 25,
+      "verdicts_changed": 13
+    },
+    "temporal-reasoning": {
+      "paired": 133,
+      "answers_changed": 88,
+      "verdicts_changed": 14
+    },
+    "knowledge-update": {
+      "paired": 78,
+      "answers_changed": 61,
+      "verdicts_changed": 12
+    },
+    "single-session-assistant": {
+      "paired": 56,
+      "answers_changed": 36,
+      "verdicts_changed": 1
+    }
+  }
+}
