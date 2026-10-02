@@ -1,43 +1,67 @@
 /**
- * Scan, judge and apply loop for the fact supersession backfill CLI
+ * Scan, judge and apply steps for the fact supersession backfill CLI
  * (engram-fact-supersession-cli.ts).
  *
  * Deep sleep retires a stored fact only when a fact consolidated after it
- * replaces it, so facts stored before the supersession judge existed can
- * still hold several versions of one claim. This pass replays that decision
- * over the live facts already stored:
- *   - facts are visited newest first, so each one is judged as the latest
- *     statement on its subject against the facts stored before it;
- *   - the pool of a fact is the live facts in its own project (a shared,
- *     NULL-project fact pairs only with shared facts) that are strictly older
- *     than it, at cosine >= the floor, nearest first, at most POOL_MAX;
- *   - a fact retired earlier in the same pass is neither judged nor offered
- *     as a candidate again, in a dry run as in an apply, so a dry run proposes
- *     exactly what an apply would write.
+ * conflicts with it and was stated later, so facts stored before the
+ * supersession judge existed can still hold several versions of one claim.
+ * The backfill replays that decision over the live facts already stored, in
+ * two separate steps.
+ *
+ * Proposing (the dry run) reads every live fact and calls the judge; it never
+ * writes:
+ *   - each fact's statement time is the time of the conversation it came
+ *     from (`statementClock` from core, the helper deep sleep uses), falling
+ *     back to the row's insert time when its source digests cannot be read.
+ *     Insert time alone cannot order facts: deep sleep re-reads a week of
+ *     digests on every run, so a later row can hold an older statement;
+ *   - facts are visited latest statement first, and the pool of a fact is the
+ *     live facts of its own project (a shared, NULL-project fact pairs only
+ *     with shared facts) stated strictly earlier, at cosine >= the floor,
+ *     nearest first, at most POOL_MAX;
+ *   - the judge names the relation only. Every pool fact was stated earlier,
+ *     so a conflict proposes retiring the pool fact; `same` and unrelated
+ *     facts are left alone (both rows are already stored);
+ *   - a fact proposed for retirement is neither judged nor offered again.
+ * Each proposal carries both rows' `updated_at` and a hash of their text, so
+ * the apply step can tell whether a row changed after it was reviewed.
+ *
+ * Applying writes exactly the proposals of a reviewed report and calls no
+ * judge. A pair is skipped, and listed, when either row is missing, no longer
+ * live, or changed since the report. A write sets only `superseded_by` and
+ * bumps `updated_at` (how the recall-engine index and the graph reconcile find
+ * supersessions), conditional on the old row still being live and unchanged,
+ * so clearing `superseded_by` restores the SQL row exactly.
  *
  * Similarity is computed here over the embeddings read once, rather than by
  * a nearest-neighbour query per fact: a global top-k can be filled by other
- * projects' or newer facts and miss the older same-project neighbours this
+ * projects' or later facts and miss the earlier same-project neighbours this
  * pass is about.
  *
- * An apply sets only `superseded_by` (and bumps `updated_at`, which is how
- * the recall-engine index and the graph reconcile find supersessions) and
- * only on a row that is still live, so clearing `superseded_by` restores the
- * row exactly. Each write is appended to the rollback sink after it lands.
- *
- * Network access goes through the injected store and judge, so the loop is
- * testable with an in-memory store and a stub judge.
+ * Network access goes through the injected store, clock and judge, so both
+ * steps are testable with an in-memory store and a stub judge.
  */
+import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import type { PostgrestClient } from '@supabase/postgrest-js'
-import type { SupersessionCandidate, SupersessionFact, SupersessionVerdict } from '@engram-mem/core'
+import { epochMs, supersessionSettingsFromEnv } from '@engram-mem/core'
+import type { StatementClock, SupersessionCandidate, SupersessionFact, SupersessionVerdict } from '@engram-mem/core'
 
 /** Candidates offered to the judge per fact; matches deep sleep's pool size. */
 export const POOL_MAX = 5
 /** Lower edges of the reported similarity bands; 0.88 is deep sleep's duplicate cosine. */
 export const BAND_EDGES: readonly number[] = [0.7, 0.8, 0.88, 0.95]
+/**
+ * Facts whose source digests and episodes are read in one batch. Episode rows
+ * carry their embeddings, so one batch over every fact would hold the whole
+ * episode table in memory.
+ */
+export const STATEMENT_BATCH = 50
 
 const SEMANTIC_TABLE = 'memory_semantic'
-const FACT_COLUMNS = 'id, topic, content, created_at, project_id, embedding'
+const FACT_COLUMNS = 'id, topic, content, created_at, updated_at, project_id, source_digest_ids, embedding'
+const STATE_COLUMNS = 'id, topic, content, updated_at, superseded_by, forgotten_at'
+const HASH_PATTERN = /^[0-9a-f]{64}$/
 
 // ---------------------------------------------------------------------------
 // Rows and seams
@@ -48,9 +72,21 @@ export interface RawFactRow {
   topic: string | null
   content: string | null
   created_at: string
+  updated_at: string
   project_id: string | null
+  source_digest_ids: string[] | null
   /** pgvector text form "[x,y,...]" from PostgREST, or an array from a stub. */
   embedding: unknown
+}
+
+/** A fact row as the apply step re-reads it, live or not. */
+export interface FactStateRow {
+  id: string
+  topic: string | null
+  content: string | null
+  updated_at: string
+  superseded_by: string | null
+  forgotten_at: string | null
 }
 
 export interface FactSupersessionStore {
@@ -59,11 +95,14 @@ export interface FactSupersessionStore {
    * ordered by id, strictly after `afterId`.
    */
   fetchPage(afterId: string | null, pageSize: number): Promise<RawFactRow[]>
+  /** The named facts whatever their state; a missing id is absent from the result. */
+  fetchRows(ids: ReadonlyArray<string>): Promise<FactStateRow[]>
   /**
-   * Point a still-live fact at its replacement and bump its `updated_at`.
-   * Returns false when the row was no longer live, so nothing changed.
+   * Point a fact at its replacement and bump its `updated_at`, only while it
+   * is live and its `updated_at` is still `expectedUpdatedAt`. Returns false
+   * when nothing changed.
    */
-  markSuperseded(oldId: string, newId: string): Promise<boolean>
+  markSuperseded(oldId: string, newId: string, expectedUpdatedAt: string): Promise<boolean>
 }
 
 export type SupersessionJudge = (
@@ -83,13 +122,10 @@ export interface RollbackSink {
 }
 
 export interface FactBackfillOptions {
-  apply: boolean
   /** The judge is called at most this many times. */
   maxCalls: number
   minCosine: number
   pageSize: number
-  /** Required with `apply`. */
-  rollback?: RollbackSink
   /** One line per judge failure; ids only. */
   warn?: (line: string) => void
 }
@@ -98,8 +134,15 @@ export interface Proposal {
   newId: string
   oldId: string
   cosine: number
-  newCreatedAt: string
-  oldCreatedAt: string
+  /** Statement times, ISO. */
+  newStatedAt: string
+  oldStatedAt: string
+  /** Each row's `updated_at` as read, verbatim. */
+  newUpdatedAt: string
+  oldUpdatedAt: string
+  /** `factContentHash` of each row's topic and content as read. */
+  newContentHash: string
+  oldContentHash: string
   projectId: string | null
 }
 
@@ -107,22 +150,20 @@ export interface BandSummary {
   band: string
   /** Candidate pairs offered to the judge in this band. */
   pairs: number
-  /** Pairs the judge said the newer fact replaces. */
+  /** Pairs the judge said conflict, proposed for retirement. */
   proposals: number
 }
 
 export interface FactBackfillResult {
-  /** Live facts read with a usable embedding and timestamp. */
+  /** Live facts read with a usable embedding and statement time. */
   scanned: number
-  /** Live rows skipped because their embedding or created_at did not parse. */
+  /** Live rows skipped because their embedding or statement time did not parse. */
   unusable: number
   calls: number
   judgeErrors: number
   /** True when a fact still needed a judgement after `maxCalls` calls. */
   stoppedAtCap: boolean
   proposals: Proposal[]
-  /** Rows actually written; always 0 in a dry run. */
-  applied: number
   bands: BandSummary[]
   /** Topic and content of every fact named in a proposal, for the local report only. */
   texts: ReadonlyMap<string, { topic: string; content: string }>
@@ -136,11 +177,19 @@ interface Fact {
   id: string
   topic: string
   content: string
-  createdAt: string
-  time: number
+  statedAt: number
+  updatedAt: string
+  contentHash: string
   projectId: string | null
   vector: number[]
   norm: number
+}
+
+/** sha256 over topic and content; a missing value hashes as the empty string. */
+export function factContentHash(topic: string | null, content: string | null): string {
+  return createHash('sha256')
+    .update(JSON.stringify([topic ?? '', content ?? '']))
+    .digest('hex')
 }
 
 export function parseEmbedding(v: unknown): number[] | null {
@@ -183,25 +232,44 @@ function allBands(): string[] {
   return [-1, ...BAND_EDGES].map((edge) => similarityBand(edge))
 }
 
-function toFact(row: RawFactRow): Fact | null {
-  const vector = parseEmbedding(row.embedding)
-  const time = Date.parse(row.created_at)
-  if (!vector || Number.isNaN(time)) return null
-  return {
-    id: row.id,
-    topic: row.topic ?? '',
-    content: row.content ?? '',
-    createdAt: row.created_at,
-    time,
-    projectId: row.project_id ?? null,
-    vector,
-    norm: norm(vector),
-  }
+/** Latest statement first; equal times in descending id order, so the order is total. */
+function latestStatementFirst(a: Fact, b: Fact): number {
+  return b.statedAt - a.statedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
 }
 
-/** Newest first; equal timestamps in descending id order, so the order is total. */
-function newestFirst(a: Fact, b: Fact): number {
-  return b.time - a.time || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+async function toFacts(rows: readonly RawFactRow[], clock: StatementClock): Promise<{ facts: Fact[]; unusable: number }> {
+  const withVectors = rows.flatMap((row) => {
+    const vector = parseEmbedding(row.embedding)
+    return vector ? [{ row, vector }] : []
+  })
+  let unusable = rows.length - withVectors.length
+  const facts: Fact[] = []
+  for (let i = 0; i < withVectors.length; i += STATEMENT_BATCH) {
+    const batch = withVectors.slice(i, i + STATEMENT_BATCH)
+    // One clock call over the batch's digests fills its cache for the per-fact calls.
+    await clock(batch.flatMap(({ row }) => row.source_digest_ids ?? []))
+    for (const { row, vector } of batch) {
+      // Insert time is never earlier than the statement, so it stands in
+      // when the source digests cannot be read.
+      const statedAt = (await clock(row.source_digest_ids ?? [])) ?? epochMs(row.created_at)
+      if (statedAt === null) {
+        unusable++
+        continue
+      }
+      facts.push({
+        id: row.id,
+        topic: row.topic ?? '',
+        content: row.content ?? '',
+        statedAt,
+        updatedAt: row.updated_at,
+        contentHash: factContentHash(row.topic, row.content),
+        projectId: row.project_id ?? null,
+        vector,
+        norm: norm(vector),
+      })
+    }
+  }
+  return { facts, unusable }
 }
 
 /**
@@ -210,6 +278,7 @@ function newestFirst(a: Fact, b: Fact): number {
  */
 async function loadLiveFacts(
   store: FactSupersessionStore,
+  clock: StatementClock,
   pageSize: number,
 ): Promise<{ facts: Fact[]; unusable: number }> {
   const facts: Fact[] = []
@@ -218,11 +287,9 @@ async function loadLiveFacts(
   for (;;) {
     const page = await store.fetchPage(after, pageSize)
     if (page.length === 0) return { facts, unusable }
-    for (const row of page) {
-      const fact = toFact(row)
-      if (fact) facts.push(fact)
-      else unusable++
-    }
+    const parsed = await toFacts(page, clock)
+    facts.push(...parsed.facts)
+    unusable += parsed.unusable
     after = page[page.length - 1]!.id
   }
 }
@@ -232,11 +299,11 @@ interface PoolEntry {
   cosine: number
 }
 
-/** `older` is the fact's project list after it, newest first. */
-function olderPool(fact: Fact, older: readonly Fact[], retired: ReadonlySet<string>, minCosine: number): PoolEntry[] {
+/** `earlier` is the fact's project list after it, latest statement first. */
+function earlierPool(fact: Fact, earlier: readonly Fact[], retired: ReadonlySet<string>, minCosine: number): PoolEntry[] {
   const pool: PoolEntry[] = []
-  for (const other of older) {
-    if (other.time >= fact.time || retired.has(other.id)) continue
+  for (const other of earlier) {
+    if (other.statedAt >= fact.statedAt || retired.has(other.id)) continue
     const c = cosine(fact, other)
     if (c >= minCosine) pool.push({ fact: other, cosine: c })
   }
@@ -253,22 +320,40 @@ function groupByProject(facts: readonly Fact[]): Map<string | null, Fact[]> {
   return groups
 }
 
+const iso = (ms: number): string => new Date(ms).toISOString()
+
+function proposalOf(fact: Fact, entry: PoolEntry): Proposal {
+  return {
+    newId: fact.id,
+    oldId: entry.fact.id,
+    cosine: entry.cosine,
+    newStatedAt: iso(fact.statedAt),
+    oldStatedAt: iso(entry.fact.statedAt),
+    newUpdatedAt: fact.updatedAt,
+    oldUpdatedAt: entry.fact.updatedAt,
+    newContentHash: fact.contentHash,
+    oldContentHash: entry.fact.contentHash,
+    projectId: fact.projectId,
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Run loop
+// Proposing (dry run)
 // ---------------------------------------------------------------------------
 
+/** Judges the live facts and returns the proposed retirements; never writes. */
 export async function runFactSupersessionBackfill(
   store: FactSupersessionStore,
   judge: SupersessionJudge,
+  clock: StatementClock,
   opts: FactBackfillOptions,
 ): Promise<FactBackfillResult> {
   if (!Number.isInteger(opts.maxCalls) || opts.maxCalls <= 0) {
     throw new Error(`maxCalls must be a positive integer, got ${opts.maxCalls}`)
   }
-  if (opts.apply && !opts.rollback) throw new Error('apply requires a rollback sink')
 
-  const { facts, unusable } = await loadLiveFacts(store, opts.pageSize)
-  const ordered = [...facts].sort(newestFirst)
+  const { facts, unusable } = await loadLiveFacts(store, clock, opts.pageSize)
+  const ordered = [...facts].sort(latestStatementFirst)
   const byProject = groupByProject(ordered)
   const indexInProject = new Map<string, number>()
   for (const list of byProject.values()) list.forEach((f, i) => indexInProject.set(f.id, i))
@@ -279,14 +364,13 @@ export async function runFactSupersessionBackfill(
   const texts = new Map<string, { topic: string; content: string }>()
   let calls = 0
   let judgeErrors = 0
-  let applied = 0
   let stoppedAtCap = false
 
   for (const fact of ordered) {
     if (retired.has(fact.id)) continue
     const projectFacts = byProject.get(fact.projectId)!
-    const older = projectFacts.slice(indexInProject.get(fact.id)! + 1)
-    const pool = olderPool(fact, older, retired, opts.minCosine)
+    const earlier = projectFacts.slice(indexInProject.get(fact.id)! + 1)
+    const pool = earlierPool(fact, earlier, retired, opts.minCosine)
     if (pool.length === 0) continue
     if (calls >= opts.maxCalls) {
       stoppedAtCap = true
@@ -298,8 +382,8 @@ export async function runFactSupersessionBackfill(
     let verdict: SupersessionVerdict
     try {
       verdict = await judge(
-        { topic: fact.topic, content: fact.content, statedAt: fact.createdAt },
-        pool.map((e) => ({ id: e.fact.id, topic: e.fact.topic, content: e.fact.content, statedAt: e.fact.createdAt })),
+        { topic: fact.topic, content: fact.content, statedAt: iso(fact.statedAt) },
+        pool.map((e) => ({ id: e.fact.id, topic: e.fact.topic, content: e.fact.content, statedAt: iso(e.fact.statedAt) })),
       )
     } catch (err) {
       judgeErrors++
@@ -307,26 +391,15 @@ export async function runFactSupersessionBackfill(
       continue
     }
 
-    // Every pool fact is older than `fact`, so a conflict retires the pool fact.
-    const replaced = new Set(verdict.conflicts)
+    // Every pool fact was stated earlier than `fact`, so a conflict retires the pool fact.
+    const conflicts = new Set(verdict.conflicts)
     for (const entry of pool) {
-      if (!replaced.has(entry.fact.id) || retired.has(entry.fact.id)) continue
+      if (!conflicts.has(entry.fact.id) || retired.has(entry.fact.id)) continue
       retired.add(entry.fact.id)
       bandCounts.get(similarityBand(entry.cosine))!.proposals++
-      proposals.push({
-        newId: fact.id,
-        oldId: entry.fact.id,
-        cosine: entry.cosine,
-        newCreatedAt: fact.createdAt,
-        oldCreatedAt: entry.fact.createdAt,
-        projectId: fact.projectId,
-      })
+      proposals.push(proposalOf(fact, entry))
       texts.set(fact.id, { topic: fact.topic, content: fact.content })
       texts.set(entry.fact.id, { topic: entry.fact.topic, content: entry.fact.content })
-      if (opts.apply && (await store.markSuperseded(entry.fact.id, fact.id))) {
-        opts.rollback!.append({ oldId: entry.fact.id, newId: fact.id, cosine: entry.cosine })
-        applied++
-      }
     }
   }
 
@@ -337,21 +410,141 @@ export async function runFactSupersessionBackfill(
     judgeErrors,
     stoppedAtCap,
     proposals,
-    applied,
     bands: [...bandCounts].map(([band, c]) => ({ band, ...c })),
     texts,
   }
 }
 
 // ---------------------------------------------------------------------------
+// Applying a reviewed report
+// ---------------------------------------------------------------------------
+
+/** What the apply step needs from a report entry. */
+export type ReviewedProposal = Pick<
+  Proposal,
+  'newId' | 'oldId' | 'cosine' | 'newUpdatedAt' | 'oldUpdatedAt' | 'newContentHash' | 'oldContentHash'
+>
+
+export type SkipReason =
+  | 'new-missing'
+  | 'old-missing'
+  | 'new-not-live'
+  | 'old-not-live'
+  | 'new-changed'
+  | 'old-changed'
+  /** The old row passed the check but changed before the conditional write. */
+  | 'old-changed-during-apply'
+
+export interface SkippedPair {
+  newId: string
+  oldId: string
+  reason: SkipReason
+}
+
+export interface ApplyResult {
+  /** Proposals in the report. */
+  reviewed: number
+  applied: number
+  skipped: SkippedPair[]
+}
+
+function nonEmptyString(entry: Record<string, unknown>, key: string, at: string): string {
+  const v = entry[key]
+  if (typeof v !== 'string' || v.trim() === '') throw new Error(`${at}: ${key} must be a non-empty string`)
+  return v
+}
+
+function timestamp(entry: Record<string, unknown>, key: string, at: string): string {
+  const v = nonEmptyString(entry, key, at)
+  if (Number.isNaN(Date.parse(v))) throw new Error(`${at}: ${key} is not a timestamp`)
+  return v
+}
+
+function contentHash(entry: Record<string, unknown>, key: string, at: string): string {
+  const v = entry[key]
+  if (typeof v !== 'string' || !HASH_PATTERN.test(v)) throw new Error(`${at}: ${key} must be a sha256 hex digest`)
+  return v
+}
+
+/**
+ * The proposals of a dry-run report (the JSON array `--report` writes).
+ * Throws on the first malformed entry, so a bad file fails before any write.
+ */
+export function parseReviewedProposals(raw: unknown): ReviewedProposal[] {
+  if (!Array.isArray(raw)) throw new Error('report must be a JSON array of proposals')
+  return raw.map((item, i) => {
+    const at = `report entry ${i}`
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) throw new Error(`${at}: not an object`)
+    const entry = item as Record<string, unknown>
+    const newId = nonEmptyString(entry, 'newId', at)
+    const oldId = nonEmptyString(entry, 'oldId', at)
+    if (newId === oldId) throw new Error(`${at}: newId and oldId are the same fact`)
+    const cos = entry['cosine']
+    if (typeof cos !== 'number' || !Number.isFinite(cos)) throw new Error(`${at}: cosine must be a number`)
+    return {
+      newId,
+      oldId,
+      cosine: cos,
+      newUpdatedAt: timestamp(entry, 'newUpdatedAt', at),
+      oldUpdatedAt: timestamp(entry, 'oldUpdatedAt', at),
+      newContentHash: contentHash(entry, 'newContentHash', at),
+      oldContentHash: contentHash(entry, 'oldContentHash', at),
+    }
+  })
+}
+
+function rowCheck(
+  side: 'new' | 'old',
+  row: FactStateRow | undefined,
+  updatedAt: string,
+  hash: string,
+): SkipReason | null {
+  if (!row) return `${side}-missing`
+  if (row.superseded_by !== null || row.forgotten_at !== null) return `${side}-not-live`
+  const changed =
+    Date.parse(row.updated_at) !== Date.parse(updatedAt) || factContentHash(row.topic, row.content) !== hash
+  return changed ? `${side}-changed` : null
+}
+
+/**
+ * Writes exactly the reviewed proposals, in report order, with no judge.
+ * Each pair is re-read just before its write, so an earlier pair of the same
+ * report that retired one of its rows makes it `*-not-live`.
+ */
+export async function applyReviewedProposals(
+  store: FactSupersessionStore,
+  proposals: ReadonlyArray<ReviewedProposal>,
+  rollback: RollbackSink,
+): Promise<ApplyResult> {
+  const skipped: SkippedPair[] = []
+  let applied = 0
+  for (const p of proposals) {
+    const rows = new Map((await store.fetchRows([p.newId, p.oldId])).map((r) => [r.id, r]))
+    const reason =
+      rowCheck('new', rows.get(p.newId), p.newUpdatedAt, p.newContentHash) ??
+      rowCheck('old', rows.get(p.oldId), p.oldUpdatedAt, p.oldContentHash) ??
+      ((await store.markSuperseded(p.oldId, p.newId, rows.get(p.oldId)!.updated_at))
+        ? null
+        : 'old-changed-during-apply')
+    if (reason) {
+      skipped.push({ newId: p.newId, oldId: p.oldId, reason })
+      continue
+    }
+    rollback.append({ oldId: p.oldId, newId: p.newId, cosine: p.cosine })
+    applied++
+  }
+  return { reviewed: proposals.length, applied, skipped }
+}
+
+// ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
-/** Ids, cosines, dates and counts only: safe for stdout. */
-export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillOptions, 'apply' | 'maxCalls' | 'minCosine'>): string {
+/** Ids, cosines, dates, hashes and counts only: safe for stdout. */
+export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillOptions, 'maxCalls' | 'minCosine'>): string {
   return JSON.stringify(
     {
-      mode: opts.apply ? 'apply' : 'dry-run',
+      mode: 'dry-run',
       maxCalls: opts.maxCalls,
       minCosine: opts.minCosine,
       scanned: result.scanned,
@@ -359,13 +552,17 @@ export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillO
       calls: result.calls,
       judgeErrors: result.judgeErrors,
       stoppedAtCap: result.stoppedAtCap,
-      applied: result.applied,
       bands: result.bands,
       proposals: result.proposals.map((p) => ({ ...p, cosine: Number(p.cosine.toFixed(6)) })),
     },
     null,
     2,
   )
+}
+
+/** Ids, reasons and counts only: safe for stdout. */
+export function applySummaryJson(result: ApplyResult): string {
+  return JSON.stringify({ mode: 'apply', ...result }, null, 2)
 }
 
 /** `n` proposals drawn without replacement (all of them when n is null or larger). */
@@ -406,6 +603,101 @@ export function rollbackLine(row: RollbackRow): string {
 }
 
 // ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+export class UsageError extends Error {}
+
+export type CliOptions =
+  | {
+      mode: 'dry-run'
+      maxCalls: number
+      reportPath: string | null
+      sample: number | null
+      minCosine: number
+      pageSize: number
+    }
+  | { mode: 'apply'; fromReportPath: string; rollbackPath: string }
+
+const DRY_RUN_ONLY = ['--max-calls', '--report', '--sample', '--min-cosine', '--page-size'] as const
+
+function positiveInt(raw: string | undefined, flag: string): number {
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new UsageError(`${flag} requires a positive integer, got ${raw === undefined ? '(missing value)' : `"${raw}"`}`)
+  }
+  return n
+}
+
+function cosineFlag(raw: string | undefined): number {
+  const n = Number(raw)
+  if (raw === undefined || raw.trim() === '' || !Number.isFinite(n) || n < -1 || n > 1) {
+    throw new UsageError(`--min-cosine requires a number in [-1, 1], got ${raw === undefined ? '(missing value)' : `"${raw}"`}`)
+  }
+  return n
+}
+
+function pathFlag(raw: string | undefined, flag: string): string {
+  if (!raw || raw.startsWith('--')) throw new UsageError(`${flag} requires a path`)
+  return raw
+}
+
+/**
+ * `--apply` writes only from a reviewed report and takes no judge flags; a
+ * dry run judges and writes nothing to the database. Output files must be new.
+ */
+export function parseFactSupersessionArgs(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (path: string) => boolean = existsSync,
+): CliOptions {
+  const values = new Map<string, string>()
+  let apply = false
+  const takesValue = new Set(['--from-report', '--rollback', ...DRY_RUN_ONLY])
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!
+    if (a === '--apply') apply = true
+    else if (takesValue.has(a)) values.set(a, argv[++i] ?? '')
+    else throw new UsageError(`unknown argument "${a}"`)
+  }
+  const raw = (flag: string) => (values.has(flag) ? values.get(flag) : undefined)
+  const newFile = (flag: string): string | null => {
+    if (!values.has(flag)) return null
+    const path = pathFlag(raw(flag), flag)
+    if (exists(path)) throw new UsageError(`${flag} ${path} already exists; name a new file`)
+    return path
+  }
+
+  if (apply) {
+    const misplaced = DRY_RUN_ONLY.filter((f) => values.has(f))
+    if (misplaced.length > 0) {
+      throw new UsageError(`${misplaced.join(', ')} apply only to a dry run; --apply writes the report as reviewed`)
+    }
+    if (!values.has('--from-report')) throw new UsageError('--apply requires --from-report PATH (a dry-run report)')
+    const fromReportPath = pathFlag(raw('--from-report'), '--from-report')
+    if (!exists(fromReportPath)) throw new UsageError(`--from-report ${fromReportPath} does not exist`)
+    const rollbackPath = newFile('--rollback')
+    if (!rollbackPath) throw new UsageError('--apply requires --rollback PATH')
+    return { mode: 'apply', fromReportPath, rollbackPath }
+  }
+
+  if (values.has('--from-report')) throw new UsageError('--from-report is only read with --apply')
+  if (values.has('--rollback')) throw new UsageError('--rollback is only written with --apply')
+  if (!values.has('--max-calls')) throw new UsageError('--max-calls is required for a dry run')
+  const reportPath = newFile('--report')
+  const sample = values.has('--sample') ? positiveInt(raw('--sample'), '--sample') : null
+  if (sample !== null && !reportPath) throw new UsageError('--sample requires --report PATH')
+  return {
+    mode: 'dry-run',
+    maxCalls: positiveInt(raw('--max-calls'), '--max-calls'),
+    reportPath,
+    sample,
+    minCosine: values.has('--min-cosine') ? cosineFlag(raw('--min-cosine')) : supersessionSettingsFromEnv(env).minCosine,
+    pageSize: values.has('--page-size') ? positiveInt(raw('--page-size'), '--page-size') : 500,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PostgREST store
 // ---------------------------------------------------------------------------
 
@@ -424,13 +716,23 @@ export function createPostgrestFactStore(client: PostgrestClient): FactSupersess
       return (data ?? []) as unknown as RawFactRow[]
     },
 
-    async markSuperseded(oldId, newId) {
+    async fetchRows(ids) {
+      if (ids.length === 0) return []
+      const { data, error } = await client.from(SEMANTIC_TABLE).select(STATE_COLUMNS).in('id', [...ids])
+      if (error) throw new Error(`fetch facts ${ids.join(', ')} failed: ${error.message}`)
+      return (data ?? []) as unknown as FactStateRow[]
+    },
+
+    async markSuperseded(oldId, newId, expectedUpdatedAt) {
       // updated_at is how listTombstonesSince finds a supersession; a write
-      // without it never leaves the recall-engine index or the graph.
+      // without it never leaves the recall-engine index or the graph. The
+      // updated_at match makes the write fail when the row changed after it
+      // was checked.
       const { data, error } = await client
         .from(SEMANTIC_TABLE)
         .update({ superseded_by: newId, updated_at: new Date().toISOString() })
         .eq('id', oldId)
+        .eq('updated_at', expectedUpdatedAt)
         .is('superseded_by', null)
         .is('forgotten_at', null)
         .select('id')

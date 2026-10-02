@@ -230,7 +230,7 @@ When no stored fact repeats or conflicts with the FACT, reply {"same": [], "conf
 const SUPERSESSION_REPLY_BASE_TOKENS = 60
 const SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE = 40
 
-export type TranscriptDigestKind ='session-summary' | 'pre-compact'
+export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
 
 const SESSION_SUMMARY_SYSTEM_PROMPT = `You summarize Claude Code work sessions. Extract ONLY:
 - Key decisions made

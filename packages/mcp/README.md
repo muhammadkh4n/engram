@@ -403,18 +403,30 @@ The package includes CLI utilities for advanced use cases:
 - `engram-git-setup` — Set up git hooks for automatic ingestion
 - `engram-shell-setup` — Set up shell hooks
 - `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
-- `engram-fact-supersession` — Retire stored semantic facts that a newer stored fact replaces, using the same
-  supersession judge deep sleep uses (`ENGRAM_CHAT_*` select its model and host). Facts are visited newest first;
-  each is judged against the live facts of its own project (shared facts only against shared facts) that are
-  strictly older, at cosine at or above `--min-cosine` (default `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most
-  five. A fact retired earlier in the pass is neither judged nor offered again.
-  - `--max-calls N` is required; the run stops at the cap and says so.
-  - Dry run by default: the judge runs, nothing is written. Stdout is JSON with the proposals (new id, old id,
-    cosine, both dates) and counts per similarity band. Fact text never goes to stdout; `--report PATH` writes the
-    proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
-  - `--apply --rollback PATH` sets `superseded_by` and bumps `updated_at` on each replaced fact that is still live,
-    and appends `old_id,new_id,cosine` to the rollback CSV after each write. Nothing is deleted; to undo, clear
-    `superseded_by` (and bump `updated_at`) on the CSV's old ids.
+- `engram-fact-supersession` — Retire stored semantic facts that a later stored fact replaces, using the same
+  supersession judge deep sleep uses (`ENGRAM_CHAT_*` select its model and host). Two steps: a dry run proposes, an
+  apply writes exactly the proposals of a reviewed report.
+  - Facts are ordered by statement time, the time of the conversation a fact came from: the latest source episode of
+    its source digests, else the digest's own time, else the row's insert time. Insert time alone cannot order facts,
+    because deep sleep re-reads a week of digests on every run.
+  - Each fact, latest statement first, is judged against the live facts of its own project (shared facts only against
+    shared facts) stated strictly earlier, at cosine at or above `--min-cosine` (default
+    `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most five. A conflict proposes retiring the earlier fact; a fact
+    proposed for retirement is neither judged nor offered again.
+  - Dry run (`--max-calls N` required; the run stops at the cap and says so): the judge runs, nothing is written.
+    Stdout is JSON with the proposals (new id, old id, cosine, both statement dates, both rows' `updated_at` and a
+    hash of their topic and content) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
+    writes the proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
+  - Apply: `--apply --from-report PATH --rollback PATH` writes exactly the proposals in that report and calls no
+    judge. A report written with `--sample` holds only the sample. A pair is skipped, and listed on stdout with a
+    reason, when either row is missing, no longer live, or changed since the report (its `updated_at` or its text).
+    A decay pass bumps `updated_at` on the facts it decays, so run the apply before the next decay pass or dry-run
+    again. Each write sets `superseded_by` and bumps `updated_at`, only while the old row is still live and
+    unchanged, and appends `old_id,new_id,cosine` to the rollback CSV (a new file).
+  - Rollback limit: nothing is deleted, and clearing `superseded_by` (and bumping `updated_at`) on the CSV's old ids
+    restores the SQL rows. It does not restore the graph: once a fact is superseded, the decay pass forgets its Neo4j
+    node, and clearing `superseded_by` does not bring that node back. The same limit applies to the facts
+    `engram-semantic-dedup` retires.
 
 ## Troubleshooting
 
