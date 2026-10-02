@@ -15,7 +15,7 @@ function makeGraph(overrides: Partial<GraphPort> = {}): GraphPort {
 
 function makeStorage(episodes: Episode[]): StorageAdapter {
   return {
-    episodes: { getByIds: vi.fn().mockResolvedValue(episodes) },
+    getByIds: vi.fn().mockResolvedValue(episodes.map((data) => ({ type: 'episode', data }))),
   } as unknown as StorageAdapter
 }
 
@@ -88,8 +88,8 @@ describe('stageActivate — context reinstatement (Gap 4)', () => {
 describe('stageActivate — lateral inhibition (Gap 5)', () => {
   it('halves the activation of high-betweenness hub nodes (isBridge)', async () => {
     const spreadActivation = vi.fn().mockResolvedValue([
-      { nodeId: 'm-bridge', nodeType: 'Memory', activation: 0.5, depth: 1, properties: { isBridge: true } },
-      { nodeId: 'm-plain', nodeType: 'Memory', activation: 0.5, depth: 1, properties: {} },
+      { nodeId: 'm-bridge', nodeType: 'Memory', activation: 0.5, depth: 1, properties: { memoryType: 'episode', isBridge: true } },
+      { nodeId: 'm-plain', nodeType: 'Memory', activation: 0.5, depth: 1, properties: { memoryType: 'episode' } },
     ])
     const graph = makeGraph({ spreadActivation })
     const storage = makeStorage([ep('m-bridge'), ep('m-plain')])
@@ -105,7 +105,7 @@ describe('stageActivate — lateral inhibition (Gap 5)', () => {
 
   it('leaves activation untouched when no node is flagged isBridge', async () => {
     const spreadActivation = vi.fn().mockResolvedValue([
-      { nodeId: 'm1', nodeType: 'Memory', activation: 0.5, depth: 1, properties: {} },
+      { nodeId: 'm1', nodeType: 'Memory', activation: 0.5, depth: 1, properties: { memoryType: 'episode' } },
     ])
     const graph = makeGraph({ spreadActivation })
     const storage = makeStorage([ep('m1')])

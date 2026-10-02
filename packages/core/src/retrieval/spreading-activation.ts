@@ -13,7 +13,7 @@
  */
 
 import type { GraphPort, GraphActivatedNode } from '../adapters/graph.js'
-import type { Episode, RetrievedMemory, RecallStrategy } from '../types.js'
+import type { MemoryType, RetrievedMemory, RecallStrategy, TypedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
 import { assembleContext } from './context-assembly.js'
@@ -144,6 +144,12 @@ export interface StageActivateOptions {
 export interface ActivationResultSet {
   associations: RetrievedMemory[]
   context: CompositeMemory
+  /**
+   * Related candidates (primary and faint, before the faint cap) that did not
+   * render: the node has no known memoryType, or its tier's store did not
+   * return the row (missing, forgotten or superseded).
+   */
+  relatedUnhydrated: number
 }
 
 /**
@@ -288,46 +294,52 @@ export async function stageActivate(
   )
 
   // --- Batched content loading ---
-  // Load full episode content from SQL using getByIds (one query for all IDs),
-  // NOT sequential getById calls (N round-trips).
+  // Memory nodes of every tier relay activation, so each candidate is looked
+  // up in its own tier's table, all of them in one batched call. The default
+  // lookup skips forgotten and superseded rows: a retired fact can still sit
+  // in the graph, and it must not render.
   const recalledIdSet = new Set(recalled.map((m) => m.id))
+  const primaryCandidates = primaryNodes.filter((n) => !recalledIdSet.has(n.nodeId))
+  const primaryIdSet = new Set(primaryCandidates.map((n) => n.nodeId))
+  const faintCandidates = faintNodes.filter(
+    (n) => !recalledIdSet.has(n.nodeId) && !primaryIdSet.has(n.nodeId),
+  )
 
-  const primaryIds = primaryNodes
-    .map((n) => n.nodeId)
-    .filter((id) => !recalledIdSet.has(id))
-
-  const faintIds = faintNodes
-    .map((n) => n.nodeId)
-    .filter((id) => !recalledIdSet.has(id) && !primaryIds.includes(id))
-
-  const [primaryEpisodes, faintEpisodes] = await Promise.all([
-    primaryIds.length > 0
-      ? storage.episodes.getByIds(primaryIds)
-      : Promise.resolve([] as Episode[]),
-    faintIds.length > 0
-      ? storage.episodes.getByIds(faintIds)
-      : Promise.resolve([] as Episode[]),
-  ])
+  const hydrated = await hydrateRelated([...primaryCandidates, ...faintCandidates], storage)
+  if (hydrated.unhydrated > 0) {
+    console.warn(
+      `[engram] related: ${hydrated.unhydrated} activated memories not hydrated ` +
+        `(${hydrated.untyped} without a known memoryType, ` +
+        `${hydrated.unhydrated - hydrated.untyped} not returned by their tier)`,
+    )
+  }
 
   // Build activation lookup for scoring
   const activationByNodeId = new Map(
     activatedNodes.map((n) => [n.nodeId, n.activation]),
   )
 
-  function toRetrievedMemory(episode: Episode): RetrievedMemory {
-    const activation = activationByNodeId.get(episode.id) ?? 0
+  function toRetrievedMemory(typed: TypedMemory): RetrievedMemory {
+    const activation = activationByNodeId.get(typed.data.id) ?? 0
     return {
-      id: episode.id,
-      type: 'episode' as const,
-      content: episode.content,
+      id: typed.data.id,
+      type: typed.type,
+      content: contentOf(typed),
       relevance: activation,
       source: 'association' as const,
       metadata: {
-        ...episode.metadata,
+        ...typed.data.metadata,
         graphActivation: activation,
         activationSource: 'spreading_activation',
       },
     }
+  }
+
+  function hydratedFrom(candidates: GraphActivatedNode[]): RetrievedMemory[] {
+    return candidates.flatMap((n) => {
+      const row = hydrated.rows.get(n.nodeId)
+      return row === undefined ? [] : [toRetrievedMemory(row)]
+    })
   }
 
   // getByIds returns rows in no defined order, so activation ties must be
@@ -341,12 +353,9 @@ export async function stageActivate(
     (graphRankByNodeId.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
       (graphRankByNodeId.get(b.id) ?? Number.MAX_SAFE_INTEGER)
 
-  const associations = primaryEpisodes
-    .map(toRetrievedMemory)
-    .sort(byActivationThenGraphRank)
+  const associations = hydratedFrom(primaryCandidates).sort(byActivationThenGraphRank)
 
-  const faintAssociations = faintEpisodes
-    .map(toRetrievedMemory)
+  const faintAssociations = hydratedFrom(faintCandidates)
     .sort(byActivationThenGraphRank)
     .slice(0, 5) // cap faint associations at 5
 
@@ -358,5 +367,56 @@ export async function stageActivate(
     activatedNodes,
   )
 
-  return { associations, context }
+  return { associations, context, relatedUnhydrated: hydrated.unhydrated }
+}
+
+// ---------------------------------------------------------------------------
+// Related hydration
+// ---------------------------------------------------------------------------
+
+const MEMORY_TYPES: ReadonlySet<string> = new Set<MemoryType>(['episode', 'digest', 'semantic', 'procedural'])
+
+/** The tier a Memory node was written for; null when the node carries none. */
+function memoryTypeOf(node: GraphActivatedNode): MemoryType | null {
+  const value = node.properties?.['memoryType']
+  return typeof value === 'string' && MEMORY_TYPES.has(value) ? (value as MemoryType) : null
+}
+
+function contentOf(typed: TypedMemory): string {
+  switch (typed.type) {
+    case 'episode': return typed.data.content
+    case 'digest': return typed.data.summary
+    case 'semantic': return typed.data.content
+    case 'procedural': return typed.data.procedure
+  }
+}
+
+interface RelatedHydration {
+  /** Live rows by id, each from the tier its node names. */
+  rows: Map<string, TypedMemory>
+  /** Candidates whose node has no known memoryType. */
+  untyped: number
+  /** Every candidate without a row: untyped, or not returned by its tier. */
+  unhydrated: number
+}
+
+async function hydrateRelated(
+  candidates: GraphActivatedNode[],
+  storage: StorageAdapter,
+): Promise<RelatedHydration> {
+  const refs: Array<{ id: string; type: MemoryType }> = []
+  let untyped = 0
+  for (const node of candidates) {
+    const type = memoryTypeOf(node)
+    if (type === null) untyped++
+    else refs.push({ id: node.nodeId, type })
+  }
+
+  const found = refs.length > 0 ? await storage.getByIds(refs) : []
+  const typeById = new Map(refs.map((ref) => [ref.id, ref.type]))
+  const rows = new Map<string, TypedMemory>()
+  for (const row of found) {
+    if (typeById.get(row.data.id) === row.type) rows.set(row.data.id, row)
+  }
+  return { rows, untyped, unhydrated: untyped + typeById.size - rows.size }
 }

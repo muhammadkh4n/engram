@@ -802,6 +802,7 @@ export async function recall(
     } else {
       associations = activationResult.associations
       compositeContext = activationResult.context
+      if (timings !== null) timings['relatedUnhydrated'] = activationResult.relatedUnhydrated
     }
   } else if (strategy.associations) {
     // No graph — SQL association walk
