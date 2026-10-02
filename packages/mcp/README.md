@@ -420,15 +420,18 @@ The package includes CLI utilities for advanced use cases:
     shared facts) stated strictly earlier, at cosine at or above `--min-cosine` (default
     `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most five. The judge also labels each fact `state`, `event` or `plan`; a conflict
     proposes retiring the earlier fact only when it is a `state` and the later fact a `state` or an `event` (the rule
-    deep sleep applies; a missing kind counts as neither). A fact proposed for retirement is neither judged nor
+    deep sleep applies; a conflict where either kind is missing or invalid retires nothing). A fact proposed for retirement is neither judged nor
     offered again.
   - Dry run (`--max-calls N` required; the run stops at the cap and says so): the judge runs, nothing is written.
     Stdout is JSON with the proposals (new id, old id, cosine, both statement dates, both rows' `updated_at` and a
     hash of their topic and content, both kinds), the count of judged conflicts per rule outcome (`retire`,
-    `kept-earlier-not-state`, `kept-later-not-current`) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
+    `kept-earlier-not-state`, `kept-later-not-current`, `kept-kind-missing`) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
     writes the proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
   - Apply: `--apply --from-report PATH --rollback PATH` writes exactly the proposals in that report and calls no
-    judge. A report written with `--sample` holds only the sample. A pair is skipped, and listed on stdout with a
+    judge. A report written with `--sample` holds only the sample. Every entry must carry `newKind` and `oldKind`: a
+    report without them, written before the state rule, is refused as a whole (regenerate the dry run on this
+    version), and an invalid kind refuses the report. The rule runs again on each entry's kinds; an entry it does not
+    let retire is not written and is listed under `rejected` on stdout with its outcome. A pair is skipped, and listed on stdout with a
     reason, when either row is missing, no longer live, or changed since the report (its `updated_at` or its text).
     A decay pass bumps `updated_at` on the facts it decays, so run the apply before the next decay pass or dry-run
     again. Each write sets `superseded_by` and bumps `updated_at`, only while the old row is still live and

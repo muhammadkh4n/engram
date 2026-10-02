@@ -264,6 +264,20 @@ describe('OpenAISummarizer.judgeSupersession', () => {
     for (const kind of ['"state"', '"event"', '"plan"']) expect(system).toContain(kind)
     expect(system).toContain('the key "new"')
   })
+
+  it('defines a decision in force as a state and lists no decision among events', async () => {
+    mockChatCreate.mockResolvedValueOnce(makeChatResponse('{"conflicts": [], "same": [], "kinds": {}}'))
+    const s = new OpenAISummarizer({ apiKey: 'test-key' })
+    await s.judgeSupersession(FACT, CANDIDATES)
+    const system = sentBody().messages.find((m) => m.role === 'system')!.content
+    const definition = (kind: string): string => system.split('\n').find((line) => line.startsWith(`- "${kind}":`))!
+
+    expect(definition('state')).toContain('a decision or choice in force')
+    expect(definition('state')).toContain('"Decided to use X" is a state.')
+    expect(definition('event')).toContain('a one-off happening')
+    expect(definition('event')).not.toMatch(/decid/i)
+    expect(system).not.toContain('decided then')
+  })
 })
 
 describe('openaiIntelligence.judgeSupersession', () => {

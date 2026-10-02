@@ -896,6 +896,7 @@ export class Memory {
       stale: deepResult.stale ?? 0,
       tie: deepResult.tie ?? 0,
       keptNotState: deepResult.keptNotState ?? 0,
+      kindMissing: deepResult.kindMissing ?? 0,
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,

@@ -150,13 +150,21 @@ export interface SupersessionCandidate {
 
 /**
  * What a fact asserts:
- * - `state`: what is currently true (a status, a current value or choice, a
- *   preference in force);
- * - `event`: something that happened at a time (released, completed, found,
- *   merged, decided then);
+ * - `state`: what is currently true (a status, a current value, a preference
+ *   in force, a decision or choice in force: what was chosen, what is used,
+ *   what the plan is now);
+ * - `event`: a one-off happening (released, shipped, completed, found,
+ *   merged, migrated);
  * - `plan`: an intention or a future step.
  */
 export type SupersessionFactKind = 'state' | 'event' | 'plan'
+
+const SUPERSESSION_FACT_KINDS: ReadonlySet<unknown> = new Set<SupersessionFactKind>(['state', 'event', 'plan'])
+
+/** True for exactly the three kind labels; case and spelling are not repaired. */
+export function isSupersessionFactKind(value: unknown): value is SupersessionFactKind {
+  return SUPERSESSION_FACT_KINDS.has(value)
+}
 
 /** Key of the new fact in `SupersessionVerdict.kinds`; candidates are keyed by id. */
 export const SUPERSESSION_NEW_FACT_KEY = 'new'
@@ -188,14 +196,21 @@ export interface SupersessionVerdict {
  *   `event`, so the earlier fact is no longer current;
  * - `kept-earlier-not-state`: the earlier fact records an event or a plan,
  *   which stays true of its time whatever follows;
- * - `kept-later-not-current`: the later fact is a plan (or of unknown kind),
- *   and an intention does not end a state.
- * An unknown or invalid kind is never `state` or `event`, so it never retires
- * and is never retired.
+ * - `kept-later-not-current`: the later fact is a plan, and an intention does
+ *   not end a state;
+ * - `kept-kind-missing`: either kind is missing or not one of the three
+ *   labels. Nothing is known about the pair, so it neither retires nor is
+ *   retired, and it is counted apart from the two rule outcomes so a judge
+ *   that stops labelling kinds is visible.
  */
-export type SupersessionRuleOutcome = 'retire' | 'kept-earlier-not-state' | 'kept-later-not-current'
+export type SupersessionRuleOutcome =
+  | 'retire'
+  | 'kept-earlier-not-state'
+  | 'kept-later-not-current'
+  | 'kept-kind-missing'
 
 export function supersessionRuleOutcome(earlierKind: unknown, laterKind: unknown): SupersessionRuleOutcome {
+  if (!isSupersessionFactKind(earlierKind) || !isSupersessionFactKind(laterKind)) return 'kept-kind-missing'
   if (earlierKind !== 'state') return 'kept-earlier-not-state'
   if (laterKind !== 'state' && laterKind !== 'event') return 'kept-later-not-current'
   return 'retire'

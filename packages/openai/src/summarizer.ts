@@ -15,9 +15,13 @@ import type {
   SupersessionCandidate,
   SupersessionVerdict,
   SupersessionStatedAt,
-  SupersessionFactKind,
 } from '@engram-mem/core'
-import { EmptyClassifierReplyError, SUPERSESSION_NEW_FACT_KEY, UnclassifiableReplyError } from '@engram-mem/core'
+import {
+  EmptyClassifierReplyError,
+  SUPERSESSION_NEW_FACT_KEY,
+  UnclassifiableReplyError,
+  isSupersessionFactKind,
+} from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
 import { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
@@ -229,8 +233,8 @@ const SUPERSESSION_SYSTEM_PROMPT = `You maintain a memory of facts about a user 
 Be conservative. A wrong "conflicts" can retire a fact that is still true. When you are unsure about a stored fact, put it in neither list.
 
 Also label the FACT and every STORED FACT with its kind:
-- "state": what is currently true: a status, a current value or choice, a preference in force.
-- "event": something that happened at a time: released, completed, found, merged, decided then.
+- "state": what is currently true: a status, a current value, a preference in force, or a decision or choice in force (what was chosen, what is used, what the plan is now). "Decided to use X" is a state.
+- "event": a one-off happening: released, shipped, completed, found, merged, migrated.
 - "plan": an intention or a future step.
 
 Use only the ids shown in STORED FACTS, each in at most one list, and the key "new" for the kind of the FACT. Reply with only JSON, exactly this shape:
@@ -241,8 +245,6 @@ When no stored fact repeats or conflicts with the FACT, both lists are empty: {"
  *  its id quoted once in a list and once as a kind key. */
 const SUPERSESSION_REPLY_BASE_TOKENS = 80
 const SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE = 80
-
-const SUPERSESSION_FACT_KINDS: ReadonlySet<string> = new Set(['state', 'event', 'plan'])
 
 export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
 
@@ -1064,7 +1066,7 @@ function pickKinds(raw: unknown, keys: ReadonlyArray<string>): SupersessionVerdi
   const kinds: SupersessionVerdict['kinds'] = {}
   for (const key of keys) {
     const kind = Object.hasOwn(raw, key) ? raw[key] : undefined
-    if (typeof kind === 'string' && SUPERSESSION_FACT_KINDS.has(kind)) kinds[key] = kind as SupersessionFactKind
+    if (isSupersessionFactKind(kind)) kinds[key] = kind
   }
   return kinds
 }

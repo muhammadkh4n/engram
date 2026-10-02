@@ -718,12 +718,53 @@ describe('deep sleep supersession retires only current-state facts', () => {
     ['a missing new-fact kind', { 'old-1': 'state' }],
     ['a missing stored-fact kind', { new: 'state' }],
     ['invalid kind values', { new: 'current', 'old-1': 'STATE' }],
-  ])('counts a conflict with %s as not a state and changes nothing', async (_label, kinds) => {
+    ['an uppercase kind', { new: 'State', 'old-1': 'state' }],
+  ])('counts a conflict with %s as kindMissing, apart from keptNotState, and changes nothing', async (_label, kinds) => {
     const { storage, result } = await runWith([neighbour('old-1', 'The reranker is bge.', 0.95)], {
       same: [], conflicts: ['old-1'], kinds: kinds as SupersessionVerdict['kinds'],
     })
     expectStoredAsNewOnly(storage)
-    expect(result).toEqual(expect.objectContaining({ superseded: 0, stale: 0, tie: 0, keptNotState: 1 }))
+    expect(result).toEqual(expect.objectContaining({ superseded: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 1 }))
+  })
+
+  it('logs one warning line per run when kinds are missing, and none when every kind is valid', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const kindLines = () => warn.mock.calls.filter(([line]) => String(line).includes('no valid kind'))
+
+    const { result } = await runWith(
+      [neighbour('old-1', 'The reranker is bge.', 0.95), neighbour('old-2', 'The reranker is mxbai.', 0.9)],
+      { same: [], conflicts: ['old-1', 'old-2'], kinds: { new: 'state' } },
+    )
+    expect(result.kindMissing).toBe(2)
+    expect(kindLines()).toHaveLength(1)
+    expect(String(kindLines()[0]![0])).toContain('2 conflict(s)')
+
+    warn.mockClear()
+    await runWith([neighbour('old-1', 'The reranker is bge.', 0.95)], {
+      same: [], conflicts: ['old-1'], kinds: { new: 'state', 'old-1': 'event' },
+    })
+    expect(kindLines()).toHaveLength(0)
+  })
+
+  it('still deduplicates an exact-text duplicate the judge wrongly calls a conflict', async () => {
+    const { storage, result } = await runWith([neighbour('old-1', 'The reranker is  GTE.', 0.85)], {
+      same: [], conflicts: ['old-1'], kinds: allState('old-1'),
+    })
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('old-1', 0.1)
+    expect(storage.semantic.insert).not.toHaveBeenCalled()
+    expect(storage.semantic.markSuperseded).not.toHaveBeenCalled()
+    expect(result).toEqual(expect.objectContaining({ deduplicated: 1, superseded: 0, keptNotState: 0, kindMissing: 0 }))
+  })
+
+  it('a kept conflict next to a neighbour the judge calls the same claim gives a duplicate of that one', async () => {
+    const { storage, result } = await runWith(
+      [neighbour('event-1', 'Stage one of the rollout completed.', 0.95), neighbour('same-1', 'Reranker: gte.', 0.8)],
+      { same: ['same-1'], conflicts: ['event-1'], kinds: { new: 'state', 'event-1': 'event', 'same-1': 'state' } },
+    )
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('same-1', 0.1)
+    expect(storage.semantic.insert).not.toHaveBeenCalled()
+    expect(storage.semantic.markSuperseded).not.toHaveBeenCalled()
+    expect(result).toEqual(expect.objectContaining({ deduplicated: 1, keptNotState: 1, kindMissing: 0 }))
   })
 
   it('counts each kept conflict and retires only the allowed ones', async () => {
@@ -760,6 +801,7 @@ describe('deep sleep supersession retires only current-state facts', () => {
     const result = await memory.consolidate('deep')
 
     expect(result.keptNotState).toBe(1)
+    expect(result.kindMissing).toBe(0)
     expect(result.superseded).toBe(0)
     await memory.dispose()
   })
@@ -770,12 +812,14 @@ describe('supersessionRuleOutcome', () => {
     ['state', 'state', 'retire'],
     ['state', 'event', 'retire'],
     ['state', 'plan', 'kept-later-not-current'],
-    ['state', undefined, 'kept-later-not-current'],
-    ['state', 'State', 'kept-later-not-current'],
+    ['state', undefined, 'kept-kind-missing'],
+    ['state', 'State', 'kept-kind-missing'],
     ['event', 'state', 'kept-earlier-not-state'],
     ['plan', 'state', 'kept-earlier-not-state'],
-    [undefined, 'state', 'kept-earlier-not-state'],
-    ['current', 'event', 'kept-earlier-not-state'],
+    [undefined, 'state', 'kept-kind-missing'],
+    ['current', 'event', 'kept-kind-missing'],
+    ['event', 'Plan', 'kept-kind-missing'],
+    ['__proto__', 'state', 'kept-kind-missing'],
   ])('earlier %s, later %s: %s', (earlier, later, outcome) => {
     expect(supersessionRuleOutcome(earlier, later)).toBe(outcome)
   })

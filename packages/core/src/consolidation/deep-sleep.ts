@@ -1,6 +1,6 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter, SupersessionCandidate, SupersessionVerdict } from '../adapters/intelligence.js'
-import { SUPERSESSION_NEW_FACT_KEY, supersessionRuleOutcome } from '../adapters/intelligence.js'
+import { SUPERSESSION_NEW_FACT_KEY, isSupersessionFactKind, supersessionRuleOutcome } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
@@ -319,15 +319,18 @@ interface ConflictResolution {
   retire: string[]
   /** Conflicts the kind rule leaves alone: no fact is stored or retired for them. */
   keptNotState: number
+  /** Conflicts left alone because either fact's kind is missing or invalid. */
+  kindMissing: number
 }
 
 /**
  * Applies the statement-time direction and the kind rule to each conflict.
  * Only a `state` can be retired, and only by a `state` or an `event` stated
  * after it: an event stays true of its time, and a plan ends nothing. An
- * unknown kind is neither. At the same (or an unknown) time the direction
- * is open, so the pair is a tie only when both facts are states, the one
- * pair the rule retires in either direction.
+ * unknown or invalid kind is neither; such a conflict is counted in
+ * `kindMissing`, apart from the rule's own outcomes. At the same (or an
+ * unknown) time the direction is open, so the pair is a tie only when both
+ * facts are states, the one pair the rule retires in either direction.
  */
 function resolveConflicts(
   conflicts: ReadonlyArray<string>,
@@ -336,9 +339,13 @@ function resolveConflicts(
   storedStatedAt: ReadonlyMap<string, number | null>,
 ): ConflictResolution {
   const newKind = kinds?.[SUPERSESSION_NEW_FACT_KEY]
-  const out: ConflictResolution = { stale: false, tie: false, retire: [], keptNotState: 0 }
+  const out: ConflictResolution = { stale: false, tie: false, retire: [], keptNotState: 0, kindMissing: 0 }
   for (const id of conflicts) {
     const storedKind = kinds?.[id]
+    if (!isSupersessionFactKind(newKind) || !isSupersessionFactKind(storedKind)) {
+      out.kindMissing++
+      continue
+    }
     const order = compareStatementTimes(candidateStatedAt, storedStatedAt.get(id) ?? null)
     const retires =
       order > 0
@@ -360,11 +367,13 @@ function resolveConflicts(
  * later stored statement win makes the candidate stale, a state/state
  * conflict of the same time is left alone, and otherwise the candidate
  * retires every stored fact the rule lets it retire.
- * A conflicting pair is never a duplicate, so a kept conflict is stored as a
- * new fact even above DUPLICATE_COSINE. Because the judge runs before the
- * duplicate check, an update that differs from the stored fact by a word is
- * not dropped as its duplicate. Verdict ids outside the pool are ignored.
- * Throws when the judge does.
+ * A conflicting pair is never a near-duplicate, so a kept conflict is stored
+ * as a new fact even above DUPLICATE_COSINE. Because the judge runs before
+ * the duplicate check, an update that differs from the stored fact by a word
+ * is not dropped as its duplicate. Identical text cannot conflict, so a
+ * stored fact whose text equals the candidate's is never taken as a conflict
+ * and stays a duplicate whatever the judge said. Verdict ids outside the pool
+ * are ignored. Throws when the judge does.
  */
 async function judgedDecision(
   judge: NonNullable<IntelligenceAdapter['judgeSupersession']>,
@@ -373,7 +382,7 @@ async function judgedDecision(
   pool: ReadonlyArray<SemanticNeighbour>,
   storedStatedAt: ReadonlyMap<string, number | null>,
   scopedExisting: ReadonlyArray<SemanticNeighbour>,
-): Promise<{ decision: SemanticDecision; keptNotState: number }> {
+): Promise<{ decision: SemanticDecision; counts: KeptConflictCounts }> {
   const candidates: SupersessionCandidate[] = pool.map(e => ({
     id: e.item.id,
     topic: e.item.topic,
@@ -385,24 +394,32 @@ async function judgedDecision(
     candidates,
   )
   const poolIds = new Set(candidates.map(c => c.id))
-  const conflicts = [...new Set(verdict.conflicts.filter(id => poolIds.has(id)))]
+  const identical = new Set(pool.filter(e => sameContent(e.item.content, candidate.content)).map(e => e.item.id))
+  const conflicts = [...new Set(verdict.conflicts.filter(id => poolIds.has(id) && !identical.has(id)))]
   const resolved = resolveConflicts(conflicts, verdict.kinds, candidateStatedAt, storedStatedAt)
-  const keptNotState = resolved.keptNotState
-  if (resolved.stale) return { decision: { kind: 'stale' }, keptNotState }
-  if (resolved.tie) return { decision: { kind: 'tie' }, keptNotState }
-  if (resolved.retire.length > 0) return { decision: { kind: 'insert', supersededIds: resolved.retire }, keptNotState }
+  const counts = { keptNotState: resolved.keptNotState, kindMissing: resolved.kindMissing }
+  if (resolved.stale) return { decision: { kind: 'stale' }, counts }
+  if (resolved.tie) return { decision: { kind: 'tie' }, counts }
+  if (resolved.retire.length > 0) return { decision: { kind: 'insert', supersededIds: resolved.retire }, counts }
   const conflicting = new Set(conflicts)
   const sameId = verdict.same.find(id => poolIds.has(id) && !conflicting.has(id))
+  // Conflicting neighbours leave only the cosine part of the check; the
+  // exact-text part also reads the re-read pool, which holds the rows the
+  // judge saw.
   const duplicateId =
     sameId ??
-    findDuplicate(
-      candidate.content,
-      pool.filter(e => !conflicting.has(e.item.id)),
-      scopedExisting.filter(e => !conflicting.has(e.item.id)),
-    )
-  if (duplicateId) return { decision: { kind: 'duplicate', id: duplicateId }, keptNotState }
-  return { decision: { kind: 'insert', supersededIds: [] }, keptNotState }
+    findDuplicate(candidate.content, pool.filter(e => !conflicting.has(e.item.id)), [...scopedExisting, ...pool])
+  if (duplicateId) return { decision: { kind: 'duplicate', id: duplicateId }, counts }
+  return { decision: { kind: 'insert', supersededIds: [] }, counts }
 }
+
+/** Judged conflicts that changed nothing, by why. */
+interface KeptConflictCounts {
+  keptNotState: number
+  kindMissing: number
+}
+
+const NO_KEPT_CONFLICTS: KeptConflictCounts = { keptNotState: 0, kindMissing: 0 }
 
 interface JudgeContext {
   storage: StorageAdapter
@@ -420,10 +437,10 @@ async function llmDecision(
   nearestPool: ReadonlyArray<SemanticNeighbour>,
   scopedExisting: ReadonlyArray<SemanticNeighbour>,
   existing: ReadonlyArray<SemanticNeighbour>,
-): Promise<{ decision: SemanticDecision; judged: boolean; keptNotState: number }> {
+): Promise<{ decision: SemanticDecision; judged: boolean; counts: KeptConflictCounts }> {
   const pool = await rereadPool(ctx.storage, nearestPool, ctx.projectId)
   if (pool.length === 0) {
-    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, false), judged: false, keptNotState: 0 }
+    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, false), judged: false, counts: NO_KEPT_CONFLICTS }
   }
   const candidateStatedAt = await ctx.clock(candidate.sourceDigestIds)
   const storedStatedAt = await poolStatementTimes(ctx.clock, pool)
@@ -434,7 +451,7 @@ async function llmDecision(
     console.warn(
       `[deep-sleep] supersession judge failed; regex path for neighbours ${pool.map(e => e.item.id).join(',')}`,
     )
-    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, true), judged: true, keptNotState: 0 }
+    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, true), judged: true, counts: NO_KEPT_CONFLICTS }
   }
 }
 
@@ -468,7 +485,7 @@ export async function deepSleep(
   if (digests.length < minDigests) {
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
-      supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0,
+      supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
     }
   }
 
@@ -482,6 +499,7 @@ export async function deepSleep(
   let stale = 0
   let tie = 0
   let keptNotState = 0
+  let kindMissing = 0
   let graphNodesCreated = 0
   let graphEdgesCreated = 0
 
@@ -563,7 +581,8 @@ export async function deepSleep(
       const judged = await llmDecision({ storage, judge, clock, projectId }, candidate, pool, scopedExisting, existing)
       decision = judged.decision
       if (judged.judged) supersessionJudged++
-      keptNotState += judged.keptNotState
+      keptNotState += judged.counts.keptNotState
+      kindMissing += judged.counts.kindMissing
     } else {
       decision = ruleDecision(candidate, pool, scopedExisting, existing, supersession.mode !== 'off')
     }
@@ -794,6 +813,12 @@ export async function deepSleep(
     procedural++
   }
 
+  if (kindMissing > 0) {
+    console.warn(
+      `[deep-sleep] supersession judge gave no valid kind for ${kindMissing} conflict(s) this run; none retired anything`,
+    )
+  }
+
   return {
     cycle: 'deep',
     promoted,
@@ -804,6 +829,7 @@ export async function deepSleep(
     stale,
     tie,
     keptNotState,
+    kindMissing,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
   }

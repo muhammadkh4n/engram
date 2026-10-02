@@ -456,8 +456,11 @@ export interface ConsolidateResult {
    *  fact stated at the same time, so neither can be called current. */
   tie?: number
   /** Judged conflicts that changed nothing because the earlier fact is not a
-   *  current state or the later one is a plan (or a kind is unknown). */
+   *  current state or the later one is a plan. */
   keptNotState?: number
+  /** Judged conflicts that changed nothing because the judge gave no valid
+   *  kind for one of the two facts. */
+  kindMissing?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number
