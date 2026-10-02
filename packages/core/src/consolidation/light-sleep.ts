@@ -51,6 +51,7 @@ export async function lightSleep(
   let graphEdgesCreated = 0
   let graphContextKept = 0
   let graphContextDropped = 0
+  let summaryFallbacks = 0
 
   const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
 
@@ -104,6 +105,7 @@ export async function lightSleep(
               decisions = result2.decisions
             } else {
               // Level 3: heuristic fallback
+              summaryFallbacks++
               const h = heuristicSummarize(batch, TARGET_TOKENS)
               summaryText = h.text
               topics = h.topics
@@ -112,7 +114,9 @@ export async function lightSleep(
             }
           }
         } catch {
-          // On intelligence error, fall back to heuristic
+          // On intelligence error (including a reply that did not parse), fall
+          // back to the heuristic, which keeps whole source sentences
+          summaryFallbacks++
           const h = heuristicSummarize(batch, TARGET_TOKENS)
           summaryText = h.text
           topics = h.topics
@@ -262,10 +266,15 @@ export async function lightSleep(
     }
   }
 
+  if (summaryFallbacks > 0) {
+    console.warn(`[light-sleep] ${summaryFallbacks} summary fallback(s) to the heuristic summarizer this run`)
+  }
+
   return {
     cycle: 'light',
     digestsCreated,
     episodesProcessed,
+    summaryFallbacks,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
     graphContextKept: graphAvailable ? graphContextKept : undefined,

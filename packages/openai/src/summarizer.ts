@@ -397,8 +397,13 @@ export class OpenAISummarizer {
       temperature: 0.3,
     })
 
-    const raw = resp.choices[0]?.message?.content ?? '{}'
-    return this.parseSummaryResult(raw, content)
+    const choice = resp.choices[0]
+    // A reply cut at max_tokens can still close its JSON by chance; its text is
+    // then a fragment, so it is never parsed (chatCreate has already logged it).
+    if (choice?.finish_reason === 'length') {
+      throw new Error('summarize: reply cut off at max_tokens')
+    }
+    return this.parseSummaryResult(choice?.message?.content ?? '')
   }
 
   async digestTranscript(
@@ -955,30 +960,24 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
     }
   }
 
-  private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
+  /** Throws rather than guessing: the caller stores `text` as the digest, so a
+   *  raw reply or a cut of the source content must never stand in for it. */
+  private parseSummaryResult(raw: string): SummaryResult {
+    let obj: Record<string, unknown>
     try {
-      const obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
-
-      return {
-        text: typeof obj['text'] === 'string' ? obj['text'] : originalContent.slice(0, 500),
-        topics: Array.isArray(obj['topics'])
-          ? (obj['topics'] as unknown[]).filter((t): t is string => typeof t === 'string')
-          : [],
-        entities: Array.isArray(obj['entities'])
-          ? (obj['entities'] as unknown[]).filter((e): e is string => typeof e === 'string')
-          : [],
-        decisions: Array.isArray(obj['decisions'])
-          ? (obj['decisions'] as unknown[]).filter((d): d is string => typeof d === 'string')
-          : [],
-      }
+      obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
     } catch {
-      // Graceful fallback to raw text
-      return {
-        text: raw.slice(0, 500),
-        topics: [],
-        entities: [],
-        decisions: [],
-      }
+      throw new Error(`summarize: reply holds no JSON object (chars=${raw.length})`)
+    }
+    const text = obj['text']
+    if (typeof text !== 'string' || text.trim() === '') {
+      throw new Error('summarize: reply has no text')
+    }
+    return {
+      text,
+      topics: stringsOf(obj['topics']),
+      entities: stringsOf(obj['entities']),
+      decisions: stringsOf(obj['decisions']),
     }
   }
 
@@ -1011,6 +1010,10 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
       return []
     }
   }
+}
+
+function stringsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

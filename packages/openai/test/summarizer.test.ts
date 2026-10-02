@@ -89,18 +89,44 @@ describe('OpenAISummarizer', () => {
       expect(call.model).toBe('gpt-4o')
     })
 
-    it('handles malformed JSON gracefully by returning raw text as summary', async () => {
-      const rawText = 'This is not JSON at all, just plain text from the model.'
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(rawText))
+    it('throws when the reply holds no JSON object, never storing the raw reply', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('This is not JSON at all, just plain text from the model.'))
 
       const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.summarize('content', defaultOpts)
 
-      // Should not throw; text should contain the raw fallback
-      expect(result.text).toBe(rawText)
-      expect(result.topics).toEqual([])
-      expect(result.entities).toEqual([])
-      expect(result.decisions).toEqual([])
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/summarize/)
+    })
+
+    it('throws when the JSON reply has no text field', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('{}'))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/text/)
+    })
+
+    it('throws when the JSON reply has a blank text field', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ text: '   ', topics: ['a'] })))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/text/)
+    })
+
+    it('throws on a reply cut off at max_tokens, after reporting it, without parsing it', async () => {
+      const complete = JSON.stringify({ text: 'Looks complete but was cut.', topics: [], entities: [], decisions: [] })
+      mockChatCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: complete }, finish_reason: 'length' }],
+      })
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+      try {
+        const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+        await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/max_tokens/)
+        expect(stderr.mock.calls.some(([line]) => String(line).includes('summarize output hit max_tokens'))).toBe(true)
+      } finally {
+        stderr.mockRestore()
+      }
     })
 
     it('handles JSON wrapped in markdown code fences', async () => {

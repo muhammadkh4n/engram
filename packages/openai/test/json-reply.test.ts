@@ -71,12 +71,9 @@ const PARSERS: ParserCase[] = [
     run: (s) => s.summarize('source content', { mode: 'preserve_details', targetTokens: 200 }),
     expected: (text) => ({ text, topics: ['ingest'], entities: ['pm2'], decisions: ['use systemd'] }),
     proseOnly: async (s) => {
-      await expect(s.summarize('source content', { mode: 'preserve_details', targetTokens: 200 })).resolves.toEqual({
-        text: PROSE_ONLY,
-        topics: [],
-        entities: [],
-        decisions: [],
-      })
+      await expect(s.summarize('source content', { mode: 'preserve_details', targetTokens: 200 })).rejects.toThrow(
+        /summarize: reply holds no JSON object/,
+      )
     },
   },
   {
@@ -104,7 +101,7 @@ describe.each(PARSERS)('$name reads every reply shape', (parser) => {
     await expect(parser.run(new OpenAISummarizer({ apiKey: 'k' }))).resolves.toEqual(parser.expected(text))
   })
 
-  it('prose only degrades as before', async () => {
+  it('prose only fails the way the parser defines', async () => {
     mockChatCreate.mockResolvedValueOnce(reply(PROSE_ONLY))
 
     await parser.proseOnly(new OpenAISummarizer({ apiKey: 'k' }))

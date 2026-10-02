@@ -350,6 +350,78 @@ describe('lightSleep', () => {
       const insertCall = vi.mocked(storage.digests.insert).mock.calls[0][0]
       expect(insertCall.summary).toBeTruthy()
     })
+
+    it('stores the heuristic summary, never a raw reply, when the summarizer rejects an unparseable reply', async () => {
+      const session1 = makeSession('s1', 5)
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession: new Map([['s1', session1]]) })
+      const intelligence = {
+        summarize: vi.fn().mockRejectedValue(new Error('summarize: reply holds no JSON object')),
+      }
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      try {
+        await lightSleep(storage, intelligence, { minEpisodes: 5 })
+      } finally {
+        warn.mockRestore()
+      }
+
+      const summary = vi.mocked(storage.digests.insert).mock.calls[0][0].summary
+      expect(summary).toContain('Episode 1 content for s1.')
+      expect(summary.trimStart().startsWith('{')).toBe(false)
+      expect(summary.trimStart().startsWith('```')).toBe(false)
+    })
+
+    it('counts each summarizer fallback and warns once per run', async () => {
+      const episodesPerSession = new Map([
+        ['s1', makeSession('s1', 5)],
+        ['s2', makeSession('s2', 5)],
+        ['s3', makeSession('s3', 5)],
+      ])
+      const storage = makeMockStorage({ sessions: ['s1', 's2', 's3'], episodesPerSession })
+      const intelligence = {
+        summarize: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('summarize: reply cut off at max_tokens'))
+          .mockResolvedValueOnce({ text: 'A clean summary.', topics: [], entities: [], decisions: [] })
+          .mockRejectedValueOnce(new Error('summarize: reply has no text')),
+      }
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      let result
+      let warnLines: string[]
+      try {
+        result = await lightSleep(storage, intelligence, { minEpisodes: 5 })
+      } finally {
+        warnLines = warn.mock.calls.map(([line]) => String(line))
+        warn.mockRestore()
+      }
+
+      expect(result.digestsCreated).toBe(3)
+      expect(result.summaryFallbacks).toBe(2)
+      const fallbackLines = warnLines.filter(line => line.includes('summary fallback'))
+      expect(fallbackLines).toHaveLength(1)
+      expect(fallbackLines[0]).toContain('2 summary fallback')
+    })
+
+    it('reports zero fallbacks and logs no fallback line when every summary parses', async () => {
+      const storage = makeMockStorage({ sessions: ['s1'], episodesPerSession: new Map([['s1', makeSession('s1', 5)]]) })
+      const intelligence = {
+        summarize: vi.fn().mockResolvedValue({ text: 'A clean summary.', topics: [], entities: [], decisions: [] }),
+      }
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      let result
+      let warnLines: string[]
+      try {
+        result = await lightSleep(storage, intelligence, { minEpisodes: 5 })
+      } finally {
+        warnLines = warn.mock.calls.map(([line]) => String(line))
+        warn.mockRestore()
+      }
+
+      expect(result.summaryFallbacks).toBe(0)
+      expect(warnLines.some(line => line.includes('summary fallback'))).toBe(false)
+    })
   })
 
   // -------------------------------------------------------------------------

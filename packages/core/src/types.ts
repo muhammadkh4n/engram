@@ -443,6 +443,9 @@ export interface ConsolidateResult {
   cycle: string
   digestsCreated?: number
   episodesProcessed?: number
+  /** Light-sleep batches summarized by the heuristic because the
+   *  intelligence summarizer failed or returned an over-budget summary. */
+  summaryFallbacks?: number
   promoted?: number
   procedural?: number
   deduplicated?: number
