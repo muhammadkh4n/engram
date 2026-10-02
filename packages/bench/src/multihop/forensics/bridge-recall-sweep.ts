@@ -123,6 +123,8 @@ async function main(): Promise<void> {
       const result = await iterativeRecall(
         item.question,
         {
+          // Undated: multi-hop items are encyclopedia paragraphs with no
+          // question date, so expansion gets no reference date here.
           recall: async (query) => {
             const recalled = await memory.recall(query, { strategyOverride: { maxResults: RECALL_POOL } })
             assertRecallNotDegraded(recalled, `${item.id}: ${query}`)

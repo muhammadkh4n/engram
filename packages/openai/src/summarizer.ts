@@ -14,7 +14,7 @@ import type {
 } from '@engram-mem/core'
 import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
-import { assertTimeZone, calendarDateIn } from './time-zone.js'
+import { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
 export interface OpenAISummarizerOptions {
   apiKey: string
@@ -947,13 +947,16 @@ const MAX_EXPANSION_TERMS = 5
 
 /**
  * System prompt for query expansion. With a valid reference date the prompt
- * opens with it (its calendar day in `timeZone`, so a user's "yesterday"
- * resolves against the user's own day, not the server's) and asks for the
+ * opens with it (its weekday and calendar day in `timeZone`, so a user's
+ * "yesterday" resolves against the user's own day, not the server's, and the
+ * model never has to work out which weekday today is) and asks for the
  * concrete dates relative phrases resolve to; without one it forbids concrete
  * dates, since any date the model produced would be invented.
  */
 function expansionSystemPrompt(now: Date | undefined, timeZone: string): string {
-  const today = now !== undefined && !Number.isNaN(now.getTime()) ? calendarDateIn(now, timeZone) : null
+  const today = now !== undefined && !Number.isNaN(now.getTime())
+    ? `${weekdayIn(now, timeZone)}, ${calendarDateIn(now, timeZone)}`
+    : null
   const temporalRule = today !== null
     ? [
         '2. For temporal queries, include BOTH relative phrases ("last week") AND the',

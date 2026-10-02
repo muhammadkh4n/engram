@@ -135,9 +135,9 @@ export interface SweepRecallConfig {
   maxK: number
   synthesize: boolean
   /**
-   * Question date. `formatted` mode always passes it, as the server passes the
-   * request time; `sessions` mode passes it only with `synthesize`, as the
-   * anchor for now-relative synthesis lines.
+   * Question date, passed in both modes as the server passes the request time:
+   * query expansion anchors relative dates to it, and with `synthesize` it is
+   * also the anchor for now-relative synthesis lines.
    */
   now?: Date | null
   /**
@@ -206,12 +206,8 @@ export function sweepRecallOptions(cfg: SweepRecallConfig): Record<string, unkno
   }
   return {
     strategyOverride: { maxResults: cfg.maxK },
-    ...(cfg.synthesize
-      ? {
-          synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true },
-          ...(cfg.now ? { now: cfg.now } : {}),
-        }
-      : {}),
+    ...(cfg.now ? { now: cfg.now } : {}),
+    ...(cfg.synthesize ? { synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true } } : {}),
   }
 }
 

@@ -34,6 +34,7 @@ import * as fs from 'node:fs'
 import { LoCoMoAdapter } from '../adapter.js'
 import { createBenchMemory } from '../../memory-factory.js'
 import { assertRecallNotDegraded } from '../../refuse-degraded.js'
+import { latestSessionDate } from '../session-date.js'
 import type { LoCoMoConversationFile } from '../types.js'
 import type { BenchmarkOpts } from '../../types.js'
 
@@ -108,10 +109,12 @@ async function main(): Promise<void> {
 
       const evalStart = Date.now()
       const convRows: PerQResult[] = []
+      const now = latestSessionDate(conv)
       for (let qi = 0; qi < conv.qa.length; qi++) {
         const qa = conv.qa[qi]!
         const result = await memory.recall(qa.question, {
           strategyOverride: { maxResults: args.maxResults },
+          ...(now ? { now } : {}),
         })
         assertRecallNotDegraded(result, `${convId}: ${qa.question}`)
 

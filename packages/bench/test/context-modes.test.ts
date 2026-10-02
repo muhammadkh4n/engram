@@ -152,6 +152,14 @@ describe('sweepRecallOptions', () => {
     })
   })
 
+  it('sessions mode passes the question date with synthesize off', () => {
+    const now = new Date('2023-05-30T00:00:00Z')
+    expect(sweepRecallOptions({ contextMode: 'sessions', maxK: 30, synthesize: false, now })).toEqual({
+      strategyOverride: { maxResults: 30 },
+      now,
+    })
+  })
+
   it('sessions mode with synthesis keeps the evidence cap and the question-date anchor', () => {
     const now = new Date('2023-05-30T00:00:00Z')
     expect(sweepRecallOptions({ contextMode: 'sessions', maxK: 30, synthesize: true, now })).toEqual({

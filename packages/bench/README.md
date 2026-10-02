@@ -344,6 +344,17 @@ Files generated:
 - `longmemeval-results.json` — Full results object
 - `longmemeval-predictions.jsonl` — JSONL format for LLM-as-judge evaluation
 
+## Reference dates
+
+Every bench recall passes `now` when its data carries a date, as the server passes the request time,
+so query expansion resolves "last week" against the day the question was asked:
+
+- LongMemEval (the adapter, both sweep modes and the fusion grid): the question's `question_date`.
+- LoCoMo (the adapter, the judge and the local recall sweep): the conversation's latest
+  `session_N_date_time`, read as wall-clock time in the process zone.
+- Replay: each logged recall's own time; the probe: one fixed time per run.
+- Multi-hop (MuSiQue, HotpotQA, 2Wiki): undated, since the items carry no date.
+
 ## Metrics
 
 ### LoCoMo

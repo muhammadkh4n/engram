@@ -11,6 +11,7 @@ import { createBenchMemory } from '../memory-factory.js'
 import { mergeAssociationsIntoScored } from '../merge-associations.js'
 import { wipeBenchGraph } from '../bench-graph.js'
 import { assertRecallNotDegraded } from '../refuse-degraded.js'
+import { latestSessionDate } from './session-date.js'
 
 export class LoCoMoAdapter {
   async loadDataset(dataPath: string): Promise<LoCoMoConversationFile[]> {
@@ -195,13 +196,14 @@ export class LoCoMoAdapter {
     for (const conv of conversations) {
       const convId = conv.sample_id
       const qaPredictions: LoCoMoQAPrediction[] = []
+      const now = latestSessionDate(conv)
 
       for (const qa of conv.qa) {
         // Gate-corpus filter: score only the requested categories (e.g. [2,3]
         // multi-hop/temporal). The conversation was already ingested whole, so
         // the graph the recall traverses is unaffected — only scoring narrows.
         if (opts?.categories && !opts.categories.includes(qa.category)) continue
-        const recallResult = await memory.recall(qa.question)
+        const recallResult = await memory.recall(qa.question, now ? { now } : {})
         assertRecallNotDegraded(recallResult, `${convId}: ${qa.question}`)
         const topMemories = mergeAssociationsIntoScored(
           recallResult, opts?.mergeAssociationsIntoTopK,

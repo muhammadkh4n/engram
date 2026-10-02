@@ -7,7 +7,7 @@ export { OpenAIEmbeddingService } from './embeddings.js'
 export type { OpenAIEmbeddingServiceOptions } from './embeddings.js'
 export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM, DEFAULT_CHAT_MODEL } from './summarizer.js'
 export type { OpenAISummarizerOptions, ChatReasoningMode, TranscriptDigestKind } from './summarizer.js'
-export { assertTimeZone, calendarDateIn } from './time-zone.js'
+export { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
 export interface OpenAIIntelligenceOptions {
   apiKey: string

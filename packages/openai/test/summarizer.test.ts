@@ -430,7 +430,7 @@ describe('OpenAISummarizer', () => {
     it('opens the prompt with the reference date and asks for dates computed from it', async () => {
       const prompt = await expansionPrompt({ now: new Date('2023-05-14T09:30:00Z') })
 
-      expect(prompt.split('\n')[0]).toBe("Today's date is 2023-05-14.")
+      expect(prompt.split('\n')[0]).toBe("Today's date is Sunday, 2023-05-14.")
       expect(prompt).toContain("concrete dates they refer to, computed from today's date")
       expect(prompt).not.toContain('relative phrases only')
     })
@@ -446,12 +446,12 @@ describe('OpenAISummarizer', () => {
       expect(prompt).not.toMatch(/Monday|Tuesday|May 7/)
     })
 
-    it('states the calendar date of the reference instant in the configured zone', async () => {
+    it('states the weekday and calendar date of the reference instant in the configured zone', async () => {
       const now = new Date('2026-10-01T22:00:00Z')
 
-      expect((await expansionPrompt({ now }, 'Asia/Karachi')).split('\n')[0]).toBe("Today's date is 2026-10-02.")
-      expect((await expansionPrompt({ now }, 'UTC')).split('\n')[0]).toBe("Today's date is 2026-10-01.")
-      expect((await expansionPrompt({ now })).split('\n')[0]).toBe("Today's date is 2026-10-01.")
+      expect((await expansionPrompt({ now }, 'Asia/Karachi')).split('\n')[0]).toBe("Today's date is Friday, 2026-10-02.")
+      expect((await expansionPrompt({ now }, 'UTC')).split('\n')[0]).toBe("Today's date is Thursday, 2026-10-01.")
+      expect((await expansionPrompt({ now })).split('\n')[0]).toBe("Today's date is Thursday, 2026-10-01.")
     })
 
     it('refuses an unknown time zone when constructed', () => {

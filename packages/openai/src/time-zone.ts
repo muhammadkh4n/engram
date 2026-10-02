@@ -24,3 +24,8 @@ export function calendarDateIn(instant: Date, timeZone: string): string {
   const part = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? ''
   return `${part('year').padStart(4, '0')}-${part('month')}-${part('day')}`
 }
+
+/** The English weekday name ("Friday") that `instant` falls on in `timeZone`. */
+export function weekdayIn(instant: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long' }).format(instant)
+}

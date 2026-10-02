@@ -162,7 +162,7 @@ describe('chat reasoning control', () => {
     const intel = openaiIntelligence({ apiKey: 'k', timeZone: 'Asia/Karachi' })
     await intel.expandQuery!('q', { now: new Date('2026-10-01T22:00:00Z') })
     const body = mockChatCreate.mock.calls[0]![0] as { messages: Array<{ content: string }> }
-    expect(body.messages[0]!.content.split('\n')[0]).toBe("Today's date is 2026-10-02.")
+    expect(body.messages[0]!.content.split('\n')[0]).toBe("Today's date is Friday, 2026-10-02.")
     expect(() => openaiIntelligence({ apiKey: 'k', timeZone: 'Not/AZone' })).toThrow(/not a valid IANA time zone name/)
   })
 

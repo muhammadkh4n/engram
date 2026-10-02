@@ -21,7 +21,11 @@ import type { BenchRecallResult, BenchScoredMemory } from '../merge-associations
  * adapter.
  */
 export interface IterativeRecallDeps {
-  /** Bound recall over the memory under test. For A4 the graph is OFF. */
+  /**
+   * Bound recall over the memory under test. For A4 the graph is OFF. The
+   * caller binds any reference date (`now`) into this closure, since every
+   * round of one question shares it.
+   */
   recall: (query: string) => Promise<BenchRecallResult>
   /**
    * The agentic step: given the original multi-hop question and the memories
