@@ -174,10 +174,11 @@ describe('buildEvalStack', () => {
     expect(h.recalls.at(-1)).toEqual({ query: 'where is the env file', opts: expected })
     expect(out.recallOpts).toEqual(expected)
     expect(out.formatted).toBe(result(true).formatted)
-    expect(out.items).toEqual([
+    expect(out.items.map(({ section, id, line }) => ({ section, id, line }))).toEqual([
       { section: 'recalled', id: 'ep-1', line: '- [episode · user · 2026-09-01] the deploy script reads the service env file' },
       { section: 'related', id: 'sem-7', line: '- [semantic · 2026-08-20] the service env file lives under /etc' },
     ])
+    for (const item of out.items) expect(out.formatted.slice(item.start, item.end)).toBe(item.line)
   })
 
   it('rejects arguments memory_recall would reject', async () => {

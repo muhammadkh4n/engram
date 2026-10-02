@@ -172,6 +172,9 @@ export interface EvalItem {
   section: string
   id: string | null
   line: string
+  /** Offsets of `line` in `formatted`, as the payload reported them. */
+  start: number
+  end: number
 }
 
 export interface EvalRecall {
@@ -219,6 +222,8 @@ function payloadItems(result: EvalRecallResult): EvalItem[] {
     section: it.section,
     id: it.id ?? null,
     line: result.formatted.slice(it.start, it.end),
+    start: it.start,
+    end: it.end,
   }))
 }
 
