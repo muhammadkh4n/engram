@@ -107,6 +107,12 @@ export interface Digest {
    * Null or absent: extraction is still pending, so a failed run retries it.
    */
   factsExtractedAt?: Date | null
+  /**
+   * Failed fact-extraction calls on this digest. Deep sleep stops retrying a
+   * digest once this reaches its attempt cap; the digest stays unextracted.
+   * Absent counts as 0.
+   */
+  factExtractionAttempts?: number
 }
 
 export interface SemanticMemory {
@@ -475,6 +481,9 @@ export interface ConsolidateResult {
   /** Deep-sleep digests stamped with no fact read because none of their
    *  source episodes is live. */
   noEpisodes?: number
+  /** Deep-sleep digests whose failure this run reached the attempt cap; no
+   *  later run retries them. */
+  extractionExhausted?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

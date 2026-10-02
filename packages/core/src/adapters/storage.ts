@@ -111,9 +111,15 @@ export interface DigestStorage {
   count?(): Promise<number>
   /**
    * Up to `limit` digests whose facts have not been extracted yet
-   * (`factsExtractedAt` unset), oldest `createdAt` first.
+   * (`factsExtractedAt` unset) and whose failed attempts are below
+   * `maxAttempts`, oldest `createdAt` first.
    */
-  getPendingFactExtraction(limit: number): Promise<Digest[]>
+  getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]>
+  /**
+   * Add one failed fact-extraction attempt to a digest, atomically, and
+   * return its attempt count after the increment (0 when no such digest).
+   */
+  recordFactExtractionFailure(id: string): Promise<number>
   /** Stamp one digest's `factsExtractedAt`, removing it from the pending set. */
   markFactsExtracted(id: string, at: Date): Promise<void>
 }

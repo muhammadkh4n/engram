@@ -96,9 +96,19 @@ confidence (0 to 1) is how clearly the episodes state the claim.`
 /** Episode text per extraction call. Episodes are never cut, so a single
  *  episode above this goes alone in its own call. */
 const FACTS_CHUNK_MAX_CHARS = 24_000
+/** Reply budget: a base plus tokens per 1,000 chars of episode text. Facts
+ *  scale with the text they are drawn from, not with how many turns carry it;
+ *  a per-episode budget starves a few long turns, and their call then fails on
+ *  every run. */
 const FACTS_REPLY_BASE_TOKENS = 300
-const FACTS_REPLY_TOKENS_PER_EPISODE = 150
+const FACTS_REPLY_TOKENS_PER_1K_CHARS = 110
 const FACTS_REPLY_MAX_TOKENS = 3_000
+
+interface FactEpisodeChunk {
+  episodes: FactSourceEpisode[]
+  /** Summed `content.length` of the chunk's episodes. */
+  chars: number
+}
 
 const ENTITY_SYSTEM_PROMPT = `You are a named-entity extractor for a cognitive memory graph. Given text from a conversation episode, identify REAL entities worth storing as graph nodes for retrieval.
 
@@ -629,10 +639,8 @@ export class OpenAISummarizer {
     return facts
   }
 
-  private async extractFactsChunk(
-    episodes: ReadonlyArray<FactSourceEpisode>,
-    projectId: string | null,
-  ): Promise<ExtractedFact[]> {
+  private async extractFactsChunk(chunk: FactEpisodeChunk, projectId: string | null): Promise<ExtractedFact[]> {
+    const { episodes, chars } = chunk
     const resp = await this.chatCreate('extractFacts', {
       model: this.model,
       messages: [
@@ -640,7 +648,7 @@ export class OpenAISummarizer {
         { role: 'user', content: buildFactsUserMessage(episodes, projectId) },
       ],
       max_tokens: Math.min(
-        FACTS_REPLY_BASE_TOKENS + FACTS_REPLY_TOKENS_PER_EPISODE * episodes.length,
+        FACTS_REPLY_BASE_TOKENS + Math.ceil((chars * FACTS_REPLY_TOKENS_PER_1K_CHARS) / 1000),
         FACTS_REPLY_MAX_TOKENS,
       ),
       temperature: 0,
@@ -650,7 +658,7 @@ export class OpenAISummarizer {
     // A cut reply can still close its JSON after dropping later facts, so it is
     // never parsed (chatCreate has already logged it).
     if (choice?.finish_reason === 'length') {
-      throw new Error(`extractFacts: reply cut off at max_tokens (${episodes.length} episodes)`)
+      throw new Error(`extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
     }
     const raw = choice?.message?.content ?? ''
     let reply: Record<string, unknown>
@@ -1096,20 +1104,20 @@ function isFactsReply(value: unknown): boolean {
 
 /** Whole-episode chunks of at most FACTS_CHUNK_MAX_CHARS episode text each,
  *  in input order; an episode longer than that is a chunk of its own. */
-function chunkFactEpisodes(episodes: ReadonlyArray<FactSourceEpisode>): FactSourceEpisode[][] {
-  const chunks: FactSourceEpisode[][] = []
+function chunkFactEpisodes(episodes: ReadonlyArray<FactSourceEpisode>): FactEpisodeChunk[] {
+  const chunks: FactEpisodeChunk[] = []
   let current: FactSourceEpisode[] = []
   let chars = 0
   for (const ep of episodes) {
     if (current.length > 0 && chars + ep.content.length > FACTS_CHUNK_MAX_CHARS) {
-      chunks.push(current)
+      chunks.push({ episodes: current, chars })
       current = []
       chars = 0
     }
     current.push(ep)
     chars += ep.content.length
   }
-  if (current.length > 0) chunks.push(current)
+  if (current.length > 0) chunks.push({ episodes: current, chars })
   return chunks
 }
 

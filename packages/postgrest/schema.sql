@@ -196,6 +196,24 @@ END; $$;
 
 
 --
+-- Name: engram_digest_fact_attempt(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Records one failed fact-extraction call on a digest and returns its attempt
+-- count after the increment, in one statement, so two concurrent failures
+-- both count. Deep sleep stops retrying a digest at its attempt cap. An
+-- unknown id updates nothing and returns NULL.
+CREATE OR REPLACE FUNCTION public.engram_digest_fact_attempt(p_id uuid) RETURNS integer
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  UPDATE memory_digests SET fact_extraction_attempts = fact_extraction_attempts + 1
+    WHERE id = p_id
+    RETURNING fact_extraction_attempts;
+$$;
+
+
+--
 -- Name: engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1004,6 +1022,13 @@ ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS last_shown timesta
 --
 ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_extracted_at timestamp with time zone;
 
+--
+-- Failed fact-extraction calls per digest. Deep sleep reads only digests below
+-- its attempt cap, so a digest that fails every time cannot hold its place at
+-- the head of the oldest-first pending batch. A rederive resets it to 0.
+--
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS fact_extraction_attempts integer DEFAULT 0 NOT NULL;
+
 
 --
 -- memory_episodes.fts converge: older installs generated fts from a since-removed
@@ -1554,6 +1579,7 @@ $smoke$;
 REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -1579,6 +1605,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -1599,6 +1626,7 @@ $$;
 GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;

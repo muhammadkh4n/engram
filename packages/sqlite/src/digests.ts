@@ -136,13 +136,14 @@ export class SqliteDigestStorage implements DigestStorage {
     return result
   }
 
-  async getPendingFactExtraction(limit: number): Promise<Digest[]> {
+  async getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]> {
     const rows = this.db
       .prepare(
-        `SELECT * FROM digests WHERE facts_extracted_at IS NULL
+        `SELECT * FROM digests
+         WHERE facts_extracted_at IS NULL AND fact_extraction_attempts < ?
          ORDER BY created_at ASC, rowid ASC LIMIT ?`
       )
-      .all(limit) as DigestRow[]
+      .all(maxAttempts, limit) as DigestRow[]
     return rows.map((r) => this.rowToDigest(r))
   }
 
@@ -150,6 +151,16 @@ export class SqliteDigestStorage implements DigestStorage {
     this.db
       .prepare('UPDATE digests SET facts_extracted_at = julianday(?) WHERE id = ?')
       .run(at.toISOString(), id)
+  }
+
+  async recordFactExtractionFailure(id: string): Promise<number> {
+    const row = this.db
+      .prepare(
+        `UPDATE digests SET fact_extraction_attempts = fact_extraction_attempts + 1
+         WHERE id = ? RETURNING fact_extraction_attempts`
+      )
+      .get(id) as { fact_extraction_attempts: number } | undefined
+    return row?.fact_extraction_attempts ?? 0
   }
 
   private rowToDigest(row: DigestRow): Digest {
@@ -170,6 +181,7 @@ export class SqliteDigestStorage implements DigestStorage {
       createdAt: julianToDate(row.created_at)!,
       projectId: row.project_id ?? null,
       factsExtractedAt: julianToDate(row.facts_extracted_at),
+      factExtractionAttempts: row.fact_extraction_attempts ?? 0,
     }
   }
 
@@ -192,4 +204,5 @@ interface DigestRow {
   created_at: number
   project_id: string | null
   facts_extracted_at: number | null
+  fact_extraction_attempts: number
 }

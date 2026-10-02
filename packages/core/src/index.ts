@@ -8,6 +8,7 @@ export {
   SUPERSESSION_MIN_COSINE,
   DEFAULT_SUPERSESSION,
   DEFAULT_MAX_DIGESTS,
+  DEFAULT_MAX_EXTRACTION_ATTEMPTS,
 } from './consolidation/deep-sleep.js'
 export { extractDigestFacts } from './consolidation/fact-candidates.js'
 export type { FactCandidate, DigestFactExtraction } from './consolidation/fact-candidates.js'

@@ -140,11 +140,12 @@ export class PostgRestDigestStorage implements DigestStorage {
     return counts
   }
 
-  async getPendingFactExtraction(limit: number): Promise<Digest[]> {
+  async getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]> {
     const { data, error } = await this.client
       .from('memory_digests')
       .select('*')
       .is('facts_extracted_at', null)
+      .lt('fact_extraction_attempts', maxAttempts)
       .order('created_at', { ascending: true })
       .order('id', { ascending: true })
       .limit(limit)
@@ -158,6 +159,12 @@ export class PostgRestDigestStorage implements DigestStorage {
       .update({ facts_extracted_at: at.toISOString() })
       .eq('id', id)
     if (error) throw new Error(`Digest markFactsExtracted failed: ${error.message}`)
+  }
+
+  async recordFactExtractionFailure(id: string): Promise<number> {
+    const { data, error } = await this.client.rpc('engram_digest_fact_attempt', { p_id: id })
+    if (error) throw new Error(`Digest recordFactExtractionFailure failed: ${error.message}`)
+    return typeof data === 'number' ? data : 0
   }
 
   /**
@@ -193,6 +200,7 @@ interface DigestRow {
   created_at: string
   project_id?: string | null
   facts_extracted_at?: string | null
+  fact_extraction_attempts?: number | null
 }
 
 interface RecallRow {
@@ -222,6 +230,7 @@ function rowToDigest(row: DigestRow): Digest {
     createdAt: new Date(row.created_at),
     projectId: row.project_id ?? null,
     factsExtractedAt: row.facts_extracted_at ? new Date(row.facts_extracted_at) : null,
+    factExtractionAttempts: row.fact_extraction_attempts ?? 0,
   }
 }
 

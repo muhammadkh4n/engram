@@ -137,16 +137,38 @@ describe('OpenAISummarizer.extractFacts', () => {
     expect(userMessage(0)).toMatch(/project: none/i)
   })
 
-  it('scales max_tokens with the episodes in the call, capped at 3000', async () => {
+  it('sizes max_tokens by the characters of episode text in the call, capped at 3000', async () => {
     mockChatCreate.mockResolvedValue(factsReply([]))
     const s = new OpenAISummarizer({ apiKey: 'k' })
 
-    await s.extractFacts({ episodes: [episode('a', 'x'), episode('b', 'y')], projectId: null })
-    const many = Array.from({ length: 30 }, (_, i) => episode(`e${i}`, `short ${i}`))
+    // 1,000 + 500 chars -> 300 + ceil(1500 x 110 / 1000) = 465
+    await s.extractFacts({ episodes: [episode('a', 'x'.repeat(1000)), episode('b', 'y'.repeat(500))], projectId: null })
+    // Many short episodes no longer inflate the budget: 30 x 3 chars -> 300 + ceil(9.9) = 310
+    const many = Array.from({ length: 30 }, (_, i) => episode(`e${i}`, 'abc'))
     await s.extractFacts({ episodes: many, projectId: null })
+    // A full 24,000-char chunk -> 300 + 2640 = 2940
+    await s.extractFacts({ episodes: [episode('c', 'z'.repeat(24_000))], projectId: null })
+    // One oversized episode goes alone and the budget stops at the cap
+    await s.extractFacts({ episodes: [episode('d', 'w'.repeat(40_000))], projectId: null })
 
-    expect(call(0).max_tokens).toBe(600)
-    expect(call(1).max_tokens).toBe(3000)
+    expect(call(0).max_tokens).toBe(465)
+    expect(call(1).max_tokens).toBe(310)
+    expect(call(2).max_tokens).toBe(2940)
+    expect(call(3).max_tokens).toBe(3000)
+  })
+
+  it('budgets each chunk by its own characters', async () => {
+    mockChatCreate.mockResolvedValue(factsReply([]))
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    await s.extractFacts({
+      episodes: [episode('a', 'a'.repeat(20_000)), episode('b', 'b'.repeat(10_000)), episode('c', 'c'.repeat(100))],
+      projectId: null,
+    })
+
+    expect(mockChatCreate).toHaveBeenCalledTimes(2)
+    expect(call(0).max_tokens).toBe(300 + 2200)
+    expect(call(1).max_tokens).toBe(300 + Math.ceil(10_100 * 110 / 1000))
   })
 
   it('splits a large batch into whole-episode chunks and numbers each call from E1', async () => {
@@ -170,8 +192,8 @@ describe('OpenAISummarizer.extractFacts', () => {
     expect(second).toContain(big('c'))
     expect(second).toMatch(/E1\b/)
     expect(second).not.toMatch(/E3\b/)
-    expect(call(0).max_tokens).toBe(600)
-    expect(call(1).max_tokens).toBe(450)
+    expect(call(0).max_tokens).toBe(2500)
+    expect(call(1).max_tokens).toBe(1400)
     expect(facts.map((f) => f.episodeIds)).toEqual([['ep-b'], ['ep-c']])
   })
 

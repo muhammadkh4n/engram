@@ -392,4 +392,15 @@ export function runMigrations(db: Database.Database): void {
     `)
     db.pragma('user_version = 7')
   }
+
+  if (currentVersion < 8) {
+    // V8: failed fact-extraction calls per digest. Deep sleep reads only
+    // digests below its attempt cap, so one that fails every time cannot hold
+    // its place at the head of the oldest-first pending batch.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'fact_extraction_attempts')) {
+      db.exec('ALTER TABLE digests ADD COLUMN fact_extraction_attempts INTEGER NOT NULL DEFAULT 0')
+    }
+    db.pragma('user_version = 8')
+  }
 }

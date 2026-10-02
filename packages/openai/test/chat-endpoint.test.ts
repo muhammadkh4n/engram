@@ -110,7 +110,7 @@ describe('chat reasoning control', () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k' }))
     expect(bodies).toHaveLength(9)
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 450])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 304])
   })
 
   it("'off': sends reasoning effort none on every call site, caps unchanged, provider still merged", async () => {
@@ -123,13 +123,13 @@ describe('chat reasoning control', () => {
       expect(b['reasoning']).toEqual({ effort: 'none' })
       expect(b['provider']).toEqual(prefs)
     }
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 450])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 304])
   })
 
   it("'default': every cap raised by the default 2048-token headroom, no reasoning key", async () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k', reasoning: 'default' }))
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548, 2448, 2448, 2548, 2498])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548, 2448, 2448, 2548, 2352])
   })
 
   it("'default': honours a configured headroom", async () => {

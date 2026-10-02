@@ -101,7 +101,7 @@ describe('SqliteDigestStorage', () => {
     it('a new digest is pending', async () => {
       const digest = await insertAt('fresh', 2461000.5)
 
-      const pending = await store.getPendingFactExtraction(10)
+      const pending = await store.getPendingFactExtraction(10, 3)
 
       expect(pending.map((d) => d.id)).toEqual([digest.id])
       expect(pending[0].factsExtractedAt).toBeNull()
@@ -112,10 +112,10 @@ describe('SqliteDigestStorage', () => {
       const newest = await insertAt('newest', 2461002.5)
       const oldest = await insertAt('oldest', 2461000.5)
 
-      expect((await store.getPendingFactExtraction(10)).map((d) => d.id)).toEqual([
+      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([
         oldest.id, middle.id, newest.id,
       ])
-      expect((await store.getPendingFactExtraction(2)).map((d) => d.id)).toEqual([
+      expect((await store.getPendingFactExtraction(2, 3)).map((d) => d.id)).toEqual([
         oldest.id, middle.id,
       ])
     })
@@ -127,10 +127,43 @@ describe('SqliteDigestStorage', () => {
 
       await store.markFactsExtracted(done.id, at)
 
-      expect((await store.getPendingFactExtraction(10)).map((d) => d.id)).toEqual([open.id])
+      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([open.id])
       const [stamped] = await store.getBySession('s1')
       expect(stamped.id).toBe(done.id)
       expect(Math.abs(stamped.factsExtractedAt!.getTime() - at.getTime())).toBeLessThan(5)
+    })
+
+    it('a new digest has no failed attempts', async () => {
+      await insertAt('fresh', 2461000.5)
+
+      const [digest] = await store.getPendingFactExtraction(10, 3)
+
+      expect(digest.factExtractionAttempts).toBe(0)
+    })
+
+    it('recordFactExtractionFailure adds one attempt and returns the new count', async () => {
+      const digest = await insertAt('flaky', 2461000.5)
+
+      expect(await store.recordFactExtractionFailure(digest.id)).toBe(1)
+      expect(await store.recordFactExtractionFailure(digest.id)).toBe(2)
+
+      const [read] = await store.getBySession('s1')
+      expect(read.factExtractionAttempts).toBe(2)
+    })
+
+    it('recordFactExtractionFailure returns 0 for an unknown digest', async () => {
+      expect(await store.recordFactExtractionFailure('no-such-digest')).toBe(0)
+    })
+
+    it('leaves a digest at the attempt cap out of the pending set, still unstamped', async () => {
+      const stuck = await insertAt('stuck', 2461000.5)
+      const newer = await insertAt('newer', 2461001.5)
+      for (let i = 0; i < 3; i++) await store.recordFactExtractionFailure(stuck.id)
+
+      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([newer.id])
+      expect((await store.getPendingFactExtraction(10, 4)).map((d) => d.id)).toEqual([stuck.id, newer.id])
+      const [read] = await store.getBySession('s1')
+      expect(read.factsExtractedAt).toBeNull()
     })
   })
 })

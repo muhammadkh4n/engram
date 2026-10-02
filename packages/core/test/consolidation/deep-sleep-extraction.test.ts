@@ -3,6 +3,7 @@ import { deepSleep, DEFAULT_MAX_DIGESTS } from '../../src/consolidation/deep-sle
 import { extractDigestFacts } from '../../src/consolidation/fact-candidates.js'
 import type { ExtractFactsInput, ExtractedFact, IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type { Episode } from '../../src/types.js'
+import { CircuitOpenError } from '../../src/resilience/circuit-breaker.js'
 import { makeDigest, makeEpisode, makeMockStorage, resetIdCounter } from './mock-storage.js'
 
 const at = (iso: string) => new Date(iso)
@@ -49,7 +50,7 @@ describe('deep sleep reads each digest once, from its episodes', () => {
     expect(second).toEqual(expect.objectContaining({ promoted: 0, deduplicated: 0, extractionFailed: 0, noEpisodes: 0 }))
     expect(storage.semantic.insert).toHaveBeenCalledTimes(3)
     expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual(digests.map(d => d.id))
-    expect(await storage.digests.getPendingFactExtraction(10)).toEqual([])
+    expect(await storage.digests.getPendingFactExtraction(10, 3)).toEqual([])
   })
 
   it('leaves a digest whose extraction throws pending, counts it, moves on, and retries it on the next run', async () => {
@@ -65,7 +66,7 @@ describe('deep sleep reads each digest once, from its episodes', () => {
     expect(first).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 1, noEpisodes: 0 }))
     expect(storage.digests.markFactsExtracted).toHaveBeenCalledTimes(1)
     expect(storage.digests.markFactsExtracted).toHaveBeenCalledWith(working!.id, expect.any(Date))
-    expect((await storage.digests.getPendingFactExtraction(10)).map(d => d.id)).toEqual([failing!.id])
+    expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual([failing!.id])
     expect(warn.mock.calls.map(c => c.join(' ')).join('\n')).toContain(failing!.id)
 
     const retry = await deepSleep(storage, intelligence, { minDigests: 1 })
@@ -74,7 +75,7 @@ describe('deep sleep reads each digest once, from its episodes', () => {
     expect(intelligence.extractFacts).toHaveBeenLastCalledWith(
       expect.objectContaining({ episodes: [expect.objectContaining({ id: eps[0]!.id })] }),
     )
-    expect(await storage.digests.getPendingFactExtraction(10)).toEqual([])
+    expect(await storage.digests.getPendingFactExtraction(10, 3)).toEqual([])
   })
 
   it('never hands a forgotten episode to the extractor, and stamps a digest with no live episode without reading it', async () => {
@@ -182,7 +183,7 @@ describe('deep sleep reads each digest once, from its episodes', () => {
 
     const ran = await deepSleep(storage, intelligence, { minDigests: 2, maxDigests: 2 })
 
-    expect(storage.digests.getPendingFactExtraction).toHaveBeenLastCalledWith(2)
+    expect(storage.digests.getPendingFactExtraction).toHaveBeenLastCalledWith(2, 3)
     expect(ran.promoted).toBe(2)
     const extracted = intelligence.extractFacts.mock.calls.map(c => (c[0] as ExtractFactsInput).episodes[0]!.content)
     expect(extracted).toEqual(['turn 4', 'turn 3'])
@@ -192,7 +193,96 @@ describe('deep sleep reads each digest once, from its episodes', () => {
     const storage = makeMockStorage()
     await deepSleep(storage, extractor(), { minDigests: 0 })
     expect(DEFAULT_MAX_DIGESTS).toBe(50)
-    expect(storage.digests.getPendingFactExtraction).toHaveBeenCalledWith(50)
+    expect(storage.digests.getPendingFactExtraction).toHaveBeenCalledWith(50, 3)
+  })
+})
+
+describe('a digest that keeps failing cannot jam the pending queue', () => {
+  beforeEach(() => {
+    resetIdCounter()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Rejects for any call whose episodes include `content`, extracts the rest. */
+  function failingOn(content: string, error: () => Error = () => new Error('reply cut off at max_tokens')) {
+    return extractor(async (input) => {
+      if (input.episodes.some(e => e.content === content)) throw error()
+      return factPerEpisode(input)
+    })
+  }
+
+  it('counts each failure on the digest, stops retrying it after three, and extracts newer digests', async () => {
+    const eps = [makeEpisode({ content: 'always fails' }), makeEpisode({ content: 'newer one' })]
+    const [stuck, newer] = eps.map((e, i) => digestOver([e], { createdAt: at(`2026-09-0${i + 1}T00:00:00Z`) }))
+    const storage = storageWith(eps, [stuck!])
+    const intelligence = failingOn('always fails')
+
+    const runs = []
+    for (let i = 0; i < 3; i++) runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+
+    expect(runs.map(r => r.extractionFailed)).toEqual([1, 1, 1])
+    expect(runs.map(r => r.extractionExhausted)).toEqual([0, 0, 1])
+    expect(storage.digests.recordFactExtractionFailure).toHaveBeenCalledTimes(3)
+    expect(storage.digests.markFactsExtracted).not.toHaveBeenCalled()
+    expect(await storage.digests.getPendingFactExtraction(10, 3)).toEqual([])
+    const stored = (await storage.digests.getRecent(3650)).find(d => d.id === stuck!.id)!
+    expect(stored.factExtractionAttempts).toBe(3)
+    expect(stored.factsExtractedAt ?? null).toBeNull()
+
+    await storage.digests.insert(newer!)
+    intelligence.extractFacts.mockClear()
+    const fourth = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(fourth).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 0, extractionExhausted: 0 }))
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(1)
+    expect(intelligence.extractFacts).toHaveBeenCalledWith(
+      expect.objectContaining({ episodes: [expect.objectContaining({ content: 'newer one' })] }),
+    )
+  })
+
+  it('honours a configured attempt cap', async () => {
+    const eps = [makeEpisode({ content: 'always fails' })]
+    const storage = storageWith(eps, [digestOver(eps)])
+    const intelligence = failingOn('always fails')
+
+    const first = await deepSleep(storage, intelligence, { minDigests: 1, maxExtractionAttempts: 1 })
+    const second = await deepSleep(storage, intelligence, { minDigests: 1, maxExtractionAttempts: 1 })
+
+    expect(first).toEqual(expect.objectContaining({ extractionFailed: 1, extractionExhausted: 1 }))
+    expect(second).toEqual(expect.objectContaining({ extractionFailed: 0, extractionExhausted: 0, promoted: 0 }))
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(1)
+    expect(storage.digests.getPendingFactExtraction).toHaveBeenLastCalledWith(DEFAULT_MAX_DIGESTS, 1)
+  })
+
+  it('does not count an open circuit against the digest and ends the run at it', async () => {
+    const eps = [makeEpisode({ content: 'first' }), makeEpisode({ content: 'second' }), makeEpisode({ content: 'third' })]
+    const digests = eps.map((e, i) => digestOver([e], { createdAt: at(`2026-09-0${i + 1}T00:00:00Z`) }))
+    const storage = storageWith(eps, digests)
+    const intelligence = failingOn('second', () => new CircuitOpenError('Circuit breaker is open'))
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 0, extractionExhausted: 0 }))
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(2)
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual([digests[0]!.id])
+    expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual([digests[1]!.id, digests[2]!.id])
+  })
+
+  it('recognises an open circuit thrown by another copy of the error class', async () => {
+    const eps = [makeEpisode({ content: 'only' })]
+    const storage = storageWith(eps, [digestOver(eps)])
+    const foreign = Object.assign(new Error('Circuit breaker is open'), { name: 'CircuitOpenError' })
+    const intelligence = failingOn('only', () => foreign)
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ extractionFailed: 0 }))
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
   })
 })
 

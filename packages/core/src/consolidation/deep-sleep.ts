@@ -8,6 +8,7 @@ import { linkFactContext } from './own-text-links.js'
 import { epochMs, factStatementClock } from './statement-time.js'
 import type { FactClock } from './statement-time.js'
 import { extractDigestFacts } from './fact-candidates.js'
+import { CircuitOpenError } from '../resilience/circuit-breaker.js'
 import type { FactCandidate } from './fact-candidates.js'
 
 export interface DeepSleepOptions {
@@ -15,6 +16,9 @@ export interface DeepSleepOptions {
   minDigests?: number
   /** Most pending digests one run extracts, oldest first. Default 50. */
   maxDigests?: number
+  /** Failed extraction calls after which a digest is no longer retried.
+   *  Default 3. */
+  maxExtractionAttempts?: number
   /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
    *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
    *  supersessionSettingsFromEnv and passes the result here. */
@@ -48,6 +52,11 @@ const NEIGHBOUR_POOL_MAX = 5
 
 /** Pending digests one run extracts when DeepSleepOptions.maxDigests is unset. */
 export const DEFAULT_MAX_DIGESTS = 50
+/** Failed extraction calls per digest when DeepSleepOptions.maxExtractionAttempts
+ *  is unset. A digest that fails for its own reasons (an oversized reply, a
+ *  reply that never parses) fails the same way every run; without a cap such
+ *  digests stay oldest-first in the pending set and fill every batch. */
+export const DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
 
 const SUPERSESSION_MODES: ReadonlySet<string> = new Set(['regex', 'llm', 'off'])
 
@@ -753,8 +762,11 @@ export async function promoteFactCandidates(
  * (extractDigestFacts), stores the facts (promoteFactCandidates) and stamps
  * the digest. Oldest first means a fact is stored before the facts stated
  * after it are judged against it. A digest whose extraction fails stays
- * pending for the next run; one with no live episode is stamped with nothing
- * stored.
+ * pending and gains one failed attempt; at `maxExtractionAttempts` it leaves
+ * the pending set unstamped, so newer digests are not starved behind it. An
+ * open circuit is an outage, not the digest's fault: it is not counted and
+ * ends the run's loop, so an outage cannot exhaust every pending digest. A
+ * digest with no live episode is stamped with nothing stored.
  *
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
@@ -764,6 +776,12 @@ export async function promoteFactCandidates(
  * - CONTRADICTS relationships on supersession
  * - Temporal validity (validFrom from earliest source episode)
  */
+/** By name as well as class: an adapter bundled with its own copy of core
+ *  throws a CircuitOpenError this module's class does not match. */
+function isCircuitOpen(err: unknown): boolean {
+  return err instanceof CircuitOpenError || (err instanceof Error && err.name === 'CircuitOpenError')
+}
+
 export async function deepSleep(
   storage: StorageAdapter,
   intelligence: IntelligenceAdapter | undefined,
@@ -772,13 +790,14 @@ export async function deepSleep(
 ): Promise<ConsolidateResult> {
   const minDigests = opts?.minDigests ?? 3
   const maxDigests = opts?.maxDigests ?? DEFAULT_MAX_DIGESTS
-  const pending = await storage.digests.getPendingFactExtraction(maxDigests)
+  const maxAttempts = opts?.maxExtractionAttempts ?? DEFAULT_MAX_EXTRACTION_ATTEMPTS
+  const pending = await storage.digests.getPendingFactExtraction(maxDigests, maxAttempts)
 
   if (pending.length < minDigests) {
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
       supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
-      extractionFailed: 0, noEpisodes: 0,
+      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0,
     }
   }
 
@@ -792,6 +811,7 @@ export async function deepSleep(
 
   let totals = zeroCounts()
   let extractionFailed = 0
+  let extractionExhausted = 0
   let noEpisodes = 0
   for (const digest of pending) {
     let extraction: Awaited<ReturnType<typeof extractDigestFacts>>
@@ -799,8 +819,22 @@ export async function deepSleep(
       extraction = await extractDigestFacts(storage, intelligence, digest)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      console.warn(`[deep-sleep] fact extraction failed for digest ${digest.id}; it stays pending: ${msg}`)
+      if (isCircuitOpen(err)) {
+        console.warn(`[deep-sleep] circuit open at digest ${digest.id}; ending this run's extraction: ${msg}`)
+        break
+      }
+      const attempts = await storage.digests.recordFactExtractionFailure(digest.id)
       extractionFailed++
+      if (attempts >= maxAttempts) {
+        extractionExhausted++
+        console.warn(
+          `[deep-sleep] fact extraction failed for digest ${digest.id} (attempt ${attempts} of ${maxAttempts}); no longer retried: ${msg}`,
+        )
+      } else {
+        console.warn(
+          `[deep-sleep] fact extraction failed for digest ${digest.id} (attempt ${attempts} of ${maxAttempts}); it stays pending: ${msg}`,
+        )
+      }
       continue
     }
     if (extraction.status === 'no-episodes') {
@@ -823,6 +857,7 @@ export async function deepSleep(
     cycle: 'deep',
     ...tierCounts,
     extractionFailed,
+    extractionExhausted,
     noEpisodes,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,

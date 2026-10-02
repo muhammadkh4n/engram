@@ -42,9 +42,9 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 7 after all migrations', () => {
+  it('sets schema version to 8 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(7)
+    expect(getSchemaVersion(db)).toBe(8)
   })
 
   it('v5 adds forgotten_at to the recallable memory tables', () => {
@@ -84,7 +84,7 @@ describe('SQLite migrations', () => {
     insertDigest('old-2', 2461001.5)
 
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(7)
+    expect(getSchemaVersion(db)).toBe(8)
 
     insertDigest('new-1', 2461002.75)
     const rows = db
@@ -98,10 +98,37 @@ describe('SQLite migrations', () => {
     ])
   })
 
+  it('v8 adds a zero attempt count to existing digests and to new ones', () => {
+    runMigrations(db)
+    db.exec('ALTER TABLE digests DROP COLUMN fact_extraction_attempts')
+    db.pragma('user_version = 7')
+    const insertDigest = (id: string) => {
+      db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'digest')
+      db.prepare(
+        `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
+         source_digest_ids, level, metadata, created_at)
+         VALUES (?, 's1', 'summary', '[]', '[]', '[]', 0, '{}', 2461000.5)`,
+      ).run(id)
+    }
+    insertDigest('before')
+
+    runMigrations(db)
+    insertDigest('after')
+
+    expect(getSchemaVersion(db)).toBe(8)
+    const col = (db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string; notnull: number; dflt_value: string | null }>)
+      .find((c) => c.name === 'fact_extraction_attempts')
+    expect(col).toEqual(expect.objectContaining({ notnull: 1, dflt_value: '0' }))
+    expect(db.prepare('SELECT id, fact_extraction_attempts AS n FROM digests ORDER BY id').all()).toEqual([
+      { id: 'after', n: 0 },
+      { id: 'before', n: 0 },
+    ])
+  })
+
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(7)
+    expect(getSchemaVersion(db)).toBe(8)
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE name = 'episode_parts'").pluck().all(),
     ).toEqual([])
