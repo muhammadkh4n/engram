@@ -10,6 +10,7 @@ import {
   type BackfillRow,
   type BackfillRules,
   type ProjectBackfillStore,
+  type ProjectChange,
 } from '../src/ingest/project-backfill-lib.js'
 
 interface StoredEpisode extends BackfillRow {
@@ -170,9 +171,23 @@ describe('runProjectBackfill against a stubbed store', () => {
     expect(Object.fromEntries(report.plan.shared)).toEqual({ 'cross-cutting': 1, 'no-repo': 2, 'shared-alias': 1 })
   })
 
-  it('apply writes in batches, only NULL rows, and a second run is a no-op', async () => {
+  function sink(): { changes: ProjectChange[]; write(c: readonly ProjectChange[]): void } {
+    const changes: ProjectChange[] = []
+    return { changes, write: (c) => void changes.push(...c) }
+  }
+
+  it('refuses to apply without a rollback record', async () => {
+    await expect(runProjectBackfill(fixture(), r, { apply: true, pageSize: 3, batchSize: 1 })).rejects.toThrow(
+      /rollback/,
+    )
+  })
+
+  it('apply writes in batches, only NULL rows, records each batch, and a second run is a no-op', async () => {
     const store = fixture()
-    const report = await runProjectBackfill(store, r, { apply: true, pageSize: 3, batchSize: 1 })
+    const rollback = sink()
+    const report = await runProjectBackfill(store, r, { apply: true, pageSize: 3, batchSize: 1, rollback })
+    expect(rollback.changes).toHaveLength(3)
+    expect(rollback.changes.every((c) => c.table === 'memory_episodes' && c.old === null)).toBe(true)
     expect(store.updateCalls).toHaveLength(3)
     expect(report.updated.get('engram')).toBe(2)
     expect(report.updated.get('aithentic-sam-mfe')).toBe(1)
@@ -184,14 +199,14 @@ describe('runProjectBackfill against a stubbed store', () => {
       ['engram', 'engram'],
     ])
 
-    const again = await runProjectBackfill(store, r, { apply: true, pageSize: 3, batchSize: 1 })
+    const again = await runProjectBackfill(store, r, { apply: true, pageSize: 3, batchSize: 1, rollback })
     expect(again.plan.assignments.size).toBe(0)
     expect(store.updateCalls).toHaveLength(3)
   })
 
   it('reports counts and project names, never content or ids', async () => {
     const store = fixture()
-    const report = await runProjectBackfill(store, r, { apply: true, pageSize: 50, batchSize: 50 })
+    const report = await runProjectBackfill(store, r, { apply: true, pageSize: 50, batchSize: 50, rollback: sink() })
     const text = formatReport(report, true)
     expect(text).toContain('engram: 2 / 2')
     expect(text).toContain('engram-project-scoping -> engram: 1')
