@@ -69,17 +69,24 @@ export function parseJudgeContextMode(argv: readonly string[]): ContextMode {
 
 export interface ProductionRecallOptions {
   projectId?: string
+  now?: Date
 }
 
 /**
  * The options the `memory_recall` tool handler in
  * packages/mcp/src/server-core.ts passes to `Memory.recall`: `projectId` only
  * when the caller supplies one, `synthesize` only when the caller asks (never
- * here). No `strategyOverride`, `tokenBudget`, `asOf` or `now`, so the
- * intent-mode strategy's own result cap and token budget apply.
+ * here), and `now`, the reference date for query expansion and synthesis. The
+ * server passes the request time; a bench passes the question date in its
+ * place, omitted when the question has none. No `strategyOverride` or
+ * `tokenBudget`, so the intent-mode strategy's own result cap and token budget
+ * apply.
  */
-export function productionRecallOptions(projectId?: string): ProductionRecallOptions {
-  return projectId ? { projectId } : {}
+export function productionRecallOptions(projectId?: string, now?: Date | null): ProductionRecallOptions {
+  return {
+    ...(projectId ? { projectId } : {}),
+    ...(now ? { now } : {}),
+  }
 }
 
 interface MetadataCarrier {
@@ -127,7 +134,11 @@ export interface SweepRecallConfig {
   /** Result cap for `sessions` mode (the largest K scored). */
   maxK: number
   synthesize: boolean
-  /** Question date, the anchor for now-relative synthesis lines. */
+  /**
+   * Question date, passed in both modes as the server passes the request time:
+   * query expansion anchors relative dates to it, and with `synthesize` it is
+   * also the anchor for now-relative synthesis lines.
+   */
   now?: Date | null
   /**
    * `formatted` mode only: fusion weights for this recall, passed as
@@ -185,7 +196,7 @@ export interface SweepRecallOutcome {
 export function sweepRecallOptions(cfg: SweepRecallConfig): Record<string, unknown> {
   if (cfg.contextMode === 'formatted') {
     return {
-      ...productionRecallOptions(),
+      ...productionRecallOptions(undefined, cfg.now),
       ...(cfg.fusion !== undefined ? { strategyOverride: { fusion: { ...cfg.fusion } } } : {}),
       ...(cfg.reconsolidate === false ? { reconsolidate: false } : {}),
     }
@@ -195,12 +206,8 @@ export function sweepRecallOptions(cfg: SweepRecallConfig): Record<string, unkno
   }
   return {
     strategyOverride: { maxResults: cfg.maxK },
-    ...(cfg.synthesize
-      ? {
-          synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true },
-          ...(cfg.now ? { now: cfg.now } : {}),
-        }
-      : {}),
+    ...(cfg.now ? { now: cfg.now } : {}),
+    ...(cfg.synthesize ? { synthesize: { maxEvidenceSessions: 5, includeComputeNotes: true } } : {}),
   }
 }
 

@@ -15,7 +15,7 @@
  */
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import type { Memory } from '@engram-mem/core'
+import { parseEventDate, type Memory } from '@engram-mem/core'
 import type {
   BenchmarkOpts, LongMemEvalResult, LongMemEvalPrediction,
   LongMemEvalAbilityMetrics, LongMemEvalAbility,
@@ -155,7 +155,8 @@ export class LongMemEvalAdapter {
       const ingestMs = Date.now() - ingestStart
 
       const evalStart = Date.now()
-      const recallResult = await memory.recall(question.question)
+      const now = parseEventDate(question.question_date)
+      const recallResult = await memory.recall(question.question, now ? { now } : {})
       assertRecallNotDegraded(recallResult, question.question_id)
       const topMemories = mergeAssociationsIntoScored(
         recallResult, opts?.mergeAssociationsIntoTopK,

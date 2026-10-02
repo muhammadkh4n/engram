@@ -22,6 +22,7 @@ import {
   recallOptionsFromArgs,
   RECALL_CONVERSATION_ID_MAX,
   parseChatReasoningEnv,
+  parseTimeZoneEnv,
   chatIntelligenceOptionsFromEnv,
   supersessionSettingsAtStartup,
   runMemoryForget,
@@ -368,6 +369,33 @@ describe('parseChatReasoningEnv', () => {
   })
 })
 
+describe('parseTimeZoneEnv', () => {
+  it('defaults to UTC when unset or blank', () => {
+    expect(parseTimeZoneEnv({})).toEqual({ timeZone: 'UTC' })
+    expect(parseTimeZoneEnv({ ENGRAM_TIMEZONE: '  ' })).toEqual({ timeZone: 'UTC' })
+  })
+
+  it('accepts an IANA zone name', () => {
+    expect(parseTimeZoneEnv({ ENGRAM_TIMEZONE: ' Asia/Karachi ' })).toEqual({ timeZone: 'Asia/Karachi' })
+  })
+
+  it('refuses a name Intl does not know, naming the variable and the value', () => {
+    expect(() => parseTimeZoneEnv({ ENGRAM_TIMEZONE: 'Mars/Olympus_Mons' }))
+      .toThrow(/ENGRAM_TIMEZONE must be an IANA time zone name.*got "Mars\/Olympus_Mons"/)
+  })
+
+  it('fails startup on an invalid zone before any backend is contacted', async () => {
+    const saved = process.env['ENGRAM_TIMEZONE']
+    process.env['ENGRAM_TIMEZONE'] = 'Asia/Lahore_City'
+    try {
+      await expect(getMemory()).rejects.toThrow(/ENGRAM_TIMEZONE must be an IANA time zone name.*got "Asia\/Lahore_City"/)
+    } finally {
+      if (saved === undefined) delete process.env['ENGRAM_TIMEZONE']
+      else process.env['ENGRAM_TIMEZONE'] = saved
+    }
+  })
+})
+
 describe('runMemoryRecall', () => {
   const REASON = '429 You exceeded your current quota, please check your plan and billing details.'
   const NOTICE = vectorUnavailableNotice(REASON)
@@ -387,6 +415,22 @@ describe('runMemoryRecall', () => {
   function stubMemory(r: RecallResult) {
     return { recall: async () => r }
   }
+
+  it('passes the request time as now and keeps the argument-derived options', async () => {
+    const seen: unknown[] = []
+    const mem = { recall: async (_q: string, opts?: unknown) => { seen.push(opts); return result({}) } }
+    const before = Date.now()
+
+    await runMemoryRecall(mem, { query: 'what did we ship last week', project_id: 'engram', synthesize: true })
+
+    const after = Date.now()
+    expect(seen).toHaveLength(1)
+    const { now, ...rest } = seen[0] as { now: Date }
+    expect(now).toBeInstanceOf(Date)
+    expect(now.getTime()).toBeGreaterThanOrEqual(before)
+    expect(now.getTime()).toBeLessThanOrEqual(after)
+    expect(rest).toEqual({ projectId: 'engram', synthesize: true })
+  })
 
   it('returns a degraded recall as normal content that leads with the notice', async () => {
     const formatted = `${NOTICE}\n## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
@@ -458,7 +502,7 @@ describe('runMemoryRecall', () => {
 
     await runMemoryRecall(mem, { query: 'deploy window', conversation_id: 'conv-1', project_id: 'engram' })
 
-    expect(calls).toEqual([{ query: 'deploy window', opts: { projectId: 'engram', conversationKey: 'conv-1' } }])
+    expect(calls).toEqual([{ query: 'deploy window', opts: { projectId: 'engram', conversationKey: 'conv-1', now: expect.any(Date) } }])
   })
 
   it('sends no conversationKey without conversation_id, so the recall gets no priming', async () => {
@@ -475,7 +519,7 @@ describe('runMemoryRecall', () => {
 
     await runMemoryRecall(mem, { query: 'deploy window', session_id: 'sess-1' })
 
-    expect(calls).toEqual([{ query: 'deploy window', opts: {} }])
+    expect(calls).toEqual([{ query: 'deploy window', opts: { now: expect.any(Date) } }])
   })
 
   it('rejects a blank conversation_id as a tool error without recalling', async () => {

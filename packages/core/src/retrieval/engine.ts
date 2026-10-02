@@ -132,13 +132,6 @@ export interface RecallOpts {
    */
   projectUnboosted?: boolean
   /**
-   * Return memories valid at this point in time. When set:
-   * - Semantic: uses searchAtTime instead of search
-   * - Episodes/digests: passes beforeDate to SearchOptions
-   * Half-open [valid_from, valid_until). valid_until is EXCLUSIVE.
-   */
-  asOf?: Date
-  /**
    * The caller's project id. Ranks like `project` and wins over it when
    * both are set; it filters only together with `projectStrict`.
    */
@@ -147,8 +140,9 @@ export interface RecallOpts {
    *  from the returned memories. boolean | SynthesizeOpts. Default off. */
   synthesize?: boolean | SynthesizeOpts
   /** Anchor for now-relative temporal arithmetic (benchmarks pass the
-   *  question date; servers may pass request time). Wall-clock is NEVER
-   *  assumed when absent — now-relative lines are simply omitted. */
+   *  question date; servers may pass request time). Query expansion gets it
+   *  as its reference date. Wall-clock is NEVER assumed when absent —
+   *  now-relative lines are simply omitted and expansion emits no dates. */
   now?: Date
   /**
    * Record exposure (shown count), co-recalled edges and graph edge
@@ -484,7 +478,9 @@ export async function recall(
   if (shouldExpand) {
     const expandStart = stageStart(timings)
     try {
-      expandedTerms = await intelligence!.expandQuery!(query)
+      expandedTerms = opts.now !== undefined
+        ? await intelligence!.expandQuery!(query, { now: opts.now })
+        : await intelligence!.expandQuery!(query)
     } catch {
       // expansion failed — proceed without it
     }

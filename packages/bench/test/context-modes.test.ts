@@ -136,12 +136,27 @@ describe('productionRecallOptions', () => {
     expect(productionRecallOptions('engram')).toEqual({ projectId: 'engram' })
     expect(productionRecallOptions('')).toEqual({})
   })
+
+  it('passes the reference date when given, as the server passes the request time', () => {
+    const now = new Date('2023-05-27T14:05:00Z')
+    expect(productionRecallOptions('engram', now)).toEqual({ projectId: 'engram', now })
+    expect(productionRecallOptions(undefined, now)).toEqual({ now })
+    expect(productionRecallOptions(undefined, null)).toEqual({})
+  })
 })
 
 describe('sweepRecallOptions', () => {
   it('sessions mode keeps the widened result cap', () => {
     expect(sweepRecallOptions({ contextMode: 'sessions', maxK: 30, synthesize: false })).toEqual({
       strategyOverride: { maxResults: 30 },
+    })
+  })
+
+  it('sessions mode passes the question date with synthesize off', () => {
+    const now = new Date('2023-05-30T00:00:00Z')
+    expect(sweepRecallOptions({ contextMode: 'sessions', maxK: 30, synthesize: false, now })).toEqual({
+      strategyOverride: { maxResults: 30 },
+      now,
     })
   })
 
@@ -160,6 +175,9 @@ describe('sweepRecallOptions', () => {
 
   it('formatted mode uses the production options and ignores maxK', () => {
     expect(sweepRecallOptions({ contextMode: 'formatted', maxK: 30, synthesize: false })).toEqual({})
+    const now = new Date('2023-05-27T14:05:00Z')
+    expect(sweepRecallOptions({ contextMode: 'formatted', maxK: 30, synthesize: false, now })).toEqual({ now })
+    expect(sweepRecallOptions({ contextMode: 'formatted', maxK: 30, synthesize: false, now: null })).toEqual({})
   })
 })
 

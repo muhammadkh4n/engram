@@ -153,6 +153,30 @@ describe('recall engine — deep mode', () => {
     expect(expandQuery).toHaveBeenCalledWith('What did we discuss last week?')
   })
 
+  it('forwards the reference date to expandQuery when now is set', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['last week'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+    const now = new Date('2023-05-14T09:30:00Z')
+
+    await recall('What did we discuss last week?', storage, sensory, makeOpts({ intelligence, now }))
+
+    expect(expandQuery).toHaveBeenCalledTimes(1)
+    expect(expandQuery).toHaveBeenCalledWith('What did we discuss last week?', { now })
+  })
+
+  it('calls expandQuery with the query alone when now is not set', async () => {
+    const storage = createMockStorage()
+    const sensory = new SensoryBuffer()
+    const expandQuery = vi.fn().mockResolvedValue(['last week'])
+    const intelligence: IntelligenceAdapter = { expandQuery }
+
+    await recall('What did we discuss last week?', storage, sensory, makeOpts({ intelligence }))
+
+    expect(expandQuery.mock.calls).toEqual([['What did we discuss last week?']])
+  })
+
   it('does NOT call expandQuery for plain light-mode single-hop queries', async () => {
     const storage = createMockStorage()
     const sensory = new SensoryBuffer()

@@ -641,7 +641,6 @@ export class Memory {
     opts?: {
       embedding?: number[]
       tokenBudget?: number
-      asOf?: Date
       strategyOverride?: Partial<RecallStrategy>
       /** The caller's project: ranks its memories (and its product group's)
        *  higher; other projects' memories are still returned. */
@@ -650,7 +649,8 @@ export class Memory {
       projectStrict?: boolean
       /** Opt-in synthesis block computed from the returned memories. */
       synthesize?: boolean | SynthesizeOpts
-      /** Anchor for now-relative temporal arithmetic in synthesis. */
+      /** Reference date for relative time phrases: query expansion resolves
+       *  them to concrete dates, synthesis does now-relative arithmetic. */
       now?: Date
       /** Skip acknowledgements, greetings and emoji-only text instead of
        *  searching. For callers that recall on every conversation turn;
@@ -717,7 +717,6 @@ export class Memory {
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
       graph: this._graph,
-      asOf: opts?.asOf,
       ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
       ...(opts?.projectStrict === true ? { projectStrict: true } : {}),

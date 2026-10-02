@@ -539,7 +539,10 @@ $$;
 -- reduce to no lexemes (stop words, punctuation) are dropped; when none is
 -- left the query is NULL and no row matches. p_project_id is accepted for
 -- caller compatibility and filters nothing: a project tag only ranks rows (in
--- the client), it never excludes them.
+-- the client), it never excludes them. Rows with equal rank_score are ordered
+-- by memory_type and id, a key unique across the tiers: otherwise the LIMIT
+-- keeps whichever tied rows the scan meets first, and heap order changes
+-- whenever recall rewrites a returned row (shown_count).
 CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
@@ -585,7 +588,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
     WHERE mp.fts @@ mq.q
       AND mp.forgotten_at IS NULL
   ) combined
-  ORDER BY rank_score DESC
+  ORDER BY rank_score DESC, memory_type, id
   LIMIT p_match_count
 $$;
 
