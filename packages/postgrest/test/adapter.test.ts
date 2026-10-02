@@ -615,6 +615,33 @@ describe('PostgRestAssociationStorage', () => {
     })
   })
 
+  it('walk forwards excluded edge types as p_exclude_types', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.walk(['seed-1'], { maxHops: 2, minStrength: 0.2, excludeTypes: ['co_recalled', 'temporal'] })
+
+    expect(mock.rpc).toHaveBeenCalledWith('engram_association_walk', {
+      p_seed_ids: ['seed-1'],
+      p_max_hops: 2,
+      p_min_strength: 0.2,
+      p_limit: 20,
+      p_exclude_types: ['co_recalled', 'temporal'],
+    })
+  })
+
+  it('walk sends no p_exclude_types when the exclusion list is empty', async () => {
+    mock.rpc.mockResolvedValue({ data: [], error: null })
+
+    await store.walk(['seed-1'], { maxHops: 2, minStrength: 0.2, excludeTypes: [] })
+
+    expect(mock.rpc.mock.calls[0]?.[1]).toStrictEqual({
+      p_seed_ids: ['seed-1'],
+      p_max_hops: 2,
+      p_min_strength: 0.2,
+      p_limit: 20,
+    })
+  })
+
   it('walk returns empty array for no seed ids', async () => {
     const result = await store.walk([])
     expect(result).toEqual([])

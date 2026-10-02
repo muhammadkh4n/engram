@@ -37,15 +37,20 @@ export class PostgRestAssociationStorage implements AssociationStorage {
 
   async walk(
     seedIds: string[],
-    opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[] }
+    opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[]; excludeTypes?: readonly EdgeType[] }
   ): Promise<WalkResult[]> {
     if (seedIds.length === 0) return []
 
+    // p_exclude_types is sent only when something is excluded, so the default
+    // request body is unchanged and still resolves against a database whose
+    // function predates the parameter.
+    const excludeTypes = opts?.excludeTypes ?? []
     const { data, error } = await this.client.rpc('engram_association_walk', {
       p_seed_ids: seedIds,
       p_max_hops: opts?.maxHops ?? 2,
       p_min_strength: opts?.minStrength ?? 0.2,
       p_limit: 20,
+      ...(excludeTypes.length > 0 ? { p_exclude_types: [...excludeTypes] } : {}),
     })
     if (error) throw new Error(`Association walk failed: ${error.message}`)
 

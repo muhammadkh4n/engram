@@ -104,10 +104,16 @@ COMMENT ON SCHEMA public IS 'standard public schema';
 
 
 --
--- Name: engram_association_walk(uuid[], integer, double precision, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_association_walk(uuid[], integer, double precision, integer, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE OR REPLACE FUNCTION public.engram_association_walk(p_seed_ids uuid[], p_max_hops integer DEFAULT 2, p_min_strength double precision DEFAULT 0.2, p_limit integer DEFAULT 20) RETURNS TABLE(memory_id uuid, memory_type text, depth integer, path_strength double precision)
+-- Drop the signature without p_exclude_types so the new defaulted parameter
+-- does not leave an ambiguous overload alongside the old function.
+DROP FUNCTION IF EXISTS public.engram_association_walk(uuid[], integer, double precision, integer);
+
+-- p_exclude_types names edge types the walk does not follow at any hop;
+-- NULL or an empty array follows every type.
+CREATE OR REPLACE FUNCTION public.engram_association_walk(p_seed_ids uuid[], p_max_hops integer DEFAULT 2, p_min_strength double precision DEFAULT 0.2, p_limit integer DEFAULT 20, p_exclude_types text[] DEFAULT NULL::text[]) RETURNS TABLE(memory_id uuid, memory_type text, depth integer, path_strength double precision)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -123,6 +129,7 @@ CREATE OR REPLACE FUNCTION public.engram_association_walk(p_seed_ids uuid[], p_m
            (w.path_strength * a.strength)::float
     FROM walk w JOIN memory_associations a ON (a.source_id = w.memory_id OR a.target_id = w.memory_id)
     WHERE w.depth < p_max_hops AND a.strength >= p_min_strength
+      AND (p_exclude_types IS NULL OR NOT (a.edge_type = ANY(p_exclude_types)))
       AND NOT (CASE WHEN a.source_id = w.memory_id THEN a.target_id ELSE a.source_id END) = ANY(w.visited_ids)
   )
   SELECT DISTINCT ON (memory_id) memory_id, memory_type, depth, path_strength
@@ -1515,7 +1522,7 @@ $smoke$;
 -- are SECURITY INVOKER, kept for adapters on the pre-recall-RPC schema.
 --
 
-REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -1540,7 +1547,7 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -1560,7 +1567,7 @@ BEGIN
 END
 $$;
 
-GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;

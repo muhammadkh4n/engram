@@ -2,6 +2,7 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { MemoryType, RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { AssociationManager } from '../systems/association-manager.js'
+import { RECALL_LINK_DEFAULTS, type RecallLinkSwitches } from './link-switches.js'
 
 /**
  * Stage 4 of recall: reconsolidation.
@@ -13,7 +14,9 @@ import type { AssociationManager } from '../systems/association-manager.js'
  * when a graph is provided. Fire-and-forget — failures are swallowed.
  *
  * The `graph` parameter is optional and defaults to null, so existing
- * 4-argument callers continue to work unchanged.
+ * 4-argument callers continue to work unchanged. `switches` turns off the
+ * co_recalled edge writes and the graph strengthening independently; it
+ * defaults to both on. Exposure is recorded either way.
  */
 export function stageReconsolidate(
   recalled: RetrievedMemory[],
@@ -21,6 +24,7 @@ export function stageReconsolidate(
   storage: StorageAdapter,
   manager: AssociationManager,
   graph: GraphPort | null = null,
+  switches: Pick<RecallLinkSwitches, 'coRecall' | 'graphReinforce'> = RECALL_LINK_DEFAULTS,
 ): void {
   // Being shown is exposure, not use. The access count feeds the ranking
   // bonus, so bumping it for every displayed memory would let recall
@@ -38,7 +42,7 @@ export function stageReconsolidate(
   // cap is enforced (audit finding L5). Encoding salience is looked up for the
   // co-recalled episodes so noise turns do not wire (or strengthen) Hebbian
   // edges; non-episode memories (curated semantic/procedural) are left ungated.
-  const coRecalledUpdate = (async () => {
+  const coRecalledUpdate = switches.coRecall ? (async () => {
     const top5 = recalled.slice(0, 5)
     const episodeIds = top5.filter((m) => m.type === 'episode').map((m) => m.id)
     const salienceById = new Map<string, number>()
@@ -49,7 +53,7 @@ export function stageReconsolidate(
     return manager.createCoRecalledEdges(
       top5.map((m) => ({ id: m.id, type: m.type, salience: salienceById.get(m.id) })),
     )
-  })()
+  })() : Promise.resolve()
 
   // Wave 2: Neo4j edge strengthening.
   // Each traversed edge gets weight += 0.02 (capped at 1.0). This is the
@@ -59,7 +63,7 @@ export function stageReconsolidate(
   // Pragmatic approximation: strengthen edges between consecutive memories
   // in the returned set (in activation order), not the full traversal path.
   let graphUpdate: Promise<void> = Promise.resolve()
-  if (graph !== null) {
+  if (graph !== null && switches.graphReinforce) {
     const allReturned = [...recalled.slice(0, 5), ...associated.slice(0, 5)]
     if (allReturned.length >= 2) {
       const pairs: Array<[string, string]> = []
