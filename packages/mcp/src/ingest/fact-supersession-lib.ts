@@ -19,9 +19,12 @@
  *     live facts of its own project (a shared, NULL-project fact pairs only
  *     with shared facts) stated strictly earlier, at cosine >= the floor,
  *     nearest first, at most POOL_MAX;
- *   - the judge names the relation only. Every pool fact was stated earlier,
- *     so a conflict proposes retiring the pool fact; `same` and unrelated
- *     facts are left alone (both rows are already stored);
+ *   - the judge names the relation and each fact's kind (state, event or
+ *     plan). Every pool fact was stated earlier, so a conflict proposes
+ *     retiring the pool fact when core's `supersessionRuleOutcome` allows it:
+ *     the pool fact is a state and the fact a state or an event. Any other
+ *     conflict is counted and left alone, as are `same` and unrelated facts
+ *     (both rows are already stored);
  *   - a fact proposed for retirement is neither judged nor offered again.
  * Each proposal carries both rows' `updated_at` and a hash of their text, so
  * the apply step can tell whether a row changed after it was reviewed.
@@ -44,8 +47,15 @@
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import type { PostgrestClient } from '@supabase/postgrest-js'
-import { epochMs, supersessionSettingsFromEnv } from '@engram-mem/core'
-import type { StatementClock, SupersessionCandidate, SupersessionFact, SupersessionVerdict } from '@engram-mem/core'
+import { SUPERSESSION_NEW_FACT_KEY, epochMs, supersessionRuleOutcome, supersessionSettingsFromEnv } from '@engram-mem/core'
+import type {
+  StatementClock,
+  SupersessionCandidate,
+  SupersessionFact,
+  SupersessionFactKind,
+  SupersessionRuleOutcome,
+  SupersessionVerdict,
+} from '@engram-mem/core'
 
 /** Candidates offered to the judge per fact; matches deep sleep's pool size. */
 export const POOL_MAX = 5
@@ -144,13 +154,16 @@ export interface Proposal {
   newContentHash: string
   oldContentHash: string
   projectId: string | null
+  /** The judge's kind for each fact; the rule retires only a `state` old fact. */
+  newKind: SupersessionFactKind
+  oldKind: SupersessionFactKind
 }
 
 export interface BandSummary {
   band: string
   /** Candidate pairs offered to the judge in this band. */
   pairs: number
-  /** Pairs the judge said conflict, proposed for retirement. */
+  /** Conflicting pairs the kind rule lets retire, proposed for retirement. */
   proposals: number
 }
 
@@ -164,6 +177,8 @@ export interface FactBackfillResult {
   /** True when a fact still needed a judgement after `maxCalls` calls. */
   stoppedAtCap: boolean
   proposals: Proposal[]
+  /** Every conflict the judge named, by what the kind rule made of it. */
+  ruleOutcomes: Record<SupersessionRuleOutcome, number>
   bands: BandSummary[]
   /** Topic and content of every fact named in a proposal, for the local report only. */
   texts: ReadonlyMap<string, { topic: string; content: string }>
@@ -322,7 +337,12 @@ function groupByProject(facts: readonly Fact[]): Map<string | null, Fact[]> {
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
-function proposalOf(fact: Fact, entry: PoolEntry): Proposal {
+function proposalOf(
+  fact: Fact,
+  entry: PoolEntry,
+  newKind: SupersessionFactKind,
+  oldKind: SupersessionFactKind,
+): Proposal {
   return {
     newId: fact.id,
     oldId: entry.fact.id,
@@ -334,6 +354,8 @@ function proposalOf(fact: Fact, entry: PoolEntry): Proposal {
     newContentHash: fact.contentHash,
     oldContentHash: entry.fact.contentHash,
     projectId: fact.projectId,
+    newKind,
+    oldKind,
   }
 }
 
@@ -365,6 +387,11 @@ export async function runFactSupersessionBackfill(
   let calls = 0
   let judgeErrors = 0
   let stoppedAtCap = false
+  const ruleOutcomes: Record<SupersessionRuleOutcome, number> = {
+    retire: 0,
+    'kept-earlier-not-state': 0,
+    'kept-later-not-current': 0,
+  }
 
   for (const fact of ordered) {
     if (retired.has(fact.id)) continue
@@ -391,13 +418,20 @@ export async function runFactSupersessionBackfill(
       continue
     }
 
-    // Every pool fact was stated earlier than `fact`, so a conflict retires the pool fact.
+    // Every pool fact was stated earlier than `fact`: a conflict retires the
+    // pool fact when it is a state and `fact` a state or an event.
     const conflicts = new Set(verdict.conflicts)
+    const kinds = verdict.kinds ?? {}
+    const newKind = kinds[SUPERSESSION_NEW_FACT_KEY]
     for (const entry of pool) {
       if (!conflicts.has(entry.fact.id) || retired.has(entry.fact.id)) continue
+      const oldKind = kinds[entry.fact.id]
+      const outcome = supersessionRuleOutcome(oldKind, newKind)
+      ruleOutcomes[outcome]++
+      if (outcome !== 'retire') continue
       retired.add(entry.fact.id)
       bandCounts.get(similarityBand(entry.cosine))!.proposals++
-      proposals.push(proposalOf(fact, entry))
+      proposals.push(proposalOf(fact, entry, newKind!, oldKind!))
       texts.set(fact.id, { topic: fact.topic, content: fact.content })
       texts.set(entry.fact.id, { topic: entry.fact.topic, content: entry.fact.content })
     }
@@ -410,6 +444,7 @@ export async function runFactSupersessionBackfill(
     judgeErrors,
     stoppedAtCap,
     proposals,
+    ruleOutcomes,
     bands: [...bandCounts].map(([band, c]) => ({ band, ...c })),
     texts,
   }
@@ -552,6 +587,7 @@ export function summaryJson(result: FactBackfillResult, opts: Pick<FactBackfillO
       calls: result.calls,
       judgeErrors: result.judgeErrors,
       stoppedAtCap: result.stoppedAtCap,
+      ruleOutcomes: result.ruleOutcomes,
       bands: result.bands,
       proposals: result.proposals.map((p) => ({ ...p, cosine: Number(p.cosine.toFixed(6)) })),
     },

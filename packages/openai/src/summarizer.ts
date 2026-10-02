@@ -14,8 +14,9 @@ import type {
   SupersessionCandidate,
   SupersessionVerdict,
   SupersessionStatedAt,
+  SupersessionFactKind,
 } from '@engram-mem/core'
-import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
+import { EmptyClassifierReplyError, SUPERSESSION_NEW_FACT_KEY, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
 
 export interface OpenAISummarizerOptions {
@@ -217,18 +218,26 @@ const RERANK_MIN_REPLY_TOKENS = 400
 const SUPERSESSION_SYSTEM_PROMPT = `You maintain a memory of facts about a user and their work. Compare a FACT with each STORED FACT. Every fact shows the date it was stated. Decide only how each stored fact relates to the FACT, whatever their dates:
 
 - "same": the stored fact states the same claim as the FACT, possibly in other words.
-- "conflicts": the two cannot both be true now. Examples: a decision was changed, a value was updated, a preference was reversed, a tool or setting was switched to something else.
-- Neither list: the stored fact is about a different subject, adds or omits detail, or can be true at the same time as the FACT.
+- "conflicts": both facts assert the current value of the same attribute of the same subject, and they cannot both be true now. Examples: a decision was changed, a value was updated, a preference was reversed, a tool or setting was switched to something else.
+- Neither list: anything else. A different review, run, release, PR aspect, workload or component is a different subject, so it goes in neither list even when the topic is the same. So does a stored fact that adds or omits detail, or that can be true at the same time as the FACT.
 
 Be conservative. A wrong "conflicts" can retire a fact that is still true. When you are unsure about a stored fact, put it in neither list.
 
-Use only the ids shown in STORED FACTS, each in at most one list. Reply with only JSON, exactly this shape:
-{"same": ["<id>"], "conflicts": ["<id>"]}
-When no stored fact repeats or conflicts with the FACT, reply {"same": [], "conflicts": []}.`
+Also label the FACT and every STORED FACT with its kind:
+- "state": what is currently true: a status, a current value or choice, a preference in force.
+- "event": something that happened at a time: released, completed, found, merged, decided then.
+- "plan": an intention or a future step.
 
-/** Reply budget: the JSON frame plus one quoted id per candidate. */
-const SUPERSESSION_REPLY_BASE_TOKENS = 60
-const SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE = 40
+Use only the ids shown in STORED FACTS, each in at most one list, and the key "new" for the kind of the FACT. Reply with only JSON, exactly this shape:
+{"same": ["<id>"], "conflicts": ["<id>"], "kinds": {"new": "<kind>", "<id>": "<kind>"}}
+When no stored fact repeats or conflicts with the FACT, both lists are empty: {"same": [], "conflicts": [], "kinds": {"new": "<kind>", "<id>": "<kind>"}}.`
+
+/** Reply budget: the JSON frame and the new fact's kind, plus per candidate
+ *  its id quoted once in a list and once as a kind key. */
+const SUPERSESSION_REPLY_BASE_TOKENS = 80
+const SUPERSESSION_REPLY_TOKENS_PER_CANDIDATE = 80
+
+const SUPERSESSION_FACT_KINDS: ReadonlySet<string> = new Set(['state', 'event', 'plan'])
 
 export type TranscriptDigestKind = 'session-summary' | 'pre-compact'
 
@@ -1022,7 +1031,7 @@ function isCandidateList(value: unknown): boolean {
 }
 
 function emptyVerdict(): SupersessionVerdict {
-  return { same: [], conflicts: [] }
+  return { same: [], conflicts: [], kinds: {} }
 }
 
 function isSupersessionVerdict(value: unknown): boolean {
@@ -1035,13 +1044,19 @@ function isSupersessionVerdict(value: unknown): boolean {
 /**
  * Keeps only ids from the candidate set, once each. An id the model put in
  * both lists is a self-contradicting verdict and lands in neither, so the
- * candidate stays live and the new fact is stored as new.
+ * candidate stays live and the new fact is stored as new. Kinds are kept only
+ * for the new fact and known candidates and only when valid; a missing or
+ * invalid kind is left out, which the caller reads as not a state.
  */
 function parseSupersessionVerdict(
   raw: string,
   candidates: ReadonlyArray<SupersessionCandidate>,
 ): SupersessionVerdict {
-  const parsed = extractJsonReply(raw, isSupersessionVerdict) as { same?: unknown[]; conflicts?: unknown[] }
+  const parsed = extractJsonReply(raw, isSupersessionVerdict) as {
+    same?: unknown[]
+    conflicts?: unknown[]
+    kinds?: unknown
+  }
   const known = new Set(candidates.map((c) => c.id))
   const pick = (list: unknown[] | undefined): string[] => [
     ...new Set((list ?? []).filter((id): id is string => typeof id === 'string' && known.has(id))),
@@ -1052,7 +1067,18 @@ function parseSupersessionVerdict(
   return {
     same: same.filter((id) => !both.has(id)),
     conflicts: conflicts.filter((id) => !both.has(id)),
+    kinds: pickKinds(parsed.kinds, [SUPERSESSION_NEW_FACT_KEY, ...known]),
   }
+}
+
+function pickKinds(raw: unknown, keys: ReadonlyArray<string>): SupersessionVerdict['kinds'] {
+  if (!isPlainObject(raw)) return {}
+  const kinds: SupersessionVerdict['kinds'] = {}
+  for (const key of keys) {
+    const kind = Object.hasOwn(raw, key) ? raw[key] : undefined
+    if (typeof kind === 'string' && SUPERSESSION_FACT_KINDS.has(kind)) kinds[key] = kind as SupersessionFactKind
+  }
+  return kinds
 }
 
 /** ISO timestamp of a statement time, or `unknown date` when absent or unparseable. */

@@ -56,7 +56,7 @@ An empty value counts as unset. Any other malformed value fails server startup w
 
 Fact supersession in deep sleep (parsed once at server startup; a malformed value fails startup with an error naming the variable, and the resolved settings are logged once):
 
-- `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and orders a conflict by when each fact was stated. See "Fact supersession in deep sleep" in the core README.
+- `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and whether each fact is a state, an event or a plan, orders a conflict by when each fact was stated, and retires only a current-state fact. See "Fact supersession in deep sleep" in the core README.
 - `ENGRAM_SUPERSESSION_MIN_COSINE` — a number in [-1, 1], default `0.6`: the cosine floor for a stored fact to be compared with a new one.
 
 Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
@@ -416,11 +416,14 @@ The package includes CLI utilities for advanced use cases:
     because deep sleep re-reads a week of digests on every run.
   - Each fact, latest statement first, is judged against the live facts of its own project (shared facts only against
     shared facts) stated strictly earlier, at cosine at or above `--min-cosine` (default
-    `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most five. A conflict proposes retiring the earlier fact; a fact
-    proposed for retirement is neither judged nor offered again.
+    `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most five. The judge also labels each fact `state`, `event` or `plan`; a conflict
+    proposes retiring the earlier fact only when it is a `state` and the later fact a `state` or an `event` (the rule
+    deep sleep applies; a missing kind counts as neither). A fact proposed for retirement is neither judged nor
+    offered again.
   - Dry run (`--max-calls N` required; the run stops at the cap and says so): the judge runs, nothing is written.
     Stdout is JSON with the proposals (new id, old id, cosine, both statement dates, both rows' `updated_at` and a
-    hash of their topic and content) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
+    hash of their topic and content, both kinds), the count of judged conflicts per rule outcome (`retire`,
+    `kept-earlier-not-state`, `kept-later-not-current`) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
     writes the proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
   - Apply: `--apply --from-report PATH --rollback PATH` writes exactly the proposals in that report and calls no
     judge. A report written with `--sample` holds only the sample. A pair is skipped, and listed on stdout with a

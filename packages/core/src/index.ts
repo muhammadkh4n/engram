@@ -62,12 +62,16 @@ export type {
   SupersessionCandidate,
   SupersessionVerdict,
   SupersessionStatedAt,
+  SupersessionFactKind,
+  SupersessionRuleOutcome,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,
   isUnclassifiableReply,
   EmptyClassifierReplyError,
   isEmptyClassifierReply,
+  SUPERSESSION_NEW_FACT_KEY,
+  supersessionRuleOutcome,
 } from './adapters/intelligence.js'
 export type {
   GraphPort,
