@@ -867,7 +867,9 @@ export async function recall(
   // edges when graph is non-null. Only what the payload emitted was shown:
   // recording exposure or co-recall on memories the caller never saw would
   // misstate what was displayed. Emission is a prefix of each ranked list,
-  // so the emitted items are the first N of each.
+  // also when a token budget splits its room between Recalled and Related,
+  // so the emitted items are the first N of each. An item cut at the item
+  // cap was still shown.
   if (opts.reconsolidate !== false) {
     const manager = new AssociationManager(storage.associations)
     stageReconsolidate(

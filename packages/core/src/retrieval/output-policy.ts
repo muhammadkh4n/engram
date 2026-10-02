@@ -1,4 +1,3 @@
-import { estimateTokens } from '../utils/tokens.js'
 import type { RecallDegradation } from '../types.js'
 
 // ---------------------------------------------------------------------------
@@ -60,12 +59,33 @@ export interface RecallOutputPolicy {
   emitK?: number
   /** Cap on `estimateTokens` of the whole text, headers included. */
   tokenBudget?: number
+  /** Fraction of the budget room held for Related Memories, 0 to
+   *  `MAX_RELATED_SHARE`. Applies only with `tokenBudget`; defaults to
+   *  `DEFAULT_RELATED_SHARE`. */
+  relatedShare?: number
+  /** Longest item in tokens; a longer item is cut. Applies only with
+   *  `tokenBudget`; defaults to a quarter of the budget. */
+  itemMaxTokens?: number
   /** Emit the Faint Associations section. */
   faint: boolean
 }
 
 /** The policy that reproduces the unbounded payload. */
 export const DEFAULT_RECALL_OUTPUT_POLICY: RecallOutputPolicy = { faint: true }
+
+/** Related Memories' share of the budget room when the policy names none. */
+export const DEFAULT_RELATED_SHARE = 0.3
+
+/** Largest Related share, so the ranked section always keeps a tenth of the room. */
+export const MAX_RELATED_SHARE = 0.9
+
+/** Appended to an item cut at the item cap. */
+export const ITEM_CUT_MARKER = ' …'
+
+/** `estimateTokens` counts ceil(chars / 4), so a text fits a budget of B
+ *  tokens exactly when it has at most 4·B chars. Assembly under a budget
+ *  works in chars, where section costs add up exactly. */
+const CHARS_PER_TOKEN = 4
 
 export interface PayloadItem {
   section: PayloadSection
@@ -80,8 +100,9 @@ export interface RecallPayload {
   emittedMemories: number
   emittedAssociations: number
   emittedFaint: number
-  /** The token budget stopped assembly before every candidate item was
-   *  emitted. Items left out by `emitK` or the faint switch do not count. */
+  /** The token budget changed the payload: assembly left out a candidate
+   *  item, or an item was cut at the item cap. Items left out by `emitK` or
+   *  the faint switch do not count. */
   truncated: boolean
   items: PayloadItem[]
 }
@@ -106,14 +127,150 @@ function candidatesFor(
   return items
 }
 
+type SectionItems = Record<PayloadSection, readonly RenderedItem[]>
+
+function headerText(notice: string | undefined): string {
+  return (notice !== undefined ? [notice, ...PAYLOAD_HEADER_LINES] : PAYLOAD_HEADER_LINES).join('\n')
+}
+
+/** Write the header and, per section, its heading and items. Every item is
+ *  joined to the text before it with '\n'; a heading is written only with
+ *  its section's first item. No item yields ''. */
+function writePayload(header: string, sections: SectionItems): AssembledPayload {
+  const payload = emptyRecallPayload()
+  const parts = [header]
+  let length = header.length
+
+  for (const section of PAYLOAD_SECTION_ORDER) {
+    sections[section].forEach((item, i) => {
+      const lead = i === 0 ? `\n${PAYLOAD_SECTION_HEADERS[section]}\n` : '\n'
+      const start = length + lead.length
+      parts.push(lead, item.text)
+      length = start + item.text.length
+      payload.items.push({ section, ...(item.id !== undefined ? { id: item.id } : {}), start, end: length })
+      if (section === 'recalled') payload.emittedMemories++
+      else if (section === 'related') payload.emittedAssociations++
+      else if (section === 'faint') payload.emittedFaint++
+    })
+  }
+
+  return { text: payload.items.length === 0 ? '' : parts.join(''), payload }
+}
+
+/**
+ * Cut `text` to at most `maxTokens` tokens, ending at a word boundary followed
+ * by `ITEM_CUT_MARKER`. Text with no word boundary in range is cut hard,
+ * never inside a surrogate pair. Text that fits is returned unchanged.
+ */
+export function capItemText(text: string, maxTokens: number): string {
+  const maxChars = maxTokens * CHARS_PER_TOKEN
+  if (text.length <= maxChars) return text
+  const room = Math.max(0, maxChars - ITEM_CUT_MARKER.length)
+  for (let end = room; end > 0; end--) {
+    if (/\s/.test(text[end] ?? '') && !/\s/.test(text[end - 1] ?? '')) return `${text.slice(0, end)}${ITEM_CUT_MARKER}`
+  }
+  const code = text.charCodeAt(room - 1)
+  const end = code >= 0xd800 && code <= 0xdbff ? room - 1 : room
+  return `${text.slice(0, end)}${ITEM_CUT_MARKER}`
+}
+
+function checkBudgetFields(policy: RecallOutputPolicy): void {
+  const { relatedShare, itemMaxTokens } = policy
+  if (relatedShare !== undefined && !(relatedShare >= 0 && relatedShare <= MAX_RELATED_SHARE)) {
+    throw new RangeError(`relatedShare must be between 0 and ${MAX_RELATED_SHARE}, got ${relatedShare}`)
+  }
+  if (itemMaxTokens !== undefined && !(Number.isSafeInteger(itemMaxTokens) && itemMaxTokens >= 1)) {
+    throw new RangeError(`itemMaxTokens must be a positive integer, got ${itemMaxTokens}`)
+  }
+}
+
+/** Char cost of each item when emitted after the ones before it: the joining
+ *  '\n' and the item, plus the section heading for the first. */
+function itemCosts(section: PayloadSection, items: readonly RenderedItem[]): number[] {
+  return items.map((item, i) => (i === 0 ? 1 + PAYLOAD_SECTION_HEADERS[section].length : 0) + 1 + item.text.length)
+}
+
+/** How many items after the first `from` fit in `room` chars, and their cost. */
+function extendPrefix(costs: readonly number[], from: number, room: number): { count: number; used: number } {
+  let used = 0
+  let count = from
+  while (count < costs.length && used + (costs[count] ?? 0) <= room) used += costs[count++] ?? 0
+  return { count, used }
+}
+
+/**
+ * Budgeted assembly, all in chars. The room R is the budget minus the header
+ * and notice. Pass 1: the Recalled section takes the prefix that fits in its
+ * part of R and Related the prefix that fits in R·relatedShare. Pass 2: room
+ * either one left unused goes to the other, Recalled first. Domain, Context
+ * and Faint then fill what is left in order; the first of their items that
+ * does not fit ends assembly. Every item is first cut to the item cap.
+ */
+function assembleWithinBudget(
+  rendered: RenderedPayload,
+  policy: RecallOutputPolicy,
+  tokenBudget: number,
+  notice: string | undefined,
+): AssembledPayload {
+  checkBudgetFields(policy)
+  const itemMaxTokens = policy.itemMaxTokens ?? Math.max(1, Math.floor(tokenBudget / 4))
+  const header = headerText(notice)
+  const room = Math.max(0, tokenBudget * CHARS_PER_TOKEN - header.length)
+
+  const candidates = {} as Record<PayloadSection, RenderedItem[]>
+  const wasCut = {} as Record<PayloadSection, boolean[]>
+  const costs = {} as Record<PayloadSection, number[]>
+  for (const section of PAYLOAD_SECTION_ORDER) {
+    const original = candidatesFor(rendered, section, policy)
+    candidates[section] = original.map((item) => ({ ...item, text: capItemText(item.text, itemMaxTokens) }))
+    wasCut[section] = original.map((item, i) => candidates[section][i]?.text !== item.text)
+    costs[section] = itemCosts(section, candidates[section])
+  }
+
+  const relatedRoom = Math.floor(room * (policy.relatedShare ?? DEFAULT_RELATED_SHARE))
+  const recalled1 = extendPrefix(costs.recalled, 0, room - relatedRoom)
+  const related1 = extendPrefix(costs.related, 0, relatedRoom)
+  let left = room - recalled1.used - related1.used
+  const recalled2 = extendPrefix(costs.recalled, recalled1.count, left)
+  left -= recalled2.used
+  const related2 = extendPrefix(costs.related, related1.count, left)
+  left -= related2.used
+
+  const counts: Record<PayloadSection, number> = {
+    recalled: recalled2.count, related: related2.count, domain: 0, context: 0, faint: 0,
+  }
+  for (const section of ['domain', 'context', 'faint'] as const) {
+    const filled = extendPrefix(costs[section], 0, left)
+    counts[section] = filled.count
+    left -= filled.used
+    if (filled.count < costs[section].length) break
+  }
+
+  const emitted = {} as SectionItems
+  let changed = false
+  for (const section of PAYLOAD_SECTION_ORDER) {
+    emitted[section] = candidates[section].slice(0, counts[section])
+    const leftOut = counts[section] < candidates[section].length
+    changed ||= leftOut || wasCut[section].slice(0, counts[section]).includes(true)
+  }
+
+  const { text, payload } = writePayload(header, emitted)
+  return { text, payload: { ...payload, truncated: changed } }
+}
+
 /**
  * Build the payload text from rendered sections under a policy.
  *
- * Prefix rule: assembly stops at the first item that would push the text over
- * the budget; later items and sections are not tried, so a smaller item never
- * jumps a larger, better-ranked one. The first item is always emitted whole so
- * a non-empty recall never returns headers alone. A section heading is written
- * only together with its first emitted item. No emitted item yields ''.
+ * Every section is emitted as a prefix of its items, in rank order, so the
+ * first N memories and the first M associations are exactly what was shown.
+ * A section heading is written only together with its first emitted item.
+ * No emitted item yields ''.
+ *
+ * With a token budget the text never exceeds it: no item is longer than the
+ * item cap, and Related Memories holds its share of the room even when the
+ * Recalled section could fill it all (see `assembleWithinBudget`). A budget
+ * smaller than the header emits nothing. Without one the whole payload is
+ * emitted, after `emitK` and the faint switch.
  *
  * A `notice` becomes the first line, ahead of the header lines, and counts
  * against the budget like any header.
@@ -123,34 +280,10 @@ export function assemble(
   policy: RecallOutputPolicy = DEFAULT_RECALL_OUTPUT_POLICY,
   notice?: string,
 ): AssembledPayload {
-  const payload = emptyRecallPayload()
-  let text = (notice !== undefined ? [notice, ...PAYLOAD_HEADER_LINES] : PAYLOAD_HEADER_LINES).join('\n')
-
-  for (const section of PAYLOAD_SECTION_ORDER) {
-    let headed = false
-    for (const item of candidatesFor(rendered, section, policy)) {
-      const prefix = `${text}${headed ? '' : `\n${PAYLOAD_SECTION_HEADERS[section]}`}\n`
-      const next = `${prefix}${item.text}`
-      const fits = policy.tokenBudget === undefined || estimateTokens(next) <= policy.tokenBudget
-      if (!fits && payload.items.length > 0) {
-        payload.truncated = true
-        return { text, payload }
-      }
-      payload.items.push({
-        section,
-        ...(item.id !== undefined ? { id: item.id } : {}),
-        start: prefix.length,
-        end: next.length,
-      })
-      if (section === 'recalled') payload.emittedMemories++
-      else if (section === 'related') payload.emittedAssociations++
-      else if (section === 'faint') payload.emittedFaint++
-      text = next
-      headed = true
-    }
-  }
-
-  return payload.items.length === 0 ? { text: '', payload } : { text, payload }
+  if (policy.tokenBudget !== undefined) return assembleWithinBudget(rendered, policy, policy.tokenBudget, notice)
+  const sections = {} as SectionItems
+  for (const section of PAYLOAD_SECTION_ORDER) sections[section] = candidatesFor(rendered, section, policy)
+  return writePayload(headerText(notice), sections)
 }
 
 // ---------------------------------------------------------------------------

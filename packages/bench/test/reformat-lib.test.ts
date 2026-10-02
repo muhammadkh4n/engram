@@ -236,12 +236,12 @@ describe('reformatRow under a policy', () => {
     expect(derived.context_items).toBe(direct.context_items)
   })
 
-  it('emits an oversized first item whole and stops there', () => {
+  it('emits nothing under a budget smaller than the header', () => {
     const row = FIXTURES[1]![2]
     const out = reformatRow(row, { tokenBudget: 10, faint: true })
-    expect(out.payload_items).toHaveLength(1)
+    expect(out.payload_items).toHaveLength(0)
     expect(out.truncated).toBe(true)
-    expect(out.formatted).toBe(row.formatted!.slice(0, row.payload_items![0]!.end))
+    expect(out.formatted).toBe('')
   })
 
   it('drops a gold session whose only item was cut', () => {
