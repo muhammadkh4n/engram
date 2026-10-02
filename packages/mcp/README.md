@@ -110,6 +110,18 @@ Search memory for content relevant to a query.
 
 With `ENGRAM_RECALL_TIMING=1` the server writes one `[recall]` line per call to stderr: stage timings in milliseconds (`total expand search hyde pattern mmr rerank graph`, then any `graph.*` sub-stages sorted; a stage that did not run is absent), `items=` (the ranked pool), `chars=`, `emitted=` (Recalled memories in the payload), `tokens=` (estimated tokens of the payload) and `truncated=1` when the token budget cut it short.
 
+With `ENGRAM_RECALL_LOG=<file path>` (unset = off) the server also appends one JSON line per recall to that file, for replaying real recall traffic in order and for counting how often each memory is shown:
+
+```json
+{"ts":"2026-09-30T12:00:00.000Z","query":"deploy window","project_id":"engram","session_id":null,"conversation_id":null,"mode":"QUESTION","emitted":[{"id":"…","type":"episode","rank":1}],"associated":[{"id":"…","type":"semantic"}],"timings":{"total":120}}
+```
+
+- `query` is the query as received, trimmed, with credentials replaced by the same secret scrubber ingest uses. The recall itself still runs on the unscrubbed query.
+- `project_id` is the normalised `project_id` argument; `session_id` and `conversation_id` are the call's arguments of those names, `null` when absent. `mode` is the intent type the recall classified the query as.
+- `emitted` lists the Recalled section's memories in display order (`rank` from 1); `associated` lists every other memory the payload carried (related, domain, context and faint sections), in display order. `timings` is the same stage map the `[recall]` line prints when `ENGRAM_RECALL_TIMING=1`, else `null`.
+- The file is created with mode 0600 (an existing file is tightened to it). Lines are written in the background, one at a time: a slow or failing write never delays or fails a recall, and a write error is logged to stderr at most once per minute.
+- `ENGRAM_RECALL_LOG_MAX_MB` (default 200) caps the file: when the next line would push it past the cap, it is renamed to `<file>.1` (replacing any previous one) and a new file is started. A non-positive or non-numeric value fails startup.
+
 **When Claude uses it:** Automatically before answering questions about past work, decisions, or preferences. Also when you reference a previous session ("remember when...", "what did we decide about...").
 
 ### memory_ingest
