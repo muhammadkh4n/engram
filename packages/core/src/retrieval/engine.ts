@@ -18,6 +18,7 @@ import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
 import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
+import { recallLinkSwitchesFromEnv } from './link-switches.js'
 import { resolveFusionConfig } from './fusion-config.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
@@ -443,6 +444,7 @@ export async function recall(
   // value fails here, before any search work.
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
   const rankPriors = rankPriorSwitchesFromEnv(process.env)
+  const linkSwitches = recallLinkSwitchesFromEnv(process.env)
   // Per call for the same reason; an invalid override fails before searching.
   const fusion = resolveFusionConfig(strategy.fusion, process.env)
   const vectorUnavailable = opts.vectorUnavailable
@@ -788,7 +790,7 @@ export async function recall(
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
       const legacyStrategy = toRetrievalStrategy(strategy)
-      associations = await stageAssociate(memories, legacyStrategy, storage)
+      associations = await stageAssociate(memories, legacyStrategy, storage, linkSwitches.walkExclude)
     } else {
       associations = activationResult.associations
       compositeContext = activationResult.context
@@ -796,7 +798,7 @@ export async function recall(
   } else if (strategy.associations) {
     // No graph — SQL association walk
     const legacyStrategy = toRetrievalStrategy(strategy)
-    associations = await stageAssociate(memories, legacyStrategy, storage)
+    associations = await stageAssociate(memories, legacyStrategy, storage, linkSwitches.walkExclude)
   }
   if (strategy.associations) stageEnd(timings, 'graph', graphStart)
 
@@ -865,6 +867,7 @@ export async function recall(
       storage,
       manager,
       graph,
+      linkSwitches,
     )
   }
 

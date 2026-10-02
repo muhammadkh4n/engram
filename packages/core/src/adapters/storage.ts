@@ -213,9 +213,13 @@ export interface ProceduralStorage {
 
 export interface AssociationStorage {
   insert(association: Omit<Association, 'id' | 'createdAt'>): Promise<Association>
+  /**
+   * `excludeTypes` lists edge types the walk must not follow at any hop.
+   * Omitted or empty, every edge type is followed.
+   */
   walk(
     seedIds: string[],
-    opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[] }
+    opts?: { maxHops?: number; minStrength?: number; types?: EdgeType[]; excludeTypes?: readonly EdgeType[] }
   ): Promise<WalkResult[]>
   upsertCoRecalled(
     sourceId: string,

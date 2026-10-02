@@ -1,4 +1,4 @@
-import type { RetrievedMemory, RetrievalStrategy, TypedMemory } from '../types.js'
+import type { EdgeType, RetrievedMemory, RetrievalStrategy, TypedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 
 function extractContent(typed: TypedMemory): string {
@@ -21,7 +21,8 @@ function extractMetadata(typed: TypedMemory): Record<string, unknown> {
 export async function stageAssociate(
   recalled: RetrievedMemory[],
   strategy: RetrievalStrategy,
-  storage: StorageAdapter
+  storage: StorageAdapter,
+  walkExclude: readonly EdgeType[] = [],
 ): Promise<RetrievedMemory[]> {
   if (!strategy.includeAssociations || strategy.associationHops === 0) return []
   if (recalled.length === 0) return []
@@ -31,10 +32,12 @@ export async function stageAssociate(
   const seedIds = seeds.map((m) => m.id)
   const recalledIdSet = new Set(recalled.map((m) => m.id))
 
-  // Walk the association graph
+  // Walk the association graph. With nothing excluded the options carry no
+  // excludeTypes key, so the storage call is the same as without the switch.
   const walkResults = await storage.associations.walk(seedIds, {
     maxHops: strategy.associationHops,
     minStrength: 0.2,
+    ...(walkExclude.length > 0 ? { excludeTypes: walkExclude } : {}),
   })
 
   // Build a map from seed id -> relevance for scoring
