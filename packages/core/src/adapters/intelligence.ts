@@ -19,6 +19,35 @@ export interface KnowledgeCandidate {
   sourceEpisodeIds: string[]
 }
 
+/** One source episode handed to the fact extractor. */
+export interface FactSourceEpisode {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  createdAt: Date
+  content: string
+}
+
+export interface ExtractFactsInput {
+  /** Whole episodes, in statement-time order. */
+  episodes: ReadonlyArray<FactSourceEpisode>
+  /** The project the episodes belong to, null when none. */
+  projectId: string | null
+}
+
+/**
+ * A fact that stands alone: its statement names its subject, resolves its
+ * references and dates a state or an event, so it reads correctly without the
+ * conversation. `episodeIds` are the ids of the episodes it rests on, never
+ * empty.
+ */
+export interface ExtractedFact {
+  topic: string
+  statement: string
+  /** 0..1: how clearly the episodes state the claim. */
+  confidence: number
+  episodeIds: string[]
+}
+
 /**
  * Typed entity extracted from episode content by an LLM.
  *
@@ -230,6 +259,14 @@ export interface IntelligenceAdapter {
   dimensions?(): number
   summarize?(content: string, opts: SummarizeOptions): Promise<SummaryResult>
   extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
+  /**
+   * Extract standalone facts from source episodes, each citing the episodes
+   * it rests on. Episodes are never cut; a large batch may take several
+   * model calls. Resolves `[]` when the episodes hold no fact. Rejects when
+   * any call fails, is cut off at its token cap, or replies with something
+   * that cannot be read as a fact list, so the caller can retry the batch.
+   */
+  extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
   /**
    * Extract typed named entities from episode content for graph decomposition.
    * Returns real people, tools, projects, organizations, and concepts — NOT

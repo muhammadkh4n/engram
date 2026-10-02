@@ -82,6 +82,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     extractKnowledge(content) {
       return summarizer.extractKnowledge(content)
     },
+    extractFacts(input) {
+      return summarizer.extractFacts(input)
+    },
     extractEntities(content) {
       return summarizer.extractEntities(content)
     },
