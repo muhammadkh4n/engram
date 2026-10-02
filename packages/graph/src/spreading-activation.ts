@@ -9,6 +9,7 @@ const DEFAULT_PARAMS: Required<ActivationParams> = {
   minWeight: 0.01,
   edgeTypeFilter: [],
   projectId: null,
+  fanEffect: false,
 }
 
 function createdAtOf(result: ActivationResult): string {
@@ -29,6 +30,85 @@ function compareActivation(a: ActivationResult, b: ActivationResult): number {
   if (aCreated !== bCreated) return aCreated < bCreated ? 1 : -1
   if (a.nodeId === b.nodeId) return 0
   return a.nodeId < b.nodeId ? -1 : 1
+}
+
+/**
+ * ACT-R fan effect. Each step is scaled by decay and by the fan factor of the
+ * node it spreads out of: f = ln(N / deg) / ln(N), with N the Memory node count
+ * and deg the node's relationship count. A node linked to most of the graph
+ * passes on almost nothing, and one whose degree reaches N passes on nothing;
+ * a graph under two memories applies no factor, since ln 1 = 0. A literal
+ * 1/deg is not used: two hops at a typical degree fall under the activation
+ * floor. Project nodes and the default Session link whole populations, so a
+ * walk through them gives every member the same activation; they never relay,
+ * and a Project is never a seed.
+ *
+ * Strength comes from fan alone. Edge weights are not comparable across
+ * relationship types: they mix per-type ingest constants, shares of a digest's
+ * sources, and time decay that only some types receive, so multiplying them
+ * would rank a hub edge left at 1.0 above a decayed entity link. They still
+ * gate which edges a path may use (minWeight).
+ *
+ * A neighbour's activation per seed is the sum over its distinct routes: paths
+ * that visit no node twice, one entry per sequence of intermediate nodes, so
+ * parallel relationships between the same nodes count once. A memory sharing
+ * two entities with a seed therefore outranks one sharing a single entity.
+ * Per-seed totals then sum across seeds. The sum can exceed 1.
+ */
+function fanEffectCypher(relFilter: string, maxHops: number): string {
+  return `
+      CALL {
+        MATCH (m:Memory)
+        RETURN count(m) AS memoryCount
+      }
+      UNWIND $seedIds AS seedId
+      MATCH (seed) WHERE seed.id = seedId AND NOT seed:Project
+      CALL {
+        WITH seed, seedId, memoryCount
+        MATCH path = (seed)-[rels${relFilter}*1..${maxHops}]-(neighbor)
+        WHERE neighbor <> seed
+          AND ALL(r IN rels WHERE r.weight >= $minWeight)
+          AND ALL(i IN range(1, length(path)) WHERE NOT nodes(path)[i] IN nodes(path)[0..i])
+          AND NONE(n IN nodes(path)[1..-1] WHERE
+                n:Project
+                OR (n:Session AND n.id = 'default'))
+          AND ALL(n IN nodes(path) WHERE
+                $projectId IS NULL
+                OR NOT n:Memory
+                OR n.projectId = $projectId
+                OR n.projectId IS NULL)
+          AND ALL(n IN nodes(path) WHERE
+                NOT n:Memory
+                OR coalesce(n.forgottenAt, n.deletedAt) IS NULL)
+        WITH seedId, neighbor, length(path) AS hops,
+             [n IN nodes(path)[1..-1] | elementId(n)] AS via,
+             [degree IN [n IN nodes(path)[0..-1] | COUNT { (n)--() }] |
+               CASE
+                 WHEN memoryCount < 2 THEN 1.0
+                 WHEN degree >= memoryCount THEN 0.0
+                 ELSE log(toFloat(memoryCount) / degree) / log(toFloat(memoryCount))
+               END
+             ] AS fans
+        WITH neighbor, via, hops,
+             reduce(
+               activation = coalesce($seedWeights[seedId], 1.0),
+               fan IN fans | activation * $decayPerHop * fan
+             ) AS activation
+        WITH neighbor, via, MAX(activation) AS routeActivation, MIN(hops) AS routeHops
+        WITH neighbor, SUM(routeActivation) AS seedSum, MIN(routeHops) AS seedHops
+        RETURN neighbor, seedSum AS activation, seedHops AS hops
+      }
+      WITH neighbor, SUM(activation) AS bestActivation, MIN(hops) AS shortestPath
+      WHERE bestActivation >= $minActivation
+      RETURN
+        neighbor.id AS nodeId,
+        labels(neighbor)[0] AS nodeType,
+        properties(neighbor) AS properties,
+        bestActivation AS activation,
+        shortestPath AS hops
+      ORDER BY activation DESC, coalesce(neighbor.createdAt, '') DESC, nodeId
+      LIMIT $maxNodes
+    `
 }
 
 export class SpreadingActivation {
@@ -60,7 +140,7 @@ export class SpreadingActivation {
       ? Object.fromEntries(seedActivations)
       : {}
 
-    const cypher = `
+    const cypher = p.fanEffect ? fanEffectCypher(relFilter, p.maxHops) : `
       UNWIND $seedIds AS seedId
       MATCH (seed) WHERE seed.id = seedId
       CALL {
@@ -100,13 +180,15 @@ export class SpreadingActivation {
     try {
       const result = await session.executeRead(async (tx) => {
         return tx.run(cypher, {
-          seedIds,
+          // Summed activation would count a repeated seed twice.
+          seedIds: p.fanEffect ? [...new Set(seedIds)] : seedIds,
           seedWeights,
           minWeight: p.minWeight,
           decayPerHop: p.decayPerHop,
           minActivation: p.minActivation,
           maxNodes: neo4j.int(p.maxNodes),
           projectId: p.projectId ?? null,
+          ...(p.fanEffect ? { fanEffect: true } : {}),
         })
       })
 

@@ -19,7 +19,7 @@ import { unifiedSearch } from './search.js'
 import { expandQueryCached, hypotheticalDocCached, type RecallLlmCache } from './llm-step-cache.js'
 import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
-import { recallLinkSwitchesFromEnv } from './link-switches.js'
+import { recallFanEffectFromEnv, recallLinkSwitchesFromEnv } from './link-switches.js'
 import { resolveFusionConfig } from './fusion-config.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
@@ -445,6 +445,7 @@ export async function recall(
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
   const rankPriors = rankPriorSwitchesFromEnv(process.env)
   const linkSwitches = recallLinkSwitchesFromEnv(process.env)
+  const fanEffect = recallFanEffectFromEnv(process.env)
   // Priming state belongs to the calling conversation alone. Switched off,
   // the recall neither reads it (score boost, graph context seeds) nor
   // primes it.
@@ -793,7 +794,7 @@ export async function recall(
     // so recall is sensitive to that conversation's context. A recall with no
     // conversation has none.
     const contextTopics = sensory?.getPrimed().map((p) => p.topic) ?? []
-    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId, contextTopics)
+    const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId, contextTopics, { fanEffect })
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
       const legacyStrategy = toRetrievalStrategy(strategy)

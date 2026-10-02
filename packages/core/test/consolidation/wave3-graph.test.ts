@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { lightSleep } from '../../src/consolidation/light-sleep.js'
 import { deepSleep } from '../../src/consolidation/deep-sleep.js'
 import { dreamCycle } from '../../src/consolidation/dream-cycle.js'
@@ -207,7 +207,12 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
   // -----------------------------------------------------------------------
 
   describe('dreamCycle', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs()
+    })
+
     it('skips GDS operations when GDS unavailable but runs replay and causal', async () => {
+      vi.stubEnv('ENGRAM_RECALL_FAN', 'on')
       // GDS is off (default mock)
       // Replay needs seeds — mock the query
       const mockSeedResult: GraphQueryResult = {
@@ -250,6 +255,12 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
 
       // Replay created an edge (3 Memory nodes overlap: mem-A, mem-B, mem-C)
       expect(result.replayEdgesCreated).toBe(1)
+
+      // Replay spreads with today's rule whatever the recall fan switch says.
+      expect(graph.spreadActivation).toHaveBeenCalledTimes(2)
+      for (const [opts] of vi.mocked(graph.spreadActivation).mock.calls) {
+        expect(opts).not.toHaveProperty('fanEffect')
+      }
 
       // SQL supplementary pass still ran
       expect(storage.associations.discoverTopicalEdges).toHaveBeenCalled()

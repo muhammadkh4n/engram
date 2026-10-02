@@ -132,6 +132,15 @@ async function getEntitySeeds(
 // stageActivate
 // ---------------------------------------------------------------------------
 
+export interface StageActivateOptions {
+  /**
+   * Spread with the fan effect (see GraphSpreadActivationOpts.fanEffect) and
+   * without the project seed: the SQL stage already applies project scope and
+   * boost, and from the Project node every member would tie.
+   */
+  fanEffect?: boolean
+}
+
 export interface ActivationResultSet {
   associations: RetrievedMemory[]
   context: CompositeMemory
@@ -166,8 +175,10 @@ export async function stageActivate(
   project?: string,
   projectId?: string,
   contextTopics?: string[],
+  options: StageActivateOptions = {},
 ): Promise<ActivationResultSet | null> {
   const params = getActivationParams(strategy)
+  const fanEffect = options.fanEffect === true
 
   // --- Build seed map from vector results ---
   // Memory nodes in Neo4j have id = episode.id (same UUID as SQL).
@@ -189,8 +200,10 @@ export async function stageActivate(
   // When a project is provided, add its node as an additional seed with
   // activation 0.6. Spreading activation from the project node naturally
   // pulls in all memories sharing the PROJECT edge, boosting same-project
-  // associations without hard-filtering cross-project content.
-  if (project && project !== 'global') {
+  // associations without hard-filtering cross-project content. Under the fan
+  // effect it is left out: every member would tie from it, and the SQL stage
+  // has already applied the project boost.
+  if (!fanEffect && project && project !== 'global') {
     const projectNodeId = `project:${project.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/(^_|_$)/g, '')}`
     if (!seedActivations.has(projectNodeId)) {
       seedActivations.set(projectNodeId, 0.6)
@@ -236,6 +249,7 @@ export async function stageActivate(
       // Set only for strict project scoping: confines activation to that
       // project's nodes instead of bridging through shared entity/person nodes.
       ...(projectId !== undefined ? { projectId } : {}),
+      ...(fanEffect ? { fanEffect: true } : {}),
     })
   } catch (err) {
     console.warn('[engram] spreadActivation failed:', err)
@@ -316,13 +330,24 @@ export async function stageActivate(
     }
   }
 
+  // getByIds returns rows in no defined order, so activation ties must be
+  // broken by the graph's own ranking (activation, newest createdAt, id) or
+  // identical recalls render Related in a different order each time.
+  const graphRankByNodeId = new Map(
+    activatedNodes.map((n, index) => [n.nodeId, index]),
+  )
+  const byActivationThenGraphRank = (a: RetrievedMemory, b: RetrievedMemory): number =>
+    b.relevance - a.relevance ||
+    (graphRankByNodeId.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (graphRankByNodeId.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+
   const associations = primaryEpisodes
     .map(toRetrievedMemory)
-    .sort((a, b) => b.relevance - a.relevance)
+    .sort(byActivationThenGraphRank)
 
   const faintAssociations = faintEpisodes
     .map(toRetrievedMemory)
-    .sort((a, b) => b.relevance - a.relevance)
+    .sort(byActivationThenGraphRank)
     .slice(0, 5) // cap faint associations at 5
 
   // --- Assemble context from non-Memory activated nodes ---

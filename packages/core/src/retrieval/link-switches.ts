@@ -80,3 +80,12 @@ export function recallLinkSwitchesFromEnv(env: NodeJS.ProcessEnv = process.env):
     walkExclude: edgeTypesFromEnv(env, 'ENGRAM_RECALL_WALK_EXCLUDE'),
   }
 }
+
+/**
+ * Read ENGRAM_RECALL_FAN (on|off, default off): whether recall's graph stage
+ * spreads activation with the fan effect and without the project seed. Any
+ * other value throws, naming the variable.
+ */
+export function recallFanEffectFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return onOffFromEnv(env, 'ENGRAM_RECALL_FAN', false)
+}
