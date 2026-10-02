@@ -87,6 +87,8 @@ interface ScoringInput {
   bm25Boost: number
   recencyBias: number
   createdAt: Date
+  /** The instant rows are aged against, in epoch milliseconds. */
+  nowMs: number
   accessCount: number
   primingBoost: number
   role: string | undefined
@@ -137,6 +139,7 @@ function computeScore(input: ScoringInput): number {
     bm25Boost: rawBm25,
     recencyBias,
     createdAt,
+    nowMs,
     accessCount,
     primingBoost,
     role,
@@ -146,7 +149,11 @@ function computeScore(input: ScoringInput): number {
 
   const baseScore = baseSim
   const bm25Boost = rawBm25 * fusion.lexicalWeight
-  const ageHours = (Date.now() - createdAt.getTime()) / 3_600_000
+  // A row stored after the reference instant (a benchmark asks as of a past
+  // date about rows ingested today) counts as brand new. Unclamped, its
+  // negative age would grow exp(-age / decay) without bound and the recency
+  // term would swamp every other signal.
+  const ageHours = Math.max(0, (nowMs - createdAt.getTime()) / 3_600_000)
   const recencyScore = recencyBias * Math.exp(-ageHours / fusion.recencyDecayHours)
   const accessBoost = Math.min(fusion.accessBoostCap, accessCount * fusion.accessBoostPerAccess)
   const roleBoost = role === 'assistant' ? fusion.assistantRoleBoost : 0
@@ -193,6 +200,9 @@ export interface UnifiedSearchOpts {
   /** Resolved fusion config. Absent: resolved here from strategy.fusion and
    *  ENGRAM_RECALL_FUSION over the defaults. */
   fusion?: FusionConfig
+  /** The instant the recency term ages rows against. Absent or invalid: the
+   *  wall clock, read once per search so every row ages against one instant. */
+  now?: Date
 }
 
 /** Lexical-leg error messages already written to stderr by this process.
@@ -252,6 +262,7 @@ function scoreCandidate(
   strategy: RecallStrategy,
   sensory: SensoryBuffer | null,
   fusion: FusionConfig,
+  nowMs: number,
 ): RetrievedMemory {
   const content = extractContent(typed)
   const createdAt = extractCreatedAt(typed)
@@ -260,6 +271,7 @@ function scoreCandidate(
     bm25Boost,
     recencyBias: strategy.recencyBias,
     createdAt,
+    nowMs,
     accessCount: extractAccessCount(typed),
     primingBoost: sensory?.getPrimingBoost(content) ?? 0,
     role: extractRole(typed),
@@ -288,6 +300,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     return []
   }
   const fusion = opts.fusion ?? resolveFusionConfig(strategy.fusion, process.env)
+  const nowMs = opts.now !== undefined && !Number.isNaN(opts.now.getTime()) ? opts.now.getTime() : Date.now()
 
   // Storage adapters without vectorSearch, or without textBoost, degrade to
   // the per-tier text search below.
@@ -342,7 +355,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
   if (vectorResults.length > 0 || boostResults.length > 0) {
     // Primary path: score vector results with optional BM25 boost
     for (const { item: typed, similarity } of vectorResults) {
-      scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory, fusion))
+      scored.push(scoreCandidate(typed, similarity, boostMap.get(typed.data.id) ?? 0, strategy, sensory, fusion, nowMs))
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
     }
@@ -368,8 +381,8 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       if (!typed) continue
 
       const candidate = hasQueryVector
-        ? scoreCandidate(typed, rescueCosine(embedding, typed.data.embedding), b.boost, strategy, sensory, fusion)
-        : scoreCandidate(typed, normalisedLexicalRank(b.boost, maxBoost), 0, strategy, sensory, fusion)
+        ? scoreCandidate(typed, rescueCosine(embedding, typed.data.embedding), b.boost, strategy, sensory, fusion, nowMs)
+        : scoreCandidate(typed, normalisedLexicalRank(b.boost, maxBoost), 0, strategy, sensory, fusion, nowMs)
       scored.push(candidate)
       scoredIds.add(typed.data.id)
       typedById.set(typed.data.id, typed)
@@ -409,7 +422,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     }
 
     for (const { typed, similarity } of textHits) {
-      scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory, fusion))
+      scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory, fusion, nowMs))
       typedById.set(typed.data.id, typed)
     }
   }

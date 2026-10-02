@@ -11,6 +11,26 @@ const DEFAULT_PARAMS: Required<ActivationParams> = {
   projectId: null,
 }
 
+function createdAtOf(result: ActivationResult): string {
+  const createdAt = result.properties.createdAt
+  return typeof createdAt === 'string' ? createdAt : ''
+}
+
+/**
+ * Total order over activated nodes, mirroring the Cypher ORDER BY: activation
+ * descending, then newest createdAt (missing sorts last), then id. Weight-1
+ * hub edges give hundreds of nodes exactly equal activation, so without the
+ * tie-break the maxNodes cut is an arbitrary slice in the store's internal order.
+ */
+function compareActivation(a: ActivationResult, b: ActivationResult): number {
+  if (a.activation !== b.activation) return b.activation - a.activation
+  const aCreated = createdAtOf(a)
+  const bCreated = createdAtOf(b)
+  if (aCreated !== bCreated) return aCreated < bCreated ? 1 : -1
+  if (a.nodeId === b.nodeId) return 0
+  return a.nodeId < b.nodeId ? -1 : 1
+}
+
 export class SpreadingActivation {
   private driver: Driver
 
@@ -72,7 +92,7 @@ export class SpreadingActivation {
         properties(neighbor) AS properties,
         bestActivation AS activation,
         shortestPath AS hops
-      ORDER BY activation DESC
+      ORDER BY activation DESC, coalesce(neighbor.createdAt, '') DESC, nodeId
       LIMIT $maxNodes
     `
 
@@ -90,7 +110,7 @@ export class SpreadingActivation {
         })
       })
 
-      return result.records.map(record => {
+      const activated = result.records.map(record => {
         const activation = record.get('activation') as number
         const hops = typeof record.get('hops') === 'object'
           ? (record.get('hops') as { toNumber: () => number }).toNumber()
@@ -104,6 +124,7 @@ export class SpreadingActivation {
           hops,
         }
       })
+      return [...activated].sort(compareActivation)
     } finally {
       await session.close()
     }

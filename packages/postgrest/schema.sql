@@ -113,6 +113,10 @@ DROP FUNCTION IF EXISTS public.engram_association_walk(uuid[], integer, double p
 
 -- p_exclude_types names edge types the walk does not follow at any hop;
 -- NULL or an empty array follows every type.
+-- The inner DISTINCT ON keeps each memory's strongest path; the outer ORDER BY
+-- then ranks memories by that strength before LIMIT, so the cut drops the
+-- weakest paths rather than the highest ids, and memory_id breaks ties so
+-- repeated calls return the same list.
 CREATE OR REPLACE FUNCTION public.engram_association_walk(p_seed_ids uuid[], p_max_hops integer DEFAULT 2, p_min_strength double precision DEFAULT 0.2, p_limit integer DEFAULT 20, p_exclude_types text[] DEFAULT NULL::text[]) RETURNS TABLE(memory_id uuid, memory_type text, depth integer, path_strength double precision)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public'
@@ -132,8 +136,13 @@ CREATE OR REPLACE FUNCTION public.engram_association_walk(p_seed_ids uuid[], p_m
       AND (p_exclude_types IS NULL OR NOT (a.edge_type = ANY(p_exclude_types)))
       AND NOT (CASE WHEN a.source_id = w.memory_id THEN a.target_id ELSE a.source_id END) = ANY(w.visited_ids)
   )
-  SELECT DISTINCT ON (memory_id) memory_id, memory_type, depth, path_strength
-  FROM walk WHERE depth > 0 ORDER BY memory_id, path_strength DESC, depth ASC LIMIT p_limit
+  SELECT b.memory_id, b.memory_type, b.depth, b.path_strength
+  FROM (
+    SELECT DISTINCT ON (memory_id) memory_id, memory_type, depth, path_strength
+    FROM walk WHERE depth > 0 ORDER BY memory_id, path_strength DESC, depth ASC
+  ) b
+  ORDER BY b.path_strength DESC, b.depth ASC, b.memory_id
+  LIMIT p_limit
 $$;
 
 

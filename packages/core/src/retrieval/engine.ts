@@ -16,6 +16,7 @@ import {
 } from './output-policy.js'
 import { synthesize } from '../synthesis/index.js'
 import { unifiedSearch } from './search.js'
+import { expandQueryCached, hypotheticalDocCached, type RecallLlmCache } from './llm-step-cache.js'
 import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
 import { recallLinkSwitchesFromEnv } from './link-switches.js'
@@ -161,6 +162,11 @@ export interface RecallOpts {
    * also carries `degraded.lexical`.
    */
   vectorUnavailable?: string
+  /**
+   * Reuses query-expansion and HyDE outputs across recalls of the same
+   * question. Absent: every recall that expands calls the model.
+   */
+  llmCache?: RecallLlmCache
 }
 
 // ---------------------------------------------------------------------------
@@ -478,9 +484,7 @@ export async function recall(
   if (shouldExpand) {
     const expandStart = stageStart(timings)
     try {
-      expandedTerms = opts.now !== undefined
-        ? await intelligence!.expandQuery!(query, { now: opts.now })
-        : await intelligence!.expandQuery!(query)
+      expandedTerms = await expandQueryCached(intelligence!, query, opts.now, opts.llmCache)
     } catch {
       // expansion failed — proceed without it
     }
@@ -512,6 +516,7 @@ export async function recall(
     lexicalReserve,
     rankPriors,
     fusion,
+    ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
   })
   stageEnd(timings, 'search', searchStart)
@@ -537,7 +542,7 @@ export async function recall(
   if (shouldFireHyDE) {
     const hydeStart = stageStart(timings)
     try {
-      const hydeDoc = await intelligence!.generateHypotheticalDoc!(query)
+      const hydeDoc = await hypotheticalDocCached(intelligence!, query, opts.llmCache)
       // An empty document (no usable model output) would embed to noise or
       // repeat the direct pass; fusing that only reshuffles the direct ranks.
       if (hydeDoc.trim() !== '') {
@@ -556,6 +561,7 @@ export async function recall(
           lexicalReserve,
           rankPriors,
           fusion,
+          ...(opts.now !== undefined ? { now: opts.now } : {}),
         })
 
         memories = fuseByReciprocalRank(memories, hydeMemories, slateSize, fusion.rrfK)

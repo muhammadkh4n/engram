@@ -454,6 +454,15 @@ describe('OpenAISummarizer', () => {
       expect((await expansionPrompt({ now })).split('\n')[0]).toBe("Today's date is Thursday, 2026-10-01.")
     })
 
+    it('reports the calendar date its expansion prompt states for an instant', async () => {
+      const now = new Date('2026-10-01T22:00:00Z')
+      const karachi = new OpenAISummarizer({ apiKey: 'test-key', timeZone: 'Asia/Karachi' })
+
+      expect(karachi.expansionReferenceDate(now)).toBe('2026-10-02')
+      expect(new OpenAISummarizer({ apiKey: 'test-key' }).expansionReferenceDate(now)).toBe('2026-10-01')
+      expect((await expansionPrompt({ now }, 'Asia/Karachi')).split('\n')[0]).toContain(karachi.expansionReferenceDate(now))
+    })
+
     it('refuses an unknown time zone when constructed', () => {
       expect(() => new OpenAISummarizer({ apiKey: 'test-key', timeZone: 'Mars/Olympus_Mons' }))
         .toThrow(/not a valid IANA time zone name: "Mars\/Olympus_Mons"/)

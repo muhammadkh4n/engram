@@ -45,4 +45,19 @@ describe('schema.sql engram_association_walk', () => {
       /AND \(p_exclude_types IS NULL OR NOT \(a\.edge_type = ANY\(p_exclude_types\)\)\)/,
     )
   })
+
+  // LIMIT applies after the outermost ORDER BY. Ordering by memory_id there
+  // keeps the lowest UUIDs (the oldest rows, since ids are time-ordered)
+  // instead of the strongest paths; memory_id last only breaks ties so the
+  // result is the same on every call.
+  it('ranks the walk by path strength before LIMIT, with memory_id as the final tie-break', () => {
+    const body = walkBody()
+    const tail = body.slice(body.lastIndexOf(')') + 1)
+    const outer = tail.match(/ORDER BY ([^;]*?)\s+LIMIT p_limit\s*$/)
+    expect(outer).not.toBeNull()
+    const keys = outer![1]!.split(',').map((k) => k.trim().replace(/^\w+\./, ''))
+    expect(keys[0]).toBe('path_strength DESC')
+    expect(keys[keys.length - 1]).toBe('memory_id')
+    expect(body).toMatch(/SELECT DISTINCT ON \(memory_id\)[\s\S]*ORDER BY memory_id, path_strength DESC, depth ASC/)
+  })
 })
