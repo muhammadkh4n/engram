@@ -164,6 +164,17 @@ export class PostgRestProceduralStorage implements ProceduralStorage {
     if (error) throw new Error(`Procedural recordAccess failed: ${error.message}`)
   }
 
+  async recordShown(requestedIds: string[]): Promise<void> {
+    // One malformed element would fail the uuid[] cast for the whole batch.
+    const ids = onlyUuids(requestedIds)
+    if (ids.length === 0) return
+    const { error } = await this.client.rpc('engram_record_shown', {
+      p_ids: ids,
+      p_memory_type: 'procedural',
+    })
+    if (error) throw new Error(`Procedural recordShown failed: ${error.message}`)
+  }
+
 
   async markForgotten(requestedIds: string[]): Promise<number> {
     const ids = onlyUuids(requestedIds)
@@ -227,6 +238,8 @@ interface ProceduralRow {
   first_observed: string
   access_count: number
   last_accessed: string | null
+  shown_count?: number
+  last_shown?: string | null
   decay_rate: number
   source_episode_ids: string[]
   embedding: number[] | string | null
@@ -260,6 +273,8 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
     firstObserved: new Date(row.first_observed),
     accessCount: row.access_count,
     lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
+    shownCount: row.shown_count ?? 0,
+    lastShown: row.last_shown ? new Date(row.last_shown) : null,
     decayRate: row.decay_rate,
     sourceEpisodeIds: row.source_episode_ids ?? [],
     embedding: parseVector(row.embedding),

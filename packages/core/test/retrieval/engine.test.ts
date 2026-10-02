@@ -7,6 +7,7 @@ import {
   createMockStorage,
   MOCK_EPISODE,
   MOCK_SEMANTIC,
+  MOCK_PROCEDURAL,
   VECTOR_SEARCH_RESULTS,
 } from './mock-storage.js'
 import type { RecallStrategy, RetrievedMemory, TypedMemory, SearchResult } from '../../src/types.js'
@@ -764,7 +765,7 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
   })
 
   // Episodes only, so every emitted memory is recorded through
-  // episodes.recordAccess and the call list is the access list.
+  // episodes.recordShown and its id list is the shown list.
   function episodeHits(count: number): SearchResult<TypedMemory>[] {
     return Array.from({ length: count }, (_, i) => ({
       item: {
@@ -783,8 +784,14 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     return createMockStorage({ vectorSearchResults: episodeHits(count), textBoostResults: [] })
   }
 
-  function accessedIds(storage: ReturnType<typeof createMockStorage>): string[] {
-    return vi.mocked(storage.episodes.recordAccess).mock.calls.map((c) => c[0] as string)
+  function shownIds(storage: ReturnType<typeof createMockStorage>): string[] {
+    return vi.mocked(storage.episodes.recordShown!).mock.calls.flatMap((c) => c[0])
+  }
+
+  function expectNoAccessRecorded(storage: ReturnType<typeof createMockStorage>): void {
+    expect(storage.episodes.recordAccess).not.toHaveBeenCalled()
+    expect(storage.procedural.recordAccess).not.toHaveBeenCalled()
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
   }
 
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -796,17 +803,47 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     }))
   }
 
-  it('records access for every memory and association with no policy', async () => {
+  it('records shown once per tier for exactly the emitted ids and records no access', async () => {
+    const storage = createMockStorage({
+      vectorSearchResults: [
+        ...episodeHits(2),
+        { item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 },
+        { item: { type: 'procedural', data: MOCK_PROCEDURAL }, similarity: 0.8 },
+      ],
+      textBoostResults: [],
+    })
+
+    const result = await deepRecall(storage)
+
+    const emitted = [...result.memories, ...result.associations]
+    expect(result.payload.emittedMemories).toBe(result.memories.length)
+    expect(result.payload.emittedAssociations).toBe(result.associations.length)
+    const idsOf = (type: string) => emitted.filter((m) => m.type === type).map((m) => m.id)
+    expect(new Set(idsOf('episode'))).toEqual(new Set(['ep-hit-0', 'ep-hit-1', 'ep-assoc-1']))
+    expect(idsOf('semantic')).toEqual([MOCK_SEMANTIC.id])
+    expect(idsOf('procedural')).toEqual([MOCK_PROCEDURAL.id])
+    expect(storage.episodes.recordShown).toHaveBeenCalledTimes(1)
+    expect(storage.episodes.recordShown).toHaveBeenCalledWith(idsOf('episode'))
+    expect(storage.semantic.recordShown).toHaveBeenCalledTimes(1)
+    expect(storage.semantic.recordShown).toHaveBeenCalledWith(idsOf('semantic'))
+    expect(storage.procedural.recordShown).toHaveBeenCalledTimes(1)
+    expect(storage.procedural.recordShown).toHaveBeenCalledWith(idsOf('procedural'))
+    expectNoAccessRecorded(storage)
+  })
+
+  it('records shown for every memory and association with no policy', async () => {
     const storage = storageWithHits(5)
 
     const result = await deepRecall(storage)
 
     expect(result.memories).toHaveLength(5)
     expect(result.associations.map((a) => a.id)).toEqual(['ep-assoc-1'])
-    expect(accessedIds(storage)).toEqual([...result.memories, ...result.associations].map((m) => m.id))
+    expect(shownIds(storage)).toEqual([...result.memories, ...result.associations].map((m) => m.id))
+    expect(storage.semantic.recordShown).not.toHaveBeenCalled()
+    expect(storage.procedural.recordShown).not.toHaveBeenCalled()
   })
 
-  it('records access only for the 3 memories a token budget emitted', async () => {
+  it('records shown only for the 3 memories a token budget emitted', async () => {
     const unbounded = await deepRecall(storageWithHits(5), { reconsolidate: false })
     const third = unbounded.payload.items[2]
     expect(third?.section).toBe('recalled')
@@ -818,13 +855,13 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     expect(result.payload.emittedMemories).toBe(3)
     expect(result.payload.emittedAssociations).toBe(0)
     expect(result.memories).toHaveLength(5)
-    expect(accessedIds(storage)).toEqual(result.memories.slice(0, 3).map((m) => m.id))
+    expect(shownIds(storage)).toEqual(result.memories.slice(0, 3).map((m) => m.id))
     await flush()
     const coRecalled = vi.mocked(storage.associations.upsertCoRecalled).mock.calls.flatMap((c) => [c[0], c[2]])
     expect(new Set(coRecalled)).toEqual(new Set(result.memories.slice(0, 3).map((m) => m.id)))
   })
 
-  it('records access for the emitted memories and the emitted associations', async () => {
+  it('records shown for the emitted memories and the emitted associations', async () => {
     process.env['ENGRAM_RECALL_EMIT_K'] = '3'
     const storage = storageWithHits(5)
 
@@ -832,7 +869,7 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
 
     expect(result.payload.emittedMemories).toBe(3)
     expect(result.payload.emittedAssociations).toBe(1)
-    expect(accessedIds(storage)).toEqual([...result.memories.slice(0, 3), ...result.associations].map((m) => m.id))
+    expect(shownIds(storage)).toEqual([...result.memories.slice(0, 3), ...result.associations].map((m) => m.id))
   })
 
   it('writes nothing when reconsolidate is false', async () => {
@@ -847,9 +884,10 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     await recall('TypeScript strict mode', storage, new SensoryBuffer(), makeOpts({ graph, reconsolidate: false }))
     await flush()
 
-    expect(storage.episodes.recordAccess).not.toHaveBeenCalled()
-    expect(storage.procedural.recordAccess).not.toHaveBeenCalled()
-    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+    expectNoAccessRecorded(storage)
+    expect(storage.episodes.recordShown).not.toHaveBeenCalled()
+    expect(storage.semantic.recordShown).not.toHaveBeenCalled()
+    expect(storage.procedural.recordShown).not.toHaveBeenCalled()
     expect(storage.associations.upsertCoRecalled).not.toHaveBeenCalled()
     expect(graph.strengthenTraversedEdges).not.toHaveBeenCalled()
   })
@@ -948,7 +986,7 @@ describe('recall engine — rank priors', () => {
     expect(storage.vectorSearch).not.toHaveBeenCalled()
   })
 
-  it('records access on a recalled semantic memory without changing its confidence', async () => {
+  it('records a recalled semantic memory as shown without touching its access count or confidence', async () => {
     const storage = createMockStorage({
       vectorSearchResults: [{ item: { type: 'semantic', data: MOCK_SEMANTIC }, similarity: 0.82 }],
       textBoostResults: [],
@@ -957,6 +995,7 @@ describe('recall engine — rank priors', () => {
     await recall('TypeScript strict mode', storage, new SensoryBuffer(), makeOpts())
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith(MOCK_SEMANTIC.id, 0)
+    expect(storage.semantic.recordShown).toHaveBeenCalledWith([MOCK_SEMANTIC.id])
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
   })
 })

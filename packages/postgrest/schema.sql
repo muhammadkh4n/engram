@@ -142,11 +142,11 @@ DECLARE v_s int; v_p int; v_e int;
 BEGIN
   UPDATE memory_semantic SET confidence = GREATEST(0.05, confidence - p_semantic_decay_rate), updated_at = now()
   WHERE confidence > 0.05 AND forgotten_at IS NULL AND superseded_by IS NULL
-    AND (last_accessed IS NULL OR last_accessed < now() - (p_semantic_days || ' days')::interval);
+    AND (GREATEST(last_accessed, last_shown) IS NULL OR GREATEST(last_accessed, last_shown) < now() - (p_semantic_days || ' days')::interval);
   GET DIAGNOSTICS v_s = ROW_COUNT;
   UPDATE memory_procedural SET confidence = GREATEST(0.05, confidence - p_procedural_decay_rate), updated_at = now()
   WHERE confidence > 0.05 AND forgotten_at IS NULL
-    AND (last_accessed IS NULL OR last_accessed < now() - (p_procedural_days || ' days')::interval);
+    AND (GREATEST(last_accessed, last_shown) IS NULL OR GREATEST(last_accessed, last_shown) < now() - (p_procedural_days || ' days')::interval);
   GET DIAGNOSTICS v_p = ROW_COUNT;
   DELETE FROM memory_associations WHERE strength < p_edge_prune_strength
     AND (last_activated IS NULL OR last_activated < now() - (p_edge_prune_days || ' days')::interval)
@@ -173,7 +173,7 @@ BEGIN
   FROM unnest(p_ids, p_rates) AS u(id, rate)
   WHERE s.id = u.id AND s.confidence > 0.05
     AND s.forgotten_at IS NULL AND s.superseded_by IS NULL
-    AND (s.last_accessed IS NULL OR s.last_accessed < now() - make_interval(days => p_days));
+    AND (GREATEST(s.last_accessed, s.last_shown) IS NULL OR GREATEST(s.last_accessed, s.last_shown) < now() - make_interval(days => p_days));
   GET DIAGNOSTICS v_n = ROW_COUNT;
   RETURN v_n;
 END; $$;
@@ -377,6 +377,32 @@ BEGIN
   ELSIF p_memory_type = 'procedural' THEN
     UPDATE memory_procedural SET access_count = access_count + 1, last_accessed = now(),
       confidence = GREATEST(0.0, LEAST(1.0, confidence + p_conf_boost)), updated_at = now() WHERE id = p_id;
+  END IF;
+END; $$;
+
+
+--
+-- Name: engram_record_shown(uuid[], text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Records that recall emitted these memories: shown_count + 1 and last_shown
+-- for every listed row of one tier, in one set-based UPDATE. Exposure is not
+-- access, so access_count, last_accessed, confidence and updated_at are left
+-- alone. A duplicated id counts once. An unknown tier raises rather than
+-- silently recording nothing.
+CREATE OR REPLACE FUNCTION public.engram_record_shown(p_ids uuid[], p_memory_type text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_memory_type = 'episode' THEN
+    UPDATE memory_episodes SET shown_count = shown_count + 1, last_shown = now() WHERE id = ANY(p_ids);
+  ELSIF p_memory_type = 'semantic' THEN
+    UPDATE memory_semantic SET shown_count = shown_count + 1, last_shown = now() WHERE id = ANY(p_ids);
+  ELSIF p_memory_type = 'procedural' THEN
+    UPDATE memory_procedural SET shown_count = shown_count + 1, last_shown = now() WHERE id = ANY(p_ids);
+  ELSE
+    RAISE EXCEPTION 'engram_record_shown: unknown memory type %', p_memory_type;
   END IF;
 END; $$;
 
@@ -832,6 +858,8 @@ CREATE TABLE IF NOT EXISTS public.memory_episodes (
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, content)) STORED,
     project_id text,
     forgotten_at timestamp with time zone,
+    shown_count integer DEFAULT 0 NOT NULL,
+    last_shown timestamp with time zone,
     CONSTRAINT memory_episodes_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text, 'system'::text])))
 );
 
@@ -860,6 +888,8 @@ CREATE TABLE IF NOT EXISTS public.memory_procedural (
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, ((trigger_text || ' '::text) || procedure))) STORED,
     project_id text,
     forgotten_at timestamp with time zone,
+    shown_count integer DEFAULT 0 NOT NULL,
+    last_shown timestamp with time zone,
     CONSTRAINT memory_procedural_category_check CHECK ((category = ANY (ARRAY['workflow'::text, 'preference'::text, 'habit'::text, 'pattern'::text, 'convention'::text]))),
     CONSTRAINT memory_procedural_confidence_check CHECK (((confidence >= (0.0)::double precision) AND (confidence <= (1.0)::double precision))),
     CONSTRAINT memory_procedural_decay_rate_check CHECK (((decay_rate > (0.0)::double precision) AND (decay_rate <= (1.0)::double precision)))
@@ -891,6 +921,8 @@ CREATE TABLE IF NOT EXISTS public.memory_semantic (
     valid_until timestamp with time zone,
     project_id text,
     forgotten_at timestamp with time zone,
+    shown_count integer DEFAULT 0 NOT NULL,
+    last_shown timestamp with time zone,
     CONSTRAINT memory_knowledge_confidence_check CHECK (((confidence >= (0)::double precision) AND (confidence <= (1)::double precision)))
 );
 
@@ -927,6 +959,21 @@ CREATE TABLE IF NOT EXISTS public.sensory_snapshots (
 ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+
+
+--
+-- Exposure columns: how often and how recently recall emitted a memory. They
+-- are kept apart from access_count / last_accessed, which count only genuine
+-- recurrence (a duplicate ingest, a re-extracted fact), so the ranking bonus
+-- built on access_count does not feed on its own display history. Idempotent
+-- for already-provisioned DBs, where CREATE TABLE IF NOT EXISTS is a no-op.
+--
+ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS shown_count integer DEFAULT 0 NOT NULL;
+ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS last_shown timestamp with time zone;
+ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS shown_count integer DEFAULT 0 NOT NULL;
+ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS last_shown timestamp with time zone;
+ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS shown_count integer DEFAULT 0 NOT NULL;
+ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS last_shown timestamp with time zone;
 
 
 --
@@ -1474,6 +1521,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double 
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
@@ -1498,6 +1546,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
@@ -1517,6 +1566,7 @@ GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double p
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;

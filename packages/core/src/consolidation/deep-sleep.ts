@@ -250,6 +250,8 @@ export async function deepSleep(
       existing.find(e => sameContent(e.item.content, candidate.content))
 
     if (duplicate) {
+      // Re-extracting a known fact is a recurrence: it raises the access
+      // count and the fact's confidence.
       await storage.semantic.recordAccessAndBoost(duplicate.item.id, 0.1)
       deduplicated++
       continue

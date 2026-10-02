@@ -293,6 +293,18 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     if (error) throw new Error(`Episode recordAccess failed: ${error.message}`)
   }
 
+  async recordShown(requestedIds: string[]): Promise<void> {
+    // One malformed element would fail the uuid[] cast for the whole batch.
+    if (this.legacyMode) return // the legacy schema has no exposure columns
+    const ids = onlyUuids(requestedIds)
+    if (ids.length === 0) return
+    const { error } = await this.client.rpc('engram_record_shown', {
+      p_ids: ids,
+      p_memory_type: 'episode',
+    })
+    if (error) throw new Error(`Episode recordShown failed: ${error.message}`)
+  }
+
 
   async markForgotten(requestedIds: string[]): Promise<number> {
     const ids = onlyUuids(requestedIds)
@@ -359,6 +371,8 @@ interface EpisodeRow {
   salience: number
   access_count: number
   last_accessed: string | null
+  shown_count?: number
+  last_shown?: string | null
   consolidated_at: string | null
   embedding: number[] | string | null
   entities: string[]
@@ -401,6 +415,8 @@ function rowToEpisode(row: EpisodeRow, legacyMode = false): Episode {
     salience: legacyMode ? 0.3 : (row.salience ?? 0.3),
     accessCount: legacyMode ? 0 : (row.access_count ?? 0),
     lastAccessed: legacyMode ? null : (row.last_accessed ? new Date(row.last_accessed) : null),
+    shownCount: legacyMode ? 0 : (row.shown_count ?? 0),
+    lastShown: legacyMode ? null : (row.last_shown ? new Date(row.last_shown) : null),
     consolidatedAt: legacyMode ? null : (row.consolidated_at ? new Date(row.consolidated_at) : null),
     embedding: parseVector(row.embedding),
     entities: legacyMode ? [] : (row.entities ?? []),

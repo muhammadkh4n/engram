@@ -232,8 +232,9 @@ describe('forget on a project-scoped instance', () => {
     // No relevance gate: a weak match is listed for the caller to judge.
     expect(mine.relevance).toBeLessThan(0.5)
     expect(tombstoned(storage)).toEqual([])
-    // A preview is not a use: no access bump, no co-recalled edges.
+    // A preview is not a use: no access or exposure bump, no co-recalled edges.
     expect(storage.episodes.recordAccess).not.toHaveBeenCalled()
+    expect(storage.episodes.recordShown).not.toHaveBeenCalled()
     expect(storage.associations.upsertCoRecalled).not.toHaveBeenCalled()
     expect(storage.associations.insert).not.toHaveBeenCalled()
   })

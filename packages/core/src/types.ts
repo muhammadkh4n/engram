@@ -68,8 +68,20 @@ export interface Episode {
   role: 'user' | 'assistant' | 'system'
   content: string
   salience: number
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   consolidatedAt: Date | null
   embedding: number[] | null
   entities: string[]
@@ -99,8 +111,20 @@ export interface SemanticMemory {
   confidence: number
   sourceDigestIds: string[]
   sourceEpisodeIds: string[]
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   decayRate: number
   supersedes: string | null
   supersededBy: string | null
@@ -120,8 +144,20 @@ export interface ProceduralMemory {
   observationCount: number
   lastObserved: Date
   firstObserved: Date
+  /**
+   * Recurrence: how many times the same content arrived again (a duplicate
+   * ingest, a re-extracted fact) and when it last did. Feeds the ranking
+   * access bonus.
+   */
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   decayRate: number
   sourceEpisodeIds: string[]
   embedding: number[] | null

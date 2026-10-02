@@ -199,6 +199,17 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     if (error) throw new Error(`Semantic recordAccessAndBoost failed: ${error.message}`)
   }
 
+  async recordShown(requestedIds: string[]): Promise<void> {
+    // One malformed element would fail the uuid[] cast for the whole batch.
+    const ids = onlyUuids(requestedIds)
+    if (ids.length === 0) return
+    const { error } = await this.client.rpc('engram_record_shown', {
+      p_ids: ids,
+      p_memory_type: 'semantic',
+    })
+    if (error) throw new Error(`Semantic recordShown failed: ${error.message}`)
+  }
+
   async markSuperseded(id: string, supersededBy: string): Promise<void> {
     // Update the old memory to point to its replacement.
     // updated_at must be bumped here: listTombstonesSince detects supersessions
@@ -327,6 +338,8 @@ interface SemanticRow {
   source_episode_ids: string[]
   access_count: number
   last_accessed: string | null
+  shown_count?: number
+  last_shown?: string | null
   decay_rate: number
   supersedes: string | null
   superseded_by: string | null
@@ -359,6 +372,8 @@ function rowToSemantic(row: SemanticRow): SemanticMemory {
     sourceEpisodeIds: row.source_episode_ids ?? [],
     accessCount: row.access_count,
     lastAccessed: row.last_accessed ? new Date(row.last_accessed) : null,
+    shownCount: row.shown_count ?? 0,
+    lastShown: row.last_shown ? new Date(row.last_shown) : null,
     decayRate: row.decay_rate,
     supersedes: row.supersedes ?? null,
     supersededBy: row.superseded_by ?? null,

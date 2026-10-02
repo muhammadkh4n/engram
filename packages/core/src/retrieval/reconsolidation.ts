@@ -1,13 +1,14 @@
 import type { GraphPort } from '../adapters/graph.js'
-import type { RetrievedMemory } from '../types.js'
+import type { MemoryType, RetrievedMemory } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { AssociationManager } from '../systems/association-manager.js'
 
 /**
  * Stage 4 of recall: reconsolidation.
  *
- * Records access on the memories and associations the recall emitted to the
- * caller, creates co_recalled SQL edges among the top emitted memories, and
+ * Records exposure (shown_count / last_shown) on the memories and
+ * associations the recall emitted to the caller, creates co_recalled SQL
+ * edges among the top emitted memories, and
  * (Wave 2) strengthens the Neo4j edges between consecutive emitted memories
  * when a graph is provided. Fire-and-forget — failures are swallowed.
  *
@@ -21,26 +22,17 @@ export function stageReconsolidate(
   manager: AssociationManager,
   graph: GraphPort | null = null,
 ): void {
-  // Record access for each retrieved memory
-  const accessUpdates = [...recalled, ...associated].map(async (memory) => {
-    switch (memory.type) {
-      case 'semantic':
-        // Being recalled is not evidence for a fact: confidence comes from
-        // its sources and decay, and feeds the ranking prior. A per-recall
-        // boost would let retrieval reinforce its own ranking.
-        await storage.semantic.recordAccessAndBoost(memory.id, 0)
-        break
-      case 'procedural':
-        await storage.procedural.recordAccess(memory.id)
-        break
-      case 'episode':
-        await storage.episodes.recordAccess(memory.id)
-        break
-      case 'digest':
-        // DigestStorage has no recordAccess method; digests are read-only after creation
-        break
-    }
-  })
+  // Being shown is exposure, not use. The access count feeds the ranking
+  // bonus, so bumping it for every displayed memory would let recall
+  // reinforce its own ranking; access_count counts recurrence (a duplicate
+  // ingest, a re-extracted fact) and is written only on those paths.
+  // Confidence is untouched for the same reason.
+  const shown = shownIdsByTier([...recalled, ...associated])
+  const shownUpdates = [
+    recordShownBatch(storage.episodes, shown.episode),
+    recordShownBatch(storage.semantic, shown.semantic),
+    recordShownBatch(storage.procedural, shown.procedural),
+  ]
 
   // Create co_recalled edges through AssociationManager so the 100-edge-per-memory
   // cap is enforced (audit finding L5). Encoding salience is looked up for the
@@ -87,5 +79,39 @@ export function stageReconsolidate(
   }
 
   // Fire and forget — don't await, swallow errors silently
-  Promise.allSettled([...accessUpdates, coRecalledUpdate, graphUpdate]).catch(() => {})
+  Promise.allSettled([...shownUpdates, coRecalledUpdate, graphUpdate]).catch(() => {})
+}
+
+type ExposureTier = Exclude<MemoryType, 'digest'>
+
+/**
+ * Emitted ids grouped by tier, in emission order, each id once. Digests are
+ * read-only after creation and carry no exposure columns.
+ */
+function shownIdsByTier(emitted: RetrievedMemory[]): Record<ExposureTier, string[]> {
+  const byTier: Record<ExposureTier, Set<string>> = {
+    episode: new Set(),
+    semantic: new Set(),
+    procedural: new Set(),
+  }
+  for (const memory of emitted) {
+    if (memory.type !== 'digest') byTier[memory.type].add(memory.id)
+  }
+  return {
+    episode: [...byTier.episode],
+    semantic: [...byTier.semantic],
+    procedural: [...byTier.procedural],
+  }
+}
+
+/**
+ * One batch call per tier. Stores without exposure columns (no recordShown)
+ * record nothing.
+ */
+async function recordShownBatch(
+  tier: { recordShown?(ids: string[]): Promise<void> },
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0 || tier.recordShown === undefined) return
+  await tier.recordShown(ids)
 }
