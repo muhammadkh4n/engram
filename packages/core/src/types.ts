@@ -70,6 +70,13 @@ export interface Episode {
   salience: number
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   consolidatedAt: Date | null
   embedding: number[] | null
   entities: string[]
@@ -101,6 +108,13 @@ export interface SemanticMemory {
   sourceEpisodeIds: string[]
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   decayRate: number
   supersedes: string | null
   supersededBy: string | null
@@ -122,6 +136,13 @@ export interface ProceduralMemory {
   firstObserved: Date
   accessCount: number
   lastAccessed: Date | null
+  /**
+   * Exposure: how many times recall emitted this memory and when it last did.
+   * Distinct from accessCount / lastAccessed, which count genuine recurrence.
+   * Set only by stores that track exposure.
+   */
+  shownCount?: number
+  lastShown?: Date | null
   decayRate: number
   sourceEpisodeIds: string[]
   embedding: number[] | null

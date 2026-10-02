@@ -78,6 +78,12 @@ export interface EpisodeStorage {
   markConsolidated(ids: string[]): Promise<void>
   recordAccess(id: string): Promise<void>
   /**
+   * Record that recall emitted these memories: shownCount + 1 and lastShown =
+   * now for each, in one call. Touches neither the access count nor
+   * confidence. Optional: stores without exposure columns do not implement it.
+   */
+  recordShown?(ids: string[]): Promise<void>
+  /**
    * Tombstone the given memories (sets forgotten_at). Forgotten memories are
    * excluded from every recall path but retained for audit/undo. Distinct
    * from recordAccess — does NOT touch access_count. Returns the number of
@@ -122,6 +128,12 @@ export interface SemanticStorage {
    */
   listDecayCandidateIds?(days: number): Promise<string[]>
   recordAccessAndBoost(id: string, confidenceBoost: number): Promise<void>
+  /**
+   * Record that recall emitted these memories: shownCount + 1 and lastShown =
+   * now for each, in one call. Touches neither the access count nor
+   * confidence. Optional: stores without exposure columns do not implement it.
+   */
+  recordShown?(ids: string[]): Promise<void>
   markSuperseded(id: string, supersededBy: string): Promise<void>
   /**
    * Tombstone the given memories (sets forgotten_at). Forgotten memories are
@@ -163,6 +175,12 @@ export interface ProceduralStorage {
    */
   findNearest(embedding: number[], limit: number): Promise<SearchResult<ProceduralMemory>[]>
   recordAccess(id: string): Promise<void>
+  /**
+   * Record that recall emitted these memories: shownCount + 1 and lastShown =
+   * now for each, in one call. Touches neither the access count nor
+   * confidence. Optional: stores without exposure columns do not implement it.
+   */
+  recordShown?(ids: string[]): Promise<void>
   /**
    * Tombstone the given memories (sets forgotten_at). Excluded from recall,
    * retained for audit/undo. Does NOT touch access_count. Returns rows newly
