@@ -21,6 +21,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import type { SalienceCategory } from '@engram-mem/core'
+import { loadProjectRoots, projectForRoot } from './project-roots.js'
 
 /** At most this many parent directories: bounds pathological trees and symlink loops. */
 const MAX_ANCESTORS = 20
@@ -103,7 +104,8 @@ function isSharedAlias(id: string): boolean {
 
 /**
  * Resolve the project for an ingestion from the `--project` flag.
- * `auto` → resolveProjectScope (ENGRAM_PROJECT_ID, then the repository);
+ * `auto` → resolveProjectScope (ENGRAM_PROJECT_ID, the repository, then a
+ * configured root);
  * `none` or any other shared alias → null (shared); anything else → that
  * name verbatim. The same resolution feeds the stored `project_id` and the
  * `metadata.project` tag so the two never disagree.
@@ -164,7 +166,7 @@ export function projectForCategory(
  * (distinct from the soft `metadata.project` tag, though resolved from the
  * same identifier). NULL means the shared bucket — visible to every project.
  */
-export type ProjectScopeSource = 'env' | 'detected' | 'unscoped'
+export type ProjectScopeSource = 'env' | 'detected' | 'root' | 'unscoped'
 
 export interface ProjectScope {
   /** Canonical project id, or null for the shared bucket. */
@@ -182,7 +184,10 @@ export interface ProjectScope {
  *      'shared') explicitly selects the shared bucket.
  *   2. detectProject(cwd) — the owning repository's name (worktrees resolve
  *      to their main repository), drift-free across clone methods.
- *   3. null — shared bucket (the safe, non-isolating default).
+ *   3. The longest configured root containing cwd (`roots` in
+ *      ENGRAM_PROJECT_GROUPS_FILE) — names the project for a directory that
+ *      is not a repository, such as a multi-repo workspace folder.
+ *   4. null — shared bucket (the safe, non-isolating default).
  *
  * Ingest and recall MUST resolve through this single function so the tag
  * written and the filter applied always agree; otherwise scoped recall
@@ -206,6 +211,12 @@ export function resolveProjectScope(
   if (detected && !isSharedAlias(detected)) {
     return { id: detected, source: 'detected' }
   }
+  if (detected) return { id: null, source: 'unscoped' }
+
+  const rooted = normalizeProjectId(
+    projectForRoot(cwd, loadProjectRoots(env['ENGRAM_PROJECT_GROUPS_FILE'])),
+  )
+  if (rooted) return { id: rooted, source: 'root' }
   return { id: null, source: 'unscoped' }
 }
 
@@ -218,6 +229,11 @@ export function formatScopeLog(scope: ProjectScope): string {
   if (scope.id === null) {
     return 'project scope: <shared — all projects> (set ENGRAM_PROJECT_ID to isolate)'
   }
-  const src = scope.source === 'env' ? 'ENGRAM_PROJECT_ID' : 'detected from cwd'
+  const src =
+    scope.source === 'env'
+      ? 'ENGRAM_PROJECT_ID'
+      : scope.source === 'root'
+        ? 'configured root'
+        : 'detected from cwd'
   return `project scope: ${scope.id} (source: ${src})`
 }

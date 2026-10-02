@@ -6,7 +6,7 @@
  * scoped recall silently returns nothing, so the precedence and the
  * shared-alias → NULL mapping are correctness-critical.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,6 +18,7 @@ import {
   normalizeProjectId,
   projectForCategory,
 } from '../src/ingest/project-detect.js'
+import { resetProjectRootsWarning } from '../src/ingest/project-roots.js'
 
 describe('detectProject', () => {
   let root: string
@@ -250,6 +251,109 @@ describe('resolveProjectScope (hard project_id)', () => {
   })
 })
 
+describe('resolveProjectScope (configured roots)', () => {
+  let base: string
+  let groupsFile: string
+
+  function writeRoots(doc: unknown): void {
+    writeFileSync(groupsFile, typeof doc === 'string' ? doc : JSON.stringify(doc))
+  }
+  function scopeAt(cwd: string) {
+    return resolveProjectScope({ env: { ENGRAM_PROJECT_GROUPS_FILE: groupsFile }, cwd })
+  }
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'engram-roots-'))
+    groupsFile = join(base, 'project-groups.json')
+    resetProjectRootsWarning()
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  it('names the project from a root when no git ancestor exists', () => {
+    const workspace = join(base, 'workspace')
+    const deep = join(workspace, 'notes', 'scratch')
+    mkdirSync(deep, { recursive: true })
+    writeRoots({ groups: { acme: ['acme-*'] }, roots: { [workspace]: 'acme' } })
+
+    expect(scopeAt(workspace)).toEqual({ id: 'acme', source: 'root' })
+    expect(scopeAt(deep)).toEqual({ id: 'acme', source: 'root' })
+  })
+
+  it('lets a git repository win over an enclosing root', () => {
+    const workspace = join(base, 'workspace')
+    const repo = join(workspace, 'acme-api')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    writeRoots({ roots: { [workspace]: 'acme' } })
+
+    expect(scopeAt(join(repo))).toEqual({ id: 'acme-api', source: 'detected' })
+  })
+
+  it('picks the longest matching root', () => {
+    const outer = join(base, 'org')
+    const inner = join(outer, 'team')
+    const cwd = join(inner, 'docs')
+    mkdirSync(cwd, { recursive: true })
+    writeRoots({ roots: { [outer]: 'org-wide', [inner]: 'team-project' } })
+
+    expect(scopeAt(cwd)).toEqual({ id: 'team-project', source: 'root' })
+    expect(scopeAt(join(outer))).toEqual({ id: 'org-wide', source: 'root' })
+  })
+
+  it('matches on path-segment boundaries only', () => {
+    const root = join(base, 'ab')
+    const sibling = join(base, 'abc')
+    mkdirSync(root, { recursive: true })
+    mkdirSync(sibling, { recursive: true })
+    writeRoots({ roots: { [root]: 'ab-project' } })
+
+    expect(scopeAt(sibling)).toEqual({ id: null, source: 'unscoped' })
+  })
+
+  it('normalises root keys with path.resolve', () => {
+    const workspace = join(base, 'workspace')
+    mkdirSync(workspace, { recursive: true })
+    writeRoots({ roots: { [`${workspace}/./`]: 'acme' } })
+
+    expect(scopeAt(workspace)).toEqual({ id: 'acme', source: 'root' })
+  })
+
+  it('falls back to null without throwing on a malformed file, warning once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const cwd = join(base, 'workspace')
+    mkdirSync(cwd, { recursive: true })
+    writeRoots('{ "roots": { not json')
+
+    expect(scopeAt(cwd)).toEqual({ id: null, source: 'unscoped' })
+    expect(scopeAt(cwd)).toEqual({ id: null, source: 'unscoped' })
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips non-string values and a non-object roots key', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const workspace = join(base, 'workspace')
+    const other = join(base, 'other')
+    mkdirSync(workspace, { recursive: true })
+    mkdirSync(other, { recursive: true })
+    writeRoots({ roots: { [workspace]: 42, [other]: 'other-project', relative: 'x' } })
+
+    expect(scopeAt(workspace)).toEqual({ id: null, source: 'unscoped' })
+    expect(scopeAt(other)).toEqual({ id: 'other-project', source: 'root' })
+
+    writeRoots({ roots: ['not', 'an', 'object'] })
+    expect(scopeAt(other)).toEqual({ id: null, source: 'unscoped' })
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores roots when the groups file is unset', () => {
+    const plain = join(base, 'workspace')
+    mkdirSync(plain, { recursive: true })
+    expect(resolveProjectScope({ env: {}, cwd: plain })).toEqual({ id: null, source: 'unscoped' })
+  })
+})
+
 describe('formatScopeLog', () => {
   it('describes a scoped id with its source', () => {
     expect(formatScopeLog({ id: 'engram', source: 'env' })).toBe(
@@ -257,6 +361,9 @@ describe('formatScopeLog', () => {
     )
     expect(formatScopeLog({ id: 'engram', source: 'detected' })).toBe(
       'project scope: engram (source: detected from cwd)',
+    )
+    expect(formatScopeLog({ id: 'acme', source: 'root' })).toBe(
+      'project scope: acme (source: configured root)',
     )
   })
 
