@@ -112,3 +112,42 @@ describe('postgrestSource.fetchByIds', () => {
     )
   })
 })
+
+describe('postgrestSource.fetchTexts', () => {
+  it("reads a fact's topic and content, with its liveness, by uuid id", async () => {
+    const stored = [
+      { id: uuid(1), topic: 'Kam', content: 'reviewed the change', forgotten_at: null, superseded_by: null },
+      { id: uuid(2), topic: null, content: 'retired fact', forgotten_at: null, superseded_by: uuid(1) },
+    ]
+    const { client, calls } = fakeClient({ memory_semantic: stored })
+
+    const rows = await postgrestSource(client).fetchTexts('semantic', [uuid(1), uuid(2), 'sem-42'])
+
+    expect(rows).toEqual([
+      { id: uuid(1), tier: 'semantic', text: 'Kam reviewed the change', inactive: false },
+      { id: uuid(2), tier: 'semantic', text: ' retired fact', inactive: true },
+    ])
+    expect(calls[0]!.ops[0]![1][0]).toBe('id, topic, content, forgotten_at, superseded_by')
+    expect(calls[0]!.ops.find(([op]) => op === 'in')![1]).toEqual(['id', [uuid(1), uuid(2)]])
+  })
+
+  it("reads a digest's summary; digests are always live", async () => {
+    const { client, calls } = fakeClient({ memory_digests: [{ id: uuid(5), summary: 'Jira triage' }] })
+
+    const rows = await postgrestSource(client).fetchTexts('digest', [uuid(5)])
+
+    expect(rows).toEqual([{ id: uuid(5), tier: 'digest', text: 'Jira triage', inactive: false }])
+    expect(calls[0]!.table).toBe('memory_digests')
+    expect(calls[0]!.ops[0]![1][0]).toBe('id, summary')
+  })
+
+  it(`slices the ids into requests of at most ${ID_LOOKUP_SLICE}`, async () => {
+    const ids = Array.from({ length: 201 }, (_, i) => uuid(i + 1))
+    const { client, calls } = fakeClient({ memory_digests: ids.map((id) => ({ id, summary: 's' })) })
+
+    const rows = await postgrestSource(client).fetchTexts('digest', ids)
+
+    expect(calls.map((c) => (c.ops.find(([op]) => op === 'in')![1][1] as string[]).length)).toEqual([200, 1])
+    expect(rows).toHaveLength(201)
+  })
+})

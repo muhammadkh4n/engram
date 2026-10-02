@@ -6,6 +6,16 @@
  */
 
 import { nextCursor, type PageCursor } from './ingest/embed-backfill-lib.js'
+import {
+  DEFAULT_CONTEXT_PAGE_SIZE,
+  formatContextReport,
+  planContextLinks,
+  pruneContextLinks,
+  type ContextLinkGraph,
+  type ContextLinksReport,
+  type ContextTextSource,
+  type ContextUndoLine,
+} from './graph-reconcile-context.js'
 
 export type SqlTier = 'episode' | 'digest' | 'semantic' | 'procedural'
 
@@ -136,6 +146,8 @@ export interface ReconcileArgs {
   deleteMissing: boolean
   deleteOrphans: boolean
   undoLog: string | null
+  /** Undo log to replay: re-creates the context links it records, writes nothing else. */
+  undo: string | null
   pageSize: number
   batchSize: number
   help: boolean
@@ -170,6 +182,7 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
     deleteMissing: false,
     deleteOrphans: false,
     undoLog: null,
+    undo: null,
     pageSize: 1000,
     batchSize: 1000,
     help: false,
@@ -181,6 +194,7 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
     else if (a === '--delete-missing') args.deleteMissing = true
     else if (a === '--delete-orphans') args.deleteOrphans = true
     else if (a === '--undo-log') args.undoLog = requiredValue(argv[++i], 'undo-log')
+    else if (a === '--undo') args.undo = requiredValue(argv[++i], 'undo')
     else if (a === '--page-size') args.pageSize = positiveInt(argv[++i], 'page-size')
     else if (a === '--batch-size') args.batchSize = positiveInt(argv[++i], 'batch-size')
     else if (a === '--help' || a === '-h') args.help = true
@@ -188,6 +202,9 @@ export function parseReconcileArgs(argv: readonly string[]): ReconcileArgs {
   }
 
   const writes = args.apply || args.deleteMissing || args.deleteOrphans
+  if (args.undo !== null && (writes || args.undoLog !== null)) {
+    throw new ReconcileArgsError('--undo replays an undo log on its own: drop --apply, the delete flags and --undo-log')
+  }
   if (writes && args.undoLog === null) {
     throw new ReconcileArgsError('--apply, --delete-missing and --delete-orphans require --undo-log <path>')
   }
@@ -227,14 +244,14 @@ export interface SqlSourceRow {
   superseded_by?: string | null
 }
 
-export interface ReconcileSqlSource {
+export interface ReconcileSqlSource extends ContextTextSource {
   /** Rows of `tier` strictly after `cursor`, ordered by (created_at, id). */
   fetchPage(tier: SqlTier, cursor: PageCursor | null, pageSize: number): Promise<SqlSourceRow[]>
   /** Every row of `tier` whose id is in `ids`, forgotten and superseded rows included. */
   fetchByIds(tier: SqlTier, ids: readonly string[]): Promise<SqlSourceRow[]>
 }
 
-export interface ReconcileGraph {
+export interface ReconcileGraph extends ContextLinkGraph {
   /** Memory nodes with an id strictly after `after` (all when null), ordered by id. */
   fetchNodePage(after: string | null, limit: number): Promise<GraphMemoryNode[]>
   /** Sets `forgottenAt` on nodes that lack it. */
@@ -249,6 +266,7 @@ export type UndoLine =
   | { op: 'project'; id: string; before: string | null }
   | { op: 'tier'; id: string; before: string | null }
   | { op: 'delete'; id: string; memoryType: string | null; projectId: string | null }
+  | ContextUndoLine
 
 export interface ReconcileDeps {
   sql: ReconcileSqlSource
@@ -258,12 +276,15 @@ export interface ReconcileDeps {
   log(line: string): void
   now?: () => string
   nodePageSize?: number
+  /** Semantic and digest nodes per context-link page. */
+  contextPageSize?: number
 }
 
 export interface ReconcileOutcome {
   before: ReconcilePlan
   after: ReconcilePlan | null
   written: { stamped: number; projects: number; tiers: number; deleted: number; skippedChangedSinceSnapshot: number }
+  contextLinks: { before: ContextLinksReport; after: ContextLinksReport | null; pruned: number }
 }
 
 export const DEFAULT_NODE_PAGE_SIZE = 5000
@@ -351,14 +372,16 @@ function stillDeletable(snapshot: SqlMemoryRow | undefined, liveNow: boolean | u
 export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Promise<ReconcileOutcome> {
   const now = deps.now ?? (() => new Date().toISOString())
   const nodePageSize = deps.nodePageSize ?? DEFAULT_NODE_PAGE_SIZE
+  const contextPageSize = deps.contextPageSize ?? DEFAULT_CONTEXT_PAGE_SIZE
 
   const rows = await readSqlRows(deps.sql, args.pageSize)
   const nodes = await readGraphNodes(deps.graph, nodePageSize)
   const before = planReconcile(rows, nodes)
-  deps.log(formatReconcileReport(before))
+  const contextBefore = await planContextLinks(deps.sql, deps.graph, contextPageSize)
+  deps.log(`${formatReconcileReport(before)}\n${formatContextReport(contextBefore)}`)
 
   const written = { stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 }
-  if (!args.apply) return { before, after: null, written }
+  if (!args.apply) return { before, after: null, written, contextLinks: { before: contextBefore, after: null, pruned: 0 } }
 
   for (const batch of chunks(before.stamp, args.batchSize)) {
     const at = now()
@@ -395,12 +418,16 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
     written.deleted += await deps.graph.deleteNodes(batch)
   }
 
+  // Runs after the tier repair, so a node's memoryType already matches its row.
+  const pruned = await pruneContextLinks(deps.sql, deps.graph, deps.appendUndo, contextPageSize, args.batchSize)
+
   deps.log(
     `written: stamped ${written.stamped}, projects ${written.projects}, tiers ${written.tiers}, ` +
-      `deleted ${written.deleted}, ` +
+      `deleted ${written.deleted}, context links pruned ${pruned}, ` +
       `skipped (changed since snapshot) ${written.skippedChangedSinceSnapshot}`,
   )
   const after = planReconcile(rows, await readGraphNodes(deps.graph, nodePageSize))
-  deps.log(formatReconcileReport(after))
-  return { before, after, written }
+  const contextAfter = await planContextLinks(deps.sql, deps.graph, contextPageSize)
+  deps.log(`${formatReconcileReport(after)}\n${formatContextReport(contextAfter)}`)
+  return { before, after, written, contextLinks: { before: contextBefore, after: contextAfter, pruned } }
 }
