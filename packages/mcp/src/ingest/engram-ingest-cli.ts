@@ -349,7 +349,8 @@ async function runServerMode(
     ...(args.sessionId
       ? { session_id: args.sessionId, key: captureKey(args.source, args.sessionId, resolved.uuid ?? content) }
       : {}),
-    meta: { capturedAt: new Date().toISOString() },
+    // cwd lets a later retag recover the project of a capture made outside a repository.
+    meta: { capturedAt: new Date().toISOString(), cwd: process.cwd() },
   }
 
   const sent = await sendCapture(payload, env, { label: 'engram-ingest' })

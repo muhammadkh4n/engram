@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import {
   detectProject,
@@ -19,6 +20,16 @@ import {
   projectForCategory,
 } from '../src/ingest/project-detect.js'
 import { resetProjectRootsWarning } from '../src/ingest/project-roots.js'
+
+/** Hooks are disabled so a machine-wide post-commit hook never fires on test commits. */
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd, encoding: 'utf8' })
+}
+
+function initRepoWithCommit(dir: string): void {
+  git(dir, 'init', '-q')
+  git(dir, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '--allow-empty', '-m', 'init')
+}
 
 describe('detectProject', () => {
   let root: string
@@ -106,6 +117,16 @@ describe('detectProject', () => {
     writeFileSync(join(worktree, '.git'), `gitdir: ${adminDir}`)
 
     expect(detectProject(worktree)).toBe('dotfiles')
+  })
+
+  it('resolves a worktree made by git worktree add to the main repository name', () => {
+    const main = join(root, 'real-repo')
+    mkdirSync(main, { recursive: true })
+    initRepoWithCommit(main)
+    const worktree = join(root, 'real-repo-feature')
+    git(main, 'worktree', 'add', '-q', '-b', 'feature', worktree)
+
+    expect(detectProject(worktree)).toBe('real-repo')
   })
 
   it('keeps a submodule under its own name', () => {

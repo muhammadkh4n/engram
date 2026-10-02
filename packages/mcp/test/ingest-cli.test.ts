@@ -164,7 +164,7 @@ describe('engram-ingest server mode', () => {
       dedup: true,
       dry_run: false,
       key: expectedKey,
-      meta: { capturedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/) },
+      meta: { capturedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/), cwd: process.cwd() },
     })
     expect(second['key']).toBe(first['key'])
   })

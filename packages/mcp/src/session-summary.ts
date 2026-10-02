@@ -133,6 +133,7 @@ export async function runSessionSummaryWorker(
     return 0
   }
 
+  const cwd = hook.cwd ?? process.cwd()
   try {
     const result = await sendTranscriptCapture(
       {
@@ -140,8 +141,8 @@ export async function runSessionSummaryWorker(
         excerpt,
         transcriptPath,
         sessionId: SUMMARY_SESSION_ID,
-        project: resolveProject('auto', hook.cwd ?? process.cwd()),
-        meta: { transcriptPath },
+        project: resolveProject('auto', cwd),
+        meta: { transcriptPath, cwd },
         logPrefix: LOG_PREFIX,
       },
       env,
