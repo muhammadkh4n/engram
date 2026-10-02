@@ -21,6 +21,7 @@ import {
   formatRecallTimingLine,
   recallOptionsFromArgs,
   parseChatReasoningEnv,
+  chatIntelligenceOptionsFromEnv,
   runMemoryForget,
   runMemoryRecall,
   parseSalienceThresholdEnv,
@@ -239,6 +240,33 @@ describe('recallOutputPolicyAtStartup', () => {
       if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
       else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
     }
+  })
+})
+
+describe('chatIntelligenceOptionsFromEnv', () => {
+  it('maps the chat env to openaiIntelligence options, and nothing when unset', () => {
+    expect(chatIntelligenceOptionsFromEnv({})).toEqual({})
+    expect(
+      chatIntelligenceOptionsFromEnv({
+        ENGRAM_CHAT_MODEL: ' deepseek/deepseek-v4-flash ',
+        ENGRAM_CHAT_BASE_URL: 'https://openrouter.ai/api/v1',
+        ENGRAM_CHAT_API_KEY: 'k',
+        ENGRAM_CHAT_PROVIDER_PREFS: '{"order":["a"]}',
+        ENGRAM_CHAT_REASONING: 'off',
+      }),
+    ).toEqual({
+      summarizationModel: 'deepseek/deepseek-v4-flash',
+      chatBaseUrl: 'https://openrouter.ai/api/v1',
+      chatApiKey: 'k',
+      chatProviderPrefs: { order: ['a'] },
+      chatReasoning: 'off',
+    })
+  })
+
+  it('throws on provider prefs that are not a JSON object', () => {
+    expect(() => chatIntelligenceOptionsFromEnv({ ENGRAM_CHAT_PROVIDER_PREFS: '[1]' })).toThrow(
+      /ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object/,
+    )
   })
 })
 

@@ -30,6 +30,7 @@
     "engram-embed-backfill": "dist/ingest/engram-embed-backfill-cli.js",
     "engram-project-backfill": "dist/ingest/engram-project-backfill-cli.js",
     "engram-episode-reembed": "dist/ingest/engram-episode-reembed-cli.js",
+    "engram-fact-supersession": "dist/ingest/engram-fact-supersession-cli.js",
     "engram-hook-user-prompt-submit": "dist/hooks/user-prompt-submit.js",
     "engram-hook-stop": "dist/hooks/stop.js",
     "engram-salience-stats": "dist/ingest/engram-salience-stats-cli.js",

@@ -398,6 +398,18 @@ The package includes CLI utilities for advanced use cases:
 - `engram-git-setup` — Set up git hooks for automatic ingestion
 - `engram-shell-setup` — Set up shell hooks
 - `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
+- `engram-fact-supersession` — Retire stored semantic facts that a newer stored fact replaces, using the same
+  supersession judge deep sleep uses (`ENGRAM_CHAT_*` select its model and host). Facts are visited newest first;
+  each is judged against the live facts of its own project (shared facts only against shared facts) that are
+  strictly older, at cosine at or above `--min-cosine` (default `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most
+  five. A fact retired earlier in the pass is neither judged nor offered again.
+  - `--max-calls N` is required; the run stops at the cap and says so.
+  - Dry run by default: the judge runs, nothing is written. Stdout is JSON with the proposals (new id, old id,
+    cosine, both dates) and counts per similarity band. Fact text never goes to stdout; `--report PATH` writes the
+    proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
+  - `--apply --rollback PATH` sets `superseded_by` and bumps `updated_at` on each replaced fact that is still live,
+    and appends `old_id,new_id,cosine` to the rollback CSV after each write. Nothing is deleted; to undo, clear
+    `superseded_by` (and bump `updated_at`) on the CSV's old ids.
 
 ## Troubleshooting
 
