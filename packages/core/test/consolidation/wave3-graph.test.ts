@@ -15,7 +15,38 @@ interface CypherCall {
   params?: Record<string, unknown>
 }
 
-function createMockGraph(): GraphPort & {
+interface ContextCandidateRow {
+  nodeId: string
+  name: string | null
+  frequency?: number
+  weight?: number
+}
+
+function rowsResult(rows: ContextCandidateRow[]): GraphQueryResult {
+  return {
+    records: rows.map(row => ({
+      get: (key: string) => (row as unknown as Record<string, unknown>)[key],
+      toObject: () => ({ ...row }),
+    })),
+    summary: {
+      counters: {
+        nodesCreated: () => 0,
+        relationshipsCreated: () => 0,
+        relationshipsDeleted: () => 0,
+        propertiesSet: () => 0,
+      },
+    },
+  }
+}
+
+/** The candidate rows the light/deep sleep context reads return. */
+const DEFAULT_CONTEXT: ContextCandidateRow[] = [
+  { nodeId: 'el:typescript', name: 'TypeScript', frequency: 4, weight: 0.5 },
+  { nodeId: 'el:javascript', name: 'JavaScript', frequency: 2, weight: 0.8 },
+  { nodeId: 'el:jira', name: 'Jira', frequency: 6, weight: 1.0 },
+]
+
+function createMockGraph(context: ContextCandidateRow[] = DEFAULT_CONTEXT): GraphPort & {
   _calls: CypherCall[]
   _readCalls: CypherCall[]
 } {
@@ -52,9 +83,14 @@ function createMockGraph(): GraphPort & {
 
     runCypher: vi.fn(async (query: string, params?: Record<string, unknown>) => {
       readCalls.push({ query, params })
+      if (query.includes('elementId(ctx) AS nodeId')) return rowsResult(context)
       return mockResult
     }),
   }
+}
+
+function contextWrite(graph: ReturnType<typeof createMockGraph>): CypherCall | undefined {
+  return graph._calls.find(c => c.query.includes('UNWIND $links'))
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +138,51 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
       expect(queries.some(q => q.includes('EMOTIONAL'))).toBe(true)
     })
 
+    it('links the digest only to source context its summary names', async () => {
+      const episodes = Array.from({ length: 6 }, (_, i) => makeEpisode({ sessionId: 'session-1', content: `Episode ${i}` }))
+      storage.episodes.getUnconsolidatedSessions = vi.fn(async () => ['session-1'])
+      storage.episodes.getUnconsolidated = vi.fn(async () => episodes)
+      const intelligence = {
+        summarize: vi.fn(async () => ({
+          text: 'Moved the build to TypeScript; JavaScript stays in the scripts folder.',
+          topics: [], entities: [], decisions: [],
+        })),
+      }
+
+      const result = await lightSleep(storage, intelligence, { minEpisodes: 5 }, graph)
+
+      const read = graph._readCalls.find(c => c.query.includes('elementId(ctx) AS nodeId'))
+      expect(read?.query).toContain('SPOKE|CONTEXTUAL|TOPICAL')
+      expect(read?.params?.sourceEpisodeIds).toEqual(episodes.map(e => e.id))
+      expect(contextWrite(graph)?.params?.links).toEqual([
+        { nodeId: 'el:typescript', weight: 4 / 6 },
+        { nodeId: 'el:javascript', weight: 2 / 6 },
+      ])
+      expect(result.graphContextKept).toBe(2)
+      expect(result.graphContextDropped).toBe(1)
+    })
+
+    it('writes no context edge when the summary names none of the candidates', async () => {
+      const episodes = Array.from({ length: 6 }, (_, i) => makeEpisode({ sessionId: 'session-1', content: `Episode ${i}` }))
+      storage.episodes.getUnconsolidatedSessions = vi.fn(async () => ['session-1'])
+      storage.episodes.getUnconsolidated = vi.fn(async () => episodes)
+      const intelligence = {
+        summarize: vi.fn(async () => ({ text: 'Reviewed the deploy checklist.', topics: [], entities: [], decisions: [] })),
+      }
+
+      const result = await lightSleep(storage, intelligence, { minEpisodes: 5 }, graph)
+
+      expect(contextWrite(graph)).toBeUndefined()
+      expect(result.graphContextKept).toBe(0)
+      expect(result.graphContextDropped).toBe(3)
+      // The digest's other graph writes are unaffected.
+      const queries = graph._calls.map(c => c.query)
+      expect(queries.some(q => q.includes('MERGE (d:Memory'))).toBe(true)
+      expect(queries.some(q => q.includes('DERIVES_FROM'))).toBe(true)
+      expect(queries.some(q => q.includes('EMOTIONAL'))).toBe(true)
+      expect(storage.digests.insert).toHaveBeenCalled()
+    })
+
     it('skips graph operations when graph is null', async () => {
       const episodes = Array.from({ length: 6 }, (_, i) => makeEpisode({ sessionId: 'session-1', content: `Episode ${i} content about TypeScript` }))
       storage.episodes.getUnconsolidatedSessions = vi.fn(async () => ['session-1'])
@@ -112,6 +193,8 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
       expect(result.digestsCreated).toBe(1)
       expect(result.graphNodesCreated).toBeUndefined()
       expect(result.graphEdgesCreated).toBeUndefined()
+      expect(result.graphContextKept).toBeUndefined()
+      expect(result.graphContextDropped).toBeUndefined()
     })
 
     it('still creates SQL digest when graph fails', async () => {
@@ -178,6 +261,38 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
       }
 
       expect(result.graphNodesCreated).toBeDefined()
+    })
+
+    it('links each fact only to digest context its own topic and content name', async () => {
+      const digests = Array.from({ length: 3 }, (_, i) => ({
+        id: `digest-${i}`,
+        sessionId: 'session-1',
+        summary: 'I prefer TypeScript for large projects',
+        keyTopics: ['typescript'],
+        sourceEpisodeIds: [`ep-${i}`],
+        sourceDigestIds: [],
+        level: 0,
+        embedding: null,
+        metadata: {},
+        createdAt: new Date(),
+      }))
+      storage.digests.getRecent = vi.fn(async () => digests)
+
+      const result = await deepSleep(storage, undefined, { minDigests: 3 }, graph)
+
+      expect(result.promoted).toBeGreaterThan(0)
+      const reads = graph._readCalls.filter(c => c.query.includes('elementId(ctx) AS nodeId'))
+      expect(reads).toHaveLength(result.promoted!)
+      expect(reads[0].query).toContain('max(r.weight)')
+      const writes = graph._calls.filter(c => c.query.includes('UNWIND $links'))
+      expect(writes).toHaveLength(result.promoted!)
+      for (const write of writes) {
+        expect(write.query).toContain('inheritedWeight')
+        expect(write.params?.links).toEqual([{ nodeId: 'el:typescript', weight: 0.5 }])
+        expect(write.params?.inheritance).toBe(0.7)
+      }
+      expect(result.graphContextKept).toBe(result.promoted)
+      expect(result.graphContextDropped).toBe(2 * result.promoted!)
     })
 
     it('skips graph when null — SQL still works', async () => {

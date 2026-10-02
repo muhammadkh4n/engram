@@ -468,6 +468,12 @@ export interface ConsolidateResult {
   graphNodesCreated?: number
   graphEdgesCreated?: number
   graphEdgesUpdated?: number
+  /** Candidate context links (Person/Entity/Topic of the sources) written
+   *  because the new digest or fact's own text names the node. */
+  graphContextKept?: number
+  /** Candidate context links not written because the text does not name
+   *  the node. */
+  graphContextDropped?: number
   communitiesDetected?: number
   bridgeNodesFound?: number
   replayEdgesCreated?: number
