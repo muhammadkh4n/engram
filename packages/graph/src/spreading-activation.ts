@@ -32,6 +32,73 @@ function compareActivation(a: ActivationResult, b: ActivationResult): number {
   return a.nodeId < b.nodeId ? -1 : 1
 }
 
+/**
+ * ACT-R fan effect. Each step is scaled by the fan factor of the node it spreads
+ * out of: f = ln(N / deg) / ln(N), with N the Memory node count and deg the
+ * node's relationship count. A node linked to most of the graph passes on
+ * almost nothing, and one whose degree reaches N passes on nothing; a graph
+ * under two memories applies no factor, since ln 1 = 0. A literal 1/deg is
+ * not used: two hops at a typical degree fall under the activation floor.
+ * Project nodes and the default Session link whole populations, so a walk
+ * through them gives every member the same activation; they never relay, and
+ * a Project is never a seed. A neighbour's activation is its best path per
+ * seed, summed across seeds, so a memory several seeds reach outranks one
+ * reached from a single seed. The sum can exceed 1.
+ */
+function fanEffectCypher(relFilter: string, maxHops: number): string {
+  return `
+      CALL {
+        MATCH (m:Memory)
+        RETURN count(m) AS memoryCount
+      }
+      UNWIND $seedIds AS seedId
+      MATCH (seed) WHERE seed.id = seedId AND NOT seed:Project
+      CALL {
+        WITH seed, seedId, memoryCount
+        MATCH path = (seed)-[rels${relFilter}*1..${maxHops}]-(neighbor)
+        WHERE neighbor <> seed
+          AND ALL(r IN rels WHERE r.weight >= $minWeight)
+          AND NONE(n IN nodes(path)[1..-1] WHERE
+                n:Project
+                OR (n:Session AND n.id = 'default'))
+          AND ALL(n IN nodes(path) WHERE
+                $projectId IS NULL
+                OR NOT n:Memory
+                OR n.projectId = $projectId
+                OR n.projectId IS NULL)
+          AND ALL(n IN nodes(path) WHERE
+                NOT n:Memory
+                OR coalesce(n.forgottenAt, n.deletedAt) IS NULL)
+        WITH seedId, neighbor, rels, length(path) AS hops,
+             [degree IN [n IN nodes(path)[0..-1] | COUNT { (n)--() }] |
+               CASE
+                 WHEN memoryCount < 2 THEN 1.0
+                 WHEN degree >= memoryCount THEN 0.0
+                 ELSE log(toFloat(memoryCount) / degree) / log(toFloat(memoryCount))
+               END
+             ] AS fans
+        WITH neighbor, hops,
+             reduce(
+               activation = coalesce($seedWeights[seedId], 1.0),
+               i IN range(0, size(rels) - 1) |
+                 activation * rels[i].weight * $decayPerHop * fans[i]
+             ) AS activation
+        WITH neighbor, MAX(activation) AS seedBest, MIN(hops) AS seedHops
+        RETURN neighbor, seedBest AS activation, seedHops AS hops
+      }
+      WITH neighbor, SUM(activation) AS bestActivation, MIN(hops) AS shortestPath
+      WHERE bestActivation >= $minActivation
+      RETURN
+        neighbor.id AS nodeId,
+        labels(neighbor)[0] AS nodeType,
+        properties(neighbor) AS properties,
+        bestActivation AS activation,
+        shortestPath AS hops
+      ORDER BY activation DESC, coalesce(neighbor.createdAt, '') DESC, nodeId
+      LIMIT $maxNodes
+    `
+}
+
 export class SpreadingActivation {
   private driver: Driver
 
@@ -61,7 +128,7 @@ export class SpreadingActivation {
       ? Object.fromEntries(seedActivations)
       : {}
 
-    const cypher = `
+    const cypher = p.fanEffect ? fanEffectCypher(relFilter, p.maxHops) : `
       UNWIND $seedIds AS seedId
       MATCH (seed) WHERE seed.id = seedId
       CALL {
@@ -101,13 +168,15 @@ export class SpreadingActivation {
     try {
       const result = await session.executeRead(async (tx) => {
         return tx.run(cypher, {
-          seedIds,
+          // Summed activation would count a repeated seed twice.
+          seedIds: p.fanEffect ? [...new Set(seedIds)] : seedIds,
           seedWeights,
           minWeight: p.minWeight,
           decayPerHop: p.decayPerHop,
           minActivation: p.minActivation,
           maxNodes: neo4j.int(p.maxNodes),
           projectId: p.projectId ?? null,
+          ...(p.fanEffect ? { fanEffect: true } : {}),
         })
       })
 
