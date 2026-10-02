@@ -302,6 +302,20 @@ function positiveIntegerFromEnv(env: NodeJS.ProcessEnv, name: string): number | 
   return Number(value)
 }
 
+const DECIMAL_RE = /^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/
+
+function relatedShareFromEnv(env: NodeJS.ProcessEnv): number | undefined {
+  const name = 'ENGRAM_RECALL_RELATED_SHARE'
+  const raw = env[name]
+  if (raw === undefined || raw.trim() === '') return undefined
+  const value = raw.trim()
+  const share = Number(value)
+  if (!DECIMAL_RE.test(value) || !(share >= 0 && share <= MAX_RELATED_SHARE)) {
+    throw new Error(`${name} must be a decimal from 0 to ${MAX_RELATED_SHARE}, got "${raw}"`)
+  }
+  return share
+}
+
 function faintFromEnv(env: NodeJS.ProcessEnv): boolean {
   const raw = env['ENGRAM_RECALL_FAINT']
   if (raw === undefined || raw.trim() === '') return true
@@ -312,16 +326,22 @@ function faintFromEnv(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * Read ENGRAM_RECALL_EMIT_K, ENGRAM_RECALL_TOKEN_BUDGET (positive integers)
- * and ENGRAM_RECALL_FAINT (on|off, default on). Unset or empty means no
- * limit; any other value throws, naming the variable.
+ * Read ENGRAM_RECALL_EMIT_K, ENGRAM_RECALL_TOKEN_BUDGET,
+ * ENGRAM_RECALL_ITEM_MAX_TOKENS (positive integers),
+ * ENGRAM_RECALL_RELATED_SHARE (decimal, 0 to MAX_RELATED_SHARE) and
+ * ENGRAM_RECALL_FAINT (on|off, default on). Unset or empty means no limit or
+ * the default; any other value throws, naming the variable.
  */
 export function recallOutputPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
   const emitK = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_EMIT_K')
   const tokenBudget = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_TOKEN_BUDGET')
+  const relatedShare = relatedShareFromEnv(env)
+  const itemMaxTokens = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_ITEM_MAX_TOKENS')
   return {
     ...(emitK !== undefined ? { emitK } : {}),
     ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    ...(relatedShare !== undefined ? { relatedShare } : {}),
+    ...(itemMaxTokens !== undefined ? { itemMaxTokens } : {}),
     faint: faintFromEnv(env),
   }
 }

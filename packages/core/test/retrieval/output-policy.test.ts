@@ -552,8 +552,41 @@ describe('recallOutputPolicyFromEnv', () => {
     ['ENGRAM_RECALL_TOKEN_BUDGET', '99999999999999999999'],
     ['ENGRAM_RECALL_FAINT', 'false'],
     ['ENGRAM_RECALL_FAINT', 'OFF'],
+    ['ENGRAM_RECALL_RELATED_SHARE', 'half'],
+    ['ENGRAM_RECALL_RELATED_SHARE', '-0.1'],
+    ['ENGRAM_RECALL_RELATED_SHARE', '0.95'],
+    ['ENGRAM_RECALL_RELATED_SHARE', '1'],
+    ['ENGRAM_RECALL_RELATED_SHARE', '3e-1'],
+    ['ENGRAM_RECALL_RELATED_SHARE', '.'],
+    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', '0'],
+    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', '512.5'],
+    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', 'big'],
+    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', '99999999999999999999'],
   ])('throws naming %s for %j', (name, value) => {
     expect(() => recallOutputPolicyFromEnv({ [name]: value })).toThrow(name)
+  })
+
+  it('reads the Related share and the item cap', () => {
+    expect(recallOutputPolicyFromEnv({
+      ENGRAM_RECALL_TOKEN_BUDGET: '4000',
+      ENGRAM_RECALL_RELATED_SHARE: '0.25',
+      ENGRAM_RECALL_ITEM_MAX_TOKENS: '800',
+    })).toEqual({ tokenBudget: 4000, relatedShare: 0.25, itemMaxTokens: 800, faint: true })
+  })
+
+  it.each([
+    ['0', 0],
+    ['0.9', 0.9],
+    ['.5', 0.5],
+    [' 0.30 ', 0.3],
+  ])('accepts a Related share of %j', (raw, share) => {
+    expect(recallOutputPolicyFromEnv({ ENGRAM_RECALL_RELATED_SHARE: raw })).toEqual({ relatedShare: share, faint: true })
+  })
+
+  it('treats an empty share or cap as unset', () => {
+    expect(recallOutputPolicyFromEnv({ ENGRAM_RECALL_RELATED_SHARE: ' ', ENGRAM_RECALL_ITEM_MAX_TOKENS: '' })).toEqual({
+      faint: true,
+    })
   })
 })
 
@@ -563,6 +596,17 @@ describe('resolveRecallOutputPolicy', () => {
 
     expect(resolveRecallOutputPolicy(env, 1200)).toEqual({ emitK: 4, tokenBudget: 1200, faint: true })
     expect(resolveRecallOutputPolicy(env)).toEqual({ emitK: 4, tokenBudget: 5000, faint: true })
+  })
+
+  it('keeps the env share and item cap when a per-call budget overrides the env budget', () => {
+    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '5000', ENGRAM_RECALL_RELATED_SHARE: '0.4', ENGRAM_RECALL_ITEM_MAX_TOKENS: '600' }
+
+    expect(resolveRecallOutputPolicy(env, 1200)).toEqual({
+      tokenBudget: 1200,
+      relatedShare: 0.4,
+      itemMaxTokens: 600,
+      faint: true,
+    })
   })
 
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects a per-call budget of %s', (budget) => {

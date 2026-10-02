@@ -51,8 +51,12 @@ Recall output policy (server-wide; every variable unset means an unbounded paylo
 - `ENGRAM_RECALL_EMIT_K` — positive integer: emit only the first K Recalled memories.
 - `ENGRAM_RECALL_TOKEN_BUDGET` — positive integer: cap the recall text at this many estimated tokens (`ceil(chars / 4)`), headers included. The per-call `token_budget` argument of `memory_recall` overrides it.
 - `ENGRAM_RECALL_FAINT` — `on` (default) or `off`: emit the Faint Associations section.
+- `ENGRAM_RECALL_RELATED_SHARE` — decimal from `0` to `0.9`, default `0.3`: the part of the budget room (the budget minus the header and any notice) held for Related Memories. Recalled memories fill the rest first; room either section leaves unused goes to the other (Recalled first), then Domain, Context and Faint fill what is left, in that order. Each section emits a prefix of its own ranking.
+- `ENGRAM_RECALL_ITEM_MAX_TOKENS` — positive integer, default a quarter of the budget: the longest single item in estimated tokens. A longer item is cut at a word boundary and ends with ` …`, so one long memory cannot take the whole budget and the text never exceeds it.
 
-An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable; the resolved policy is logged once at startup.
+The share and the item cap apply only when a token budget is in force (from `ENGRAM_RECALL_TOKEN_BUDGET` or the per-call `token_budget`); with no budget they change nothing, and with no budget and no emit-K the payload is the unbounded text. A per-call `token_budget` replaces only the budget: the share still comes from the server, and the item cap does too when `ENGRAM_RECALL_ITEM_MAX_TOKENS` is set, otherwise it is a quarter of the per-call budget.
+
+An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable, before the server listens; the resolved policy is logged once at startup as `[engram-mcp] recall output policy: emitK=… tokenBudget=… faint=… relatedShare=… itemMaxTokens=…`.
 
 Recall LLM step cache (read once when the server builds its memory instance; an empty value counts as unset, any other malformed value fails startup with an error naming the variable):
 
@@ -117,7 +121,7 @@ Search memory for content relevant to a query.
 
 `conversation_id` is optional: a non-blank string of at most 200 characters (trimmed) naming the caller's current conversation. It scopes priming to that conversation: keywords shared by several memories an earlier recall of the same `conversation_id` returned give a small score boost (whole-token match, capped) and seed the graph walk in its next recalls, and the last recall's intent informs the next one. It does **not** filter results, unlike `session_id`. A recall without `conversation_id` gets no priming and writes no priming state, so until a client sends it, priming is off. `ENGRAM_RECALL_PRIMING=off` disables priming even when it is sent. A blank, non-string or longer value returns an error result.
 
-`token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset).
+`token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset). The budget covers the whole payload, Related Memories included, split by `ENGRAM_RECALL_RELATED_SHARE` and with every item capped by `ENGRAM_RECALL_ITEM_MAX_TOKENS` (default a quarter of this budget).
 
 The request time is the recall's reference date. Query expansion states it to the model as today's date, so a relative phrase ("last week", "yesterday") expands to the dates it means. The model gets the weekday and the calendar day (`Today's date is Friday, 2026-10-02.`) in `ENGRAM_TIMEZONE`, an IANA zone name such as `Asia/Karachi` (default `UTC`), read once at startup. A name the runtime does not know fails startup.
 

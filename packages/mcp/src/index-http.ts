@@ -24,6 +24,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
   createEngramServer,
   getCaptureDeps,
+  recallOutputPolicyAtStartup,
   captureModelFromEnv,
   parseSalienceThresholdEnv,
 } from './server-core.js'
@@ -63,6 +64,7 @@ async function main(): Promise<void> {
   // of silently gating every capture at a value nobody chose.
   const threshold = parseSalienceThresholdEnv()
   const captureModel = captureModelFromEnv()
+  recallOutputPolicyAtStartup()
 
   const httpServer = http.createServer(
     createRequestListener(config, {
