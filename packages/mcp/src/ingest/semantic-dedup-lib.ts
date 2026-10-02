@@ -24,12 +24,15 @@
  * a supersession. Nothing is deleted. Clearing `superseded_by` restores a
  * row in Postgres (recall skips superseded rows), but the recall-engine
  * index adds it back only on a rebuild. Every row written is recorded in a
- * rollback CSV as it is written.
+ * rollback CSV as it is written. With a graph, each written batch's nodes get
+ * `forgottenAt` in the same run, so they stop relaying spreading activation
+ * at once instead of at the next decay pass; the CSV records the stamp time.
  */
 
 import { closeSync, openSync, writeSync } from 'node:fs'
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import { buildKeysetFilter, chunk, nextCursor, type PageCursor } from './embed-backfill-lib.js'
+import { stampRetired, type GraphStampOutcome, type RetireGraph } from './graph-retire.js'
 
 /** Lowest similarity at which rows are merged rather than only reported. */
 export const MERGE_SIM_FLOOR = 0.95
@@ -79,6 +82,8 @@ export interface RollbackEntry {
   row: string
   canonical: string
   sim: number
+  /** The `forgottenAt` written on the row's graph node; null when no graph was configured. */
+  graphForgottenAt: string | null
 }
 
 /** Receives each written batch as soon as the store confirms it. */
@@ -126,6 +131,8 @@ export interface DedupReport {
   applied: boolean
   /** rows written on apply (empty on a dry run) */
   superseded: RollbackEntry[]
+  /** graph stamps of the superseded rows; null on a dry run or when no graph was configured */
+  graph: GraphStampOutcome | null
 }
 
 export interface SemanticDedupOptions {
@@ -139,6 +146,10 @@ export interface SemanticDedupOptions {
   batchSize: number
   /** required for apply */
   rollback?: RollbackSink
+  /** stamps each superseded row's graph node right after its batch is written */
+  graph?: RetireGraph
+  now?: () => string
+  warn?: (line: string) => void
 }
 
 /** Rejects options that could merge rows below the floor or lose rollback data. */
@@ -368,20 +379,33 @@ function finishCluster(raw: RawCluster, sources: ReadonlyMap<string, number>, me
   }
 }
 
+/** The stamp time goes into the rollback entries before the stamp is written. */
 async function applyMerges(
   store: SemanticDedupStore,
   clusters: readonly DedupCluster[],
   opts: SemanticDedupOptions,
+  graphOutcome: GraphStampOutcome | null,
 ): Promise<RollbackEntry[]> {
+  const now = opts.now ?? (() => new Date().toISOString())
+  const warn = opts.warn ?? ((line: string) => console.error(line))
   const written: RollbackEntry[] = []
   for (const cluster of clusters.filter((c) => c.mergeable)) {
     const simOf = new Map(cluster.members.map((m) => [m.id, m.sim_to_canonical]))
     const others = cluster.members.filter((m) => m.id !== cluster.canonical).map((m) => m.id)
     for (const batch of chunk(others, opts.batchSize)) {
       const changed = await store.markSuperseded(batch, cluster.canonical)
-      const entries = changed.map((row) => ({ row, canonical: cluster.canonical, sim: simOf.get(row) ?? NaN }))
+      const graphForgottenAt = opts.graph ? now() : null
+      const entries = changed.map((row) => ({
+        row,
+        canonical: cluster.canonical,
+        sim: simOf.get(row) ?? NaN,
+        graphForgottenAt,
+      }))
       opts.rollback!.write(entries)
       written.push(...entries)
+      if (opts.graph && graphOutcome && graphForgottenAt !== null) {
+        await stampRetired(opts.graph, changed, graphForgottenAt, graphOutcome, warn)
+      }
     }
   }
   return written
@@ -398,7 +422,8 @@ export async function runSemanticDedup(store: SemanticDedupStore, opts: Semantic
   const clusters = raw
     .map((c) => finishCluster(c, sources, opts.mergeSim))
     .sort((a, b) => b.members.length - a.members.length || b.min_pair_sim - a.min_pair_sim || a.canonical.localeCompare(b.canonical))
-  const superseded = opts.apply ? await applyMerges(store, clusters, opts) : []
+  const graph: GraphStampOutcome | null = opts.apply && opts.graph ? { stamped: 0, failed: 0 } : null
+  const superseded = opts.apply ? await applyMerges(store, clusters, opts, graph) : []
   return {
     scanned: rows.length,
     skipped_no_vector: skipped,
@@ -408,6 +433,7 @@ export async function runSemanticDedup(store: SemanticDedupStore, opts: Semantic
     merge_sim: opts.mergeSim,
     applied: opts.apply,
     superseded,
+    graph,
   }
 }
 
@@ -494,6 +520,7 @@ export function dedupJson(report: DedupReport): object {
     merge_sim: report.merge_sim,
     applied: report.applied,
     superseded: report.superseded.length,
+    graph: report.graph,
     clusters: report.clusters.map((c) => ({
       ...c,
       min_pair_sim: round(c.min_pair_sim),
@@ -541,13 +568,15 @@ export function writeNewFile(path: string, body: string): void {
   }
 }
 
-export const ROLLBACK_CSV_HEADER = 'row,canonical,sim'
+export const ROLLBACK_CSV_HEADER = 'row,canonical,sim,graph_forgotten_at'
 
 /**
  * A rollback CSV at `path`: created exclusively before any write, so an
  * earlier run's file is never overwritten, and appended per batch with the
  * rows the store confirmed. Restore a row with
- * `UPDATE memory_semantic SET superseded_by = NULL WHERE id = <row> AND superseded_by = <canonical>`.
+ * `UPDATE memory_semantic SET superseded_by = NULL WHERE id = <row> AND superseded_by = <canonical>`
+ * and its node with
+ * `MATCH (m:Memory {id: <row>}) WHERE m.forgottenAt = <graph_forgotten_at> REMOVE m.forgottenAt`.
  */
 export function openRollbackCsv(path: string): RollbackSink & { close(): void } {
   const fd = openSync(path, 'wx', 0o600)
@@ -555,7 +584,7 @@ export function openRollbackCsv(path: string): RollbackSink & { close(): void } 
   return {
     write(entries) {
       if (entries.length === 0) return
-      writeSync(fd, entries.map((e) => `${e.row},${e.canonical},${e.sim}`).join('\n') + '\n')
+      writeSync(fd, entries.map((e) => `${e.row},${e.canonical},${e.sim},${e.graphForgottenAt ?? ''}`).join('\n') + '\n')
     },
     close() {
       closeSync(fd)

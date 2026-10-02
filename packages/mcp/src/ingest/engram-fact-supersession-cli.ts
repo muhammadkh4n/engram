@@ -23,15 +23,22 @@
  * is listed as rejected and not written. A pair whose rows changed since the report (updated_at or
  * text), or where either row is no longer live, is skipped and listed. Each
  * write sets `superseded_by` and bumps `updated_at`, and appends
- * (old id, new id, cosine) to the rollback CSV named with --rollback.
+ * (old id, new id, cosine, graph stamp time) to the rollback CSV named with
+ * --rollback. With NEO4J_URI set, the old fact's graph node gets
+ * `forgottenAt` right after its write, so it stops relaying spreading
+ * activation at once; an unreachable Neo4j stops the apply before any write.
+ * Without NEO4J_URI the run says the graph was not stamped and that
+ * engram-graph-reconcile must follow.
  * Nothing is deleted: clearing `superseded_by` on the CSV's old ids restores
- * the SQL rows.
+ * the SQL rows, and removing `forgottenAt` where it still equals the CSV's
+ * graph_forgotten_at restores their nodes.
  *
  * Usage:
  *   node dist/ingest/engram-fact-supersession-cli.js --max-calls 200 --report review.json
  *   node dist/ingest/engram-fact-supersession-cli.js --apply --from-report review.json --rollback rollback.csv
  *
- * Env: SUPABASE_URL, SUPABASE_KEY; a dry run also needs OPENAI_API_KEY, and
+ * Env: SUPABASE_URL, SUPABASE_KEY; an apply also reads NEO4J_URI, NEO4J_USER and
+ * NEO4J_PASSWORD; a dry run also needs OPENAI_API_KEY, and
  * the ENGRAM_CHAT_* settings the server uses select the judge's chat model
  * and host.
  */
@@ -60,6 +67,7 @@ import {
   type RollbackSink,
   type SupersessionJudge,
 } from './fact-supersession-lib.js'
+import { graphOutcomeLine, openApplyGraph, type ApplyGraph } from './graph-retire.js'
 
 const TAG = '[engram-fact-supersession]'
 
@@ -74,7 +82,9 @@ const HELP =
   'Apply (no judge calls):\n' +
   '  --apply --from-report PATH --rollback PATH\n' +
   '                     write exactly the proposals in a dry-run report; rows changed since\n' +
-  '                     the report are skipped; rollback CSV (old_id, new_id, cosine) must not exist\n'
+  '                     the report are skipped; rollback CSV (old_id, new_id, cosine,\n' +
+  '                     graph_forgotten_at) must not exist\n' +
+  '                     with NEO4J_URI set, stamps forgottenAt on each retired fact\'s graph node\n'
 
 type DryRunOptions = Extract<CliOptions, { mode: 'dry-run' }>
 type ApplyOptions = Extract<CliOptions, { mode: 'apply' }>
@@ -148,18 +158,32 @@ async function dryRun(opts: DryRunOptions, url: string, key: string): Promise<vo
 
 async function apply(opts: ApplyOptions, url: string, key: string): Promise<void> {
   const { proposals, rejected } = readReport(opts.fromReportPath)
-  const rollback = fileRollbackSink(opts.rollbackPath)
-  const client = new PostgrestClient(url, { headers: { Authorization: `Bearer ${key}`, apikey: key } })
+  let graph: ApplyGraph | null
+  try {
+    graph = await openApplyGraph(TAG)
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err))
+  }
+  try {
+    const rollback = fileRollbackSink(opts.rollbackPath)
+    const client = new PostgrestClient(url, { headers: { Authorization: `Bearer ${key}`, apikey: key } })
 
-  console.error(
-    `${TAG} mode=APPLY report=${opts.fromReportPath} proposals=${proposals.length} rejected-by-rule=${rejected.length}`,
-  )
-  const result = await applyReviewedProposals(createPostgrestFactStore(client), proposals, rollback)
-  console.log(applySummaryJson(result, rejected))
-  console.error(
-    `${TAG} applied ${result.applied} of ${result.reviewed} proposals the state rule allows, skipped ` +
-      `${result.skipped.length}, rejected ${rejected.length} the rule keeps; rollback CSV: ${opts.rollbackPath}`,
-  )
+    console.error(
+      `${TAG} mode=APPLY report=${opts.fromReportPath} proposals=${proposals.length} rejected-by-rule=${rejected.length}`,
+    )
+    const result = await applyReviewedProposals(createPostgrestFactStore(client), proposals, rollback, {
+      graph: graph?.graph,
+      warn: (line) => console.error(`${TAG} ${line}`),
+    })
+    console.log(applySummaryJson(result, rejected))
+    console.error(
+      `${TAG} applied ${result.applied} of ${result.reviewed} proposals the state rule allows, skipped ` +
+        `${result.skipped.length}, rejected ${rejected.length} the rule keeps; rollback CSV: ${opts.rollbackPath}`,
+    )
+    console.error(`${TAG} ${graphOutcomeLine(result.graph)}`)
+  } finally {
+    await graph?.dispose()
+  }
 }
 
 async function main(): Promise<void> {

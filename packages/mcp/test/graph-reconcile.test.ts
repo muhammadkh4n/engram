@@ -115,6 +115,16 @@ describe('planReconcile', () => {
       [node('a', { memoryType: 'semantic' }), node('b', { memoryType: null }), node('c')],
     )
     expect(plan.tierMismatch).toBe(2)
+    expect(plan.setTier).toEqual([
+      { id: 'a', memoryType: 'episode', before: 'semantic' },
+      { id: 'b', memoryType: 'digest', before: null },
+    ])
+  })
+
+  it('never plans a tier for a node without a SQL row', () => {
+    const plan = planReconcile([row('a')], [node('a'), node('ghost', { memoryType: null })])
+    expect(plan.setTier).toEqual([])
+    expect(plan.missing).toEqual(['ghost'])
   })
 })
 
@@ -193,7 +203,7 @@ describe('formatReconcileReport', () => {
   })
 })
 
-type Event = { kind: 'undo'; lines: UndoLine[] } | { kind: 'stamp' | 'project' | 'delete'; ids: string[] }
+type Event = { kind: 'undo'; lines: UndoLine[] } | { kind: 'stamp' | 'project' | 'tier' | 'delete'; ids: string[] }
 
 function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = Infinity): ReconcileSqlSource {
   return {
@@ -240,6 +250,13 @@ function fakeGraph(initial: GraphMemoryNode[], events: Event[]): ReconcileGraph 
       const byId = new Map(rows.map((r) => [r.id, r.projectId]))
       state.nodes = state.nodes.map((node) =>
         byId.has(node.id) ? { ...node, projectId: byId.get(node.id)! } : node,
+      )
+    },
+    async setTiers(rows: Array<{ id: string; memoryType: SqlTier }>) {
+      events.push({ kind: 'tier', ids: rows.map((r) => r.id) })
+      const byId = new Map(rows.map((r) => [r.id, r.memoryType]))
+      state.nodes = state.nodes.map((node) =>
+        byId.has(node.id) ? { ...node, memoryType: byId.get(node.id)! } : node,
       )
     },
     async deleteNodes(ids: string[]) {
@@ -316,7 +333,7 @@ describe('runReconcile', () => {
     const outcome = await run()
     expect(events).toEqual([])
     expect(outcome.after).toBeNull()
-    expect(outcome.written).toEqual({ stamped: 0, projects: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
+    expect(outcome.written).toEqual({ stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
     expect(logs).toHaveLength(1)
     expect(logs[0]).not.toContain('ghost')
   })
@@ -342,10 +359,40 @@ describe('runReconcile', () => {
     expect(undo).toContainEqual({ op: 'stamp', id: 's-dead', at: '2026-10-01T00:00:00.000Z' })
     expect(undo).toContainEqual({ op: 'project', id: 'e-1', before: null })
 
-    expect(outcome.written).toEqual({ stamped: 2, projects: 3, deleted: 0, skippedChangedSinceSnapshot: 0 })
+    expect(outcome.written).toEqual({ stamped: 2, projects: 3, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
     expect(outcome.after?.stamp).toEqual([])
     expect(outcome.after?.setProject).toEqual([])
     expect(graph.nodes).toHaveLength(9)
+  })
+
+  it('repairs memoryType from the SQL tier: counted on a dry run, written on --apply after its undo lines', async () => {
+    const nodes = DRIFT_NODES.map((n) =>
+      n.id === 'e-1' ? { ...n, memoryType: 'semantic' } : n.id === 'd-1' ? { ...n, memoryType: null } : n,
+    )
+    const dry = harness([], nodes, DRIFT_TABLES)
+    const dryOutcome = await dry.run()
+    expect(dry.events).toEqual([])
+    expect(dry.logs[0]).toContain('tier mismatch:         2')
+    expect(dryOutcome.written.tiers).toBe(0)
+
+    const { events, graph, logs, run } = harness(['--apply', '--undo-log', 'u.jsonl'], nodes, DRIFT_TABLES)
+    const outcome = await run()
+
+    const tierAt = events.findIndex((e) => e.kind === 'tier')
+    const tierWrite = events[tierAt]
+    expect(tierWrite?.kind === 'tier' && [...tierWrite.ids].sort()).toEqual(['d-1', 'e-1'])
+    const undo = events[tierAt - 1]
+    expect(undo?.kind === 'undo' && undo.lines).toEqual([
+      { op: 'tier', id: 'd-1', before: null },
+      { op: 'tier', id: 'e-1', before: 'semantic' },
+    ])
+    expect(outcome.written.tiers).toBe(2)
+    expect(graph.nodes.find((n) => n.id === 'e-1')?.memoryType).toBe('episode')
+    expect(graph.nodes.find((n) => n.id === 'd-1')?.memoryType).toBe('digest')
+    // A node with no SQL row keeps its type: there is no tier to take it from.
+    expect(graph.nodes.find((n) => n.id === 'ghost-orphan')?.memoryType).toBeNull()
+    expect(outcome.after?.tierMismatch).toBe(0)
+    expect(logs).toContainEqual(expect.stringContaining('tiers 2'))
   })
 
   it('deletes nothing without a delete flag, missing nodes with --delete-missing, dead orphans with --delete-orphans', async () => {

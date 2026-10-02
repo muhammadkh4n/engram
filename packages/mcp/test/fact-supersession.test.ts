@@ -36,6 +36,8 @@ import {
   type RawFactRow,
   type RollbackRow,
 } from '../src/ingest/fact-supersession-lib.js'
+import { graphOutcomeLine } from '../src/ingest/graph-retire.js'
+import { FakeRetireGraph } from './fake-retire-graph.js'
 
 interface StoredFact extends RawFactRow {
   superseded_by: string | null
@@ -522,7 +524,8 @@ describe('dry run, then apply from the reviewed report', () => {
       ['b1', 'b2'],
     ])
     for (const r of retired) expect(Date.parse(r.updated_at)).toBeGreaterThan(Date.parse(OLD_UPDATED_AT))
-    expect(result).toEqual({ reviewed: 2, applied: 2, skipped: [] })
+    expect(result).toEqual({ reviewed: 2, applied: 2, skipped: [], graph: null })
+    expect(csv.every((r) => r.graphForgottenAt === null)).toBe(true)
     expect(csv.map((r) => [r.oldId, r.newId]).sort()).toEqual([
       ['a1', 'a3'],
       ['b1', 'b2'],
@@ -601,6 +604,63 @@ describe('dry run, then apply from the reviewed report', () => {
 
     expect(result.skipped).toEqual([{ newId: 'b2', oldId: 'b1', reason: 'old-changed-during-apply' }])
     expect(csv.map((r) => r.oldId).sort()).toEqual(['a1', 'a2'])
+  })
+
+  it('with a graph, apply stamps exactly the retired facts\' nodes and the rollback CSV restores them', async () => {
+    const store = new StubStore(table())
+    const { report } = await dryRunReport(store)
+    const reviewed = report.filter((p) => p.oldId !== 'a2')
+    // b1's node was already forgotten before this run: graph drift the stamp must not overwrite.
+    const graph = new FakeRetireGraph(['a1', 'a2', 'a3', 'b1', 'b2'], { b1: '2026-01-01T00:00:00.000Z' })
+    const before = graph.snapshot()
+    const times = ['2026-10-02T10:00:00.000Z', '2026-10-02T10:00:01.000Z']
+    const { rows: csv, sink } = collectingSink()
+
+    const result = await applyReviewedProposals(store, reviewed, sink, { graph, now: () => times.shift()! })
+
+    expect(graph.stampCalls.map((c) => c.ids)).toEqual(csv.map((r) => [r.oldId]))
+    expect(graph.forgotten()).toEqual(['a1', 'b1'])
+    expect(graph.forgottenAt.get('b1')).toBe('2026-01-01T00:00:00.000Z')
+    expect(result.graph).toEqual({ stamped: 1, failed: 0 })
+    for (const r of csv) {
+      expect(r.graphForgottenAt).toBe(graph.stampCalls.find((c) => c.ids[0] === r.oldId)!.at)
+    }
+
+    // Removing forgottenAt where it still equals each CSV line's stamp restores the graph as it was.
+    for (const r of csv) await graph.unstamp([r.oldId], r.graphForgottenAt!)
+    expect(graph.snapshot()).toEqual(before)
+  })
+
+  it('stamps no node for a skipped pair', async () => {
+    const store = new StubStore(table())
+    const { report } = await dryRunReport(store)
+    store.rows.find((r) => r.id === 'a1')!.forgotten_at = '2026-10-01T00:00:00Z'
+    const graph = new FakeRetireGraph(['a1', 'a2', 'a3', 'b1', 'b2'])
+    const { rows: csv, sink } = collectingSink()
+
+    const result = await applyReviewedProposals(store, report, sink, { graph })
+
+    expect(result.skipped.map((s) => s.oldId)).toEqual(['a1'])
+    expect(graph.forgotten()).toEqual(csv.map((r) => r.oldId).sort())
+    expect(graph.forgotten()).not.toContain('a1')
+  })
+
+  it('a failing graph write keeps the SQL apply going and is counted for a reconcile', async () => {
+    const store = new StubStore(table())
+    const { report } = await dryRunReport(store)
+    const graph = new FakeRetireGraph(['a1', 'a2', 'b1'])
+    graph.failStamps = true
+    const warnings: string[] = []
+
+    const result = await applyReviewedProposals(store, report, collectingSink().sink, {
+      graph,
+      warn: (l) => warnings.push(l),
+    })
+
+    expect(result.applied).toBe(3)
+    expect(result.graph).toEqual({ stamped: 0, failed: 3 })
+    expect(warnings).toHaveLength(1)
+    expect(graphOutcomeLine(result.graph)).toMatch(/3 failed, run engram-graph-reconcile --apply/)
   })
 
   it('a pair whose new fact an earlier pair of the same report retired is skipped', async () => {
@@ -784,9 +844,16 @@ describe('output', () => {
     expect(sampleProposals(proposals, 50)).toHaveLength(10)
   })
 
-  it('rollback lines are old id, new id, cosine', () => {
-    expect(ROLLBACK_HEADER).toBe('old_id,new_id,cosine')
-    expect(rollbackLine({ oldId: 'o', newId: 'n', cosine: 0.912345678 })).toBe('o,n,0.912346')
+  it('rollback lines are old id, new id, cosine and the graph stamp time', () => {
+    expect(ROLLBACK_HEADER).toBe('old_id,new_id,cosine,graph_forgotten_at')
+    expect(rollbackLine({ oldId: 'o', newId: 'n', cosine: 0.912345678, graphForgottenAt: null })).toBe('o,n,0.912346,')
+    expect(
+      rollbackLine({ oldId: 'o', newId: 'n', cosine: 0.5, graphForgottenAt: '2026-10-02T10:00:00.000Z' }),
+    ).toBe('o,n,0.500000,2026-10-02T10:00:00.000Z')
+  })
+
+  it('without a graph the run says the graph was not stamped and names the reconcile', () => {
+    expect(graphOutcomeLine(null)).toMatch(/not stamped.*engram-graph-reconcile --apply/)
   })
 })
 

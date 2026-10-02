@@ -209,6 +209,36 @@ describe('deep sleep fact supersession', () => {
       expect(contradicts.map(([, params]) => (params as { oldId: string }).oldId)).toEqual(['old-1', 'old-2'])
     })
 
+    it('stamps forgottenAt on exactly the retired facts\' graph nodes, in the statement that sets validUntil', async () => {
+      const storage = makeMockStorage({
+        initialDigests: plainDigests(),
+        semanticNearestResults: [
+          neighbour('old-1', 'The reranker is bge.', 0.9),
+          neighbour('old-2', 'The reranker is mxbai.', 0.8),
+          neighbour('kept', 'The reranker runs on the CPU.', 0.7),
+        ],
+      })
+      const intelligence = intelligenceWith(
+        'The reranker is gte.',
+        async () => ({ conflicts: ['old-1', 'stranger', 'old-2'], same: [], kinds: allState('old-1', 'stranger', 'old-2') }),
+      )
+      const graph = graphStub()
+
+      await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM }, graph)
+
+      const newId = storage.semantic._memories[0].id
+      const stamping = graph.runCypherWrite.mock.calls.filter(([q]) => String(q).includes('forgottenAt'))
+      expect(stamping.map(([, params]) => params)).toEqual([
+        expect.objectContaining({ oldId: 'old-1', newId }),
+        expect.objectContaining({ oldId: 'old-2', newId }),
+      ])
+      for (const [query, params] of stamping) {
+        expect(String(query)).toMatch(/old\.validUntil = \$now,\s+old\.forgottenAt = coalesce\(old\.forgottenAt, \$now\)/)
+        expect(String(query)).not.toMatch(/new\.forgottenAt/)
+        expect((params as { now: unknown }).now).toEqual(expect.any(String))
+      }
+    })
+
     it('ignores a neighbour from a different project', async () => {
       const storage = makeMockStorage({
         initialDigests: plainDigests('engram'),

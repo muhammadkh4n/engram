@@ -25,6 +25,7 @@ import {
   type SemanticDedupOptions,
   type SemanticDedupStore,
 } from '../src/ingest/semantic-dedup-lib.js'
+import { FakeRetireGraph } from './fake-retire-graph.js'
 import { fakePostgrest } from './fake-postgrest.js'
 
 interface StoredRow extends LiveSemanticRow {
@@ -305,8 +306,8 @@ describe('apply and rollback CSV', () => {
     return {
       header: header!,
       entries: lines.map((l) => {
-        const [row, canonical, sim] = l.split(',')
-        return { row: row!, canonical: canonical!, sim: Number(sim) }
+        const [row, canonical, sim, graphForgottenAt] = l.split(',')
+        return { row: row!, canonical: canonical!, sim: Number(sim), graphForgottenAt: graphForgottenAt || null }
       }),
     }
   }
@@ -342,10 +343,57 @@ describe('apply and rollback CSV', () => {
       expect(e.sim).toBeGreaterThanOrEqual(0.95)
     }
     expect(report.superseded).toHaveLength(3)
+    expect(csv.entries.every((e) => e.graphForgottenAt === null)).toBe(true)
+    expect(report.graph).toBeNull()
 
     // Rolling back from the CSV restores every row.
     for (const e of csv.entries) store.row(e.row).superseded_by = null
     expect(store.rows.every((r) => r.superseded_by === null)).toBe(true)
+  })
+
+  it('with a graph, stamps exactly the superseded rows\' nodes and the CSV restores them', async () => {
+    const store = new StubStore()
+    const canon = store.add(E1, { confidence: 0.95 })
+    const dupIds = [store.add(at(0.99)), store.add(at(0.985, -1)), store.add([0.98, 0, Math.sqrt(1 - 0.98 * 0.98)])]
+    const far = store.add(E3)
+    // One duplicate's node was forgotten before this run; its earlier stamp must survive the rollback.
+    const graph = new FakeRetireGraph([canon, ...dupIds, far], { [dupIds[2]!]: '2026-01-01T00:00:00.000Z' })
+    const before = graph.snapshot()
+    let tick = 0
+    const now = () => `2026-10-02T10:00:0${tick++}.000Z`
+    const path = join(dir, 'rollback.csv')
+    const sink = openRollbackCsv(path)
+
+    const report = await runSemanticDedup(
+      store,
+      opts({ apply: true, mergeSim: 0.95, rollback: sink, batchSize: 2, graph, now }),
+    )
+    sink.close()
+
+    expect(graph.forgotten()).toEqual([...dupIds].sort())
+    expect(graph.stampCalls.flatMap((c) => c.ids).sort()).toEqual([...dupIds].sort())
+    expect(graph.stampCalls).toHaveLength(2)
+    expect(report.graph).toEqual({ stamped: 2, failed: 0 })
+    const csv = readCsv(path)
+    for (const e of csv.entries) {
+      expect(e.graphForgottenAt).toBe(graph.stampCalls.find((c) => c.ids.includes(e.row))!.at)
+    }
+    expect(dedupJson(report)).toMatchObject({ graph: { stamped: 2, failed: 0 } })
+
+    for (const e of csv.entries) await graph.unstamp([e.row], e.graphForgottenAt!)
+    expect(graph.snapshot()).toEqual(before)
+  })
+
+  it('a dry run never touches the graph', async () => {
+    const store = new StubStore()
+    store.add(E1)
+    store.add(at(0.99))
+    const graph = new FakeRetireGraph([])
+
+    const report = await runSemanticDedup(store, opts({ mergeSim: 0.95, graph }))
+
+    expect(graph.stampCalls).toEqual([])
+    expect(report.graph).toBeNull()
   })
 
   it('records only rows the store actually changed', async () => {
@@ -363,6 +411,31 @@ describe('apply and rollback CSV', () => {
     await runSemanticDedup(store, opts({ apply: true, mergeSim: 0.95, rollback: { write: (e) => entries.push(...e) } }))
 
     expect(entries.map((e) => e.row)).toEqual([kept])
+  })
+
+  it('stamps only the rows the store actually changed, and counts a failing graph write', async () => {
+    const store = new StubStore()
+    store.add(E1, { confidence: 0.9 })
+    const raced = store.add(at(0.99))
+    const kept = store.add(at(0.99, -1))
+    const original = store.markSuperseded.bind(store)
+    store.markSuperseded = async (ids, canonical) => {
+      store.row(raced).forgotten_at = '2026-09-03T00:00:00Z'
+      return original(ids, canonical)
+    }
+    const graph = new FakeRetireGraph([raced, kept])
+    graph.failStamps = true
+    const warnings: string[] = []
+
+    const report = await runSemanticDedup(
+      store,
+      opts({ apply: true, mergeSim: 0.95, rollback: { write: () => undefined }, graph, warn: (l) => warnings.push(l) }),
+    )
+
+    expect(graph.stampCalls.map((c) => c.ids)).toEqual([[kept]])
+    expect(report.graph).toEqual({ stamped: 0, failed: 1 })
+    expect(warnings).toHaveLength(1)
+    expect(report.superseded.map((e) => e.row)).toEqual([kept])
   })
 
   it('never overwrites an existing rollback file', () => {

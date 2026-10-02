@@ -65,6 +65,7 @@ import type {
   SupersessionRuleOutcome,
   SupersessionVerdict,
 } from '@engram-mem/core'
+import { stampRetired, type GraphStampOutcome, type RetireGraph } from './graph-retire.js'
 
 /** Candidates offered to the judge per fact; matches deep sleep's pool size. */
 export const POOL_MAX = 5
@@ -133,6 +134,8 @@ export interface RollbackRow {
   oldId: string
   newId: string
   cosine: number
+  /** The `forgottenAt` written on the old fact's graph node; null when no graph was configured. */
+  graphForgottenAt: string | null
 }
 
 /** Receives each applied pair right after its write succeeds. */
@@ -508,6 +511,14 @@ export interface ApplyResult {
   reviewed: number
   applied: number
   skipped: SkippedPair[]
+  /** Graph stamps of the retired facts; null when no graph was configured. */
+  graph: GraphStampOutcome | null
+}
+
+export interface ApplyGraphOptions {
+  graph?: RetireGraph
+  now?: () => string
+  warn?: (line: string) => void
 }
 
 function nonEmptyString(entry: Record<string, unknown>, key: string, at: string): string {
@@ -593,13 +604,20 @@ function rowCheck(
 /**
  * Writes exactly the reviewed proposals, in report order, with no judge.
  * Each pair is re-read just before its write, so an earlier pair of the same
- * report that retired one of its rows makes it `*-not-live`.
+ * report that retired one of its rows makes it `*-not-live`. With a graph,
+ * each retired fact's node is stamped right after its SQL write; the stamp
+ * time goes into the rollback row before the stamp is written.
  */
 export async function applyReviewedProposals(
   store: FactSupersessionStore,
   proposals: ReadonlyArray<ReviewedProposal>,
   rollback: RollbackSink,
+  options: ApplyGraphOptions = {},
 ): Promise<ApplyResult> {
+  const { graph } = options
+  const now = options.now ?? (() => new Date().toISOString())
+  const warn = options.warn ?? ((line: string) => console.error(line))
+  const graphOutcome: GraphStampOutcome | null = graph ? { stamped: 0, failed: 0 } : null
   const skipped: SkippedPair[] = []
   let applied = 0
   for (const p of proposals) {
@@ -614,10 +632,14 @@ export async function applyReviewedProposals(
       skipped.push({ newId: p.newId, oldId: p.oldId, reason })
       continue
     }
-    rollback.append({ oldId: p.oldId, newId: p.newId, cosine: p.cosine })
+    const graphForgottenAt = graph ? now() : null
+    rollback.append({ oldId: p.oldId, newId: p.newId, cosine: p.cosine, graphForgottenAt })
     applied++
+    if (graph && graphOutcome && graphForgottenAt !== null) {
+      await stampRetired(graph, [p.oldId], graphForgottenAt, graphOutcome, warn)
+    }
   }
-  return { reviewed: proposals.length, applied, skipped }
+  return { reviewed: proposals.length, applied, skipped, graph: graphOutcome }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,10 +703,10 @@ export function reportEntries(result: FactBackfillResult, chosen: readonly Propo
   })
 }
 
-export const ROLLBACK_HEADER = 'old_id,new_id,cosine'
+export const ROLLBACK_HEADER = 'old_id,new_id,cosine,graph_forgotten_at'
 
 export function rollbackLine(row: RollbackRow): string {
-  return `${row.oldId},${row.newId},${row.cosine.toFixed(6)}`
+  return `${row.oldId},${row.newId},${row.cosine.toFixed(6)},${row.graphForgottenAt ?? ''}`
 }
 
 // ---------------------------------------------------------------------------
