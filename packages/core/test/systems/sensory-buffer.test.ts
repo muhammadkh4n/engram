@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
+import {
+  SensoryBuffer,
+  ConversationStore,
+  PRIMING_HORIZON_RECALLS,
+} from '../../src/systems/sensory-buffer.js'
 import type { WorkingMemoryItem, IntentResult } from '../../src/types.js'
+import { stagePrime } from '../../src/retrieval/priming.js'
 
 function makeItem(key: string, importance: number): WorkingMemoryItem {
   return {
@@ -317,5 +322,162 @@ describe('SensoryBuffer', () => {
 
       expect(buf2.getPrimingBoost('I love TypeScript')).toBe(0.15)
     })
+  })
+})
+
+function makeIntent(type: IntentResult['type']): IntentResult {
+  return {
+    type,
+    confidence: 0.8,
+    strategy: {
+      shouldRecall: true,
+      tiers: [],
+      queryTransform: null,
+      maxResults: 5,
+      minRelevance: 0.3,
+      includeAssociations: false,
+      associationHops: 0,
+      boostProcedural: false,
+    },
+    extractedCues: [],
+    salience: 0.5,
+  }
+}
+
+describe('SensoryBuffer whole-token priming', () => {
+  it('does not boost a word that merely contains a primed topic', () => {
+    const buf = new SensoryBuffer()
+    buf.prime(['art'], 0.15, 5)
+    expect(buf.getPrimingBoost('start the deploy')).toBe(0)
+    expect(buf.getPrimingBoost('party smart cart')).toBe(0)
+  })
+
+  it('boosts the topic as a whole token, punctuation and case aside', () => {
+    const buf = new SensoryBuffer()
+    buf.prime(['art'], 0.15, 5)
+    expect(buf.getPrimingBoost('Modern ART, mostly.')).toBe(0.15)
+  })
+
+  it('does not let a long row collect more boost by repeating a topic', () => {
+    const buf = new SensoryBuffer()
+    buf.prime(['deploy'], 0.15, 5)
+    expect(buf.getPrimingBoost('deploy deploy deploy deploy')).toBe(0.15)
+  })
+
+  it('matches every topic stagePrime primes from the same text', () => {
+    const buf = new SensoryBuffer()
+    const memories = ['pgvector reindex ran on staging', 'staging pgvector index rebuilt'].map((content, i) => ({
+      id: `m${i}`, type: 'episode' as const, content, relevance: 0.5, source: 'recall' as const, metadata: {},
+    }))
+    expect(stagePrime(memories, [], buf).sort()).toEqual(['pgvector', 'staging'])
+    expect(buf.getPrimingBoost('the pgvector staging box')).toBe(0.3)
+  })
+})
+
+describe('SensoryBuffer intent horizon', () => {
+  it('forgets an intent after the horizon of recalls without a new one', () => {
+    const buf = new SensoryBuffer()
+    buf.setIntent(makeIntent('QUESTION'))
+    for (let i = 0; i < PRIMING_HORIZON_RECALLS - 1; i++) buf.tick()
+    expect(buf.getIntent()?.type).toBe('QUESTION')
+    buf.tick()
+    expect(buf.getIntent()).toBeNull()
+    expect(buf.isEmpty()).toBe(true)
+  })
+
+  it('restarts the horizon when a new intent is set', () => {
+    const buf = new SensoryBuffer()
+    buf.setIntent(makeIntent('QUESTION'))
+    for (let i = 0; i < PRIMING_HORIZON_RECALLS - 1; i++) buf.tick()
+    buf.setIntent(makeIntent('DEBUGGING'))
+    buf.tick()
+    expect(buf.getIntent()?.type).toBe('DEBUGGING')
+  })
+
+  it('clone() copies priming and intent without sharing later writes', () => {
+    const buf = new SensoryBuffer()
+    buf.prime(['deploy'], 0.15, 5)
+    buf.setIntent(makeIntent('QUESTION'))
+    const copy = buf.clone()
+    buf.prime(['other'], 0.15, 5)
+    copy.tick()
+    expect(copy.getPrimed().map((p) => p.topic)).toEqual(['deploy'])
+    expect(copy.getIntent()?.type).toBe('QUESTION')
+    expect(buf.getPrimed().map((p) => p.turnsRemaining)).toEqual([5, 5])
+  })
+})
+
+describe('ConversationStore', () => {
+  it('keeps each key\'s state apart', () => {
+    const store = new ConversationStore()
+    store.acquire('a').prime(['deploy'], 0.15, 5)
+    store.acquire('b').setIntent(makeIntent('DEBUGGING'))
+    expect(store.acquire('b').getPrimingBoost('deploy now')).toBe(0)
+    expect(store.acquire('a').getIntent()).toBeNull()
+    expect(store.acquire('a').getPrimingBoost('deploy now')).toBe(0.15)
+  })
+
+  it('drops the least recently used key past the cap', () => {
+    const store = new ConversationStore({ maxConversations: 2 })
+    store.acquire('a').prime(['alpha'], 0.15, 5)
+    store.acquire('b').prime(['beta'], 0.15, 5)
+    store.acquire('a') // a is now the most recent
+    store.acquire('c').prime(['gamma'], 0.15, 5)
+    expect(store.keys()).toEqual(['a', 'c'])
+    expect(store.peek('b')).toBeUndefined()
+    expect(store.size()).toBe(2)
+  })
+
+  it('peek() does not refresh a key', () => {
+    const store = new ConversationStore({ maxConversations: 2 })
+    store.acquire('a')
+    store.acquire('b')
+    store.peek('a')
+    store.acquire('c')
+    expect(store.keys()).toEqual(['b', 'c'])
+  })
+
+  it('tick() advances only the named key', () => {
+    const store = new ConversationStore()
+    store.acquire('a').prime(['alpha'], 0.15, 5)
+    store.acquire('b').prime(['beta'], 0.15, 5)
+    store.tick('a')
+    store.tick('a')
+    expect(store.peek('a')?.getPrimed()[0]?.turnsRemaining).toBe(3)
+    expect(store.peek('b')?.getPrimed()[0]?.turnsRemaining).toBe(5)
+  })
+
+  it('expires a key after its own horizon of recalls', () => {
+    const store = new ConversationStore()
+    const a = store.acquire('a')
+    a.prime(['alpha'], 0.15, PRIMING_HORIZON_RECALLS)
+    a.setIntent(makeIntent('QUESTION'))
+    store.acquire('b').prime(['beta'], 0.15, PRIMING_HORIZON_RECALLS)
+    for (let i = 0; i < PRIMING_HORIZON_RECALLS - 1; i++) store.tick('a')
+    expect(store.keys()).toEqual(['a', 'b'])
+    store.tick('a')
+    expect(store.keys()).toEqual(['b'])
+    expect(store.peek('b')?.getPrimed()[0]?.turnsRemaining).toBe(PRIMING_HORIZON_RECALLS)
+  })
+
+  it('tick() on an unknown key creates nothing', () => {
+    const store = new ConversationStore()
+    store.tick('missing')
+    expect(store.size()).toBe(0)
+  })
+
+  it('snapshot()/restore() put every key back as it was', () => {
+    const store = new ConversationStore()
+    store.acquire('a').prime(['alpha'], 0.15, 5)
+    const snap = store.snapshot()
+    store.acquire('a').prime(['later'], 0.15, 5)
+    store.acquire('b')
+    store.restore(snap)
+    expect(store.keys()).toEqual(['a'])
+    expect(store.peek('a')?.getPrimed().map((p) => p.topic)).toEqual(['alpha'])
+  })
+
+  it('rejects a cap that is not a positive integer', () => {
+    expect(() => new ConversationStore({ maxConversations: 0 })).toThrow(RangeError)
   })
 })

@@ -6,7 +6,7 @@ import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // this port. This lets core stay decoupled from any specific graph
 // implementation and breaks what would otherwise be a circular dependency.
 import type { GraphPort } from './adapters/graph.js'
-import { SensoryBuffer } from './systems/sensory-buffer.js'
+import { ConversationStore, type SensoryBuffer } from './systems/sensory-buffer.js'
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
 import { recall as engineRecall } from './retrieval/engine.js'
@@ -24,6 +24,7 @@ import { extractEntities } from './ingestion/entity-extractor.js'
 import { parseContent } from './ingestion/content-parser.js'
 import { buildTextToEmbed, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
 import { embedFailureReason } from './retrieval/embed-failure.js'
+import { primingEnabledFromEnv } from './retrieval/priming.js'
 import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
 import { resolveEventDate, isoDate } from './utils/event-date.js'
@@ -110,7 +111,9 @@ export interface MemoryOptions {
 export interface SessionHandle {
   readonly sessionId: string
   ingest(message: Omit<Message, 'sessionId'>): Promise<void>
-  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean }) : Promise<RecallResult>
+  /** Recalls are primed by this session's earlier recalls only; the session
+   *  id is the conversation key unless `conversationKey` overrides it. */
+  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean; conversationKey?: string }) : Promise<RecallResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +168,9 @@ function normalizeForgetIds(ids: unknown): string[] {
 export class Memory {
   private storage: StorageAdapter
   private intelligence: IntelligenceAdapter | undefined
-  private sensory: SensoryBuffer
+  // Priming and intent carry-over, per caller conversation. A recall without
+  // a conversation key reads and writes none of it.
+  private conversations: ConversationStore
   private intentAnalyzer: HeuristicIntentAnalyzer
   private initialized = false
   // AssociationManager is lazily created after storage is initialized.
@@ -187,7 +192,7 @@ export class Memory {
     this.opts = opts
     this.storage = opts.storage
     this.intelligence = opts.intelligence
-    this.sensory = new SensoryBuffer()
+    this.conversations = new ConversationStore()
     this.intentAnalyzer = new HeuristicIntentAnalyzer()
     this._graph = opts.graph ?? null
     this._defaultProject = opts.project
@@ -246,16 +251,11 @@ export class Memory {
     }
   }
 
-  /** Release resources, persist sensory buffer. */
+  /** Release resources. Conversation priming state is not persisted: it lives
+   *  for a few recalls of one conversation and nothing reads it back. */
   async dispose(): Promise<void> {
     if (this.initialized) {
       this.initialized = false
-      try {
-        const snapshot = this.sensory.snapshot(DEFAULT_SESSION_ID)
-        await this.storage.saveSensorySnapshot(DEFAULT_SESSION_ID, snapshot)
-      } catch {
-        // Storage may already be closed when multiple Memory instances share the same adapter
-      }
       await this.storage.dispose()
     }
   }
@@ -661,9 +661,16 @@ export class Memory {
        *  harnesses and previews pass false so a lookup does not change shown
        *  counts, co-recall edges or graph weights. */
       reconsolidate?: boolean
+      /** Identifies the caller's conversation for priming: topics shared by
+       *  this conversation's recent results, the graph context seeds and the
+       *  last intent carry over to its next recalls only. Never filters the
+       *  search. Without it the recall reads and writes no priming state. */
+      conversationKey?: string
     }
   ): Promise<RecallResult> {
     this.assertInitialized()
+    const conversationKey = opts?.conversationKey
+    const conversation = this.conversationState(conversationKey)
 
     // Per-call project scope overrides the instance default. Lets one Memory
     // instance (e.g. a shared HTTP server) serve recalls for different
@@ -677,10 +684,10 @@ export class Memory {
 
     // Still run old analyzer for backward compat (intent field in result)
     const intent = this.intentAnalyzer.analyze(query, {
-      activeIntent: this.sensory.getIntent(),
-      primedTopics: this.sensory.getPrimed().map(p => p.topic),
+      activeIntent: conversation?.getIntent() ?? null,
+      primedTopics: conversation?.getPrimed().map(p => p.topic) ?? [],
     })
-    this.sensory.setIntent(intent)
+    conversation?.setIntent(intent)
 
     // Embed query if intelligence adapter provides embeddings. An embedder
     // failure (quota, outage, open circuit) must not cost the whole recall:
@@ -704,7 +711,7 @@ export class Memory {
     const effectiveProject = effectiveProjectId ?? this._defaultProject
 
     // Run vector-first pipeline (text-only fallback when no embedding)
-    const result = await engineRecall(query, this.storage, this.sensory, {
+    const result = await engineRecall(query, this.storage, conversation, {
       strategy,
       embedding: embedding ?? [],
       tokenBudget: opts?.tokenBudget,
@@ -720,8 +727,8 @@ export class Memory {
       ...(vectorUnavailable !== undefined ? { vectorUnavailable } : {}),
     })
 
-    // Tick sensory buffer: decay priming weights each turn
-    this.sensory.tick()
+    // Advance only this conversation's priming horizon.
+    if (conversation !== null && conversationKey !== undefined) this.conversations.tick(conversationKey)
 
     return {
       memories: result.memories,
@@ -992,7 +999,8 @@ export class Memory {
       }
     }
 
-    const result = await engineRecall(query, this.storage, this.sensory, {
+    // No conversation: a preview neither reads nor primes recall context.
+    const result = await engineRecall(query, this.storage, null, {
       strategy: RECALL_STRATEGIES['light'],
       embedding,
       intelligence: this.intelligence,
@@ -1124,8 +1132,10 @@ export class Memory {
       ingest: (message: Omit<Message, 'sessionId'>) => {
         return this.ingest({ ...message, sessionId: sid })
       },
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean }) => {
-        return this.recall(query, opts)
+      // The session is the conversation: its recalls prime each other and
+      // no other session's.
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean; conversationKey?: string }) => {
+        return this.recall(query, { ...opts, conversationKey: opts?.conversationKey ?? sid })
       },
     }
   }
@@ -1133,6 +1143,18 @@ export class Memory {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /** The priming state a recall may read and write: none without a key or
+   *  with ENGRAM_RECALL_PRIMING=off (read on every call, so a bad value fails
+   *  every recall, keyed or not). */
+  private conversationState(conversationKey: string | undefined): SensoryBuffer | null {
+    const enabled = primingEnabledFromEnv(process.env)
+    if (conversationKey === undefined) return null
+    if (typeof conversationKey !== 'string' || conversationKey.trim() === '') {
+      throw new Error('recall: conversationKey must be a non-empty string when given')
+    }
+    return enabled ? this.conversations.acquire(conversationKey) : null
+  }
 
   /**
    * The embedder for search queries: `embedQuery` when the adapter has one

@@ -22,7 +22,7 @@ import { recallLinkSwitchesFromEnv } from './link-switches.js'
 import { resolveFusionConfig } from './fusion-config.js'
 import { applyProjectRanking, projectRankingFromEnv, type ProjectRanking } from './project-groups.js'
 import { stageAssociate } from './association-walk.js'
-import { stagePrime } from './priming.js'
+import { primingEnabledFromEnv, stagePrime } from './priming.js'
 import { stageReconsolidate } from './reconsolidation.js'
 import { stageActivate, type CompositeMemory } from './spreading-activation.js'
 import { extractEntities } from '../ingestion/entity-extractor.js'
@@ -422,7 +422,7 @@ function finishTimings(timings: StageTimings, recallStart: number): { timings?: 
 export async function recall(
   query: string,
   storage: StorageAdapter,
-  sensory: SensoryBuffer,
+  conversation: SensoryBuffer | null,
   opts: RecallOpts
 ): Promise<RecallResult> {
   const { strategy, embedding, intelligence, sessionId } = opts
@@ -445,6 +445,10 @@ export async function recall(
   const outputPolicy = resolveRecallOutputPolicy(process.env, opts.tokenBudget)
   const rankPriors = rankPriorSwitchesFromEnv(process.env)
   const linkSwitches = recallLinkSwitchesFromEnv(process.env)
+  // Priming state belongs to the calling conversation alone. Switched off,
+  // the recall neither reads it (score boost, graph context seeds) nor
+  // primes it.
+  const sensory = primingEnabledFromEnv(process.env) ? conversation : null
   // Per call for the same reason; an invalid override fails before searching.
   const fusion = resolveFusionConfig(strategy.fusion, process.env)
   const vectorUnavailable = opts.vectorUnavailable
@@ -782,10 +786,11 @@ export async function recall(
 
   const graphStart = stageStart(timings)
   if (strategy.associations && graph !== null) {
-    // Context reinstatement (Gap 4): the topics currently primed in the sensory
-    // buffer (set by recent turns) are folded into the spreading-activation
-    // seeds so recall is sensitive to the active conversational context.
-    const contextTopics = sensory.getPrimed().map((p) => p.topic)
+    // Context reinstatement (Gap 4): the topics the calling conversation's
+    // recent recalls primed are folded into the spreading-activation seeds,
+    // so recall is sensitive to that conversation's context. A recall with no
+    // conversation has none.
+    const contextTopics = sensory?.getPrimed().map((p) => p.topic) ?? []
     const activationResult = await stageActivate(memories, query, graph, strategy, storage, project, projectId, contextTopics)
     if (activationResult === null) {
       // Graph has no nodes for any seed — fall back to SQL walk
@@ -803,7 +808,7 @@ export async function recall(
   if (strategy.associations) stageEnd(timings, 'graph', graphStart)
 
   // Stage 3: Topic priming
-  const primed = stagePrime(memories, associations, sensory)
+  const primed = sensory ? stagePrime(memories, associations, sensory) : []
 
   // Wave 5: Extract community summaries from activated community nodes.
   // Community nodes get nodeType='Community' from the updated spreadActivation().

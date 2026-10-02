@@ -248,6 +248,8 @@ export interface RecallResult {
   memories: RetrievedMemory[]
   associations: RetrievedMemory[]
   intent: IntentResult
+  /** Topics this recall primed for its conversation's next recalls. Empty
+   *  when the recall named no conversation or priming is switched off. */
   primed: string[]
   estimatedTokens: number
   formatted: string

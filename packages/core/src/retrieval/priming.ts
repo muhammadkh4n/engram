@@ -1,22 +1,18 @@
 import type { RetrievedMemory } from '../types.js'
-import type { SensoryBuffer } from '../systems/sensory-buffer.js'
+import { PRIMING_HORIZON_RECALLS, type SensoryBuffer } from '../systems/sensory-buffer.js'
+import { extractKeywords } from './keywords.js'
+import { onOffFromEnv } from './link-switches.js'
 
-// Common English stop words to filter out during keyword extraction
-const STOP_WORDS = new Set([
-  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'was',
-  'this', 'that', 'have', 'with', 'from', 'they', 'been', 'has', 'will',
-  'its', 'our', 'let', 'did', 'how', 'what', 'who', 'why', 'when', 'where',
-  'a', 'an', 'in', 'on', 'at', 'to', 'is', 'it', 'of', 'or', 'as', 'be',
-  'by', 'do', 'if', 'no', 'so', 'up', 'we', 'me', 'my', 'he', 'she', 'his',
-  'her', 'we', 'their', 'them', 'than', 'then', 'into', 'over', 'just',
-  'also', 'use', 'get', 'got', 'one', 'two', 'now', 'new', 'may', 'any',
-])
+export const PRIMING_ENV_VAR = 'ENGRAM_RECALL_PRIMING'
 
-function extractKeywords(content: string): string[] {
-  return content
-    .split(/\s+/)
-    .map((token) => token.replace(/[^a-z0-9]/gi, '').toLowerCase())
-    .filter((token) => token.length >= 3 && !STOP_WORDS.has(token))
+/**
+ * Read ENGRAM_RECALL_PRIMING (on|off, default on). `off` disables the
+ * priming boost, the graph context seeds and the intent carry-over even for
+ * a recall that names its conversation. Any other value throws, naming the
+ * variable.
+ */
+export function primingEnabledFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return onOffFromEnv(env, PRIMING_ENV_VAR, true)
 }
 
 export function stagePrime(
@@ -44,7 +40,7 @@ export function stagePrime(
     if (count >= 2) {
       // boost scales from 0.15 (count=2) to 0.75 (count>=5)
       const boost = 0.15 * Math.min(count, 5)
-      sensory.prime([topic], boost, 5)
+      sensory.prime([topic], boost, PRIMING_HORIZON_RECALLS)
       primedTopics.push(topic)
     }
   }
