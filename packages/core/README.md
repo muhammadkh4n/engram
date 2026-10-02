@@ -257,6 +257,12 @@ console.log(`Promoted ${fullResult.promoted} semantic memories`)
 console.log(`Created ${fullResult.procedural} procedural memories`)
 ```
 
+##### Fact extraction in deep sleep
+
+Deep sleep extracts each digest's facts once. A run takes up to `maxDigests` (default 50) digests whose `factsExtractedAt` is unset, oldest first, and does nothing while fewer than `minDigests` (default 3) are pending. For each digest it reads the digest's live source episodes (forgotten ones are skipped) and passes them, whole and in statement-time order, to the intelligence adapter's `extractFacts` with the digest's project; each returned fact is stored with its statement as content, the episodes it cites as `sourceEpisodeIds` and the digest as its source digest, through the dedup and supersession path below. Then the digest is stamped. Without `extractFacts`, the first-person patterns ("I prefer …", "we decided …") run on the user turns instead. Procedures are read from the digest summary either way.
+
+A digest whose extraction throws stays pending and is retried on the next run (`ConsolidateResult.extractionFailed`); a digest with no live episode is stamped with nothing extracted (`noEpisodes`). `extractDigestFacts` (one digest to candidates, no writes) and `promoteFactCandidates` (candidates through dedup, supersession and graph writes) are exported, so a rederive pass runs the same code.
+
 ##### Fact supersession in deep sleep
 
 When deep sleep promotes a semantic fact, it compares it with the fact's neighbours: the 10 nearest stored facts by cosine (`semantic.findNearest`), keeping only live facts in the new fact's project (a shared, NULL-project fact pairs only with shared facts) at cosine ≥ `ENGRAM_SUPERSESSION_MIN_COSINE` (default `0.6`, a number in [-1, 1]), at most 5, nearest first. A neighbour above cosine 0.88, or (without an embedding) one with the same normalised text in the same project, is a duplicate: it is boosted and the new fact is not stored.
@@ -270,10 +276,10 @@ When deep sleep promotes a semantic fact, it compares it with the fact's neighbo
   - stated at the same (or an unknown) time, both facts `state` → nothing is stored or retired (`tie`).
   - Otherwise a neighbour the judge calls the same claim, or the duplicate check above, makes the fact a duplicate; else it is stored as new. Neighbours the judge called conflicting are left out of the cosine part of that check only; the exact-text part still applies.
 
-  So an update that differs from the old fact by one word replaces it instead of being dropped as its duplicate, and a fact re-extracted from an older digest of the 7-day window never retires the fact that replaced it. No call is made when there are no neighbours. If the judge throws, that fact takes the `regex` path and one warning line with the neighbour ids is logged. With no `judgeSupersession` on the adapter, or no embedding for the fact, `llm` behaves as `regex`.
+  So an update that differs from the old fact by one word replaces it instead of being dropped as its duplicate, and a fact extracted late from an older conversation (a retried or rederived digest) never retires the fact that replaced it. No call is made when there are no neighbours. If the judge throws, that fact takes the `regex` path and one warning line with the neighbour ids is logged. With no `judgeSupersession` on the adapter, or no embedding for the fact, `llm` behaves as `regex`.
 - `off` — the duplicate check only; no stored fact is retired.
 
-A fact's statement time is the latest `createdAt` among the source episodes of its source digests, or a digest's own `createdAt` when none of its episodes can be read (`statementClock`). A stored fact whose digests cannot be read falls back to its own `createdAt`. Insert time cannot order facts: each deep-sleep run re-reads every digest of the last 7 days, so a fact inserted later can come from an older conversation. Digests are processed oldest first.
+A fact's statement time is the latest `createdAt` of the episodes it cites (`factStatementClock`). A fact that cites none falls back to the latest `createdAt` among the source episodes of its source digests, or a digest's own `createdAt` when none of its episodes can be read (`statementClock`). A stored fact whose sources cannot be read falls back to its own `createdAt`. Insert time cannot order facts: a digest whose extraction failed is retried on a later run, so a fact inserted later can come from an older conversation. Digests are processed oldest first.
 
 `ConsolidateResult.supersessionJudged` counts the judge calls of the run; `stale` and `tie` count the new facts not stored for the two reasons above; `keptNotState` counts the judged conflicts the kind rule left alone, and `kindMissing` the judged conflicts left alone because a kind was missing or invalid.
 

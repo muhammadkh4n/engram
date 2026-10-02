@@ -2,9 +2,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { deepSleep } from '../../src/consolidation/deep-sleep.js'
 import {
   makeMockStorage,
+  withSourceTurns,
   makeDigest,
   resetIdCounter,
 } from './mock-storage.js'
+import type { MockStorageOptions } from './mock-storage.js'
 import type { Digest, SearchResult, SemanticMemory, ProceduralMemory } from '../../src/types.js'
 
 function makeSemanticSearchResult(
@@ -63,6 +65,12 @@ function makeProceduralSearchResult(
   }
 }
 
+/** Mock storage in which every digest without source episodes has one live
+ *  user turn saying its summary. */
+function storageWithTurns(opts: MockStorageOptions = {}): ReturnType<typeof makeMockStorage> {
+  return makeMockStorage(withSourceTurns(opts))
+}
+
 describe('deepSleep', () => {
   beforeEach(() => {
     resetIdCounter()
@@ -74,7 +82,7 @@ describe('deepSleep', () => {
 
   describe('minimum digests guard', () => {
     it('returns zeros when fewer than minDigests digests exist', async () => {
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: [makeDigest()],
       })
 
@@ -93,7 +101,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'I like strict mode in TypeScript.' }),
         makeDigest({ summary: 'I want readable code.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -114,7 +122,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'I prefer tabs over spaces.' }),
         makeDigest({ summary: 'Some other content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -132,7 +140,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'I like early returns.' }),
         makeDigest({ summary: 'Filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -147,7 +155,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'My email is alice@example.com.' }),
         makeDigest({ summary: 'Filler content.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -162,7 +170,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'We decided to use PostgreSQL.' }),
         makeDigest({ summary: 'Filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -177,7 +185,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Other content about code style.' }),
         makeDigest({ summary: 'More filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -194,7 +202,7 @@ describe('deepSleep', () => {
         makeDigest({ id: 'digest-2', summary: 'I like functional style.' }),
         makeDigest({ id: 'digest-3', summary: 'Filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -220,7 +228,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'I usually write tests first.' }),
         makeDigest({ summary: 'Filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -234,7 +242,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'My process is to review tests first.' }),
         makeDigest({ summary: 'Filler content here.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -247,7 +255,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Filler.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -280,7 +288,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-1', 'TypeScript', 0.95),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -301,7 +309,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-1', 'TypeScript', 0.95),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -323,7 +331,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-2', 'TypeScript', 0.96),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -342,7 +350,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticNearestResults: [
           makeSemanticSearchResult('existing-sem-1', 'TypeScript is preferred by me.', 0.89),
@@ -368,7 +376,7 @@ describe('deepSleep', () => {
 
       // A fused rank score of 1.0 only says the row ranked first in both
       // legs; its cosine to the candidate is 0.5.
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults: [
           makeSemanticSearchResult('existing-sem-1', 'Rust has a borrow checker', 1.0),
@@ -394,7 +402,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults: [
           makeSemanticSearchResult('existing-sem-1', 'TypeScript has structural typing', 0.99),
@@ -415,7 +423,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults: [
           makeSemanticSearchResult('existing-sem-1', '  typescript ', 0.5),
@@ -442,7 +450,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-1', 'I prefer JavaScript.', 0.7),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -471,7 +479,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-1', 'I like JavaScript.', 0.7),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -496,7 +504,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('old-mem-1', 'I like PHP.', 0.6),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -527,7 +535,7 @@ describe('deepSleep', () => {
         makeSemanticSearchResult('existing-sem-1', 'TypeScript is statically typed.', 0.4),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         semanticSearchResults,
       })
@@ -555,7 +563,7 @@ describe('deepSleep', () => {
         makeProceduralSearchResult('existing-proc-1', 'habit', 'run tests before pushing code.', 0.9),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults,
       })
@@ -576,7 +584,7 @@ describe('deepSleep', () => {
         makeProceduralSearchResult('existing-proc-1', 'workflow', 'to start with types.', 0.92),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults,
       })
@@ -593,7 +601,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralNearestResults: [
           makeProceduralSearchResult('existing-proc-1', 'workflow', 'begin by writing the types', 0.89),
@@ -619,7 +627,7 @@ describe('deepSleep', () => {
 
       // A search score of 1.0 is a rank or BM25 artefact; the cosine to the
       // candidate is 0.5.
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults: [
           makeProceduralSearchResult('existing-proc-1', 'workflow', 'deploy on fridays', 1.0),
@@ -648,7 +656,7 @@ describe('deepSleep', () => {
 
       // The adapter's text path returns only live rows, so a text hit here is
       // a live procedure the vector leg did not surface.
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults: [
           makeProceduralSearchResult('existing-proc-1', 'habit', 'run tests before pushing code.', 0.5),
@@ -674,7 +682,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults: [
           makeProceduralSearchResult('existing-proc-1', 'workflow', 'start with tests', 0.99),
@@ -697,7 +705,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'More filler.' }),
       ]
 
-      const storage = makeMockStorage({
+      const storage = storageWithTurns({
         initialDigests: digests,
         proceduralSearchResults: [
           makeProceduralSearchResult('existing-proc-1', 'habit', '  Run tests before pushing code. ', 0.5),
@@ -720,13 +728,13 @@ describe('deepSleep', () => {
 
   describe('returns correct ConsolidateResult', () => {
     it('always includes cycle: "deep"', async () => {
-      const storage = makeMockStorage({ initialDigests: [] })
+      const storage = storageWithTurns({ initialDigests: [] })
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
       expect(result.cycle).toBe('deep')
     })
 
     it('returns all expected fields', async () => {
-      const storage = makeMockStorage({ initialDigests: [] })
+      const storage = storageWithTurns({ initialDigests: [] })
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
       expect(result).toHaveProperty('promoted')
       expect(result).toHaveProperty('procedural')
@@ -748,7 +756,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Some other content.' }),
         makeDigest({ summary: 'More filler content.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
       const embed = vi.fn(async (_text: string) => [0.1, 0.2, 0.3])
 
       const result = await deepSleep(storage, { embed }, { minDigests: 3 })
@@ -770,7 +778,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Some other content.' }),
         makeDigest({ summary: 'More filler content.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
       const embed = vi.fn(async (_text: string) => {
         throw new Error('embed unavailable')
       })
@@ -789,7 +797,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Some other content.' }),
         makeDigest({ summary: 'More filler content.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -805,7 +813,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Filler content one.' }),
         makeDigest({ summary: 'Filler content two.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
       const embed = vi.fn(async (_text: string) => [0.4, 0.5, 0.6])
 
       const result = await deepSleep(storage, { embed }, { minDigests: 3 })
@@ -826,7 +834,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Filler content one.' }),
         makeDigest({ summary: 'Filler content two.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
       const embed = vi.fn(async (_text: string) => {
         throw new Error('embed unavailable')
       })
@@ -853,7 +861,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Some other content.', projectId: 'engram' }),
         makeDigest({ summary: 'More filler content.', projectId: 'engram' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -869,7 +877,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Some other content.' }),
         makeDigest({ summary: 'More filler content.' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 
@@ -885,7 +893,7 @@ describe('deepSleep', () => {
         makeDigest({ summary: 'Filler content one.', projectId: 'engram' }),
         makeDigest({ summary: 'Filler content two.', projectId: 'engram' }),
       ]
-      const storage = makeMockStorage({ initialDigests: digests })
+      const storage = storageWithTurns({ initialDigests: digests })
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 })
 

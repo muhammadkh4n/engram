@@ -3,13 +3,23 @@ export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {
   deepSleep,
+  promoteFactCandidates,
   supersessionSettingsFromEnv,
   SUPERSESSION_MIN_COSINE,
   DEFAULT_SUPERSESSION,
+  DEFAULT_MAX_DIGESTS,
 } from './consolidation/deep-sleep.js'
-export { statementClock, epochMs } from './consolidation/statement-time.js'
-export type { StatementClock } from './consolidation/statement-time.js'
-export type { DeepSleepOptions, SupersessionMode, SupersessionSettings } from './consolidation/deep-sleep.js'
+export { extractDigestFacts } from './consolidation/fact-candidates.js'
+export type { FactCandidate, DigestFactExtraction } from './consolidation/fact-candidates.js'
+export { statementClock, factStatementClock, epochMs } from './consolidation/statement-time.js'
+export type { StatementClock, FactClock, FactSources } from './consolidation/statement-time.js'
+export type {
+  DeepSleepOptions,
+  SupersessionMode,
+  SupersessionSettings,
+  PromoteContext,
+  PromotionCounts,
+} from './consolidation/deep-sleep.js'
 export { dreamCycle } from './consolidation/dream-cycle.js'
 export type { DreamCycleOptions } from './consolidation/dream-cycle.js'
 export { decayPass } from './consolidation/decay-pass.js'
@@ -54,7 +64,6 @@ export type {
   IntelligenceAdapter,
   SummarizeOptions,
   SummaryResult,
-  KnowledgeCandidate,
   FactSourceEpisode,
   ExtractFactsInput,
   ExtractedFact,

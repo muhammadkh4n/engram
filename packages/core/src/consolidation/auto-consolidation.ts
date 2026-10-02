@@ -335,8 +335,8 @@ async function isDeepSleepDue(
     if (digests.length < threshold) return false
 
     // v0.3.14 delta gate — skip when no new digests have arrived since
-    // the last completed deep run. Without this, deep sleep loops forever
-    // (it doesn't mark digests as processed; isDeepSleepDue keeps firing).
+    // the last completed deep run, so isDeepSleepDue does not fire a run
+    // with nothing new to extract on every tick.
     // Falls back to "always fire when threshold met" if either count()
     // isn't implemented or there's no prior run to compare against.
     if (minNewDigests > 0 && tracker && storage.digests.count) {

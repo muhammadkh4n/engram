@@ -2,7 +2,6 @@ import OpenAI from 'openai'
 import type {
   SummarizeOptions,
   SummaryResult,
-  KnowledgeCandidate,
   ExtractFactsInput,
   ExtractedFact,
   FactSourceEpisode,
@@ -73,21 +72,6 @@ Respond in JSON with exactly this shape:
 }
 
 Be concise. Extract only the most important information. If no decisions were made, use an empty array.`
-
-const KNOWLEDGE_SYSTEM_PROMPT = `You are a knowledge extractor for an AI assistant's memory system. Given content, extract structured knowledge facts.
-
-Respond in JSON with exactly this shape (an array):
-[
-  {
-    "topic": "the subject this knowledge is about",
-    "content": "the actual knowledge or fact",
-    "confidence": 0.9,
-    "sourceDigestIds": [],
-    "sourceEpisodeIds": []
-  }
-]
-
-Extract facts, preferences, decisions, and important patterns. Assign confidence (0-1) based on how clearly stated the knowledge is. Return an empty array if no knowledge can be extracted.`
 
 const FACTS_SYSTEM_PROMPT = `You extract facts for a long-term memory from conversation episodes between a user and an AI assistant. The episodes are numbered E1, E2, and so on; each shows the date and time it was said and who said it (user, assistant or system). The project the conversation belongs to, if any, is named before them.
 
@@ -632,21 +616,6 @@ export class OpenAISummarizer {
     }
   }
 
-  async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
-    const resp = await this.chatCreate('extractKnowledge', {
-      model: this.model,
-      messages: [
-        { role: 'system', content: KNOWLEDGE_SYSTEM_PROMPT },
-        { role: 'user', content: content },
-      ],
-      max_tokens: 1000,
-      temperature: 0.2,
-    })
-
-    const raw = resp.choices[0]?.message?.content ?? '[]'
-    return this.parseKnowledgeCandidates(raw)
-  }
-
   /**
    * Standalone facts from source episodes (see IntelligenceAdapter.extractFacts).
    * Chunks run one after another; any failed chunk rejects the whole batch, so
@@ -1056,36 +1025,6 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
       decisions: stringsOf(obj['decisions']),
     }
   }
-
-  private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
-    try {
-      const parsed = extractJsonReply(raw, isCandidateList) as unknown[]
-
-      return parsed
-        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-        .map((item) => ({
-          topic: typeof item['topic'] === 'string' ? item['topic'] : '',
-          content: typeof item['content'] === 'string' ? item['content'] : '',
-          confidence:
-            typeof item['confidence'] === 'number'
-              ? Math.min(1, Math.max(0, item['confidence']))
-              : 0.5,
-          sourceDigestIds: Array.isArray(item['sourceDigestIds'])
-            ? (item['sourceDigestIds'] as unknown[]).filter(
-                (id): id is string => typeof id === 'string'
-              )
-            : [],
-          sourceEpisodeIds: Array.isArray(item['sourceEpisodeIds'])
-            ? (item['sourceEpisodeIds'] as unknown[]).filter(
-                (id): id is string => typeof id === 'string'
-              )
-            : [],
-        }))
-        .filter((c) => c.topic.length > 0 && c.content.length > 0)
-    } catch {
-      return []
-    }
-  }
 }
 
 function stringsOf(value: unknown): string[] {
@@ -1098,11 +1037,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isSalienceVerdict(value: unknown): boolean {
   return isPlainObject(value) && typeof value['store'] === 'boolean'
-}
-
-/** A list holding at least one object; `[]` and `[1]` in prose are not candidates. */
-function isCandidateList(value: unknown): boolean {
-  return Array.isArray(value) && value.some(isPlainObject)
 }
 
 function emptyVerdict(): SupersessionVerdict {

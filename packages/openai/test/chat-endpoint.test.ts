@@ -92,8 +92,11 @@ async function callEverySite(s: OpenAISummarizer): Promise<Array<Record<string, 
   await s.rerank('Alice', [{ id: 'a', content: 'Alice note' }, { id: 'b', content: 'Bob note' }])
   mockChatCreate.mockResolvedValueOnce(chatReply('{"entities":[]}'))
   await s.extractEntities('Alice met Bob at the Lisbon office on Monday morning.')
-  mockChatCreate.mockResolvedValueOnce(chatReply('[]'))
-  await s.extractKnowledge('Alice prefers tea over coffee.')
+  mockChatCreate.mockResolvedValueOnce(chatReply('{"facts":[]}'))
+  await s.extractFacts({
+    episodes: [{ id: 'ep-1', role: 'user', createdAt: new Date('2026-01-05T10:00:00Z'), content: 'Alice prefers tea over coffee.' }],
+    projectId: null,
+  })
   return mockChatCreate.mock.calls.map((c) => c[0] as Record<string, unknown>)
 }
 
@@ -107,7 +110,7 @@ describe('chat reasoning control', () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k' }))
     expect(bodies).toHaveLength(9)
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 1000])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 450])
   })
 
   it("'off': sends reasoning effort none on every call site, caps unchanged, provider still merged", async () => {
@@ -120,13 +123,13 @@ describe('chat reasoning control', () => {
       expect(b['reasoning']).toEqual({ effort: 'none' })
       expect(b['provider']).toEqual(prefs)
     }
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 1000])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([100, 180, 80, 400, 500, 400, 400, 500, 450])
   })
 
   it("'default': every cap raised by the default 2048-token headroom, no reasoning key", async () => {
     const bodies = await callEverySite(new OpenAISummarizer({ apiKey: 'k', reasoning: 'default' }))
     for (const b of bodies) expect('reasoning' in b).toBe(false)
-    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548, 2448, 2448, 2548, 3048])
+    expect(bodies.map((b) => b['max_tokens'])).toEqual([2148, 2228, 2128, 2448, 2548, 2448, 2448, 2548, 2498])
   })
 
   it("'default': honours a configured headroom", async () => {

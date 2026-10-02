@@ -469,6 +469,12 @@ export interface ConsolidateResult {
   /** Judged conflicts that changed nothing because the judge gave no valid
    *  kind for one of the two facts. */
   kindMissing?: number
+  /** Deep-sleep digests whose fact extraction failed; they stay pending for
+   *  the next run. */
+  extractionFailed?: number
+  /** Deep-sleep digests stamped with no fact read because none of their
+   *  source episodes is live. */
+  noEpisodes?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

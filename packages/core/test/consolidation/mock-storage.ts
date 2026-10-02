@@ -403,3 +403,26 @@ export function makeDigest(overrides: Partial<Digest> = {}): Digest {
     ...overrides,
   }
 }
+
+/**
+ * Gives every digest that lists no source episodes one live user turn whose
+ * content is the digest's summary, stated at the digest's `createdAt`, so a
+ * test written against a summary reaches the episode-reading fact paths
+ * with the same text.
+ */
+export function withSourceTurns(opts: MockStorageOptions = {}): MockStorageOptions {
+  const episodesPerSession = new Map(opts.episodesPerSession ?? [])
+  const initialDigests = (opts.initialDigests ?? []).map(digest => {
+    if (digest.sourceEpisodeIds.length > 0) return digest
+    const turn = makeEpisode({
+      sessionId: digest.sessionId,
+      role: 'user',
+      content: digest.summary,
+      createdAt: digest.createdAt,
+      projectId: digest.projectId,
+    })
+    episodesPerSession.set(digest.sessionId, [...(episodesPerSession.get(digest.sessionId) ?? []), turn])
+    return { ...digest, sourceEpisodeIds: [turn.id] }
+  })
+  return { ...opts, initialDigests, episodesPerSession }
+}

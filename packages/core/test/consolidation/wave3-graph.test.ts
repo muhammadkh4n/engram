@@ -5,6 +5,7 @@ import { dreamCycle } from '../../src/consolidation/dream-cycle.js'
 import { decayPass } from '../../src/consolidation/decay-pass.js'
 import { makeMockStorage, makeEpisode } from './mock-storage.js'
 import type { GraphPort, GraphQueryResult } from '../../src/adapters/graph.js'
+import type { Digest } from '../../src/types.js'
 
 // ---------------------------------------------------------------------------
 // Mock graph that records all Cypher calls
@@ -220,6 +221,14 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
   // -----------------------------------------------------------------------
 
   describe('deepSleep', () => {
+    /** Digests awaiting fact extraction, each over one live user turn that
+     *  says its summary. */
+    function givePendingDigests(digests: Array<Omit<Digest, 'projectId'>>): void {
+      const turns = digests.map(d => makeEpisode({ id: d.sourceEpisodeIds[0]!, role: 'user', content: d.summary }))
+      storage.digests.getPendingFactExtraction = vi.fn(async () => digests.map(d => ({ ...d, projectId: null })))
+      storage.episodes.getByIds = vi.fn(async (ids: string[]) => turns.filter(t => ids.includes(t.id)))
+    }
+
     it('creates semantic Memory node with validFrom and CONTRADICTS on supersession', async () => {
       // Set up digests with content that triggers semantic extraction
       const digests = Array.from({ length: 3 }, (_, i) => ({
@@ -235,7 +244,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         createdAt: new Date(),
       }))
 
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
 
       // Mock findEarliestInDigests
       storage.episodes.findEarliestInDigests = vi.fn(async () => ({
@@ -276,7 +285,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         metadata: {},
         createdAt: new Date(),
       }))
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 }, graph)
 
@@ -309,7 +318,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         createdAt: new Date(),
       }))
 
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 }, null)
 

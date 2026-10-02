@@ -11,14 +11,6 @@ export interface SummaryResult {
   decisions: string[]
 }
 
-export interface KnowledgeCandidate {
-  topic: string
-  content: string
-  confidence: number
-  sourceDigestIds: string[]
-  sourceEpisodeIds: string[]
-}
-
 /** One source episode handed to the fact extractor. */
 export interface FactSourceEpisode {
   id: string
@@ -258,7 +250,6 @@ export interface IntelligenceAdapter {
   embedQuery?(text: string): Promise<number[]>
   dimensions?(): number
   summarize?(content: string, opts: SummarizeOptions): Promise<SummaryResult>
-  extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
   /**
    * Extract standalone facts from source episodes, each citing the episodes
    * it rests on. Episodes are never cut; a large batch may take several

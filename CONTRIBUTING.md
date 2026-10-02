@@ -160,7 +160,7 @@ Intelligence adapters implement the `IntelligenceAdapter` interface.
      dimensions?(): number
 
      summarize?(content: string, opts?: SummarizeOptions): Promise<string>
-     extractKnowledge?(content: string): Promise<KnowledgeExtraction>
+     extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
    }
    ```
 

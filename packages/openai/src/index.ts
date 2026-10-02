@@ -79,9 +79,6 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     summarize(content, summarizeOpts) {
       return summarizer.summarize(content, summarizeOpts)
     },
-    extractKnowledge(content) {
-      return summarizer.extractKnowledge(content)
-    },
     extractFacts(input) {
       return summarizer.extractFacts(input)
     },

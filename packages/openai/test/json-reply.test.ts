@@ -76,17 +76,6 @@ const PARSERS: ParserCase[] = [
       )
     },
   },
-  {
-    name: 'parseKnowledgeCandidates',
-    payload: (text) => [{ topic: 'ingest', content: text, confidence: 0.9, sourceEpisodeIds: ['ep-1'] }],
-    run: (s) => s.extractKnowledge('digest text'),
-    expected: (text) => [
-      { topic: 'ingest', content: text, confidence: 0.9, sourceDigestIds: [], sourceEpisodeIds: ['ep-1'] },
-    ],
-    proseOnly: async (s) => {
-      await expect(s.extractKnowledge('digest text')).resolves.toEqual([])
-    },
-  },
 ]
 
 describe.each(PARSERS)('$name reads every reply shape', (parser) => {

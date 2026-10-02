@@ -5,12 +5,16 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
 import { linkFactContext } from './own-text-links.js'
-import { majorityProjectId } from './inherit-project.js'
-import { epochMs, statementClock } from './statement-time.js'
-import type { StatementClock } from './statement-time.js'
+import { epochMs, factStatementClock } from './statement-time.js'
+import type { FactClock } from './statement-time.js'
+import { extractDigestFacts } from './fact-candidates.js'
+import type { FactCandidate } from './fact-candidates.js'
 
 export interface DeepSleepOptions {
+  /** A run does nothing while fewer digests than this await fact extraction. Default 3. */
   minDigests?: number
+  /** Most pending digests one run extracts, oldest first. Default 50. */
+  maxDigests?: number
   /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
    *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
    *  supersessionSettingsFromEnv and passes the result here. */
@@ -42,6 +46,9 @@ const NEIGHBOUR_SCAN = 10
 /** Neighbours kept after filtering; bounds the judge prompt. */
 const NEIGHBOUR_POOL_MAX = 5
 
+/** Pending digests one run extracts when DeepSleepOptions.maxDigests is unset. */
+export const DEFAULT_MAX_DIGESTS = 50
+
 const SUPERSESSION_MODES: ReadonlySet<string> = new Set(['regex', 'llm', 'off'])
 
 /**
@@ -66,21 +73,6 @@ export function supersessionSettingsFromEnv(env: NodeJS.ProcessEnv = process.env
   return { mode: mode as SupersessionMode, minCosine }
 }
 
-// ---------------------------------------------------------------------------
-// Extraction patterns
-// ---------------------------------------------------------------------------
-
-interface KnowledgeCandidate {
-  topic: string
-  content: string
-  fullMatch?: string
-  confidence: number
-  sourceDigestIds: string[]
-  sourceEpisodeIds: string[]
-  kind: 'semantic' | 'procedural'
-  trigger?: string
-}
-
 /**
  * Cosine similarity above which a candidate restates an existing memory:
  * on text-embedding-3-small, 0.88 is "same claim, different phrasing".
@@ -92,30 +84,6 @@ function sameContent(a: string, b: string): boolean {
   const norm = (t: string) => t.trim().toLowerCase().replace(/\s+/g, ' ')
   return norm(a) === norm(b)
 }
-
-const SEMANTIC_PATTERNS: Array<{ pattern: RegExp; topic: string; confidence: number }> = [
-  { pattern: /I prefer\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
-  { pattern: /I like\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
-  { pattern: /I want\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.85 },
-  { pattern: /I don'?t like\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
-  { pattern: /I hate\s+(.+?)(?:\.|,|$)/gi, topic: 'preference', confidence: 0.9 },
-  { pattern: /let'?s go with\s+(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
-  { pattern: /we decided\s+(?:to\s+)?(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
-  { pattern: /the plan is to\s+(.+?)(?:\.|,|$)/gi, topic: 'decision', confidence: 0.9 },
-  { pattern: /my (?:name|email|timezone|location) is\s+(.+?)(?:\.|,|$)/gi, topic: 'personal_info', confidence: 0.9 },
-]
-
-const PROCEDURAL_TRIGGER_PATTERNS: Array<{ pattern: RegExp; category: 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention' }> = [
-  { pattern: /\bmy workflow is\b(.+)/i, category: 'workflow' },
-  { pattern: /\bi usually\b(.+)/i, category: 'habit' },
-  { pattern: /\bmy process is\b(.+)/i, category: 'workflow' },
-  { pattern: /\bi always\b(.+)/i, category: 'habit' },
-  { pattern: /\bbefore (?:i|we) \w+,\s*(?:i|we)\b(.+)/i, category: 'workflow' },
-  { pattern: /\bafter (?:i|we) \w+,\s*(?:i|we)\b(.+)/i, category: 'workflow' },
-  { pattern: /\bnever use\b(.+)/i, category: 'convention' },
-  { pattern: /\balways run\b(.+)/i, category: 'convention' },
-  { pattern: /\bmake sure to\b(.+)/i, category: 'convention' },
-]
 
 const CONTRADICTION_PAIRS: Array<[RegExp, RegExp]> = [
   [/I prefer\s+(.+)/i, /I don'?t like\s+(.+)/i],
@@ -139,55 +107,6 @@ function subjectsOverlap(a: string, b: string): boolean {
   const maxSize = Math.max(wordsA.size, wordsB.size)
   if (maxSize === 0) return false
   return overlap / maxSize > 0.5
-}
-
-function extractCandidatesFromText(text: string, digestId: string): KnowledgeCandidate[] {
-  const candidates: KnowledgeCandidate[] = []
-  const seen = new Set<string>()
-
-  for (const { pattern, category } of PROCEDURAL_TRIGGER_PATTERNS) {
-    pattern.lastIndex = 0
-    const match = pattern.exec(text)
-    if (match) {
-      const procedure = match[1].trim()
-      if (procedure.length < 3) continue
-      const key = `procedural:${category}:${procedure}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      candidates.push({
-        topic: category,
-        content: procedure,
-        confidence: 0.85,
-        sourceDigestIds: [digestId],
-        sourceEpisodeIds: [],
-        kind: 'procedural',
-        trigger: category,
-      })
-    }
-  }
-
-  for (const { pattern, topic, confidence } of SEMANTIC_PATTERNS) {
-    pattern.lastIndex = 0
-    let match
-    while ((match = pattern.exec(text)) !== null) {
-      const content = match[1].trim()
-      if (content.length < 3) continue
-      const key = `semantic:${topic}:${content}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      candidates.push({
-        topic,
-        content,
-        fullMatch: match[0].trim(),
-        confidence,
-        sourceDigestIds: [digestId],
-        sourceEpisodeIds: [],
-        kind: 'semantic',
-      })
-    }
-  }
-
-  return candidates
 }
 
 function detectSupersession(newPhrase: string, existingContent: string): boolean {
@@ -250,7 +169,7 @@ function findDuplicate(
 
 /** The regex path, and with `retire` false the no-supersession path. */
 function ruleDecision(
-  candidate: KnowledgeCandidate,
+  candidate: FactCandidate,
   pool: ReadonlyArray<SemanticNeighbour>,
   scopedExisting: ReadonlyArray<SemanticNeighbour>,
   existing: ReadonlyArray<SemanticNeighbour>,
@@ -286,18 +205,21 @@ async function rereadPool(
   })
 }
 
-/** Statement times of the pool's facts. A fact whose source digests cannot
- *  be read falls back to its insert time, which is never earlier than the
- *  time it was stated. */
+/** Statement times of the pool's facts. A fact whose sources cannot be read
+ *  falls back to its insert time, which is never earlier than the time it
+ *  was stated. */
 async function poolStatementTimes(
-  clock: StatementClock,
+  clock: FactClock,
   pool: ReadonlyArray<SemanticNeighbour>,
 ): Promise<Map<string, number | null>> {
-  // One call over every digest fills the clock's cache for the per-fact calls.
-  await clock(pool.flatMap(e => e.item.sourceDigestIds))
+  // One call over every source fills the clock's caches for the per-fact calls.
+  await clock({
+    sourceEpisodeIds: pool.flatMap(e => e.item.sourceEpisodeIds),
+    sourceDigestIds: pool.flatMap(e => e.item.sourceDigestIds),
+  })
   const times = new Map<string, number | null>()
   for (const e of pool) {
-    times.set(e.item.id, (await clock(e.item.sourceDigestIds)) ?? epochMs(e.item.createdAt))
+    times.set(e.item.id, (await clock(e.item)) ?? epochMs(e.item.createdAt))
   }
   return times
 }
@@ -378,7 +300,7 @@ function resolveConflicts(
  */
 async function judgedDecision(
   judge: NonNullable<IntelligenceAdapter['judgeSupersession']>,
-  candidate: KnowledgeCandidate,
+  candidate: FactCandidate,
   candidateStatedAt: number | null,
   pool: ReadonlyArray<SemanticNeighbour>,
   storedStatedAt: ReadonlyMap<string, number | null>,
@@ -425,7 +347,7 @@ const NO_KEPT_CONFLICTS: KeptConflictCounts = { keptNotState: 0, kindMissing: 0 
 interface JudgeContext {
   storage: StorageAdapter
   judge: NonNullable<IntelligenceAdapter['judgeSupersession']>
-  clock: StatementClock
+  clock: FactClock
   projectId: string | null
 }
 
@@ -434,7 +356,7 @@ interface JudgeContext {
  *  candidate; a storage failure propagates as it does elsewhere here. */
 async function llmDecision(
   ctx: JudgeContext,
-  candidate: KnowledgeCandidate,
+  candidate: FactCandidate,
   nearestPool: ReadonlyArray<SemanticNeighbour>,
   scopedExisting: ReadonlyArray<SemanticNeighbour>,
   existing: ReadonlyArray<SemanticNeighbour>,
@@ -443,7 +365,7 @@ async function llmDecision(
   if (pool.length === 0) {
     return { decision: ruleDecision(candidate, pool, scopedExisting, existing, false), judged: false, counts: NO_KEPT_CONFLICTS }
   }
-  const candidateStatedAt = await ctx.clock(candidate.sourceDigestIds)
+  const candidateStatedAt = candidate.statedAt ?? await ctx.clock(candidate)
   const storedStatedAt = await poolStatementTimes(ctx.clock, pool)
   try {
     const judged = await judgedDecision(ctx.judge, candidate, candidateStatedAt, pool, storedStatedAt, scopedExisting)
@@ -456,11 +378,381 @@ async function llmDecision(
   }
 }
 
+/** What promoting a set of candidates did. */
+export interface PromotionCounts {
+  promoted: number
+  procedural: number
+  deduplicated: number
+  superseded: number
+  supersessionJudged: number
+  stale: number
+  tie: number
+  keptNotState: number
+  kindMissing: number
+  graphNodesCreated: number
+  graphEdgesCreated: number
+  graphContextKept: number
+  graphContextDropped: number
+}
+
+function zeroCounts(): PromotionCounts {
+  return {
+    promoted: 0, procedural: 0, deduplicated: 0, superseded: 0, supersessionJudged: 0, stale: 0, tie: 0,
+    keptNotState: 0, kindMissing: 0, graphNodesCreated: 0, graphEdgesCreated: 0, graphContextKept: 0,
+    graphContextDropped: 0,
+  }
+}
+
+function addCounts(a: PromotionCounts, b: PromotionCounts): PromotionCounts {
+  const out = { ...a }
+  for (const key of Object.keys(b) as Array<keyof PromotionCounts>) out[key] = a[key] + b[key]
+  return out
+}
+
+export interface PromoteContext {
+  storage: StorageAdapter
+  intelligence?: IntelligenceAdapter
+  graph?: GraphPort | null
+  /** Whether graph writes run. Read once from `graph.isAvailable()` when unset. */
+  graphAvailable?: boolean
+  /** Defaults to DEFAULT_SUPERSESSION. */
+  supersession?: SupersessionSettings
+  /** Statement times of stored facts. Share one across a run so sources are read once. */
+  clock?: FactClock
+}
+
+type ResolvedPromoteContext = Required<Omit<PromoteContext, 'intelligence' | 'graph'>> &
+  Pick<PromoteContext, 'intelligence' | 'graph'>
+
+async function resolvePromoteContext(ctx: PromoteContext): Promise<ResolvedPromoteContext> {
+  const graphAvailable = ctx.graphAvailable ??
+    Boolean(ctx.graph?.runCypherWrite && await ctx.graph.isAvailable().catch(() => false))
+  return {
+    ...ctx,
+    graphAvailable,
+    supersession: ctx.supersession ?? DEFAULT_SUPERSESSION,
+    clock: ctx.clock ?? factStatementClock(ctx.storage),
+  }
+}
+
+/** Embeds `text` when the adapter can; an embed failure means no vector. */
+async function tryEmbed(intelligence: IntelligenceAdapter | undefined, text: string): Promise<number[] | undefined> {
+  if (!intelligence?.embed) return undefined
+  try {
+    return await intelligence.embed(text)
+  } catch {
+    return undefined
+  }
+}
+
+/** The store decision for one semantic candidate, with the judge counters it produced. */
+async function decideSemantic(
+  ctx: ResolvedPromoteContext,
+  candidate: FactCandidate,
+  candidateEmbedding: number[] | undefined,
+  counts: PromotionCounts,
+): Promise<SemanticDecision> {
+  const { storage, supersession } = ctx
+  const searchOpts: { limit: number; embedding?: number[] } = { limit: 5 }
+  if (candidateEmbedding) searchOpts.embedding = candidateEmbedding
+
+  const existing = await storage.semantic.search(candidate.content, searchOpts)
+  // search() scores are not cosine: hybrid results are fused ranks (RRF on
+  // PostgREST, a BM25/cosine blend on SQLite) and text-only results are a
+  // constant or a max-normalised BM25, so no fixed threshold on them means
+  // "same claim". The paraphrase check uses findNearest's raw cosine; the
+  // lexical fallback is an exact match after normalisation.
+  const nearest = candidateEmbedding
+    ? await storage.semantic.findNearest(candidateEmbedding, NEIGHBOUR_SCAN)
+    : []
+  const projectId = candidate.projectId
+  const pool = neighbourPool(nearest, projectId, supersession.minCosine)
+  const scopedExisting = existing.filter(e => inProject(e.item, projectId))
+
+  // The judge needs a vector-built pool; without a judge or a vector, llm
+  // mode behaves as regex mode.
+  const judge = ctx.intelligence?.judgeSupersession?.bind(ctx.intelligence)
+  if (supersession.mode === 'llm' && judge && candidateEmbedding) {
+    const judged = await llmDecision({ storage, judge, clock: ctx.clock, projectId }, candidate, pool, scopedExisting, existing)
+    if (judged.judged) counts.supersessionJudged++
+    counts.keptNotState += judged.counts.keptNotState
+    counts.kindMissing += judged.counts.kindMissing
+    return judged.decision
+  }
+  return ruleDecision(candidate, pool, scopedExisting, existing, supersession.mode !== 'off')
+}
+
+/** Semantic node, DERIVES_FROM edges, own-text context links and supersession
+ *  edges for one stored fact. A graph failure is logged and never fails the run. */
+async function writeSemanticGraph(
+  graph: GraphPort,
+  storage: StorageAdapter,
+  candidate: FactCandidate,
+  semanticId: string,
+  supersededIds: ReadonlyArray<string>,
+  counts: PromotionCounts,
+): Promise<void> {
+  if (!graph.runCypherWrite) return
+  try {
+    const now = new Date().toISOString()
+
+    // validFrom = earliest source episode, not consolidation time
+    let validFrom = now
+    if (storage.episodes.findEarliestInDigests) {
+      const earliest = await storage.episodes.findEarliestInDigests(candidate.sourceDigestIds)
+      if (earliest) validFrom = earliest.createdAt.toISOString()
+    }
+
+    // Step 1: Create Semantic Memory node
+    const nodeResult = await graph.runCypherWrite(`
+      MERGE (s:Memory {id: $semanticId})
+      SET s.memoryType = 'semantic',
+          s.label = $label,
+          s.topic = $topic,
+          s.createdAt = $now,
+          s.validFrom = $validFrom,
+          s.validUntil = null,
+          s.pageRank = 0.0,
+          s.betweenness = 0.0,
+          s.isBridge = false,
+          s.activationCount = 0
+    `, {
+      semanticId,
+      label: `${candidate.topic}: ${candidate.content.slice(0, 60)}`,
+      topic: candidate.topic,
+      now,
+      validFrom,
+    })
+    counts.graphNodesCreated += extractCounters(nodeResult).nodesCreated
+
+    // Step 2: DERIVES_FROM edges to source digests
+    const derivesResult = await graph.runCypherWrite(`
+      UNWIND $sourceDigestIds AS digestId
+      MATCH (dig:Memory {id: digestId})
+      MATCH (s:Memory {id: $semanticId})
+      MERGE (s)-[r:DERIVES_FROM]->(dig)
+      ON CREATE SET r.weight = 0.8,
+                    r.createdAt = $now,
+                    r.lastTraversed = null,
+                    r.traversalCount = 0
+    `, { sourceDigestIds: candidate.sourceDigestIds, semanticId, now })
+    counts.graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
+
+    // Step 3: Context of the source digests that the fact's own text names
+    const ctxLinks = await linkFactContext(graph, {
+      semanticId,
+      text: `${candidate.topic} ${candidate.content}`,
+      sourceDigestIds: candidate.sourceDigestIds,
+      now,
+    })
+    counts.graphEdgesCreated += ctxLinks.relationshipsCreated
+    counts.graphContextKept += ctxLinks.kept
+    counts.graphContextDropped += ctxLinks.dropped
+
+    // Step 4: Supersession → CONTRADICTS + validUntil + forgottenAt.
+    // Spreading activation skips only nodes with forgottenAt; without it
+    // the retired fact keeps relaying until the decay pass's tombstone
+    // sync. coalesce keeps an earlier forget time.
+    for (const supersededId of supersededIds) {
+      await graph.runCypherWrite(`
+        MATCH (old:Memory {id: $oldId})
+        MATCH (new:Memory {id: $newId})
+        SET old.validUntil = $now,
+            old.forgottenAt = coalesce(old.forgottenAt, $now)
+        MERGE (new)-[r:CONTRADICTS]->(old)
+        ON CREATE SET r.weight = 1.0,
+                      r.createdAt = $now,
+                      r.lastTraversed = null,
+                      r.traversalCount = 0
+      `, { oldId: supersededId, newId: semanticId, now })
+      counts.graphEdgesCreated++
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.warn(`[deep-sleep] Neo4j graph update failed for ${semanticId}: ${msg}`)
+  }
+}
+
+async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandidate, counts: PromotionCounts): Promise<void> {
+  const { storage } = ctx
+  // Embed the same topic+content text that the semantic FTS column and the
+  // embed-backfill CLI use: stored rows carry vectors of that shape, so the
+  // dedup comparison and the persisted embedding must match it. The vector
+  // also lets semantic.search run hybrid BM25+vector, which catches
+  // paraphrases ("X published v1.0" / "MK noted X shipped 1.0") that BM25
+  // alone misses.
+  const candidateEmbedding = await tryEmbed(ctx.intelligence, `${candidate.topic} ${candidate.content}`)
+  const decision = await decideSemantic(ctx, candidate, candidateEmbedding, counts)
+
+  if (decision.kind === 'stale') {
+    counts.stale++
+    return
+  }
+  if (decision.kind === 'tie') {
+    counts.tie++
+    return
+  }
+  if (decision.kind === 'duplicate') {
+    // Re-extracting a known fact is a recurrence: it raises the access
+    // count and the fact's confidence.
+    await storage.semantic.recordAccessAndBoost(decision.id, 0.1)
+    counts.deduplicated++
+    return
+  }
+  const supersededIds = decision.supersededIds
+
+  // Persist the embedding computed for dedup above: a null embedding
+  // leaves the row invisible to vector search AND to this same
+  // embedding-based dedup on every future cycle.
+  const knowledge = await storage.semantic.insert({
+    topic: candidate.topic,
+    content: candidate.content,
+    confidence: candidate.confidence,
+    sourceDigestIds: candidate.sourceDigestIds,
+    sourceEpisodeIds: candidate.sourceEpisodeIds,
+    decayRate: 0.02,
+    supersedes: supersededIds[0] ?? null,
+    supersededBy: null,
+    embedding: candidateEmbedding ?? null,
+    metadata: {},
+    projectId: candidate.projectId,
+  })
+
+  for (const supersededId of supersededIds) {
+    await storage.semantic.markSuperseded(supersededId, knowledge.id)
+    counts.superseded++
+  }
+
+  for (const digestId of candidate.sourceDigestIds) {
+    await storage.associations.insert({
+      sourceId: digestId,
+      sourceType: 'digest',
+      targetId: knowledge.id,
+      targetType: 'semantic',
+      edgeType: 'derives_from',
+      strength: 0.8,
+      lastActivated: null,
+      metadata: {},
+    })
+  }
+
+  if (ctx.graphAvailable && ctx.graph) {
+    await writeSemanticGraph(ctx.graph, storage, candidate, knowledge.id, supersededIds, counts)
+  }
+  counts.promoted++
+}
+
+async function promoteProcedural(ctx: ResolvedPromoteContext, candidate: FactCandidate, counts: PromotionCounts): Promise<void> {
+  const { storage, graph } = ctx
+  const searchQuery = `${candidate.trigger ?? candidate.topic} ${candidate.content}`
+
+  // Embed the same trigger+procedure text that FTS indexes and the
+  // embed-backfill CLI use, so stored vectors stay comparable across write
+  // paths. On failure the row lands with null and stays reachable via BM25
+  // until a backfill fills the vector.
+  const proceduralEmbedding = await tryEmbed(ctx.intelligence, searchQuery)
+
+  // Same rule as the semantic tier: search()/searchByTrigger() scores are
+  // fused ranks, a constant or a max-normalised BM25, never a cosine, so the
+  // paraphrase check uses findNearest's raw cosine and the lexical fallback
+  // is an exact procedure match after normalisation.
+  const nearest = proceduralEmbedding
+    ? await storage.procedural.findNearest(proceduralEmbedding, 3)
+    : []
+  const textHits = await storage.procedural.search(candidate.content, { limit: 3 })
+  const match =
+    nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
+    textHits.find(e => sameContent(e.item.procedure, candidate.content))
+
+  if (match) {
+    await storage.procedural.incrementObservation(match.item.id)
+    return
+  }
+
+  // Procedures are stored shared: a procedure or habit describes how the
+  // user works, which applies in every project, not only the one it was
+  // first observed in.
+  const proceduralRecord = await storage.procedural.insert({
+    category: (candidate.trigger as 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention') ?? 'preference',
+    trigger: candidate.trigger ?? candidate.topic,
+    procedure: candidate.content,
+    confidence: candidate.confidence,
+    observationCount: 1,
+    lastObserved: new Date(),
+    firstObserved: new Date(),
+    decayRate: 0.01,
+    sourceEpisodeIds: candidate.sourceEpisodeIds,
+    embedding: proceduralEmbedding ?? null,
+    metadata: {},
+    projectId: null,
+  })
+
+  if (ctx.graphAvailable && graph?.runCypherWrite) {
+    try {
+      const now = new Date().toISOString()
+      const nodeResult = await graph.runCypherWrite(`
+        MERGE (p:Memory {id: $proceduralId})
+        SET p.memoryType = 'procedural',
+            p.label = $label,
+            p.triggerPattern = $triggerPattern,
+            p.createdAt = $now,
+            p.validFrom = $now,
+            p.validUntil = null,
+            p.pageRank = 0.0,
+            p.betweenness = 0.0,
+            p.isBridge = false,
+            p.activationCount = 0
+      `, {
+        proceduralId: proceduralRecord.id,
+        label: `${candidate.trigger}: ${candidate.content.slice(0, 60)}`,
+        triggerPattern: candidate.trigger ?? candidate.topic,
+        now,
+      })
+      counts.graphNodesCreated += extractCounters(nodeResult).nodesCreated
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[deep-sleep] Neo4j graph update failed for procedural ${proceduralRecord.id}: ${msg}`)
+    }
+  }
+
+  counts.procedural++
+}
+
 /**
- * Deep Sleep (Weekly) — Digests -> Semantic + Procedural.
+ * Stores candidates through the dedup, supersession and graph path:
+ * semantic candidates first, in the order given, then procedures. Each
+ * semantic candidate is a duplicate (boosted), stale, a tie, or inserted
+ * with derives_from links to its digests, retiring the stored facts it
+ * supersedes. A storage failure rejects; a graph failure is logged.
+ */
+export async function promoteFactCandidates(
+  candidates: ReadonlyArray<FactCandidate>,
+  ctx: PromoteContext,
+): Promise<PromotionCounts> {
+  const resolved = await resolvePromoteContext(ctx)
+  const counts = zeroCounts()
+  for (const candidate of candidates.filter(c => c.kind === 'semantic')) {
+    await promoteSemantic(resolved, candidate, counts)
+  }
+  for (const candidate of candidates.filter(c => c.kind === 'procedural')) {
+    await promoteProcedural(resolved, candidate, counts)
+  }
+  return counts
+}
+
+/**
+ * Deep Sleep — Digests -> Semantic + Procedural.
  *
  * Brain analogy: Slow-wave sleep. Transfers hippocampal memories to neocortex,
  * extracting facts, patterns, and procedural rules.
+ *
+ * Each digest's facts are extracted once: a run takes up to `maxDigests`
+ * digests not yet extracted, oldest first, reads each one's live episodes
+ * (extractDigestFacts), stores the facts (promoteFactCandidates) and stamps
+ * the digest. Oldest first means a fact is stored before the facts stated
+ * after it are judged against it. A digest whose extraction fails stays
+ * pending for the next run; one with no live episode is stamped with nothing
+ * stored.
  *
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
@@ -477,358 +769,59 @@ export async function deepSleep(
   graph?: GraphPort | null,
 ): Promise<ConsolidateResult> {
   const minDigests = opts?.minDigests ?? 3
-  const supersession = opts?.supersession ?? DEFAULT_SUPERSESSION
+  const maxDigests = opts?.maxDigests ?? DEFAULT_MAX_DIGESTS
+  const pending = await storage.digests.getPendingFactExtraction(maxDigests)
 
-  // Oldest first, so within a run a fact is stored before the facts stated
-  // after it are judged against it. getRecent returns newest first.
-  const digests = [...await storage.digests.getRecent(7)]
-    .sort((a, b) => (epochMs(a.createdAt) ?? 0) - (epochMs(b.createdAt) ?? 0))
-
-  if (digests.length < minDigests) {
+  if (pending.length < minDigests) {
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
       supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
+      extractionFailed: 0, noEpisodes: 0,
     }
   }
 
-  const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
+  const ctx = await resolvePromoteContext({
+    storage,
+    intelligence,
+    graph,
+    supersession: opts?.supersession,
+    clock: factStatementClock(storage, pending),
+  })
 
-  let promoted = 0
-  let procedural = 0
-  let deduplicated = 0
-  let superseded = 0
-  let supersessionJudged = 0
-  let stale = 0
-  let tie = 0
-  let keptNotState = 0
-  let kindMissing = 0
-  let graphNodesCreated = 0
-  let graphEdgesCreated = 0
-  let graphContextKept = 0
-  let graphContextDropped = 0
-
-  // Collect all candidates from all digests
-  const allCandidates: KnowledgeCandidate[] = []
-  for (const digest of digests) {
-    const candidates = extractCandidatesFromText(digest.summary, digest.id)
-    allCandidates.push(...candidates)
-  }
-
-  // Semantic promotions inherit the project of the digests they derive from,
-  // so same-project ranking survives consolidation. Procedural promotions are
-  // stored shared: a procedure or habit describes how the user works, which
-  // applies in every project, not only the one it was first observed in.
-  const digestProjectById = new Map(digests.map(d => [d.id, d.projectId]))
-  const candidateProjectId = (candidate: KnowledgeCandidate): string | null =>
-    majorityProjectId(candidate.sourceDigestIds.map(id => digestProjectById.get(id)))
-
-  // If intelligence adapter supports extractKnowledge, use it to augment
-  if (intelligence?.extractKnowledge) {
-    for (const digest of digests) {
-      try {
-        const aiCandidates = await intelligence.extractKnowledge(digest.summary)
-        for (const c of aiCandidates) {
-          allCandidates.push({
-            ...c,
-            sourceDigestIds: c.sourceDigestIds.length > 0 ? c.sourceDigestIds : [digest.id],
-            kind: 'semantic',
-          })
-        }
-      } catch {
-        // ignore intelligence errors
-      }
+  let totals = zeroCounts()
+  let extractionFailed = 0
+  let noEpisodes = 0
+  for (const digest of pending) {
+    let extraction: Awaited<ReturnType<typeof extractDigestFacts>>
+    try {
+      extraction = await extractDigestFacts(storage, intelligence, digest)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(`[deep-sleep] fact extraction failed for digest ${digest.id}; it stays pending: ${msg}`)
+      extractionFailed++
+      continue
     }
-  }
-
-  // Process semantic candidates
-  const semanticCandidates = allCandidates.filter(c => c.kind === 'semantic')
-  const judge = intelligence?.judgeSupersession?.bind(intelligence)
-  const clock = statementClock(storage, digests)
-  for (const candidate of semanticCandidates) {
-    // Pass an embedding so semantic.search uses hybrid BM25+vector.
-    // BM25-only dedup misses LLM paraphrases of the same fact
-    // ("X published v1.0" ↔ "MK noted X shipped 1.0") because their
-    // token sets differ. Cosine similarity catches the semantic match.
-    // Embed the same topic+content text that the semantic FTS column and
-    // the embed-backfill CLI use — stored rows carry vectors of that shape,
-    // so both the dedup comparison here and the persisted embedding below
-    // must match it or cosine similarity degrades from shape drift.
-    let candidateEmbedding: number[] | undefined
-    if (intelligence?.embed) {
-      try {
-        candidateEmbedding = await intelligence.embed(`${candidate.topic} ${candidate.content}`)
-      } catch {
-        // ignore — fall back to BM25-only path below
-      }
-    }
-
-    const searchOpts: { limit: number; embedding?: number[] } = { limit: 5 }
-    if (candidateEmbedding) searchOpts.embedding = candidateEmbedding
-
-    const existing = await storage.semantic.search(candidate.content, searchOpts)
-    // search() scores are not cosine: hybrid results are fused ranks (RRF on
-    // PostgREST, a BM25/cosine blend on SQLite) and text-only results are a
-    // constant or a max-normalised BM25, so no fixed threshold on them means
-    // "same claim". The paraphrase check uses findNearest's raw cosine; the
-    // lexical fallback is an exact match after normalisation.
-    const nearest = candidateEmbedding
-      ? await storage.semantic.findNearest(candidateEmbedding, NEIGHBOUR_SCAN)
-      : []
-    const projectId = candidateProjectId(candidate)
-    const pool = neighbourPool(nearest, projectId, supersession.minCosine)
-    const scopedExisting = existing.filter(e => inProject(e.item, projectId))
-
-    // The judge needs a vector-built pool; without a judge or a vector, llm
-    // mode behaves as regex mode.
-    let decision: SemanticDecision
-    if (supersession.mode === 'llm' && judge && candidateEmbedding) {
-      const judged = await llmDecision({ storage, judge, clock, projectId }, candidate, pool, scopedExisting, existing)
-      decision = judged.decision
-      if (judged.judged) supersessionJudged++
-      keptNotState += judged.counts.keptNotState
-      kindMissing += judged.counts.kindMissing
+    if (extraction.status === 'no-episodes') {
+      noEpisodes++
     } else {
-      decision = ruleDecision(candidate, pool, scopedExisting, existing, supersession.mode !== 'off')
+      totals = addCounts(totals, await promoteFactCandidates(extraction.candidates, ctx))
     }
-
-    if (decision.kind === 'stale') {
-      stale++
-      continue
-    }
-    if (decision.kind === 'tie') {
-      tie++
-      continue
-    }
-    if (decision.kind === 'duplicate') {
-      // Re-extracting a known fact is a recurrence: it raises the access
-      // count and the fact's confidence.
-      await storage.semantic.recordAccessAndBoost(decision.id, 0.1)
-      deduplicated++
-      continue
-    }
-    const supersededIds = decision.supersededIds
-
-    // Persist the embedding computed for dedup above: a null embedding
-    // leaves the row invisible to vector search AND to this same
-    // embedding-based dedup on every future cycle (the duplication leak
-    // that flooded the semantic tier ran through exactly that blind spot).
-    const knowledge = await storage.semantic.insert({
-      topic: candidate.topic,
-      content: candidate.content,
-      confidence: candidate.confidence,
-      sourceDigestIds: candidate.sourceDigestIds,
-      sourceEpisodeIds: candidate.sourceEpisodeIds,
-      decayRate: 0.02,
-      supersedes: supersededIds[0] ?? null,
-      supersededBy: null,
-      embedding: candidateEmbedding ?? null,
-      metadata: {},
-      projectId,
-    })
-
-    for (const supersededId of supersededIds) {
-      await storage.semantic.markSuperseded(supersededId, knowledge.id)
-      superseded++
-    }
-
-    // SQL derives_from associations
-    for (const digestId of candidate.sourceDigestIds) {
-      await storage.associations.insert({
-        sourceId: digestId,
-        sourceType: 'digest',
-        targetId: knowledge.id,
-        targetType: 'semantic',
-        edgeType: 'derives_from',
-        strength: 0.8,
-        lastActivated: null,
-        metadata: {},
-      })
-    }
-
-    // --- Neo4j: Semantic Memory node ---
-    if (graphAvailable && graph?.runCypherWrite) {
-      try {
-        const now = new Date().toISOString()
-
-        // AUDIT FIX: validFrom = earliest source episode, not consolidation time
-        let validFrom = now
-        if (storage.episodes.findEarliestInDigests) {
-          const earliest = await storage.episodes.findEarliestInDigests(candidate.sourceDigestIds)
-          if (earliest) validFrom = earliest.createdAt.toISOString()
-        }
-
-        // Step 1: Create Semantic Memory node
-        const nodeResult = await graph.runCypherWrite(`
-          MERGE (s:Memory {id: $semanticId})
-          SET s.memoryType = 'semantic',
-              s.label = $label,
-              s.topic = $topic,
-              s.createdAt = $now,
-              s.validFrom = $validFrom,
-              s.validUntil = null,
-              s.pageRank = 0.0,
-              s.betweenness = 0.0,
-              s.isBridge = false,
-              s.activationCount = 0
-        `, {
-          semanticId: knowledge.id,
-          label: `${candidate.topic}: ${candidate.content.slice(0, 60)}`,
-          topic: candidate.topic,
-          now,
-          validFrom,
-        })
-        graphNodesCreated += extractCounters(nodeResult).nodesCreated
-
-        // Step 2: DERIVES_FROM edges to source digests
-        const derivesResult = await graph.runCypherWrite(`
-          UNWIND $sourceDigestIds AS digestId
-          MATCH (dig:Memory {id: digestId})
-          MATCH (s:Memory {id: $semanticId})
-          MERGE (s)-[r:DERIVES_FROM]->(dig)
-          ON CREATE SET r.weight = 0.8,
-                        r.createdAt = $now,
-                        r.lastTraversed = null,
-                        r.traversalCount = 0
-        `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
-        graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
-
-        // Step 3: Context of the source digests that the fact's own text names
-        const ctxLinks = await linkFactContext(graph, {
-          semanticId: knowledge.id,
-          text: `${candidate.topic} ${candidate.content}`,
-          sourceDigestIds: candidate.sourceDigestIds,
-          now,
-        })
-        graphEdgesCreated += ctxLinks.relationshipsCreated
-        graphContextKept += ctxLinks.kept
-        graphContextDropped += ctxLinks.dropped
-
-        // Step 4: Supersession → CONTRADICTS + validUntil + forgottenAt.
-        // Spreading activation skips only nodes with forgottenAt; without it
-        // the retired fact keeps relaying until the decay pass's tombstone
-        // sync. coalesce keeps an earlier forget time.
-        for (const supersededId of supersededIds) {
-          await graph.runCypherWrite(`
-            MATCH (old:Memory {id: $oldId})
-            MATCH (new:Memory {id: $newId})
-            SET old.validUntil = $now,
-                old.forgottenAt = coalesce(old.forgottenAt, $now)
-            MERGE (new)-[r:CONTRADICTS]->(old)
-            ON CREATE SET r.weight = 1.0,
-                          r.createdAt = $now,
-                          r.lastTraversed = null,
-                          r.traversalCount = 0
-          `, { oldId: supersededId, newId: knowledge.id, now })
-          graphEdgesCreated++
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.warn(`[deep-sleep] Neo4j graph update failed for ${knowledge.id}: ${msg}`)
-      }
-    }
-
-    promoted++
+    await storage.digests.markFactsExtracted(digest.id, new Date())
   }
 
-  // Process procedural candidates
-  const proceduralCandidates = allCandidates.filter(c => c.kind === 'procedural')
-  for (const candidate of proceduralCandidates) {
-    const searchQuery = `${candidate.trigger ?? candidate.topic} ${candidate.content}`
-
-    // Embed the same trigger+procedure text that FTS indexes and the
-    // embed-backfill CLI use, so stored vectors stay comparable across
-    // write paths. Best-effort: on failure the row lands with null and
-    // stays reachable via BM25 until a backfill fills the vector.
-    let proceduralEmbedding: number[] | undefined
-    if (intelligence?.embed) {
-      try {
-        proceduralEmbedding = await intelligence.embed(searchQuery)
-      } catch {
-        // fall through — insert without embedding
-      }
-    }
-
-    // Same rule as the semantic tier: search()/searchByTrigger() scores are
-    // fused ranks, a constant or a max-normalised BM25, never a cosine, so the
-    // paraphrase check uses findNearest's raw cosine and the lexical fallback
-    // is an exact procedure match after normalisation.
-    const nearest = proceduralEmbedding
-      ? await storage.procedural.findNearest(proceduralEmbedding, 3)
-      : []
-    const textHits = await storage.procedural.search(candidate.content, { limit: 3 })
-    const match =
-      nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
-      textHits.find(e => sameContent(e.item.procedure, candidate.content))
-
-    if (match) {
-      await storage.procedural.incrementObservation(match.item.id)
-      continue
-    }
-
-    const proceduralRecord = await storage.procedural.insert({
-      category: (candidate.trigger as 'workflow' | 'preference' | 'habit' | 'pattern' | 'convention') ?? 'preference',
-      trigger: candidate.trigger ?? candidate.topic,
-      procedure: candidate.content,
-      confidence: candidate.confidence,
-      observationCount: 1,
-      lastObserved: new Date(),
-      firstObserved: new Date(),
-      decayRate: 0.01,
-      sourceEpisodeIds: candidate.sourceEpisodeIds,
-      embedding: proceduralEmbedding ?? null,
-      metadata: {},
-      projectId: null,
-    })
-
-    // --- Neo4j: Procedural Memory node ---
-    if (graphAvailable && graph?.runCypherWrite) {
-      try {
-        const now = new Date().toISOString()
-        const nodeResult = await graph.runCypherWrite(`
-          MERGE (p:Memory {id: $proceduralId})
-          SET p.memoryType = 'procedural',
-              p.label = $label,
-              p.triggerPattern = $triggerPattern,
-              p.createdAt = $now,
-              p.validFrom = $now,
-              p.validUntil = null,
-              p.pageRank = 0.0,
-              p.betweenness = 0.0,
-              p.isBridge = false,
-              p.activationCount = 0
-        `, {
-          proceduralId: proceduralRecord.id,
-          label: `${candidate.trigger}: ${candidate.content.slice(0, 60)}`,
-          triggerPattern: candidate.trigger ?? candidate.topic,
-          now,
-        })
-        graphNodesCreated += extractCounters(nodeResult).nodesCreated
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        console.warn(`[deep-sleep] Neo4j graph update failed for procedural ${proceduralRecord.id}: ${msg}`)
-      }
-    }
-
-    procedural++
-  }
-
-  if (kindMissing > 0) {
+  if (totals.kindMissing > 0) {
     console.warn(
-      `[deep-sleep] supersession judge gave no valid kind for ${kindMissing} conflict(s) this run; none retired anything`,
+      `[deep-sleep] supersession judge gave no valid kind for ${totals.kindMissing} conflict(s) this run; none retired anything`,
     )
   }
 
+  const { graphNodesCreated, graphEdgesCreated, graphContextKept, graphContextDropped, ...tierCounts } = totals
+  const graphAvailable = ctx.graphAvailable
   return {
     cycle: 'deep',
-    promoted,
-    procedural,
-    deduplicated,
-    superseded,
-    supersessionJudged,
-    stale,
-    tie,
-    keptNotState,
-    kindMissing,
+    ...tierCounts,
+    extractionFailed,
+    noEpisodes,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
     graphContextKept: graphAvailable ? graphContextKept : undefined,
