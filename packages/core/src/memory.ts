@@ -633,7 +633,6 @@ export class Memory {
     opts?: {
       embedding?: number[]
       tokenBudget?: number
-      asOf?: Date
       strategyOverride?: Partial<RecallStrategy>
       /** The caller's project: ranks its memories (and its product group's)
        *  higher; other projects' memories are still returned. */
@@ -703,7 +702,6 @@ export class Memory {
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
       graph: this._graph,
-      asOf: opts?.asOf,
       ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
       ...(opts?.projectStrict === true ? { projectStrict: true } : {}),

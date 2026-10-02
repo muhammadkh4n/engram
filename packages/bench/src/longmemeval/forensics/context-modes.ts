@@ -75,7 +75,7 @@ export interface ProductionRecallOptions {
  * The options the `memory_recall` tool handler in
  * packages/mcp/src/server-core.ts passes to `Memory.recall`: `projectId` only
  * when the caller supplies one, `synthesize` only when the caller asks (never
- * here). No `strategyOverride`, `tokenBudget`, `asOf` or `now`, so the
+ * here). No `strategyOverride`, `tokenBudget` or `now`, so the
  * intent-mode strategy's own result cap and token budget apply.
  */
 export function productionRecallOptions(projectId?: string): ProductionRecallOptions {

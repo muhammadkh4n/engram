@@ -132,13 +132,6 @@ export interface RecallOpts {
    */
   projectUnboosted?: boolean
   /**
-   * Return memories valid at this point in time. When set:
-   * - Semantic: uses searchAtTime instead of search
-   * - Episodes/digests: passes beforeDate to SearchOptions
-   * Half-open [valid_from, valid_until). valid_until is EXCLUSIVE.
-   */
-  asOf?: Date
-  /**
    * The caller's project id. Ranks like `project` and wins over it when
    * both are set; it filters only together with `projectStrict`.
    */
