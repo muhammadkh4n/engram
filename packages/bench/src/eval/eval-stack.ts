@@ -24,6 +24,7 @@ import {
   storageClient,
   type GuardStats,
 } from './write-guards.js'
+import { assertPinsClean, installFetchGuard, type EvalPins } from './pins.js'
 
 // --- env file -------------------------------------------------------------
 
@@ -188,6 +189,8 @@ export interface EvalStack {
   graph: boolean
   /** Blocked write attempts so far; any count fails the run. */
   guards: GuardStats
+  /** The recorded model replies recall is answered from, when the stack was built with them. */
+  pins: EvalPins | null
   /**
    * One recall with the options memory_recall builds from `args`, plus
    * reconsolidate: false and `now` as the reference date. The memory's
@@ -219,13 +222,20 @@ function payloadItems(result: EvalRecallResult): EvalItem[] {
   }))
 }
 
-async function buildIntelligence(mods: EvalModules, env: NodeJS.ProcessEnv): Promise<IntelligenceAdapter> {
+async function buildIntelligence(
+  mods: EvalModules,
+  env: NodeJS.ProcessEnv,
+  pins: EvalPins | undefined,
+): Promise<IntelligenceAdapter> {
   const { timeZone } = mods.serverCore.parseTimeZoneEnv(env)
-  const base = mods.openaiIntelligence({
+  const raw = mods.openaiIntelligence({
     apiKey: requireEnv(env, 'OPENAI_API_KEY'),
     ...mods.serverCore.chatIntelligenceOptionsFromEnv(env),
     timeZone,
   })
+  // Wrapped before the local reranker is attached: the remote reranker is a
+  // model call and gets pinned, the ONNX one is part of the code under test.
+  const base = pins ? pins.wrap(raw) : raw
   if (env['ENGRAM_RERANK_LOCAL'] !== 'true') return base
   // The server falls back to the OpenAI reranker when the local one fails to
   // load; an evaluation must not score a different reranker, so it throws.
@@ -256,7 +266,7 @@ function buildGraph(mods: EvalModules, env: NodeJS.ProcessEnv, guards: GuardStat
  */
 export async function buildEvalStack(
   mods: EvalModules,
-  opts: { calibrationQuery: string; now: Date; env?: NodeJS.ProcessEnv },
+  opts: { calibrationQuery: string; now: Date; env?: NodeJS.ProcessEnv; pins?: EvalPins },
 ): Promise<EvalStack> {
   const env = opts.env ?? process.env
   const sc = mods.serverCore
@@ -265,11 +275,38 @@ export async function buildEvalStack(
   const supabaseUrl = requireEnv(env, 'SUPABASE_URL')
   const supabaseKey = requireEnv(env, 'SUPABASE_KEY')
 
+  const pins = opts.pins
+  const restoreFetch = pins?.mode === 'strict'
+    ? installFetchGuard([new URL(supabaseUrl).origin], pins.stats)
+    : () => undefined
+  try {
+    return await assembleEvalStack(mods, { ...opts, env, supabaseUrl, supabaseKey, supersession, restoreFetch })
+  } catch (err) {
+    restoreFetch()
+    throw err
+  }
+}
+
+async function assembleEvalStack(
+  mods: EvalModules,
+  opts: {
+    calibrationQuery: string
+    now: Date
+    env: NodeJS.ProcessEnv
+    pins?: EvalPins
+    supabaseUrl: string
+    supabaseKey: string
+    supersession: unknown
+    restoreFetch: () => void
+  },
+): Promise<EvalStack> {
+  const { env, pins, supabaseUrl, supabaseKey, supersession, restoreFetch } = opts
+  const sc = mods.serverCore
   const guards = createGuardStats()
   const rawStorage = new mods.PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   guardPostgrestClient(storageClient(rawStorage), guards)
   const storage = await sc.maybeWithRecallEngine(rawStorage, supabaseUrl)
-  const intelligence = await buildIntelligence(mods, env)
+  const intelligence = await buildIntelligence(mods, env, pins)
   const graph = buildGraph(mods, env, guards)
 
   const memory = mods.createMemory({
@@ -290,6 +327,7 @@ export async function buildEvalStack(
   const stack: EvalStack = {
     graph: graph !== null,
     guards,
+    pins: pins ?? null,
     async recall(query, args, now) {
       const argOpts = sc.recallOptionsFromArgs({ ...args, query })
       if ('error' in argOpts) throw new Error(argOpts.error)
@@ -297,6 +335,7 @@ export async function buildEvalStack(
       resetSensory()
       const result = await memory.recall(query.trim(), recallOpts)
       assertNoBlockedCalls(guards)
+      if (pins) assertPinsClean(pins)
       return {
         query,
         recallOpts,
@@ -308,7 +347,11 @@ export async function buildEvalStack(
       }
     },
     async close() {
-      await graph?.dispose?.()
+      try {
+        await graph?.dispose?.()
+      } finally {
+        restoreFetch()
+      }
     },
   }
 
@@ -334,9 +377,14 @@ export async function openEvalStack(opts: {
   envFile: string
   calibrationQuery: string
   now: Date
+  pins?: EvalPins
 }): Promise<EvalStack> {
   const vars = guardRecallEnv(parseSystemdEnvFile(fs.readFileSync(opts.envFile, 'utf8')))
   applyEvalEnv(vars)
   const mods = await loadEvalModules(opts.engramDist)
-  return buildEvalStack(mods, { calibrationQuery: opts.calibrationQuery, now: opts.now })
+  return buildEvalStack(mods, {
+    calibrationQuery: opts.calibrationQuery,
+    now: opts.now,
+    ...(opts.pins ? { pins: opts.pins } : {}),
+  })
 }
