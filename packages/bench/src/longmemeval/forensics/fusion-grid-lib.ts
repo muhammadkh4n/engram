@@ -13,7 +13,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { createHash } from 'node:crypto'
-import { validateFusionOverride, type FusionConfig, type IntelligenceAdapter } from '@engram-mem/core'
+import { parseEventDate, validateFusionOverride, type FusionConfig, type IntelligenceAdapter } from '@engram-mem/core'
 import { parseContextMode, runSweepRecall, type FormattedContextFields, type SweepMemory } from './context-modes.js'
 import { parseEmbedArgs, parseRerankerArgs } from './reranker-meta-lib.js'
 import {
@@ -29,6 +29,7 @@ import {
   type RunIdentity,
 } from './sweep-checkpoint-lib.js'
 import type { LongMemEvalQuestionType } from '../types.js'
+import { expansionKey } from '../../expansion-key.js'
 import type { EmbedBackend, RerankerBackend } from '../../types.js'
 
 export const DEFAULT_CELL = 'default'
@@ -144,30 +145,35 @@ export function parseGridArgs(argv: readonly string[]): GridArgs {
 }
 
 /**
- * Memoise the recall-time model calls for one question: `embed`,
- * `expandQuery` and `generateHypotheticalDoc` by input text, `rerank` by the
- * whole call, (query, ordered document ids). A settled failure is memoised
- * too, so every cell sees the same outcome. Methods the base lacks stay absent, because recall checks
- * for their presence; every other method passes through.
+ * Memoise the recall-time model calls for one question: `embed` and
+ * `generateHypotheticalDoc` by input text, `expandQuery` by text plus
+ * reference date (its options are forwarded), `rerank` by the whole call,
+ * (query, ordered document ids). A settled failure is memoised too, so every
+ * cell sees the same outcome. Methods the base lacks stay absent, because
+ * recall checks for their presence; every other method passes through.
  */
 export function memoizeIntelligence(base: IntelligenceAdapter): IntelligenceAdapter {
   const out: IntelligenceAdapter = { ...base }
-  if (base.embed) out.embed = memoByText(base.embed.bind(base))
-  if (base.expandQuery) out.expandQuery = memoByText(base.expandQuery.bind(base))
-  if (base.generateHypotheticalDoc) out.generateHypotheticalDoc = memoByText(base.generateHypotheticalDoc.bind(base))
+  if (base.embed) out.embed = memoBy(base.embed.bind(base), (text) => text)
+  if (base.expandQuery) out.expandQuery = memoBy(base.expandQuery.bind(base), expansionKey)
+  if (base.generateHypotheticalDoc) out.generateHypotheticalDoc = memoBy(base.generateHypotheticalDoc.bind(base), (text) => text)
   if (base.rerank) out.rerank = memoRerank(base.rerank.bind(base))
   return out
 }
 
-function memoByText<T>(fn: (text: string) => Promise<T>): (text: string) => Promise<T> {
+function memoBy<A extends unknown[], T>(
+  fn: (...args: A) => Promise<T>,
+  keyOf: (...args: A) => string,
+): (...args: A) => Promise<T> {
   const cache = new Map<string, Promise<T>>()
-  return (text) => {
-    let hit = cache.get(text)
+  return (...args) => {
+    const key = keyOf(...args)
+    let hit = cache.get(key)
     if (!hit) {
-      hit = fn(text)
+      hit = fn(...args)
       // A cached rejection may never be awaited again; mark it handled.
       hit.catch(() => {})
-      cache.set(text, hit)
+      cache.set(key, hit)
     }
     return hit
   }
@@ -199,6 +205,8 @@ export interface GridQuestion {
   question_id: string
   question_type: LongMemEvalQuestionType
   question: string
+  /** The dataset's question date: recall's reference date, as the server's is the request time. */
+  question_date: string
   answer_session_ids: string[]
 }
 
@@ -247,6 +255,7 @@ export async function recallCells(
       synthesize: false,
       fusion: cell.fusion as Record<string, number>,
       reconsolidate: false,
+      now: parseEventDate(q.question_date),
     })
     const evalMs = Date.now() - start
     const recallAtK: Record<number, boolean> = {}

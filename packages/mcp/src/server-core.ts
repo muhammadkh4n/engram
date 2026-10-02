@@ -32,7 +32,7 @@ import type {
   RecallOutputPolicy,
 } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
+import { openaiIntelligence, assertTimeZone, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
@@ -231,6 +231,21 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
   return out
 }
 
+/**
+ * ENGRAM_TIMEZONE: the IANA zone whose calendar date query expansion states as
+ * today's date, so "yesterday" means the user's yesterday when the server runs
+ * on UTC. Read once at startup; unset or blank → `UTC`. A name Intl rejects
+ * fails startup instead of the first recall.
+ */
+export function parseTimeZoneEnv(env: NodeJS.ProcessEnv = process.env): { timeZone: string } {
+  const name = env['ENGRAM_TIMEZONE']?.trim() || 'UTC'
+  try {
+    return { timeZone: assertTimeZone(name) }
+  } catch {
+    throw new Error(`ENGRAM_TIMEZONE must be an IANA time zone name such as "Asia/Karachi", got "${name}"`)
+  }
+}
+
 const DEFAULT_SALIENCE_THRESHOLD = 0.7
 
 /**
@@ -322,6 +337,7 @@ export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env
 
 async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyAtStartup()
+  const { timeZone } = parseTimeZoneEnv()
   const recallLog = recallLogFromEnv()
   if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
 
@@ -368,6 +384,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
     ...(chatApiKey ? { chatApiKey } : {}),
     ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
     ...chatReasoning,
+    timeZone,
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local ONNX
   // cross-encoder over the openaiIntelligence adapter so the rerank stage

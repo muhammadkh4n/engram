@@ -33,8 +33,10 @@ const QUESTION: GridQuestion = {
   question_id: QID,
   question_type: 'single-session-user',
   question: 'Where did I move the herb planters?',
+  question_date: '2023/05/27 (Sat) 14:05',
   answer_session_ids: ['sess_a'],
 }
+const QUESTION_NOW = new Date('2023-05-27T14:05:00Z')
 
 const LINES = {
   m1: '- [episode · user · 2023-05-20] I moved the herb planters to the balcony last weekend.',
@@ -201,6 +203,21 @@ describe('memoizeIntelligence', () => {
     expect(counts).toMatchObject({ embed: 2, expandQuery: 1, generateHypotheticalDoc: 1 })
   })
 
+  it('forwards expandQuery options and keys expansion by text plus reference date', async () => {
+    const seen: Array<Date | undefined> = []
+    const memo = memoizeIntelligence({
+      async expandQuery(q, opts) { seen.push(opts?.now); return [`${q} @ ${opts?.now?.toISOString() ?? 'undated'}`] },
+    })
+    const may7 = new Date('2023-05-07T10:00:00Z')
+    const may8 = new Date('2023-05-08T10:00:00Z')
+
+    expect(await memo.expandQuery!('last week', { now: may7 })).toEqual(['last week @ 2023-05-07T10:00:00.000Z'])
+    expect(await memo.expandQuery!('last week', { now: may8 })).toEqual(['last week @ 2023-05-08T10:00:00.000Z'])
+    expect(await memo.expandQuery!('last week')).toEqual(['last week @ undated'])
+    expect(await memo.expandQuery!('last week', { now: new Date(may7.getTime()) })).toEqual(['last week @ 2023-05-07T10:00:00.000Z'])
+    expect(seen).toEqual([may7, may8, undefined])
+  })
+
   // Mirrors the real rerankers: a one-document call returns 1.0 without
   // scoring, only the first 50 documents are scored, and a score depends on
   // the batch it was computed in.
@@ -267,9 +284,15 @@ describe('recallCells', () => {
     const memory = stubMemory()
     await recallCells(memory, QUESTION, CELLS, { episodes: 12, ingestMs: 40 })
     expect(memory.calls).toEqual([
-      { strategyOverride: { fusion: {} }, reconsolidate: false },
-      { strategyOverride: { fusion: { lexicalWeight: 0.8 } }, reconsolidate: false },
+      { strategyOverride: { fusion: {} }, reconsolidate: false, now: QUESTION_NOW },
+      { strategyOverride: { fusion: { lexicalWeight: 0.8 } }, reconsolidate: false, now: QUESTION_NOW },
     ])
+  })
+
+  it('passes no reference date when the question date does not parse', async () => {
+    const memory = stubMemory()
+    await recallCells(memory, { ...QUESTION, question_date: 'unknown' }, CELLS, { episodes: 12, ingestMs: 40 })
+    expect(memory.calls.map((c) => 'now' in (c as object))).toEqual([false, false])
   })
 
   it('produces different rows for cells with different weights, sharing the ingest stats', async () => {

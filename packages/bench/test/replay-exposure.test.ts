@@ -30,6 +30,8 @@ const recallLine = (step: number, queryId: string, ids: string[]) =>
 const episodeLine = (step: number, id: string) =>
   JSON.stringify({ step, at: '2026-09-30T10:00:00.000Z', kind: 'episode', pins_sha256: 'x', id, inserted: true, embedding: 'stored' })
 
+
+const REFERENCE_DATE = new Date('2026-10-02T04:00:00Z')
 describe('gini', () => {
   it('is 0 for a uniform exposure', () => {
     expect(gini([3, 3, 3, 3])).toBe(0)
@@ -240,11 +242,12 @@ describe('probe', () => {
       violations: () => [],
       write: (record, formatted) => written.push({ record, formatted }),
       now: () => new Date('2026-10-01T00:00:00Z'),
+      referenceDate: REFERENCE_DATE,
     })
     expect(n).toBe(2)
     expect(calls).toEqual([
-      { query: 'reranker decision', opts: { projectId: 'engram', reconsolidate: false } },
-      { query: 'shared prefs', opts: { reconsolidate: false } },
+      { query: 'reranker decision', opts: { projectId: 'engram', reconsolidate: false, now: REFERENCE_DATE } },
+      { query: 'shared prefs', opts: { reconsolidate: false, now: REFERENCE_DATE } },
     ])
     const first = written[0]!
     expect(first.formatted).toBe('## Recalled\n- [episode] content of m0\n')
@@ -266,6 +269,7 @@ describe('probe', () => {
       beforeQuery: () => {},
       violations: () => (calls >= 2 ? ['strict pin misses [{"bucket":"embedQuery"}]'] : []),
       write: (record) => written.push(record),
+      referenceDate: REFERENCE_DATE,
     })
     await expect(run).rejects.toBeInstanceOf(ReplayStopped)
     await expect(run).rejects.toThrow(/step 1: strict pin misses/)
@@ -282,6 +286,7 @@ describe('probe', () => {
       beforeQuery: () => events.push('reset'),
       violations: () => [],
       write: () => {},
+      referenceDate: REFERENCE_DATE,
     })
     expect(events).toEqual(['reset', 'recall a', 'reset', 'recall b', 'reset', 'recall c'])
   })
@@ -321,6 +326,7 @@ describe('probe', () => {
       beforeQuery: reset ? resetSensory : () => {},
       violations: () => [],
       write: (record) => byQuery.set(record.query, record.memories.map((m) => m.id)),
+      referenceDate: REFERENCE_DATE,
     })
     return byQuery
   }
@@ -347,5 +353,17 @@ describe('probe', () => {
     expect(args).toMatchObject({ queries: 'q.json', arm: 'NB', pinsMode: 'strict', env: { ENGRAM_RECALL_FUSION: '{"accessBoostCap":0}' } })
     expect(() => parseProbeArgs(['--queries', 'q.json'])).toThrow(/--target is required/)
     expect(() => parseProbeArgs(['--conversation-key', 'logged'])).toThrow(/unknown flag --conversation-key/)
+  })
+
+  it('parses --now as the run reference date and refuses a value without a zone', () => {
+    const base = [
+      '--queries', 'q.json', '--target', 'http://127.0.0.1:3901', '--key-env', 'K', '--engram-dist', '/d',
+      '--arm', 'NB', '--pins', 'p.json', '--out', 'o',
+    ]
+    expect(parseProbeArgs(base).referenceDate).toBeUndefined()
+    expect(parseProbeArgs([...base, '--now', '2026-10-02T09:00:00+05:00']).referenceDate).toEqual(new Date('2026-10-02T04:00:00Z'))
+    for (const bad of ['2026-10-02', '2026-10-02T09:00:00', 'yesterday', '2026-13-40T09:00:00Z']) {
+      expect(() => parseProbeArgs([...base, '--now', bad])).toThrow(/--now expects an ISO 8601 instant/)
+    }
   })
 })

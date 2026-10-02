@@ -106,6 +106,8 @@ Search memory for content relevant to a query.
 
 `token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset).
 
+The request time is the recall's reference date. Query expansion states it to the model as today's date, so a relative phrase ("last week", "yesterday") expands to the dates it means. The date is the calendar day in `ENGRAM_TIMEZONE`, an IANA zone name such as `Asia/Karachi` (default `UTC`), read once at startup. A name the runtime does not know fails startup.
+
 **Returns:** Formatted memories with attribution (role, date, session). Includes direct matches and associated memories found via graph walk, in the section order and under the prefix rule described in the recall output policy above.
 
 With `ENGRAM_RECALL_TIMING=1` the server writes one `[recall]` line per call to stderr: stage timings in milliseconds (`total expand search hyde pattern mmr rerank graph`, then any `graph.*` sub-stages sorted; a stage that did not run is absent), `items=` (the ranked pool), `chars=`, `emitted=` (Recalled memories in the payload), `tokens=` (estimated tokens of the payload) and `truncated=1` when the token budget cut it short.

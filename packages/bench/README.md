@@ -139,10 +139,11 @@ vectors at) through the sweep's own identity builder, `meta` records `embedBacke
 
 Cells differ only by their weights:
 
-- each recall passes `{ strategyOverride: { fusion }, reconsolidate: false }`, so no cell records access
-  or edges for the next;
-- a per-question memo wraps the intelligence adapter: `embed`, `expandQuery` and
-  `generateHypotheticalDoc` by input text, `rerank` by (query, ordered document ids). A repeated slate
+- each recall passes `{ strategyOverride: { fusion }, reconsolidate: false, now }`, so no cell records access
+  or edges for the next; `now` is the question date, as the server passes the request time and the
+  formatted sweep passes the question date;
+- a per-question memo wraps the intelligence adapter: `embed` and `generateHypotheticalDoc` by input text,
+  `expandQuery` by text plus reference date (its options forwarded), `rerank` by (query, ordered document ids). A repeated slate
   reuses that call's scores; any other slate goes to the reranker whole, as a direct recall does, so the
   candidate cap, the single-document guard and the batching match production. A failure is memoised too;
 - the memory's sensory buffer (primed topics, working items, active intent) is reset to its post-ingest
@@ -192,13 +193,18 @@ npx tsx packages/bench/src/replay/replay.ts \
 - **Episodes** are inserted as rows through the arm's PostgREST client, keeping the window's id, embedding
   and `created_at`, with no embed or chat call. An id already in the copy is left as it is and logged as
   `inserted: false`. A missing embedding is inserted as NULL and counted.
-- **Recalls** run `memory.recall(query, { projectId, conversationKey, reconsolidate: true })` on one long-lived
+- **Recalls** run `memory.recall(query, { projectId, conversationKey, reconsolidate: true, now })` on one long-lived
   memory, so priming carries from one recall to the next. `--conversation-key logged` sends the log's
   `conversation_id`; `sessionize` groups recalls by project with a 30-minute inactivity gap, because clients
   send no conversation id today; `none` (the default) sends no key. A build without per-conversation recall
-  state ignores the key.
+  state ignores the key. `now` is the logged recall's own `ts`, as the server passes the request time, so
+  query expansion resolves relative dates against the day the query was asked. `ENGRAM_TIMEZONE` (or
+  `--env ENGRAM_TIMEZONE=…`) sets the zone of that day as on the server; a build without the setting refuses it.
 - **Pins:** `embed`, `embedQuery`, `expandQuery` and `generateHypotheticalDoc` are memoised per text in the
-  pins file, one JSON object per method (`embed`, `embedQuery`, `expand`, `hyde`) keyed by input text. The first arm runs `--pins-mode fill`; later arms run `strict`, where
+  pins file, one JSON object per method (`embed`, `embedQuery`, `expand`, `hyde`) keyed by input text.
+  `expand` keys a dated call by the text, a NUL and the reference instant (`now`, ISO), and forwards the date
+  to the model; a text-only key, as in pins files written before recall passed a date, serves only calls
+  with no date. The first arm runs `--pins-mode fill`; later arms run `strict`, where
   a miss throws without calling the model. Every other model method is blocked and counted. A strict miss or a
   blocked call stops the run (exit 4), because the engine swallows expansion and HyDE errors.
 - **Outputs:** `<out>/steps.jsonl`, one line per event: `step`, `kind`, `pins_sha256`, and for recalls
@@ -219,13 +225,16 @@ npx tsx packages/bench/src/replay/probe.ts \
   --queries ./probe.json \
   --target http://127.0.0.1:3901 --key-env REPLAY_PGRST_KEY \
   --engram-dist /path/to/engram-checkout --arm control [--env K=V …] \
-  --pins ./pins.json [--pins-mode fill|strict] \
+  --pins ./pins.json [--pins-mode fill|strict] [--now 2026-10-02T09:00:00Z] \
   --out ./probe
 ```
 
 - Same build loading, stack composition, `--env` handling, copy guards and pins as the replay. Each query runs
-  `memory.recall(q, { projectId: p, reconsolidate: false })` with no conversation key, on a fresh memory, so
-  in-process priming from the replay does not carry over.
+  `memory.recall(q, { projectId: p, reconsolidate: false, now })` with no conversation key, on a fresh memory,
+  so in-process priming from the replay does not carry over.
+- `now` is one reference date for the whole run: `--now` (an ISO 8601 instant with a zone), else the run's
+  start. The meta records it as `identity.reference_date`. Arms that share a strict pins file pass the same
+  `--now`, since expansion pins are keyed by it.
 - The sensory buffer (working items, primed topics, intent) is restored to its state at memory build before
   every query. Recall primes topics even with reconsolidation off, and that priming lifts rows in the next
   recalls; without the reset each arm's answers would depend on the probe's own query order. The meta records

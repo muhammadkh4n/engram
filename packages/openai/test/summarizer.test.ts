@@ -419,9 +419,10 @@ describe('OpenAISummarizer', () => {
       expect(await expand(null)).toEqual([])
     })
 
-    async function expansionPrompt(opts?: { now?: Date }): Promise<string> {
+    async function expansionPrompt(opts?: { now?: Date }, timeZone?: string): Promise<string> {
       mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: '["last week"]' } }] })
-      await new OpenAISummarizer({ apiKey: 'test-key' }).expandQuery('What did we discuss last week?', opts)
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key', ...(timeZone !== undefined ? { timeZone } : {}) })
+      await summarizer.expandQuery('What did we discuss last week?', opts)
       const body = mockChatCreate.mock.calls.at(-1)![0] as { messages: { role: string; content: string }[] }
       return body.messages[0]!.content
     }
@@ -443,6 +444,19 @@ describe('OpenAISummarizer', () => {
       expect(prompt).not.toContain('plausible concrete forms')
       expect(prompt).not.toMatch(/\b(19|20)\d\d\b/)
       expect(prompt).not.toMatch(/Monday|Tuesday|May 7/)
+    })
+
+    it('states the calendar date of the reference instant in the configured zone', async () => {
+      const now = new Date('2026-10-01T22:00:00Z')
+
+      expect((await expansionPrompt({ now }, 'Asia/Karachi')).split('\n')[0]).toBe("Today's date is 2026-10-02.")
+      expect((await expansionPrompt({ now }, 'UTC')).split('\n')[0]).toBe("Today's date is 2026-10-01.")
+      expect((await expansionPrompt({ now })).split('\n')[0]).toBe("Today's date is 2026-10-01.")
+    })
+
+    it('refuses an unknown time zone when constructed', () => {
+      expect(() => new OpenAISummarizer({ apiKey: 'test-key', timeZone: 'Mars/Olympus_Mons' }))
+        .toThrow(/not a valid IANA time zone name: "Mars\/Olympus_Mons"/)
     })
 
     it('treats an invalid reference date as absent', async () => {

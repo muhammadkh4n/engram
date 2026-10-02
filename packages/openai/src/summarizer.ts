@@ -14,6 +14,7 @@ import type {
 } from '@engram-mem/core'
 import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
+import { assertTimeZone, calendarDateIn } from './time-zone.js'
 
 export interface OpenAISummarizerOptions {
   apiKey: string
@@ -38,6 +39,9 @@ export interface OpenAISummarizerOptions {
   /** Tokens added to every call's `max_tokens` in `'default'` reasoning mode.
    *  Default 2048. Ignored otherwise. */
   reasoningHeadroom?: number
+  /** IANA time zone whose calendar date query expansion states as today's
+   *  date. Default `UTC`. An invalid name throws here. */
+  timeZone?: string
 }
 
 export type ChatReasoningMode = 'off' | 'default'
@@ -279,8 +283,10 @@ export class OpenAISummarizer {
   private readonly providerPrefs: Record<string, unknown> | undefined
   private readonly reasoning: ChatReasoningMode | undefined
   private readonly reasoningHeadroom: number
+  private readonly timeZone: string
 
   constructor(opts: OpenAISummarizerOptions) {
+    this.timeZone = assertTimeZone(opts.timeZone ?? 'UTC')
     this.client = new OpenAI({ apiKey: opts.apiKey, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) })
     this.model = opts.model ?? DEFAULT_CHAT_MODEL
     this.contextualizeModel = opts.model ?? 'gpt-4.1-mini'
@@ -450,7 +456,7 @@ export class OpenAISummarizer {
     const response = await this.chatCreate('expandQuery', {
       model: this.model,
       messages: [
-        { role: 'system', content: expansionSystemPrompt(opts?.now) },
+        { role: 'system', content: expansionSystemPrompt(opts?.now, this.timeZone) },
         { role: 'user', content: query },
       ],
       max_tokens: 100,
@@ -940,18 +946,14 @@ function isCandidateList(value: unknown): boolean {
 const MAX_EXPANSION_TERMS = 5
 
 /**
- * The reply should be a JSON array of strings; models also wrap it in prose,
- * a fence, or an object. The first array holding at least one string is used;
- * a reply with none yields no terms.
- */
-/**
  * System prompt for query expansion. With a valid reference date the prompt
- * opens with it (UTC calendar day) and asks for the concrete dates relative
- * phrases resolve to; without one it forbids concrete dates, since any date
- * the model produced would be invented.
+ * opens with it (its calendar day in `timeZone`, so a user's "yesterday"
+ * resolves against the user's own day, not the server's) and asks for the
+ * concrete dates relative phrases resolve to; without one it forbids concrete
+ * dates, since any date the model produced would be invented.
  */
-function expansionSystemPrompt(now: Date | undefined): string {
-  const today = now !== undefined && !Number.isNaN(now.getTime()) ? now.toISOString().slice(0, 10) : null
+function expansionSystemPrompt(now: Date | undefined, timeZone: string): string {
+  const today = now !== undefined && !Number.isNaN(now.getTime()) ? calendarDateIn(now, timeZone) : null
   const temporalRule = today !== null
     ? [
         '2. For temporal queries, include BOTH relative phrases ("last week") AND the',
@@ -988,6 +990,11 @@ function expansionSystemPrompt(now: Date | undefined): string {
   ].join('\n')
 }
 
+/**
+ * The reply should be a JSON array of strings; models also wrap it in prose,
+ * a fence, or an object. The first array holding at least one string is used;
+ * a reply with none yields no terms.
+ */
 function parseExpansionTerms(raw: string): string[] {
   try {
     const terms = extractJsonReply(

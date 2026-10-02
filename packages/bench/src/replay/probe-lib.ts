@@ -37,8 +37,10 @@ export function parseProbeQueries(text: string): ProbeQuery[] {
   })
 }
 
-export function probeRecallOptions(query: ProbeQuery): ArmRecallOptions {
-  return { ...(query.p ? { projectId: query.p } : {}), reconsolidate: false }
+/** `now` is the run's one reference date: every query and every arm of a
+ *  probe expands against the same date, so a strict pins file serves them all. */
+export function probeRecallOptions(query: ProbeQuery, now: Date): ArmRecallOptions {
+  return { ...(query.p ? { projectId: query.p } : {}), reconsolidate: false, now }
 }
 
 export interface ProbeMemory {
@@ -105,6 +107,8 @@ export interface ProbeDeps {
   write(record: ProbeRecord, formatted: string): void
   clock?: () => number
   now?: () => Date
+  /** The reference date every query recalls with. */
+  referenceDate: Date
 }
 
 /** Runs every probe query once, in file order, each after `beforeQuery`; a
@@ -117,7 +121,7 @@ export async function runProbe(deps: ProbeDeps): Promise<number> {
   for (const [i, query] of deps.queries.entries()) {
     deps.beforeQuery()
     const t0 = clock()
-    const result = await deps.aroundRecall(() => deps.recall(query.q.trim(), probeRecallOptions(query)))
+    const result = await deps.aroundRecall(() => deps.recall(query.q.trim(), probeRecallOptions(query, deps.referenceDate)))
     const wallMs = Math.round(clock() - t0)
     const reasons = deps.violations()
     if (reasons.length > 0) throw new ReplayStopped(i, reasons)
@@ -137,11 +141,23 @@ export interface ProbeArgs {
   pins: string
   pinsMode: PinsMode
   out: string
+  /** `--now`: the reference date for every query; the run's start when absent.
+   *  Arms sharing a strict pins file pass the same value. */
+  referenceDate?: Date
 }
 
 const PROBE_FLAGS = new Set([
-  '--queries', '--target', '--key-env', '--engram-dist', '--arm', '--env', '--pins', '--pins-mode', '--out',
+  '--queries', '--target', '--key-env', '--engram-dist', '--arm', '--env', '--pins', '--pins-mode', '--out', '--now',
 ])
+
+function parseReferenceDate(raw: string | undefined): Date | undefined {
+  if (raw === undefined) return undefined
+  const date = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? new Date(raw) : null
+  if (date === null || Number.isNaN(date.getTime())) {
+    throw new Error(`--now expects an ISO 8601 instant with a zone, such as 2026-10-02T09:00:00Z; got ${JSON.stringify(raw)}`)
+  }
+  return date
+}
 
 export function parseProbeArgs(argv: readonly string[]): ProbeArgs {
   const { one, env } = parseFlagValues(argv, PROBE_FLAGS, [
@@ -158,5 +174,6 @@ export function parseProbeArgs(argv: readonly string[]): ProbeArgs {
     pins: one['--pins']!,
     pinsMode: parsePinsMode(one['--pins-mode']),
     out: one['--out']!,
+    ...(one['--now'] !== undefined ? { referenceDate: parseReferenceDate(one['--now'])! } : {}),
   }
 }

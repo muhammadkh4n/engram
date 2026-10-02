@@ -87,11 +87,24 @@ describe('parseWindow and runReplay', () => {
     expect(calls).toEqual(['insert ep-1', 'insert ep-2', 'recall bm25 b parameter', 'recall what reranker do we use'])
   })
 
+  it('passes each logged recall its own time as the reference date', async () => {
+    const events = parseWindow([
+      recall('what shipped yesterday', '2026-10-01T22:00:00Z'),
+      recall('what shipped yesterday', '2026-10-02T09:30:00+05:00'),
+    ].join('\n'))
+    const { deps, recallOpts } = fakeDeps(events)
+    await runReplay(deps)
+    expect(recallOpts.map((o) => (o as { now: Date }).now.toISOString())).toEqual([
+      '2026-10-01T22:00:00.000Z',
+      '2026-10-02T04:30:00.000Z',
+    ])
+  })
+
   it('re-runs a logged recall with reconsolidation on and the logged project', async () => {
     const events = parseWindow(recall('  how is the recall log rotated  ', '2026-09-30T10:00:00Z'))
     const { deps, recallOpts, steps } = fakeDeps(events)
     await runReplay(deps)
-    expect(recallOpts).toEqual([{ projectId: 'engram', reconsolidate: true }])
+    expect(recallOpts).toEqual([{ projectId: 'engram', reconsolidate: true, now: new Date('2026-09-30T10:00:00Z') }])
     expect(steps[0]).toMatchObject({ step: 0, kind: 'recall', query_id: 'r0', conversation_key: null, pins_sha256: 'pins-sha' })
   })
 
@@ -99,7 +112,7 @@ describe('parseWindow and runReplay', () => {
     const events = parseWindow(recall('q', '2026-09-30T10:00:00Z', { conversation_id: 'conv-7' }))
     const logged = fakeDeps(events, { keys: conversationKeys(events, 'logged') })
     await runReplay(logged.deps)
-    expect(logged.recallOpts[0]).toEqual({ projectId: 'engram', conversationKey: 'conv-7', reconsolidate: true })
+    expect(logged.recallOpts[0]).toEqual({ projectId: 'engram', conversationKey: 'conv-7', reconsolidate: true, now: new Date('2026-09-30T10:00:00Z') })
     expect(conversationKeys(events, 'none').size).toBe(0)
   })
 
@@ -204,6 +217,39 @@ describe('pins', () => {
     const sha = pins.flush()
     expect(sha).toBe(sha256(saved))
     expect(parsePins(saved).embed).toEqual({ abc: [3] })
+  })
+
+  it('pins forward expansion options and key expansion by text plus reference date', async () => {
+    const seen: Array<Date | undefined> = []
+    const dated: IntelligenceAdapter = {
+      expandQuery: async (q, opts) => (seen.push(opts?.now), [`${q} @ ${opts?.now?.toISOString() ?? 'undated'}`]),
+    }
+    let saved = ''
+    const pins = createPins(parsePins(null), NO_PINS_FILE_SHA, 'fill', (json) => (saved = json))
+    const wrapped = pins.wrap(dated)
+    const oct1 = new Date('2026-10-01T22:00:00Z')
+    const oct2 = new Date('2026-10-02T22:00:00Z')
+
+    expect(await wrapped.expandQuery!('yesterday', { now: oct1 })).toEqual(['yesterday @ 2026-10-01T22:00:00.000Z'])
+    expect(await wrapped.expandQuery!('yesterday', { now: oct2 })).toEqual(['yesterday @ 2026-10-02T22:00:00.000Z'])
+    expect(await wrapped.expandQuery!('yesterday', { now: new Date(oct1.getTime()) })).toEqual(['yesterday @ 2026-10-01T22:00:00.000Z'])
+    expect(seen).toEqual([oct1, oct2])
+    pins.flush()
+    expect(Object.keys(parsePins(saved).expand)).toEqual([
+      'yesterday\u00002026-10-01T22:00:00.000Z',
+      'yesterday\u00002026-10-02T22:00:00.000Z',
+    ])
+  })
+
+  it('serves a text-only pin written before dates were passed to undated calls only', async () => {
+    const counter = { n: 0 }
+    const pins = createPins(parsePins(JSON.stringify({ expand: { 'last week': ['old pin'] } })), 'sha0', 'strict', () => {})
+    const wrapped = pins.wrap(intel(counter))
+
+    await expect(wrapped.expandQuery!('last week')).resolves.toEqual(['old pin'])
+    await expect(wrapped.expandQuery!('last week', { now: new Date('2026-10-01T22:00:00Z') })).rejects.toThrow(/strict pins/)
+    expect(counter.n).toBe(0)
+    expect(pins.stats.misses).toEqual([{ bucket: 'expand', text: 'last week', now: '2026-10-01T22:00:00.000Z' }])
   })
 
   it('blocks and counts model calls that are not pinned recall calls', async () => {

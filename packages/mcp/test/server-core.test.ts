@@ -21,6 +21,7 @@ import {
   formatRecallTimingLine,
   recallOptionsFromArgs,
   parseChatReasoningEnv,
+  parseTimeZoneEnv,
   runMemoryForget,
   runMemoryRecall,
   parseSalienceThresholdEnv,
@@ -276,6 +277,33 @@ describe('parseChatReasoningEnv', () => {
     for (const v of ['0', '-5', '1.5', 'abc', '2048tokens']) {
       expect(() => parseChatReasoningEnv({ ENGRAM_CHAT_REASONING: 'default', ENGRAM_CHAT_REASONING_HEADROOM: v, ...HOST }))
         .toThrow(/ENGRAM_CHAT_REASONING_HEADROOM/)
+    }
+  })
+})
+
+describe('parseTimeZoneEnv', () => {
+  it('defaults to UTC when unset or blank', () => {
+    expect(parseTimeZoneEnv({})).toEqual({ timeZone: 'UTC' })
+    expect(parseTimeZoneEnv({ ENGRAM_TIMEZONE: '  ' })).toEqual({ timeZone: 'UTC' })
+  })
+
+  it('accepts an IANA zone name', () => {
+    expect(parseTimeZoneEnv({ ENGRAM_TIMEZONE: ' Asia/Karachi ' })).toEqual({ timeZone: 'Asia/Karachi' })
+  })
+
+  it('refuses a name Intl does not know, naming the variable and the value', () => {
+    expect(() => parseTimeZoneEnv({ ENGRAM_TIMEZONE: 'Mars/Olympus_Mons' }))
+      .toThrow(/ENGRAM_TIMEZONE must be an IANA time zone name.*got "Mars\/Olympus_Mons"/)
+  })
+
+  it('fails startup on an invalid zone before any backend is contacted', async () => {
+    const saved = process.env['ENGRAM_TIMEZONE']
+    process.env['ENGRAM_TIMEZONE'] = 'Asia/Lahore_City'
+    try {
+      await expect(getMemory()).rejects.toThrow(/ENGRAM_TIMEZONE must be an IANA time zone name.*got "Asia\/Lahore_City"/)
+    } finally {
+      if (saved === undefined) delete process.env['ENGRAM_TIMEZONE']
+      else process.env['ENGRAM_TIMEZONE'] = saved
     }
   })
 })
