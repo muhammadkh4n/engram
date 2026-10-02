@@ -1,0 +1,154 @@
+{
+  "meta": {
+    "args": {
+      "baseline": "./results/longmemeval/r3-g0-formatted-judge-2026-10.json",
+      "treatment": "./results/longmemeval/r3-budget-2000-judge-2026-10.json",
+      "label": "budget 2000 vs G0",
+      "output": "./results/longmemeval/r3-budget-2000-mcnemar-2026-10.json"
+    },
+    "generated_at": "2026-10-02T01:38:51.319Z"
+  },
+  "strict": {
+    "overall": {
+      "n": 500,
+      "baseSuccess": 406,
+      "treatSuccess": 379,
+      "n01": 50,
+      "n10": 23,
+      "p": 0.0021181727464005787
+    },
+    "byType": {
+      "single-session-user": {
+        "n": 70,
+        "baseSuccess": 66,
+        "treatSuccess": 63,
+        "n01": 3,
+        "n10": 0,
+        "p": 0.25000000000000006
+      },
+      "multi-session": {
+        "n": 133,
+        "baseSuccess": 98,
+        "treatSuccess": 88,
+        "n01": 16,
+        "n10": 6,
+        "p": 0.05247879028320321
+      },
+      "single-session-preference": {
+        "n": 30,
+        "baseSuccess": 12,
+        "treatSuccess": 10,
+        "n01": 6,
+        "n10": 4,
+        "p": 0.7539062500000018
+      },
+      "temporal-reasoning": {
+        "n": 133,
+        "baseSuccess": 108,
+        "treatSuccess": 99,
+        "n01": 16,
+        "n10": 7,
+        "p": 0.09313964843750008
+      },
+      "knowledge-update": {
+        "n": 78,
+        "baseSuccess": 66,
+        "treatSuccess": 66,
+        "n01": 6,
+        "n10": 6,
+        "p": 1
+      },
+      "single-session-assistant": {
+        "n": 56,
+        "baseSuccess": 56,
+        "treatSuccess": 53,
+        "n01": 3,
+        "n10": 0,
+        "p": 0.25000000000000006
+      }
+    },
+    "abstention": {
+      "n": 30,
+      "baseIncorrect": 7,
+      "treatIncorrect": 6,
+      "newlyIncorrect": 1
+    },
+    "unpaired": 0
+  },
+  "lenient": {
+    "overall": {
+      "n": 500,
+      "baseSuccess": 429,
+      "treatSuccess": 410,
+      "n01": 40,
+      "n10": 21,
+      "p": 0.020414713799634738
+    },
+    "byType": {
+      "single-session-user": {
+        "n": 70,
+        "baseSuccess": 68,
+        "treatSuccess": 66,
+        "n01": 2,
+        "n10": 0,
+        "p": 0.5
+      },
+      "multi-session": {
+        "n": 133,
+        "baseSuccess": 103,
+        "treatSuccess": 97,
+        "n01": 13,
+        "n10": 7,
+        "p": 0.2631759643554683
+      },
+      "single-session-preference": {
+        "n": 30,
+        "baseSuccess": 22,
+        "treatSuccess": 17,
+        "n01": 6,
+        "n10": 1,
+        "p": 0.12500000000000006
+      },
+      "temporal-reasoning": {
+        "n": 133,
+        "baseSuccess": 113,
+        "treatSuccess": 104,
+        "n01": 15,
+        "n10": 6,
+        "p": 0.07835388183593736
+      },
+      "knowledge-update": {
+        "n": 78,
+        "baseSuccess": 67,
+        "treatSuccess": 71,
+        "n01": 3,
+        "n10": 7,
+        "p": 0.3437500000000007
+      },
+      "single-session-assistant": {
+        "n": 56,
+        "baseSuccess": 56,
+        "treatSuccess": 55,
+        "n01": 1,
+        "n10": 0,
+        "p": 1
+      }
+    },
+    "abstention": {
+      "n": 30,
+      "baseIncorrect": 7,
+      "treatIncorrect": 6,
+      "newlyIncorrect": 1
+    },
+    "unpaired": 0
+  },
+  "criteria": {
+    "significant_sinks": [],
+    "non_targeted_significant_regressions": [],
+    "non_targeted_significant_improvements": [],
+    "overall_strict_delta_pp": -5.4,
+    "secondary_bar_pass": false,
+    "sink_bar_pass": false,
+    "no_regression_pass": true
+  }
+}
