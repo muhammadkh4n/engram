@@ -35,6 +35,12 @@ export interface ProjectChange {
   before: string | null
 }
 
+export interface TierChange {
+  id: string
+  memoryType: SqlTier
+  before: string | null
+}
+
 export interface ReconcilePlan {
   /** Nodes to stamp with `forgottenAt` because their SQL row is inactive. */
   stamp: string[]
@@ -46,7 +52,9 @@ export interface ReconcilePlan {
   /** Orphans whose row is inactive or absent. A live row's node is never listed. */
   deletableOrphans: string[]
   liveWithoutNode: Record<SqlTier, number>
-  /** Nodes whose `memoryType` differs from the tier of their SQL row. */
+  /** Nodes whose `memoryType` differs from the tier of their SQL row, untyped nodes included. */
+  setTier: TierChange[]
+  /** `setTier.length`. */
   tierMismatch: number
   totals: { rows: number; nodes: number }
 }
@@ -72,8 +80,8 @@ export function planReconcile(
   const setProject: ProjectChange[] = []
   const missing: string[] = []
   const deletableOrphans: string[] = []
+  const setTier: TierChange[] = []
   const orphans = { live: 0, inactive: 0, missing: 0 }
-  let tierMismatch = 0
 
   for (const node of nodes) {
     nodeIds.add(key(node.id))
@@ -93,7 +101,7 @@ export function planReconcile(
     if (row.projectId !== null && row.projectId !== node.projectId) {
       setProject.push({ id: node.id, projectId: row.projectId, before: node.projectId })
     }
-    if (node.memoryType !== row.tier) tierMismatch++
+    if (node.memoryType !== row.tier) setTier.push({ id: node.id, memoryType: row.tier, before: node.memoryType })
 
     if (isOrphan) {
       if (row.inactive) {
@@ -117,7 +125,8 @@ export function planReconcile(
     orphans,
     deletableOrphans,
     liveWithoutNode,
-    tierMismatch,
+    setTier,
+    tierMismatch: setTier.length,
     totals: { rows: rowsById.size, nodes: nodes.length },
   }
 }
@@ -231,12 +240,14 @@ export interface ReconcileGraph {
   /** Sets `forgottenAt` on nodes that lack it. */
   forgetMemories(ids: string[]): Promise<number>
   setProjects(rows: Array<{ id: string; projectId: string }>): Promise<void>
+  setTiers(rows: Array<{ id: string; memoryType: SqlTier }>): Promise<void>
   deleteNodes(ids: string[]): Promise<number>
 }
 
 export type UndoLine =
   | { op: 'stamp'; id: string; at: string }
   | { op: 'project'; id: string; before: string | null }
+  | { op: 'tier'; id: string; before: string | null }
   | { op: 'delete'; id: string; memoryType: string | null; projectId: string | null }
 
 export interface ReconcileDeps {
@@ -252,7 +263,7 @@ export interface ReconcileDeps {
 export interface ReconcileOutcome {
   before: ReconcilePlan
   after: ReconcilePlan | null
-  written: { stamped: number; projects: number; deleted: number; skippedChangedSinceSnapshot: number }
+  written: { stamped: number; projects: number; tiers: number; deleted: number; skippedChangedSinceSnapshot: number }
 }
 
 export const DEFAULT_NODE_PAGE_SIZE = 5000
@@ -346,7 +357,7 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   const before = planReconcile(rows, nodes)
   deps.log(formatReconcileReport(before))
 
-  const written = { stamped: 0, projects: 0, deleted: 0, skippedChangedSinceSnapshot: 0 }
+  const written = { stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 }
   if (!args.apply) return { before, after: null, written }
 
   for (const batch of chunks(before.stamp, args.batchSize)) {
@@ -359,6 +370,12 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
     await deps.appendUndo(batch.map((c) => ({ op: 'project', id: c.id, before: c.before })))
     await deps.graph.setProjects(batch.map((c) => ({ id: c.id, projectId: c.projectId })))
     written.projects += batch.length
+  }
+
+  for (const batch of chunks(before.setTier, args.batchSize)) {
+    await deps.appendUndo(batch.map((c) => ({ op: 'tier', id: c.id, before: c.before })))
+    await deps.graph.setTiers(batch.map((c) => ({ id: c.id, memoryType: c.memoryType })))
+    written.tiers += batch.length
   }
 
   const liveIds = new Set(rows.filter((r) => !r.inactive).map((r) => key(r.id)))
@@ -379,7 +396,8 @@ export async function runReconcile(deps: ReconcileDeps, args: ReconcileArgs): Pr
   }
 
   deps.log(
-    `written: stamped ${written.stamped}, projects ${written.projects}, deleted ${written.deleted}, ` +
+    `written: stamped ${written.stamped}, projects ${written.projects}, tiers ${written.tiers}, ` +
+      `deleted ${written.deleted}, ` +
       `skipped (changed since snapshot) ${written.skippedChangedSinceSnapshot}`,
   )
   const after = planReconcile(rows, await readGraphNodes(deps.graph, nodePageSize))

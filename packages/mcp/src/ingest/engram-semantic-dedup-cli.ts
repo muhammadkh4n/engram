@@ -14,9 +14,14 @@
  * Apply never deletes: non-canonical rows get `superseded_by = <canonical>`
  * and a fresh `updated_at` (so tombstone readers see the supersession), and
  * each written row is appended to the `--rollback-csv` file (created new,
- * never overwritten) as (row, canonical, sim). Clearing `superseded_by`
- * restores a row in Postgres; the recall-engine index re-adds it only on a
- * rebuild.
+ * never overwritten) as (row, canonical, sim, graph stamp time). With
+ * NEO4J_URI set, each written row's graph node gets `forgottenAt` in the same
+ * run, so it stops relaying spreading activation at once; an unreachable
+ * Neo4j stops the apply before any write. Without NEO4J_URI the run says the
+ * graph was not stamped and that engram-graph-reconcile must follow.
+ * Clearing `superseded_by` restores a row in Postgres, and removing
+ * `forgottenAt` where it still equals the CSV's graph_forgotten_at restores
+ * its node; the recall-engine index re-adds the row only on a rebuild.
  *
  * Usage:
  *   engram-semantic-dedup                                   # dry run
@@ -28,7 +33,8 @@
  *   --page-size N    rows per fetch (default 500)
  *   --batch-size N   ids per lookup and update (default 100)
  *
- * Required env: SUPABASE_URL, SUPABASE_KEY
+ * Required env: SUPABASE_URL, SUPABASE_KEY; an apply also reads NEO4J_URI,
+ * NEO4J_USER and NEO4J_PASSWORD
  */
 
 import { existsSync } from 'node:fs'
@@ -50,6 +56,7 @@ import {
   type SemanticDedupOptions,
   type SemanticDedupStore,
 } from './semantic-dedup-lib.js'
+import { graphOutcomeLine, openApplyGraph, type ApplyGraph } from './graph-retire.js'
 
 const TAG = '[engram-semantic-dedup]'
 
@@ -97,7 +104,8 @@ const HELP =
   `  --top-k N           neighbours per row (default ${DEFAULT_TOP_K})\n` +
   `  --merge-sim S       merge clusters whose every pair is >= S (S >= ${MERGE_SIM_FLOOR})\n` +
   '  --apply             supersede non-canonical rows (needs --merge-sim and --rollback-csv)\n' +
-  '  --rollback-csv FILE new CSV of (row, canonical, sim) for every row written\n' +
+  '  --rollback-csv FILE new CSV of (row, canonical, sim, graph_forgotten_at) for every row written\n' +
+  '                      with NEO4J_URI set, --apply stamps forgottenAt on each written row\'s graph node\n' +
   '  --report FILE       new local JSON file with each member\'s topic and content\n' +
   '  --page-size N       rows per fetch (default 500)\n' +
   '  --batch-size N      ids per lookup and update (default 100)\n'
@@ -171,13 +179,27 @@ async function main(): Promise<void> {
     `${TAG} mode=${args.apply ? 'APPLY' : 'DRY-RUN'} report-sim=${args.reportSim} top-k=${args.topK} merge-sim=${args.mergeSim ?? '-'}`,
   )
 
+  let graph: ApplyGraph | null = null
+  if (args.apply) {
+    try {
+      graph = await openApplyGraph(TAG)
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err))
+    }
+  }
   // Created before any write so a failed apply still leaves its rollback list.
   const rollback = args.rollbackPath ? openRollbackCsv(args.rollbackPath) : undefined
   let report
   try {
-    report = await runSemanticDedup(store, { ...opts, rollback })
+    report = await runSemanticDedup(store, {
+      ...opts,
+      rollback,
+      graph: graph?.graph,
+      warn: (line) => console.error(`${TAG} ${line}`),
+    })
   } finally {
     rollback?.close()
+    await graph?.dispose()
   }
 
   console.log(JSON.stringify(dedupJson(report), null, 2))
@@ -189,6 +211,7 @@ async function main(): Promise<void> {
     console.error(`${TAG} content report written to ${args.reportPath}`)
   }
   if (args.rollbackPath) console.error(`${TAG} rollback CSV: ${args.rollbackPath}`)
+  if (args.apply) console.error(`${TAG} ${graphOutcomeLine(report.graph)}`)
 }
 
 main().catch((err) => {

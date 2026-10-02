@@ -53,7 +53,8 @@ function fakeDriver(captured: CapturedRun[], rows: FakeRow[] = []): Driver {
   return { session: () => session } as unknown as Driver
 }
 
-// The query every caller without the fan effect has always sent.
+// The query every caller without the fan effect sends: the original walk,
+// plus the filter that drops a seed's own sources and derivations.
 function defaultCypher(relFilter: string, maxHops: number): string {
   return `
       UNWIND $seedIds AS seedId
@@ -81,6 +82,14 @@ function defaultCypher(relFilter: string, maxHops: number): string {
       }
       WITH neighbor, MAX(activation) AS bestActivation, MIN(hops) AS shortestPath
       WHERE bestActivation >= $minActivation
+        AND NOT EXISTS {
+          MATCH (neighbor)-[:DERIVES_FROM*1..2]->(source)
+          WHERE source.id IN $seedIds
+        }
+        AND NOT EXISTS {
+          MATCH (neighbor)<-[:DERIVES_FROM*1..2]-(derived)
+          WHERE derived.id IN $seedIds
+        }
       RETURN
         neighbor.id AS nodeId,
         labels(neighbor)[0] AS nodeType,
@@ -223,6 +232,19 @@ describe('SpreadingActivation with the fan effect on (unit, no Neo4j)', () => {
     expect(cypher).toContain(
       "ORDER BY activation DESC, coalesce(neighbor.createdAt, '') DESC, nodeId LIMIT $maxNodes",
     )
+  })
+
+  it('drops a seed\'s own sources and derivations after aggregation, as the default query does', async () => {
+    const { captured } = await run(['a'], { fanEffect: true })
+    const cypher = flat(captured.cypher)
+    expect(cypher).toContain(
+      'WHERE bestActivation >= $minActivation'
+        + ' AND NOT EXISTS { MATCH (neighbor)-[:DERIVES_FROM*1..2]->(source) WHERE source.id IN $seedIds }'
+        + ' AND NOT EXISTS { MATCH (neighbor)<-[:DERIVES_FROM*1..2]-(derived) WHERE derived.id IN $seedIds }'
+        + ' RETURN',
+    )
+    // The walk itself still crosses DERIVES_FROM: only the returned rows change.
+    expect(cypher).toContain('MATCH path = (seed)-[rels*1..3]-(neighbor)')
   })
 
   it('still sorts the returned rows by activation, newest, then id; sums above 1 sort first', async () => {

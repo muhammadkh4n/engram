@@ -12,6 +12,25 @@ const DEFAULT_PARAMS: Required<ActivationParams> = {
   fanEffect: false,
 }
 
+/**
+ * DERIVES_FROM runs from a derived memory to its evidence: digest to source
+ * episode, semantic fact to source digest, so two hops cover the whole chain.
+ * A neighbour within two such hops of any seed, followed in one direction,
+ * is the seed's own source or a summary built from it. It restates the seed
+ * and inherits the seed's entity links, so it would otherwise outrank every
+ * real association. It is filtered from the result only, after activation is
+ * aggregated: it still relays to the nodes beyond it.
+ */
+const EXCLUDE_SEED_DERIVATIONS = `
+        AND NOT EXISTS {
+          MATCH (neighbor)-[:DERIVES_FROM*1..2]->(source)
+          WHERE source.id IN $seedIds
+        }
+        AND NOT EXISTS {
+          MATCH (neighbor)<-[:DERIVES_FROM*1..2]-(derived)
+          WHERE derived.id IN $seedIds
+        }`
+
 function createdAtOf(result: ActivationResult): string {
   const createdAt = result.properties.createdAt
   return typeof createdAt === 'string' ? createdAt : ''
@@ -99,7 +118,7 @@ function fanEffectCypher(relFilter: string, maxHops: number): string {
         RETURN neighbor, seedSum AS activation, seedHops AS hops
       }
       WITH neighbor, SUM(activation) AS bestActivation, MIN(hops) AS shortestPath
-      WHERE bestActivation >= $minActivation
+      WHERE bestActivation >= $minActivation${EXCLUDE_SEED_DERIVATIONS}
       RETURN
         neighbor.id AS nodeId,
         labels(neighbor)[0] AS nodeType,
@@ -165,7 +184,7 @@ export class SpreadingActivation {
         RETURN neighbor, activation, hops
       }
       WITH neighbor, MAX(activation) AS bestActivation, MIN(hops) AS shortestPath
-      WHERE bestActivation >= $minActivation
+      WHERE bestActivation >= $minActivation${EXCLUDE_SEED_DERIVATIONS}
       RETURN
         neighbor.id AS nodeId,
         labels(neighbor)[0] AS nodeType,

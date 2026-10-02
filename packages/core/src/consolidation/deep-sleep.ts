@@ -708,12 +708,16 @@ export async function deepSleep(
         `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
         graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
 
-        // Step 4: Supersession → CONTRADICTS + validUntil
+        // Step 4: Supersession → CONTRADICTS + validUntil + forgottenAt.
+        // Spreading activation skips only nodes with forgottenAt; without it
+        // the retired fact keeps relaying until the decay pass's tombstone
+        // sync. coalesce keeps an earlier forget time.
         for (const supersededId of supersededIds) {
           await graph.runCypherWrite(`
             MATCH (old:Memory {id: $oldId})
             MATCH (new:Memory {id: $newId})
-            SET old.validUntil = $now
+            SET old.validUntil = $now,
+                old.forgottenAt = coalesce(old.forgottenAt, $now)
             MERGE (new)-[r:CONTRADICTS]->(old)
             ON CREATE SET r.weight = 1.0,
                           r.createdAt = $now,

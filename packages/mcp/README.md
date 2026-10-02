@@ -413,7 +413,7 @@ The package includes CLI utilities for advanced use cases:
 - `engram-git-setup` — Set up git hooks for automatic ingestion
 - `engram-shell-setup` — Set up shell hooks
 - `engram-derived-project-backfill` — Tag digests and semantic facts stored without a `project_id` from their `derives_from` sources: episodes → digests first, then digests → semantic facts in the same run. A row gets a project only when every tagged source holds that project; mixed sources (`mixed`) and rows with no tagged source (`no-source-tag`) stay NULL. Only NULL rows are read or written, so a repeat run is a no-op. Dry-run by default (counts per project and per reason, up to ten sample ids per bucket, never content); `--apply --applied-out FILE` writes in batches and records every row it tagged in a new CSV as (tier, id, project_id), so the apply can be undone exactly
-- `engram-semantic-dedup` — Report clusters of near-duplicate live semantic facts: each row's top-k nearest neighbours (default 10) within the same `project_id` (NULL only with NULL) at cosine ≥ `--report-sim` (default 0.88), joined by union-find. Canonical row: highest confidence, then most `derives_from` sources, then newest. Dry-run by default: JSON on stdout (ids, similarities, `access_count` / `shown_count`, canonical choice) and a summary on stderr; content only goes to a new local file named with `--report`. `--apply --merge-sim S` (S ≥ 0.95) sets `superseded_by = <canonical>` on the other rows of clusters whose every pair is ≥ S, deletes nothing, and appends each written row to a new `--rollback-csv` file as (row, canonical, sim). Each write also sets `updated_at`, which is how tombstone readers (the graph decay pass, the recall-engine index) see the supersession. Clearing `superseded_by` restores a row in Postgres; the recall-engine index re-adds it only on a rebuild
+- `engram-semantic-dedup` — Report clusters of near-duplicate live semantic facts: each row's top-k nearest neighbours (default 10) within the same `project_id` (NULL only with NULL) at cosine ≥ `--report-sim` (default 0.88), joined by union-find. Canonical row: highest confidence, then most `derives_from` sources, then newest. Dry-run by default: JSON on stdout (ids, similarities, `access_count` / `shown_count`, canonical choice) and a summary on stderr; content only goes to a new local file named with `--report`. `--apply --merge-sim S` (S ≥ 0.95) sets `superseded_by = <canonical>` on the other rows of clusters whose every pair is ≥ S, deletes nothing, and appends each written row to a new `--rollback-csv` file as (row, canonical, sim, graph_forgotten_at). Each write also sets `updated_at`, which is how tombstone readers (the graph decay pass, the recall-engine index) see the supersession. With `NEO4J_URI` set, the apply stamps `forgottenAt` on each written row's graph node in the same run (the CSV records the stamp time), so it stops relaying spreading activation at once; an unreachable Neo4j stops the apply before any write, and without `NEO4J_URI` the run says the graph was not stamped and that `engram-graph-reconcile --apply` must follow. Clearing `superseded_by` restores a row in Postgres, and removing `forgottenAt` where it still equals the CSV's `graph_forgotten_at` restores its node; the recall-engine index re-adds the row only on a rebuild
 - `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
 - `engram-fact-supersession` — Retire stored semantic facts that a later stored fact replaces, using the same
   supersession judge deep sleep uses (`ENGRAM_CHAT_*` select its model and host). Two steps: a dry run proposes, an
@@ -440,10 +440,15 @@ The package includes CLI utilities for advanced use cases:
     reason, when either row is missing, no longer live, or changed since the report (its `updated_at` or its text).
     A decay pass bumps `updated_at` on the facts it decays, so run the apply before the next decay pass or dry-run
     again. Each write sets `superseded_by` and bumps `updated_at`, only while the old row is still live and
-    unchanged, and appends `old_id,new_id,cosine` to the rollback CSV (a new file).
-  - Rollback limit: nothing is deleted, and clearing `superseded_by` (and bumping `updated_at`) on the CSV's old ids
-    restores the SQL rows. It does not restore the graph: once a fact is superseded, the decay pass forgets its Neo4j
-    node, and clearing `superseded_by` does not bring that node back. The same limit applies to the facts
+    unchanged, and appends `old_id,new_id,cosine,graph_forgotten_at` to the rollback CSV (a new file).
+  - Graph: with `NEO4J_URI` set, each retired fact's Neo4j node gets `forgottenAt` right after its write, and the
+    stamp time goes into the CSV first. An unreachable Neo4j stops the apply before any write; a failed stamp is
+    counted and the run asks for `engram-graph-reconcile --apply`. Without `NEO4J_URI` the run says once that the
+    graph was not stamped and that `engram-graph-reconcile --apply` must follow.
+  - Rollback: nothing is deleted. Clearing `superseded_by` (and bumping `updated_at`) on the CSV's old ids restores
+    the SQL rows, and removing `forgottenAt` from each old id's node where it still equals the line's
+    `graph_forgotten_at` restores the graph; a node forgotten before the apply keeps its own stamp. The decay pass
+    re-stamps a superseded fact's node, so restore SQL before the graph. The same applies to the facts
     `engram-semantic-dedup` retires.
 
 ## Troubleshooting

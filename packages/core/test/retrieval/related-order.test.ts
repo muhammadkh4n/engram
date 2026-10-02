@@ -13,7 +13,7 @@ const recalled: RetrievedMemory[] = [
 ]
 
 function memoryNode(nodeId: string, activation: number): GraphActivatedNode {
-  return { nodeId, nodeType: 'Memory', activation, depth: 1, properties: {} }
+  return { nodeId, nodeType: 'Memory', activation, depth: 1, properties: { memoryType: 'episode' } }
 }
 
 function ep(id: string): Episode {
@@ -66,9 +66,9 @@ function shuffled<T>(items: readonly T[], seed: number): T[] {
 // each call, as an unordered SQL `IN (...)` lookup may.
 function shufflingStorage(seed: number): StorageAdapter {
   return {
-    episodes: {
-      getByIds: vi.fn().mockImplementation(async (ids: string[]) => shuffled(ids.map(ep), seed)),
-    },
+    getByIds: vi.fn().mockImplementation(async (refs: Array<{ id: string }>) =>
+      shuffled(refs.map((ref) => ({ type: 'episode' as const, data: ep(ref.id) })), seed),
+    ),
   } as unknown as StorageAdapter
 }
 
@@ -88,8 +88,8 @@ async function activate(seed: number) {
 describe('stageActivate — Related order after hydration', () => {
   it('hydration returns the rows out of the graph order', async () => {
     const storage = shufflingStorage(7)
-    const rows = await storage.episodes.getByIds(PRIMARY_ORDER)
-    expect(rows.map((r) => r.id)).not.toEqual(PRIMARY_ORDER)
+    const rows = await storage.getByIds(PRIMARY_ORDER.map((id) => ({ id, type: 'episode' as const })))
+    expect(rows.map((r) => r.data.id)).not.toEqual(PRIMARY_ORDER)
   })
 
   it('associations follow the activation order, ties broken by graph rank', async () => {

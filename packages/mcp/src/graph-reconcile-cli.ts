@@ -5,12 +5,13 @@
  * Compares the SQL memory tables (the source of truth) with the Neo4j Memory
  * nodes and repairs the drift the graph accumulates when a write reaches one
  * store but not the other: nodes of forgotten or superseded rows that never
- * got `forgottenAt`, nodes missing the row's project, nodes with no row at
- * all, and orphan nodes of dead rows.
+ * got `forgottenAt`, nodes missing the row's project, nodes whose
+ * `memoryType` is not the tier of their row, nodes with no row at all, and
+ * orphan nodes of dead rows.
  *
  * Dry run by default: prints counts only. Every write appends its undo lines
- * (JSON, one per node) to the undo log before the batch runs. Stamps and
- * project changes are undone from that log; a delete is undone only from a
+ * (JSON, one per node) to the undo log before the batch runs. Stamps,
+ * project and tier changes are undone from that log; a delete is undone only from a
  * Neo4j dump. The node of a live SQL row is never deleted. After writing, the
  * graph is read again and a second report printed.
  *
@@ -18,7 +19,7 @@
  *
  * Usage:
  *   engram-graph-reconcile                                      # dry run
- *   engram-graph-reconcile --apply --undo-log PATH              # stamp forgottenAt, set projectId
+ *   engram-graph-reconcile --apply --undo-log PATH              # stamp forgottenAt, set projectId and memoryType
  *   engram-graph-reconcile --apply --delete-missing --undo-log PATH   # also delete nodes with no SQL row
  *   engram-graph-reconcile --apply --delete-orphans --undo-log PATH   # also delete orphans of dead or absent rows
  *   engram-graph-reconcile --page-size N                        # SQL rows per fetch (default 1000)
@@ -45,13 +46,13 @@ const TAG = '[engram-graph-reconcile]'
 const HELP =
   'engram-graph-reconcile — reconcile Neo4j Memory nodes with the SQL memory tables\n' +
   '  (dry run by default; prints counts only)\n' +
-  '  --apply            stamp forgottenAt on nodes of inactive rows and set projectId from SQL\n' +
+  '  --apply            stamp forgottenAt on nodes of inactive rows; set projectId and memoryType from SQL\n' +
   '  --delete-missing   with --apply: DETACH DELETE nodes that have no SQL row\n' +
   '  --delete-orphans   with --apply: DETACH DELETE orphan nodes whose row is inactive or absent\n' +
   '  --undo-log PATH    required with any write; undo lines are appended before each batch\n' +
   '  --page-size N      SQL rows per fetch (default 1000)\n' +
   '  --batch-size N     nodes per write (default 1000)\n' +
-  '  A stamp or project change is undone from the undo log. A delete is undone only\n' +
+  '  A stamp, project or tier change is undone from the undo log. A delete is undone only\n' +
   '  from a Neo4j dump: take one before --delete-missing or --delete-orphans.\n'
 
 function toNumber(value: unknown): number {
@@ -92,6 +93,12 @@ function neo4jGraph(graph: NeuralGraph): ReconcileGraph {
     async setProjects(rows) {
       await graph.runCypherWrite(
         'UNWIND $rows AS row MATCH (m:Memory {id: row.id}) SET m.projectId = row.projectId',
+        { rows },
+      )
+    },
+    async setTiers(rows) {
+      await graph.runCypherWrite(
+        'UNWIND $rows AS row MATCH (m:Memory {id: row.id}) SET m.memoryType = row.memoryType',
         { rows },
       )
     },
