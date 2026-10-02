@@ -335,37 +335,35 @@ describe('recallCells', () => {
 })
 
 describe('sensoryResetter', () => {
-  it('restores the captured buffer and intent before each cell', () => {
-    const state = { primed: ['planters'], intent: 'recall' as unknown }
-    const sensory = {
+  it('restores the captured conversation store before each cell', () => {
+    const state = { primed: ['planters'] }
+    const conversations = {
       snapshot: () => ({ primed: [...state.primed] }),
       restore: (snap: unknown) => { state.primed = [...(snap as { primed: string[] }).primed] },
-      getIntent: () => state.intent,
-      setIntent: (i: unknown) => { state.intent = i },
     }
-    const reset = sensoryResetter({ sensory }, 'fusion-grid')
+    const reset = sensoryResetter({ conversations }, 'fusion-grid')
     state.primed.push('basil')
-    state.intent = 'other'
     reset()
-    expect(state).toEqual({ primed: ['planters'], intent: 'recall' })
+    expect(state).toEqual({ primed: ['planters'] })
   })
 
-  it('resets the sensory buffer of a real Memory', async () => {
+  it('resets the conversation store of a real Memory', async () => {
     const { memory } = await createBenchMemory({ graph: false, openaiApiKey: '' })
     try {
       const reset = sensoryResetter(memory, 'fusion-grid')
-      const sensory = (memory as unknown as { sensory: { prime(t: string[], b: number, n: number): void; getPrimed(): unknown[] } }).sensory
-      sensory.prime(['planters'], 0.2, 3)
-      expect(sensory.getPrimed()).toHaveLength(1)
+      type Buffer = { prime(t: string[], b: number, n: number): void; getPrimed(): unknown[] }
+      const conversations = (memory as unknown as { conversations: { acquire(k: string): Buffer; keys(): string[] } }).conversations
+      conversations.acquire('conversation-a').prime(['planters'], 0.2, 3)
+      expect(conversations.keys()).toEqual(['conversation-a'])
       reset()
-      expect(sensory.getPrimed()).toEqual([])
+      expect(conversations.keys()).toEqual([])
     } finally {
       await memory.dispose()
     }
   })
 
-  it('fails loudly when the memory has no sensory buffer', () => {
-    expect(() => sensoryResetter({}, 'fusion-grid')).toThrow(/sensory buffer/)
+  it('fails loudly when the memory has no conversation store', () => {
+    expect(() => sensoryResetter({}, 'fusion-grid')).toThrow(/conversation store/)
   })
 })
 

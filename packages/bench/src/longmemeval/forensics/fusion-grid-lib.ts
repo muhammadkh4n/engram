@@ -5,8 +5,8 @@
 // LLM-dependent steps (query expansion, HyDE, embeddings) and the reranker are
 // memoised per question so every cell reads the same outputs, recall runs with
 // `reconsolidate: false` so no cell changes access counts or edges for the
-// next, and the sensory buffer is reset to its post-ingest state before each
-// cell because a recall primes topics that boost the following recall.
+// next, and the per-conversation priming store is reset to its post-ingest
+// state before each cell, so no cell's priming can boost a later cell's recall.
 //
 // Rows have the recall-sweep `formatted` row schema, one output file per cell,
 // so judge.ts, mcnemar-judged and drift-compare read a cell like a sweep.

@@ -294,12 +294,10 @@ describe('probe', () => {
   // A stub memory whose ranking depends on the previous recall's priming, the
   // way stagePrime lifts rows that share a topic with the last results.
   function primingMemory() {
-    const state = { primed: [] as string[], intent: null as unknown }
-    const sensory = {
+    const state = { primed: [] as string[] }
+    const conversations = {
       snapshot: () => ({ primed: [...state.primed] }),
       restore: (snap: unknown) => { state.primed = [...(snap as { primed: string[] }).primed] },
-      getIntent: () => state.intent,
-      setIntent: (i: unknown) => { state.intent = i },
     }
     const recall = async (query: string): Promise<ArmRecallResult> => {
       const ids = ['shared', `own-${query}`, ...state.primed.map((t) => `primed-${t}`)]
@@ -311,7 +309,7 @@ describe('probe', () => {
         formatted: ranked.join('\n'),
       }
     }
-    return { memory: { sensory }, recall }
+    return { memory: { conversations }, recall }
   }
 
   async function probeInOrder(order: string[], reset: boolean): Promise<Map<string, string[]>> {

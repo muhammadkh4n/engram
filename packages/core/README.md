@@ -50,7 +50,7 @@ interface MemoryOptions {
 
 #### `initialize(): Promise<void>`
 
-Initialize storage and restore sensory buffer snapshot. Must be called before any operations.
+Initialize storage. Must be called before any operations.
 
 ```javascript
 await memory.initialize()
@@ -97,7 +97,7 @@ interface RecallResult {
   memories: RetrievedMemory[]       // Directly matched memories
   associations: RetrievedMemory[]   // Found via association walk
   intent: IntentResult              // Detected intent
-  primed: string[]                  // Topics now boosted for this session
+  primed: string[]                  // Topics primed for this conversation's next recalls ([] without conversationKey)
   estimatedTokens: number           // Token count for assembled context
   formatted: string                 // Ready to inject into system prompt
   sessions?: SessionGroup[]         // v0.6: session-completeness ranking (additive)
@@ -129,6 +129,7 @@ interface RecallOptions {
   synthesize?: boolean | SynthesizeOpts  // Opt-in synthesis block (see below)
   now?: Date              // Anchor for now-relative temporal arithmetic in synthesis
   reconsolidate?: boolean // Default true; false makes the recall read-only
+  conversationKey?: string // The caller's conversation, for priming only; never filters results
 }
 
 const result = await memory.recall(query, { tokenBudget: 2000 })
@@ -137,6 +138,8 @@ const result = await memory.recall(query, { tokenBudget: 2000 })
 `tokenBudget` bounds the `formatted` text, not retrieval: `memories` and `associations` still hold the full ranked lists, and `result.payload` says what the text carried (`emittedMemories`, `emittedAssociations`, `emittedFaint`, `truncated`, and the character span of each emitted item). It must be a positive integer (a `RangeError` otherwise) and takes precedence over the `ENGRAM_RECALL_TOKEN_BUDGET` environment variable. Tokens are estimated as `ceil(chars / 4)`, headers included.
 
 The text is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole. Two more environment variables shape the text: `ENGRAM_RECALL_EMIT_K` (emit only the first K Recalled memories) and `ENGRAM_RECALL_FAINT` (`on` by default, `off` drops the Faint Associations section). Unset, empty or absent, each means no limit, so `formatted` is the same unbounded text as before; a malformed value throws, naming the variable.
+
+Priming (`conversationKey`). After a recall, every keyword (3+ characters, not a stop word) found in two or more of its results is primed for the next 5 recalls of the same conversation, with boost 0.15 × min(count, 5). A later recall in that conversation adds the summed boost of the primed topics among a candidate's own keywords (whole tokens: a primed `art` does not match `start`), capped at 0.30, to its fused score; the primed topics also seed graph spreading activation as context, and the last intent is passed to the next intent analysis. All of this state belongs to the conversation named by `conversationKey`: two conversations never see each other's priming, and a recall without a key reads and writes none. The 5-recall horizon counts that conversation's recalls only, and a conversation's state is dropped once it has expired. At most 500 conversations (`DEFAULT_MAX_CONVERSATIONS`) are kept; past that the least recently recalled one is dropped. The state lives in process memory and is not persisted. `ENGRAM_RECALL_PRIMING` (`on` by default, read on every recall) set to `off` disables the boost, the context seeds and the intent carry-over even for a keyed recall; any other value throws, naming the variable. A blank `conversationKey` throws. `forget()` previews never read or prime a conversation. Recalls through a `session()` handle use the session id as the key.
 
 Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
 
@@ -250,6 +253,26 @@ console.log(`Promoted ${fullResult.promoted} semantic memories`)
 console.log(`Created ${fullResult.procedural} procedural memories`)
 ```
 
+##### Fact supersession in deep sleep
+
+When deep sleep promotes a semantic fact, it compares it with the fact's neighbours: the 10 nearest stored facts by cosine (`semantic.findNearest`), keeping only live facts in the new fact's project (a shared, NULL-project fact pairs only with shared facts) at cosine ≥ `ENGRAM_SUPERSESSION_MIN_COSINE` (default `0.6`, a number in [-1, 1]), at most 5, nearest first. A neighbour above cosine 0.88, or (without an embedding) one with the same normalised text in the same project, is a duplicate: it is boosted and the new fact is not stored.
+
+`ENGRAM_SUPERSESSION` decides when a newer fact retires a stored one. Deep sleep reads no environment variable itself: pass `supersession: { mode, minCosine }` to `createMemory` (used by `consolidate()` and auto-consolidation), to `startConsolidationWorker`, or to `deepSleep(storage, intelligence, { supersession })`. `supersessionSettingsFromEnv()` parses `ENGRAM_SUPERSESSION` and `ENGRAM_SUPERSESSION_MIN_COSINE` (unset or empty means the default; any other value throws, naming the variable); call it once at startup, as the MCP server does. With no settings, deep sleep uses `regex` at cosine 0.6.
+
+- `regex` (default) — the duplicate check above, then a fixed list of English contradiction pairs ("I prefer X" vs "I don't like X", "I always" vs "I never", …) against the fact's search hits.
+- `llm` — the intelligence adapter's `judgeSupersession` runs first, over the neighbours, each read again by id first so the judge sees its topic and source digests (vector-recall rows carry neither), and a neighbour retired since the nearest-neighbour read is dropped. The judge only names the relation of each neighbour to the new fact, `same` or `conflicts`; the statement times decide the direction:
+  - conflict, new fact stated later → every conflicting neighbour is retired (`markSuperseded`, which bumps `updated_at`, plus a `CONTRADICTS` graph edge), and the new fact's `supersedes` holds the first;
+  - conflict with a neighbour stated later → the new fact is stale and not stored (`stale`);
+  - conflict with a neighbour stated at the same time → nothing is stored or retired (`tie`);
+  - no conflict → a neighbour the judge calls the same claim, or the duplicate check above, makes the fact a duplicate; otherwise it is stored as new.
+
+  So an update that differs from the old fact by one word replaces it instead of being dropped as its duplicate, and a fact re-extracted from an older digest of the 7-day window never retires the fact that replaced it. No call is made when there are no neighbours. If the judge throws, that fact takes the `regex` path and one warning line with the neighbour ids is logged. With no `judgeSupersession` on the adapter, or no embedding for the fact, `llm` behaves as `regex`.
+- `off` — the duplicate check only; no stored fact is retired.
+
+A fact's statement time is the latest `createdAt` among the source episodes of its source digests, or a digest's own `createdAt` when none of its episodes can be read (`statementClock`). A stored fact whose digests cannot be read falls back to its own `createdAt`. Insert time cannot order facts: each deep-sleep run re-reads every digest of the last 7 days, so a fact inserted later can come from an older conversation. Digests are processed oldest first.
+
+`ConsolidateResult.supersessionJudged` counts the judge calls of the run; `stale` and `tie` count the new facts not stored for the two reasons above.
+
 #### `stats(): Promise<MemoryStats>`
 
 Get memory statistics across all systems.
@@ -321,13 +344,13 @@ const sess2 = memory.session('user-123-conversation-abc')
 // All ingests automatically tagged with sessionId
 await sess.ingest({ role: 'user', content: 'Hello' })
 
-// Recalls are still cross-session, but primed toward this session
+// Recalls search every session; priming carries over only between this session's recalls
 const result = await sess.recall('previous context?')
 ```
 
 #### `dispose(): Promise<void>`
 
-Release resources. Persists sensory buffer snapshot to storage for restoration on next init.
+Release resources. Conversation priming state is in-process only and is discarded.
 
 ```javascript
 await memory.dispose()
@@ -337,13 +360,12 @@ await memory.dispose()
 
 ### Sensory Buffer (Working Memory)
 
-In-memory store of the agent's current focus. ~100 items, volatile.
+In-memory recall context, one per conversation (`conversationKey`), volatile.
 
-- **Items** — Extracted entities, topics, decisions, preferences
-- **Primed Topics** — Boosted for future recalls, decay each turn
-- **Active Intent** — Current goal driving retrieval strategy
+- **Primed Topics** — Boosted for that conversation's next recalls, expire after 5 of them
+- **Active Intent** — The last recall's intent, passed to the next analysis
 
-Saved/restored on session boundaries.
+Bounded by an LRU over conversations and never persisted. See Priming under `recall`.
 
 ### Episodic System
 
@@ -360,7 +382,7 @@ Extracted facts and concepts. The agent's knowledge.
 
 - Decays by confidence score (0-1)
 - Confidence floor at 0.05 (below retrieval threshold)
-- Supersession tracking (newer facts replace older ones)
+- Supersession tracking (newer facts replace older ones; see "Fact supersession in deep sleep")
 - Reconstructed from digests during deep sleep
 
 ### Procedural System
@@ -452,9 +474,9 @@ A: Check that messages were ingested with matching sessionId (or default). Wait 
 
 A: Pass `tokenBudget` (or set `ENGRAM_RECALL_TOKEN_BUDGET` / `ENGRAM_RECALL_EMIT_K`) to bound `formatted`. Memories are ranked by relevance and the text keeps a prefix of that ranking, so the top results always survive.
 
-**Q: Sensory buffer not restored**
+**Q: Priming does not carry over between recalls**
 
-A: Snapshot is saved on `dispose()`. If process crashes, snapshot is lost. Ephemeral by design.
+A: Priming is per conversation. Pass the same `conversationKey` on each recall of a conversation (or recall through a `session()` handle), and check that `ENGRAM_RECALL_PRIMING` is not `off`. The state is in process memory only, so a restart starts every conversation fresh.
 
 ## Contributing
 

@@ -20,8 +20,11 @@ import {
   maybeWithRecallEngine,
   formatRecallTimingLine,
   recallOptionsFromArgs,
+  RECALL_CONVERSATION_ID_MAX,
   parseChatReasoningEnv,
   parseTimeZoneEnv,
+  chatIntelligenceOptionsFromEnv,
+  supersessionSettingsAtStartup,
   runMemoryForget,
   runMemoryRecall,
   parseSalienceThresholdEnv,
@@ -176,6 +179,29 @@ describe('formatRecallTimingLine', () => {
 })
 
 describe('recallOptionsFromArgs', () => {
+  it('passes conversation_id through as the priming key, trimmed', () => {
+    expect(recallOptionsFromArgs({ query: 'q', conversation_id: '  conv-1  ' })).toEqual({ conversationKey: 'conv-1' })
+  })
+
+  it('accepts a conversation_id of exactly the maximum length', () => {
+    const id = 'c'.repeat(RECALL_CONVERSATION_ID_MAX)
+    expect(recallOptionsFromArgs({ query: 'q', conversation_id: id })).toEqual({ conversationKey: id })
+  })
+
+  it('never turns session_id into a priming key', () => {
+    expect(recallOptionsFromArgs({ query: 'q', session_id: 'sess-1' })).toEqual({})
+  })
+
+  it.each(['', '   ', 42, null, 'c'.repeat(RECALL_CONVERSATION_ID_MAX + 1)])(
+    'rejects conversation_id %j',
+    (value) => {
+      const opts = recallOptionsFromArgs({ query: 'q', conversation_id: value })
+
+      expect(opts).toHaveProperty('error')
+      expect((opts as { error: string }).error).toMatch(/conversation_id must be a non-blank string of at most 200 characters/)
+    },
+  )
+
   it('trims the project id the way memory_ingest does', () => {
     expect(recallOptionsFromArgs({ query: 'q', project_id: '  engram  ' })).toEqual({ projectId: 'engram' })
   })
@@ -240,6 +266,68 @@ describe('recallOutputPolicyAtStartup', () => {
       if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
       else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
     }
+  })
+})
+
+describe('supersessionSettingsAtStartup', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('resolves the regex default when nothing is set and logs it', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(supersessionSettingsAtStartup({})).toEqual({ mode: 'regex', minCosine: 0.6 })
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] fact supersession: mode=regex minCosine=0.6')
+  })
+
+  it('resolves a configured mode and floor', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_SUPERSESSION: 'llm', ENGRAM_SUPERSESSION_MIN_COSINE: '0.7' }
+
+    expect(supersessionSettingsAtStartup(env)).toEqual({ mode: 'llm', minCosine: 0.7 })
+  })
+
+  it.each([
+    ['ENGRAM_SUPERSESSION', 'LLM', /ENGRAM_SUPERSESSION must be "regex", "llm" or "off", got "LLM"/],
+    ['ENGRAM_SUPERSESSION_MIN_COSINE', 'high', /ENGRAM_SUPERSESSION_MIN_COSINE must be a number in \[-1, 1\], got "high"/],
+  ])('fails startup on a malformed %s before any backend is contacted', async (name, value, message) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const saved = process.env[name]
+    process.env[name] = value
+    try {
+      await expect(getMemory()).rejects.toThrow(message)
+    } finally {
+      if (saved === undefined) delete process.env[name]
+      else process.env[name] = saved
+    }
+  })
+})
+
+describe('chatIntelligenceOptionsFromEnv', () => {
+  it('maps the chat env to openaiIntelligence options, and nothing when unset', () => {
+    expect(chatIntelligenceOptionsFromEnv({})).toEqual({})
+    expect(
+      chatIntelligenceOptionsFromEnv({
+        ENGRAM_CHAT_MODEL: ' deepseek/deepseek-v4-flash ',
+        ENGRAM_CHAT_BASE_URL: 'https://openrouter.ai/api/v1',
+        ENGRAM_CHAT_API_KEY: 'k',
+        ENGRAM_CHAT_PROVIDER_PREFS: '{"order":["a"]}',
+        ENGRAM_CHAT_REASONING: 'off',
+      }),
+    ).toEqual({
+      summarizationModel: 'deepseek/deepseek-v4-flash',
+      chatBaseUrl: 'https://openrouter.ai/api/v1',
+      chatApiKey: 'k',
+      chatProviderPrefs: { order: ['a'] },
+      chatReasoning: 'off',
+    })
+  })
+
+  it('throws on provider prefs that are not a JSON object', () => {
+    expect(() => chatIntelligenceOptionsFromEnv({ ENGRAM_CHAT_PROVIDER_PREFS: '[1]' })).toThrow(
+      /ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object/,
+    )
   })
 })
 
@@ -394,6 +482,54 @@ describe('runMemoryRecall', () => {
     const res = await runMemoryRecall(stubMemory(result({})), { query: '  ' })
 
     expect(res).toEqual({ content: [{ type: 'text', text: 'Error: query must be a non-empty string' }], isError: true })
+  })
+
+  function capturingMemory() {
+    const calls: Array<{ query: string; opts: unknown }> = []
+    return {
+      calls,
+      mem: {
+        recall: async (query: string, opts?: unknown) => {
+          calls.push({ query, opts })
+          return result({})
+        },
+      },
+    }
+  }
+
+  it('forwards conversation_id to the recall as conversationKey', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window', conversation_id: 'conv-1', project_id: 'engram' })
+
+    expect(calls).toEqual([{ query: 'deploy window', opts: { projectId: 'engram', conversationKey: 'conv-1', now: expect.any(Date) } }])
+  })
+
+  it('sends no conversationKey without conversation_id, so the recall gets no priming', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window' })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.opts).not.toHaveProperty('conversationKey')
+  })
+
+  it('leaves session_id out of the recall options, as before', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window', session_id: 'sess-1' })
+
+    expect(calls).toEqual([{ query: 'deploy window', opts: { now: expect.any(Date) } }])
+  })
+
+  it('rejects a blank conversation_id as a tool error without recalling', async () => {
+    const { calls, mem } = capturingMemory()
+
+    const res = await runMemoryRecall(mem, { query: 'deploy window', conversation_id: '  ' })
+
+    expect(res.isError).toBe(true)
+    expect(res.content[0]?.text).toMatch(/^Error: conversation_id must be a non-blank string/)
+    expect(calls).toHaveLength(0)
   })
 })
 

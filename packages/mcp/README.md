@@ -54,6 +54,11 @@ Recall output policy (server-wide; every variable unset means an unbounded paylo
 
 An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable; the resolved policy is logged once at startup.
 
+Fact supersession in deep sleep (parsed once at server startup; a malformed value fails startup with an error naming the variable, and the resolved settings are logged once):
+
+- `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and orders a conflict by when each fact was stated. See "Fact supersession in deep sleep" in the core README.
+- `ENGRAM_SUPERSESSION_MIN_COSINE` — a number in [-1, 1], default `0.6`: the cosine floor for a stored fact to be compared with a new one.
+
 Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
 
 - `ENGRAM_RECALL_HUB_DAMPING` — damps memories recalled far more often than their tier. For episode, semantic and procedural candidates, T = max(p99 of the tier's access_count, 10); the factor is 1 when access ≤ T, else `1 / (1 + ln(access / T))`. Digests get 1. The p99 comes from the storage's `accessCountQuantile` and is cached per storage instance for 10 minutes. On PostgREST it needs the `engram_access_count_quantile` function, so re-apply `packages/postgrest/schema.sql` before turning this on; with the function missing, hub damping is a no-op that logs one warning per process.
@@ -100,9 +105,12 @@ Search memory for content relevant to a query.
 {
   "query": "What deployment preferences did we discuss?",
   "session_id": "optional-session-id",
+  "conversation_id": "optional-conversation-id",
   "token_budget": 4000
 }
 ```
+
+`conversation_id` is optional: a non-blank string of at most 200 characters (trimmed) naming the caller's current conversation. It scopes priming to that conversation: keywords shared by several memories an earlier recall of the same `conversation_id` returned give a small score boost (whole-token match, capped) and seed the graph walk in its next recalls, and the last recall's intent informs the next one. It does **not** filter results, unlike `session_id`. A recall without `conversation_id` gets no priming and writes no priming state, so until a client sends it, priming is off. `ENGRAM_RECALL_PRIMING=off` disables priming even when it is sent. A blank, non-string or longer value returns an error result.
 
 `token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset).
 
@@ -323,7 +331,7 @@ Returns cross-project connections (people/entities shared between projects). Use
 
 Engram has 5 cognitive systems:
 
-1. **Sensory Buffer** — In-memory working memory (~100 items). Primed topics boost future recall.
+1. **Sensory Buffer** — In-memory working memory (~100 items). Primed topics boost later recalls of the same conversation (`conversation_id`).
 2. **Episodic System** — Raw conversation turns (ground truth, never deleted).
 3. **Semantic System** — Extracted facts with confidence scores. Decays over time.
 4. **Procedural System** — Learned workflows, preferences, habits.
@@ -402,6 +410,30 @@ The package includes CLI utilities for advanced use cases:
 - `engram-derived-project-backfill` — Tag digests and semantic facts stored without a `project_id` from their `derives_from` sources: episodes → digests first, then digests → semantic facts in the same run. A row gets a project only when every tagged source holds that project; mixed sources (`mixed`) and rows with no tagged source (`no-source-tag`) stay NULL. Only NULL rows are read or written, so a repeat run is a no-op. Dry-run by default (counts per project and per reason, up to ten sample ids per bucket, never content); `--apply --applied-out FILE` writes in batches and records every row it tagged in a new CSV as (tier, id, project_id), so the apply can be undone exactly
 - `engram-semantic-dedup` — Report clusters of near-duplicate live semantic facts: each row's top-k nearest neighbours (default 10) within the same `project_id` (NULL only with NULL) at cosine ≥ `--report-sim` (default 0.88), joined by union-find. Canonical row: highest confidence, then most `derives_from` sources, then newest. Dry-run by default: JSON on stdout (ids, similarities, `access_count` / `shown_count`, canonical choice) and a summary on stderr; content only goes to a new local file named with `--report`. `--apply --merge-sim S` (S ≥ 0.95) sets `superseded_by = <canonical>` on the other rows of clusters whose every pair is ≥ S, deletes nothing, and appends each written row to a new `--rollback-csv` file as (row, canonical, sim). Each write also sets `updated_at`, which is how tombstone readers (the graph decay pass, the recall-engine index) see the supersession. Clearing `superseded_by` restores a row in Postgres; the recall-engine index re-adds it only on a rebuild
 - `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
+- `engram-fact-supersession` — Retire stored semantic facts that a later stored fact replaces, using the same
+  supersession judge deep sleep uses (`ENGRAM_CHAT_*` select its model and host). Two steps: a dry run proposes, an
+  apply writes exactly the proposals of a reviewed report.
+  - Facts are ordered by statement time, the time of the conversation a fact came from: the latest source episode of
+    its source digests, else the digest's own time, else the row's insert time. Insert time alone cannot order facts,
+    because deep sleep re-reads a week of digests on every run.
+  - Each fact, latest statement first, is judged against the live facts of its own project (shared facts only against
+    shared facts) stated strictly earlier, at cosine at or above `--min-cosine` (default
+    `ENGRAM_SUPERSESSION_MIN_COSINE`, else 0.6), at most five. A conflict proposes retiring the earlier fact; a fact
+    proposed for retirement is neither judged nor offered again.
+  - Dry run (`--max-calls N` required; the run stops at the cap and says so): the judge runs, nothing is written.
+    Stdout is JSON with the proposals (new id, old id, cosine, both statement dates, both rows' `updated_at` and a
+    hash of their topic and content) and counts per similarity band. Fact text never goes to stdout; `--report PATH`
+    writes the proposals with both facts' text to a new local file (mode 0600), `--sample N` writes N random ones.
+  - Apply: `--apply --from-report PATH --rollback PATH` writes exactly the proposals in that report and calls no
+    judge. A report written with `--sample` holds only the sample. A pair is skipped, and listed on stdout with a
+    reason, when either row is missing, no longer live, or changed since the report (its `updated_at` or its text).
+    A decay pass bumps `updated_at` on the facts it decays, so run the apply before the next decay pass or dry-run
+    again. Each write sets `superseded_by` and bumps `updated_at`, only while the old row is still live and
+    unchanged, and appends `old_id,new_id,cosine` to the rollback CSV (a new file).
+  - Rollback limit: nothing is deleted, and clearing `superseded_by` (and bumping `updated_at`) on the CSV's old ids
+    restores the SQL rows. It does not restore the graph: once a fact is superseded, the decay pass forgets its Neo4j
+    node, and clearing `superseded_by` does not bring that node back. The same limit applies to the facts
+    `engram-semantic-dedup` retires.
 
 ## Troubleshooting
 

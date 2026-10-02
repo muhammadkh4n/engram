@@ -248,6 +248,8 @@ export interface RecallResult {
   memories: RetrievedMemory[]
   associations: RetrievedMemory[]
   intent: IntentResult
+  /** Topics this recall primed for its conversation's next recalls. Empty
+   *  when the recall named no conversation or priming is switched off. */
   primed: string[]
   estimatedTokens: number
   formatted: string
@@ -445,6 +447,14 @@ export interface ConsolidateResult {
   procedural?: number
   deduplicated?: number
   superseded?: number
+  /** Supersession judge calls made by deep sleep (ENGRAM_SUPERSESSION=llm). */
+  supersessionJudged?: number
+  /** Deep-sleep candidates not stored because a stored fact stated later
+   *  conflicts with them. */
+  stale?: number
+  /** Deep-sleep candidates left unstored because they conflict with a stored
+   *  fact stated at the same time, so neither can be called current. */
+  tie?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

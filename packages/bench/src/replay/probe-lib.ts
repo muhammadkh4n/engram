@@ -100,8 +100,8 @@ export interface ProbeDeps {
   recall(query: string, opts: ArmRecallOptions): Promise<ArmRecallResult>
   /** Wraps each recall: the arm's env is set for that call only. */
   aroundRecall<T>(fn: () => Promise<T>): Promise<T>
-  /** Runs before every query; the CLI restores the sensory buffer here so a
-   *  query's priming never lifts rows in the queries after it. */
+  /** Runs before every query; the CLI restores the per-conversation priming
+   *  store here so a query's priming never lifts rows in the queries after it. */
   beforeQuery(): void
   violations(): string[]
   write(record: ProbeRecord, formatted: string): void

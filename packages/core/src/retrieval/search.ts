@@ -167,7 +167,8 @@ export interface UnifiedSearchOpts {
   embedding: number[]
   strategy: RecallStrategy
   storage: StorageAdapter
-  sensory: SensoryBuffer
+  /** The calling conversation's priming state. Null: no priming boost. */
+  sensory: SensoryBuffer | null
   sessionId?: string
   expandedTerms?: string[]
   /** Forwarded to storage as a hard project filter. Set only for strict
@@ -249,7 +250,7 @@ function scoreCandidate(
   base: number,
   bm25Boost: number,
   strategy: RecallStrategy,
-  sensory: SensoryBuffer,
+  sensory: SensoryBuffer | null,
   fusion: FusionConfig,
 ): RetrievedMemory {
   const content = extractContent(typed)
@@ -260,7 +261,7 @@ function scoreCandidate(
     recencyBias: strategy.recencyBias,
     createdAt,
     accessCount: extractAccessCount(typed),
-    primingBoost: sensory.getPrimingBoost(content),
+    primingBoost: sensory?.getPrimingBoost(content) ?? 0,
     role: extractRole(typed),
     content,
     fusion,

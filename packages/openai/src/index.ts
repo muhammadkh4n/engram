@@ -100,6 +100,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     selectEvidence(query, evidence, selOpts) {
       return summarizer.selectEvidence(query, evidence, selOpts)
     },
+    judgeSupersession(fact, candidates) {
+      return summarizer.judgeSupersession(fact, candidates)
+    },
     contextualizeChunk(chunk, ctxOpts) {
       return summarizer.contextualizeChunk(chunk, ctxOpts)
     },

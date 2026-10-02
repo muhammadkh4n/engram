@@ -353,7 +353,7 @@ describe('deepSleep', () => {
 
       const result = await deepSleep(storage, { embed }, { minDigests: 3 })
 
-      expect(storage.semantic.findNearest).toHaveBeenCalledWith([0.1, 0.2, 0.3], 5)
+      expect(storage.semantic.findNearest).toHaveBeenCalledWith([0.1, 0.2, 0.3], 10)
       expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledWith('existing-sem-1', 0.1)
       expect(result.deduplicated).toBe(1)
       expect(storage.semantic.insert).not.toHaveBeenCalled()
