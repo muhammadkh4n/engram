@@ -17,6 +17,7 @@ import {
 } from '../src/replay/probe-lib.js'
 import { ReplayStopped } from '../src/replay/replay-lib.js'
 import type { ArmRecallOptions, ArmRecallResult } from '../src/replay/replay-stack.js'
+import { sensoryResetter } from '../src/sensory-reset.js'
 
 const recallLine = (step: number, queryId: string, ids: string[]) =>
   JSON.stringify({
@@ -235,6 +236,7 @@ describe('probe', () => {
         inside++
         try { return await fn() } finally { inside-- }
       },
+      beforeQuery: () => {},
       violations: () => [],
       write: (record, formatted) => written.push({ record, formatted }),
       now: () => new Date('2026-10-01T00:00:00Z'),
@@ -261,12 +263,80 @@ describe('probe', () => {
       arm: 'control',
       recall: async () => { calls++; return result(3) },
       aroundRecall: (fn) => fn(),
+      beforeQuery: () => {},
       violations: () => (calls >= 2 ? ['strict pin misses [{"bucket":"embedQuery"}]'] : []),
       write: (record) => written.push(record),
     })
     await expect(run).rejects.toBeInstanceOf(ReplayStopped)
     await expect(run).rejects.toThrow(/step 1: strict pin misses/)
     expect(written.map((r) => r.label)).toEqual(['s00'])
+  })
+
+  it('runs the beforeQuery hook before every query', async () => {
+    const events: string[] = []
+    await runProbe({
+      queries: parseProbeQueries(JSON.stringify([{ q: 'a' }, { q: 'b' }, { q: 'c' }])),
+      arm: 'control',
+      recall: async (query) => { events.push(`recall ${query}`); return result(1) },
+      aroundRecall: (fn) => fn(),
+      beforeQuery: () => events.push('reset'),
+      violations: () => [],
+      write: () => {},
+    })
+    expect(events).toEqual(['reset', 'recall a', 'reset', 'recall b', 'reset', 'recall c'])
+  })
+
+  // A stub memory whose ranking depends on the previous recall's priming, the
+  // way stagePrime lifts rows that share a topic with the last results.
+  function primingMemory() {
+    const state = { primed: [] as string[], intent: null as unknown }
+    const sensory = {
+      snapshot: () => ({ primed: [...state.primed] }),
+      restore: (snap: unknown) => { state.primed = [...(snap as { primed: string[] }).primed] },
+      getIntent: () => state.intent,
+      setIntent: (i: unknown) => { state.intent = i },
+    }
+    const recall = async (query: string): Promise<ArmRecallResult> => {
+      const ids = ['shared', `own-${query}`, ...state.primed.map((t) => `primed-${t}`)]
+      const ranked = state.primed.length > 0 ? [...ids].reverse() : ids
+      state.primed = [query]
+      return {
+        memories: ranked.map((id, i) => mem(id, i)),
+        associations: [],
+        formatted: ranked.join('\n'),
+      }
+    }
+    return { memory: { sensory }, recall }
+  }
+
+  async function probeInOrder(order: string[], reset: boolean): Promise<Map<string, string[]>> {
+    const { memory, recall } = primingMemory()
+    const resetSensory = sensoryResetter(memory, 'replay-probe')
+    const byQuery = new Map<string, string[]>()
+    await runProbe({
+      queries: parseProbeQueries(JSON.stringify(order.map((q) => ({ q })))),
+      arm: 'control',
+      recall: (query) => recall(query),
+      aroundRecall: (fn) => fn(),
+      beforeQuery: reset ? resetSensory : () => {},
+      violations: () => [],
+      write: (record) => byQuery.set(record.query, record.memories.map((m) => m.id)),
+    })
+    return byQuery
+  }
+
+  it('gives each query the same ranking whatever the query order when the buffer is reset', async () => {
+    const forward = await probeInOrder(['alpha', 'beta'], true)
+    const backward = await probeInOrder(['beta', 'alpha'], true)
+    expect(forward).toEqual(backward)
+    expect(forward.get('beta')).toEqual(['shared', 'own-beta'])
+  })
+
+  it('lets the previous query rerank the next one without the reset', async () => {
+    const forward = await probeInOrder(['alpha', 'beta'], false)
+    const backward = await probeInOrder(['beta', 'alpha'], false)
+    expect(forward.get('beta')).toEqual(['primed-alpha', 'own-beta', 'shared'])
+    expect(forward).not.toEqual(backward)
   })
 
   it('parses probe arguments with the replay guards and pins flags', () => {

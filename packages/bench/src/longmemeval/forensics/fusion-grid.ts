@@ -33,6 +33,7 @@
 import * as fs from 'node:fs'
 import { LongMemEvalAdapter } from '../adapter.js'
 import { createBenchMemory, resolveEmbedDims } from '../../memory-factory.js'
+import { sensoryResetter } from '../../sensory-reset.js'
 import { FUSION_ENV_VAR, recallOutputPolicyFromEnv } from '@engram-mem/core'
 import { buildModelMeta, resolveEmbedSettings } from './reranker-meta-lib.js'
 import type { BenchmarkOpts, RerankerBackend } from '../../types.js'
@@ -55,7 +56,6 @@ import {
   parseGrid,
   parseGridArgs,
   recallCells,
-  sensoryResetter,
   sha256Hex,
   type GridRow,
 } from './fusion-grid-lib.js'
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
       await memory.flushPendingWrites()
       const ingest = { episodes: episodesIngested, ingestMs: Date.now() - ingestStart }
       await recallCells(memory, q, cells, ingest, {
-        beforeCell: sensoryResetter(memory),
+        beforeCell: sensoryResetter(memory, 'fusion-grid'),
         onRow: (cell, row) => {
           appendCheckpointRow(partialByCell.get(cell.name)!, row)
           newRows.get(cell.name)!.push(row)

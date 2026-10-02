@@ -98,19 +98,24 @@ export interface ProbeDeps {
   recall(query: string, opts: ArmRecallOptions): Promise<ArmRecallResult>
   /** Wraps each recall: the arm's env is set for that call only. */
   aroundRecall<T>(fn: () => Promise<T>): Promise<T>
+  /** Runs before every query; the CLI restores the sensory buffer here so a
+   *  query's priming never lifts rows in the queries after it. */
+  beforeQuery(): void
   violations(): string[]
   write(record: ProbeRecord, formatted: string): void
   clock?: () => number
   now?: () => Date
 }
 
-/** Runs every probe query once, in file order; a violation stops the probe
- *  before that query's record is written. Returns the number of records. */
+/** Runs every probe query once, in file order, each after `beforeQuery`; a
+ *  violation stops the probe before that query's record is written. Returns
+ *  the number of records. */
 export async function runProbe(deps: ProbeDeps): Promise<number> {
   const clock = deps.clock ?? (() => performance.now())
   const now = deps.now ?? (() => new Date())
   let written = 0
   for (const [i, query] of deps.queries.entries()) {
+    deps.beforeQuery()
     const t0 = clock()
     const result = await deps.aroundRecall(() => deps.recall(query.q.trim(), probeRecallOptions(query)))
     const wallMs = Math.round(clock() - t0)

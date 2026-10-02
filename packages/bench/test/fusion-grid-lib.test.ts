@@ -14,7 +14,6 @@ import {
   parseGrid,
   parseGridArgs,
   recallCells,
-  sensoryResetter,
   type GridCell,
   type GridQuestion,
   type GridRow,
@@ -27,6 +26,7 @@ import {
 } from '../src/longmemeval/forensics/context-modes.js'
 import { parsePartial, pendingQuestions, type RunIdentity } from '../src/longmemeval/forensics/sweep-checkpoint-lib.js'
 import { createBenchMemory } from '../src/memory-factory.js'
+import { sensoryResetter } from '../src/sensory-reset.js'
 
 const QID = 'q-grid-1'
 const QUESTION: GridQuestion = {
@@ -320,7 +320,7 @@ describe('sensoryResetter', () => {
       getIntent: () => state.intent,
       setIntent: (i: unknown) => { state.intent = i },
     }
-    const reset = sensoryResetter({ sensory })
+    const reset = sensoryResetter({ sensory }, 'fusion-grid')
     state.primed.push('basil')
     state.intent = 'other'
     reset()
@@ -330,7 +330,7 @@ describe('sensoryResetter', () => {
   it('resets the sensory buffer of a real Memory', async () => {
     const { memory } = await createBenchMemory({ graph: false, openaiApiKey: '' })
     try {
-      const reset = sensoryResetter(memory)
+      const reset = sensoryResetter(memory, 'fusion-grid')
       const sensory = (memory as unknown as { sensory: { prime(t: string[], b: number, n: number): void; getPrimed(): unknown[] } }).sensory
       sensory.prime(['planters'], 0.2, 3)
       expect(sensory.getPrimed()).toHaveLength(1)
@@ -342,7 +342,7 @@ describe('sensoryResetter', () => {
   })
 
   it('fails loudly when the memory has no sensory buffer', () => {
-    expect(() => sensoryResetter({})).toThrow(/sensory buffer/)
+    expect(() => sensoryResetter({}, 'fusion-grid')).toThrow(/sensory buffer/)
   })
 })
 

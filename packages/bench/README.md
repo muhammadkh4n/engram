@@ -226,6 +226,10 @@ npx tsx packages/bench/src/replay/probe.ts \
 - Same build loading, stack composition, `--env` handling, copy guards and pins as the replay. Each query runs
   `memory.recall(q, { projectId: p, reconsolidate: false })` with no conversation key, on a fresh memory, so
   in-process priming from the replay does not carry over.
+- The sensory buffer (working items, primed topics, intent) is restored to its state at memory build before
+  every query. Recall primes topics even with reconsolidation off, and that priming lifts rows in the next
+  recalls; without the reset each arm's answers would depend on the probe's own query order. The meta records
+  `sensory: reset before each query`.
 - Writes `<out>/<arm>/s00.txt` (the formatted payload) and `<out>/<arm>/s00.json` (`label`, `arm`, `query`,
   `projectId`, the top 10 `memories` with `rank`, `id`, `type`, `content`, `relevance`, `metadata`, and the
   associated ids), one pair per query, plus `<out>/probe-meta-<arm>.json`. This is the layout the pairwise

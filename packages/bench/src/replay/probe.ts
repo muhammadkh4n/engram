@@ -2,7 +2,8 @@
 /**
  * Final-state probe of an arm's copy after a replay: a held-out query file
  * (`[{q, p}]`) run with `reconsolidate: false` and no conversation key, on the
- * same build, env, pins and copy guards as the replay.
+ * same build, env, pins and copy guards as the replay. The sensory buffer is
+ * restored before each query, so no query's priming reaches the next.
  *
  * Usage:
  *   npx tsx packages/bench/src/replay/probe.ts \
@@ -19,6 +20,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { NO_PINS_FILE_SHA, ReplayStopped, createPins, parsePins, sha256, withEnv } from './replay-lib.js'
 import { parseProbeArgs, parseProbeQueries, runProbe, type ProbeArgs } from './probe-lib.js'
+import { sensoryResetter } from '../sensory-reset.js'
 import { armRerankModel, buildArmMemory, openArmCopy, pinViolations, readOrNull, writeAtomic } from './replay-stack.js'
 
 async function main(args: ProbeArgs): Promise<number> {
@@ -55,6 +57,7 @@ async function main(args: ProbeArgs): Promise<number> {
     graph: 'none: this probe wires no graph',
     reranker: rerankModel ?? `${copy.mods.DEFAULT_RERANK_MODEL} (default)`,
     recall_options: 'projectId from the query file, no conversation key, reconsolidate off',
+    sensory: 'reset before each query',
   }
   const writeMeta = (extra: Record<string, unknown> = {}) =>
     writeAtomic(metaPath, JSON.stringify({ ...meta, pin_stats: pins.stats, ...extra }, null, 2))
@@ -62,12 +65,16 @@ async function main(args: ProbeArgs): Promise<number> {
 
   const memory = await buildArmMemory(copy, args.env, pins, args.pinsMode)
   meta['lexical_mode'] = copy.storage.lexicalMode ?? null
+  // Recall primes topics whatever `reconsolidate` is, and the priming boosts
+  // the following recalls; every query starts from the buffer as built.
+  const resetSensory = sensoryResetter(memory, 'replay-probe')
   try {
     const written = await runProbe({
       queries,
       arm: args.arm,
       recall: (query, opts) => memory.recall(query, opts),
       aroundRecall: (fn) => withEnv(args.env, fn),
+      beforeQuery: resetSensory,
       violations: () => pinViolations(pins),
       write: (record, formatted) => {
         fs.writeFileSync(path.join(armDir, `${record.label}.txt`), formatted)
