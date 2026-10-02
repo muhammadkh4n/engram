@@ -129,6 +129,18 @@ export function makeMockDigestStorage(initialDigests: Digest[] = []): MockDigest
       }
       return counts
     }),
+
+    getPendingFactExtraction: vi.fn(async (limit: number) => {
+      return digests
+        .filter(d => !d.factsExtractedAt)
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .slice(0, limit)
+    }),
+
+    markFactsExtracted: vi.fn(async (id: string, at: Date) => {
+      const index = digests.findIndex(d => d.id === id)
+      if (index >= 0) digests[index] = { ...digests[index]!, factsExtractedAt: at }
+    }),
   }
 }
 

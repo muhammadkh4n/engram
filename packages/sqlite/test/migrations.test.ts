@@ -42,9 +42,9 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 6 after all migrations', () => {
+  it('sets schema version to 7 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(6)
+    expect(getSchemaVersion(db)).toBe(7)
   })
 
   it('v5 adds forgotten_at to the recallable memory tables', () => {
@@ -66,10 +66,42 @@ describe('SQLite migrations', () => {
     expect(objects).toEqual([])
   })
 
+  it('v7 stamps the digests that already exist and leaves later ones pending', () => {
+    runMigrations(db)
+    db.exec('DROP INDEX idx_digests_facts_pending')
+    db.exec('ALTER TABLE digests DROP COLUMN facts_extracted_at')
+    db.pragma('user_version = 6')
+
+    const insertDigest = (id: string, createdAt: number) => {
+      db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run(id, 'digest')
+      db.prepare(
+        `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
+         source_digest_ids, level, metadata, created_at)
+         VALUES (?, 's1', 'summary', '[]', '[]', '[]', 0, '{}', ?)`,
+      ).run(id, createdAt)
+    }
+    insertDigest('old-1', 2461000.25)
+    insertDigest('old-2', 2461001.5)
+
+    runMigrations(db)
+    expect(getSchemaVersion(db)).toBe(7)
+
+    insertDigest('new-1', 2461002.75)
+    const rows = db
+      .prepare('SELECT id, created_at, facts_extracted_at FROM digests ORDER BY id')
+      .all() as Array<{ id: string; created_at: number; facts_extracted_at: number | null }>
+
+    expect(rows).toEqual([
+      { id: 'new-1', created_at: 2461002.75, facts_extracted_at: null },
+      { id: 'old-1', created_at: 2461000.25, facts_extracted_at: 2461000.25 },
+      { id: 'old-2', created_at: 2461001.5, facts_extracted_at: 2461001.5 },
+    ])
+  })
+
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(6)
+    expect(getSchemaVersion(db)).toBe(7)
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE name = 'episode_parts'").pluck().all(),
     ).toEqual([])

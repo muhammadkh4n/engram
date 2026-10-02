@@ -136,6 +136,22 @@ export class SqliteDigestStorage implements DigestStorage {
     return result
   }
 
+  async getPendingFactExtraction(limit: number): Promise<Digest[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM digests WHERE facts_extracted_at IS NULL
+         ORDER BY created_at ASC, rowid ASC LIMIT ?`
+      )
+      .all(limit) as DigestRow[]
+    return rows.map((r) => this.rowToDigest(r))
+  }
+
+  async markFactsExtracted(id: string, at: Date): Promise<void> {
+    this.db
+      .prepare('UPDATE digests SET facts_extracted_at = julianday(?) WHERE id = ?')
+      .run(at.toISOString(), id)
+  }
+
   private rowToDigest(row: DigestRow): Digest {
     return {
       id: row.id,
@@ -153,6 +169,7 @@ export class SqliteDigestStorage implements DigestStorage {
       metadata: JSON.parse(row.metadata),
       createdAt: julianToDate(row.created_at)!,
       projectId: row.project_id ?? null,
+      factsExtractedAt: julianToDate(row.facts_extracted_at),
     }
   }
 
@@ -174,4 +191,5 @@ interface DigestRow {
   metadata: string
   created_at: number
   project_id: string | null
+  facts_extracted_at: number | null
 }

@@ -102,6 +102,11 @@ export interface Digest {
   metadata: Record<string, unknown>
   createdAt: Date
   projectId: string | null  // Wave 5
+  /**
+   * When deep sleep extracted this digest's facts from its source episodes.
+   * Null or absent: extraction is still pending, so a failed run retries it.
+   */
+  factsExtractedAt?: Date | null
 }
 
 export interface SemanticMemory {

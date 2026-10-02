@@ -374,4 +374,22 @@ export function runMigrations(db: Database.Database): void {
     `)
     db.pragma('user_version = 6')
   }
+
+  if (currentVersion < 7) {
+    // V7: fact-extraction watermark on digests. Deep sleep extracts facts from
+    // the digests where it is NULL and stamps them. Rows that exist before this
+    // version had their facts extracted by the older rolling-window pass, so
+    // they are stamped with their own created_at; a migration runs once, so
+    // digests written later stay pending.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'facts_extracted_at')) {
+      db.exec('ALTER TABLE digests ADD COLUMN facts_extracted_at REAL')
+    }
+    db.exec('UPDATE digests SET facts_extracted_at = created_at WHERE facts_extracted_at IS NULL')
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_digests_facts_pending
+      ON digests(created_at) WHERE facts_extracted_at IS NULL
+    `)
+    db.pragma('user_version = 7')
+  }
 }

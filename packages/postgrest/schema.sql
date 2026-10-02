@@ -996,6 +996,16 @@ ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS last_shown timesta
 
 
 --
+-- Fact-extraction watermark: deep sleep extracts facts from the digests where
+-- facts_extracted_at IS NULL and stamps each one. This file is re-applied on
+-- every deploy, so it never stamps rows: a stamp here would also mark digests
+-- written since the last apply and skip their extraction. Existing rows are
+-- stamped once, by hand, when upgrading (see the package README).
+--
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_extracted_at timestamp with time zone;
+
+
+--
 -- memory_episodes.fts converge: older installs generated fts from a since-removed
 -- secondary text column (falling back to content). CREATE TABLE IF NOT EXISTS never
 -- rewrites an existing column, so an install whose generation expression differs
@@ -1166,6 +1176,13 @@ CREATE INDEX IF NOT EXISTS idx_assoc_target_strength ON public.memory_associatio
 --
 
 CREATE INDEX IF NOT EXISTS idx_digests_created ON public.memory_digests USING btree (created_at DESC);
+
+
+--
+-- Name: idx_digests_facts_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_digests_facts_pending ON public.memory_digests USING btree (created_at) WHERE (facts_extracted_at IS NULL);
 
 
 --

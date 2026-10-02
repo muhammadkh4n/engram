@@ -140,6 +140,26 @@ export class PostgRestDigestStorage implements DigestStorage {
     return counts
   }
 
+  async getPendingFactExtraction(limit: number): Promise<Digest[]> {
+    const { data, error } = await this.client
+      .from('memory_digests')
+      .select('*')
+      .is('facts_extracted_at', null)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(limit)
+    if (error) throw new Error(`Digest getPendingFactExtraction failed: ${error.message}`)
+    return ((data ?? []) as DigestRow[]).map(rowToDigest)
+  }
+
+  async markFactsExtracted(id: string, at: Date): Promise<void> {
+    const { error } = await this.client
+      .from('memory_digests')
+      .update({ facts_extracted_at: at.toISOString() })
+      .eq('id', id)
+    if (error) throw new Error(`Digest markFactsExtracted failed: ${error.message}`)
+  }
+
   /**
    * Total digest count. Optional in DigestStorage; implementing here so the
    * v0.3.14 deep-sleep delta gate (isDeepSleepDue) can skip no-op runs by
@@ -172,6 +192,7 @@ interface DigestRow {
   metadata: Record<string, unknown>
   created_at: string
   project_id?: string | null
+  facts_extracted_at?: string | null
 }
 
 interface RecallRow {
@@ -200,6 +221,7 @@ function rowToDigest(row: DigestRow): Digest {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     projectId: row.project_id ?? null,
+    factsExtractedAt: row.facts_extracted_at ? new Date(row.facts_extracted_at) : null,
   }
 }
 

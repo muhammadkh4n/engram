@@ -208,6 +208,8 @@ export function createMockStorage(opts: MockStorageOptions = {}): StorageAdapter
     getBySession: vi.fn().mockResolvedValue([]),
     getRecent: vi.fn().mockResolvedValue([]),
     getCountBySession: vi.fn().mockResolvedValue({}),
+    getPendingFactExtraction: vi.fn().mockResolvedValue([]),
+    markFactsExtracted: vi.fn().mockResolvedValue(undefined),
   }
 
   const semantic: SemanticStorage = {

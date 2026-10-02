@@ -109,6 +109,13 @@ export interface DigestStorage {
   getCountBySession(): Promise<Record<string, number>>
   /** Fast COUNT(*) for stats(). Falls back to getCountBySession sum when not implemented. */
   count?(): Promise<number>
+  /**
+   * Up to `limit` digests whose facts have not been extracted yet
+   * (`factsExtractedAt` unset), oldest `createdAt` first.
+   */
+  getPendingFactExtraction(limit: number): Promise<Digest[]>
+  /** Stamp one digest's `factsExtractedAt`, removing it from the pending set. */
+  markFactsExtracted(id: string, at: Date): Promise<void>
 }
 
 export interface SemanticStorage {
