@@ -121,6 +121,12 @@ describe('schema.sql engram_text_match builds the tsquery per term', () => {
     expect(body()).not.toMatch(/p_project_id/)
   })
 
+  it('breaks rank_score ties on memory_type then id, so the LIMIT cut is the same on every call', () => {
+    expect(body().replace(/\s+/g, ' ').trim()).toMatch(
+      /\) combined ORDER BY rank_score DESC, memory_type, id LIMIT p_match_count$/,
+    )
+  })
+
   it('keeps the old text-boost function for the build that is still running', () => {
     expect(schema).toMatch(/CREATE OR REPLACE FUNCTION public\.engram_text_boost\(p_query_terms text/)
   })

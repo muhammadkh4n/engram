@@ -198,6 +198,15 @@ CREATE INDEX IF NOT EXISTS idx_procedural_bm25 ON public.memory_procedural
 -- keeps the outer rank_score filter from being pushed into the tier, where
 -- it would score every row a second time.
 --
+-- Ties. Each cut (a term's candidate LIMIT and its row_number(), the
+-- tier's candidate cap, the tier's p_match_count rows and the final cut)
+-- ends its ORDER BY in a key that is unique within its rows: the row id, and
+-- memory_type with the id across tiers. Rows with identical text score
+-- identically, and without that key the cut keeps whichever tied rows the
+-- scan meets first. Heap order changes whenever a row is rewritten, and
+-- recall rewrites the rows it returns (shown_count), so two calls with the
+-- same terms over the same rows could return different id sets.
+--
 -- An empty or NULL p_terms, or terms that reduce to no lexemes, return no
 -- rows. p_project_id is accepted for caller compatibility and filters
 -- nothing: a project tag only ranks rows (in the client), it never excludes
@@ -231,18 +240,19 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
         WHERE me.id IN (
           SELECT c.id
           FROM match_terms mt CROSS JOIN LATERAL (
-            SELECT e.id, row_number() OVER (ORDER BY ts_rank_cd(e.fts, mt.q, 2) DESC) AS term_rank
+            SELECT e.id, row_number() OVER (ORDER BY ts_rank_cd(e.fts, mt.q, 2) DESC, e.id) AS term_rank
             FROM memory_episodes e
             WHERE e.fts @@ mt.q
               AND e.forgotten_at IS NULL
               AND (p_session_id IS NULL OR e.session_id = p_session_id)
+            ORDER BY ts_rank_cd(e.fts, mt.q, 2) DESC, e.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
           GROUP BY c.id
-          ORDER BY min(c.term_rank)
+          ORDER BY min(c.term_rank), c.id
           LIMIT (SELECT candidate_cap FROM bounds)
         )
-        ORDER BY bm25_score
+        ORDER BY bm25_score, me.id
         LIMIT p_match_count
       ) episodes
 
@@ -256,16 +266,17 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
         WHERE md.id IN (
           SELECT c.id
           FROM match_terms mt CROSS JOIN LATERAL (
-            SELECT d.id, row_number() OVER (ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC) AS term_rank
+            SELECT d.id, row_number() OVER (ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id) AS term_rank
             FROM memory_digests d
             WHERE d.fts @@ mt.q
+            ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
           GROUP BY c.id
-          ORDER BY min(c.term_rank)
+          ORDER BY min(c.term_rank), c.id
           LIMIT (SELECT candidate_cap FROM bounds)
         )
-        ORDER BY bm25_score
+        ORDER BY bm25_score, md.id
         LIMIT p_match_count
       ) digests
 
@@ -279,18 +290,19 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
         WHERE ms.id IN (
           SELECT c.id
           FROM match_terms mt CROSS JOIN LATERAL (
-            SELECT s.id, row_number() OVER (ORDER BY ts_rank_cd(s.fts, mt.q, 2) DESC) AS term_rank
+            SELECT s.id, row_number() OVER (ORDER BY ts_rank_cd(s.fts, mt.q, 2) DESC, s.id) AS term_rank
             FROM memory_semantic s
             WHERE s.fts @@ mt.q
               AND s.superseded_by IS NULL
               AND s.forgotten_at IS NULL
+            ORDER BY ts_rank_cd(s.fts, mt.q, 2) DESC, s.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
           GROUP BY c.id
-          ORDER BY min(c.term_rank)
+          ORDER BY min(c.term_rank), c.id
           LIMIT (SELECT candidate_cap FROM bounds)
         )
-        ORDER BY bm25_score
+        ORDER BY bm25_score, ms.id
         LIMIT p_match_count
       ) semantic
 
@@ -304,23 +316,24 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
         WHERE mp.id IN (
           SELECT c.id
           FROM match_terms mt CROSS JOIN LATERAL (
-            SELECT p.id, row_number() OVER (ORDER BY ts_rank_cd(p.fts, mt.q, 2) DESC) AS term_rank
+            SELECT p.id, row_number() OVER (ORDER BY ts_rank_cd(p.fts, mt.q, 2) DESC, p.id) AS term_rank
             FROM memory_procedural p
             WHERE p.fts @@ mt.q
               AND p.forgotten_at IS NULL
+            ORDER BY ts_rank_cd(p.fts, mt.q, 2) DESC, p.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
           GROUP BY c.id
-          ORDER BY min(c.term_rank)
+          ORDER BY min(c.term_rank), c.id
           LIMIT (SELECT candidate_cap FROM bounds)
         )
-        ORDER BY bm25_score
+        ORDER BY bm25_score, mp.id
         LIMIT p_match_count
       ) procedural
     ) tiers
   ) combined
   WHERE rank_score > 0
-  ORDER BY rank_score DESC
+  ORDER BY rank_score DESC, memory_type, id
   LIMIT p_match_count
 $$;
 
