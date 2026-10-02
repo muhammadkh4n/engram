@@ -156,6 +156,59 @@ time. Each cell checkpoints to `<name>.json.partial.jsonl`; `--resume` needs all
 run identity (including the grid sha256) and skips the questions present in every one. A question
 stopped part-way through its cells reruns in all of them.
 
+## Replay
+
+LongMemEval and the recall sweeps build a fresh store per question or recall with `reconsolidate: false`, so neither can see an
+effect that builds up over many recalls: access counts, co-recall edges, priming. `src/replay/replay.ts`
+replays a window of real traffic, in time order, against a writable copy of the store, once per arm:
+
+```bash
+npx tsx packages/bench/src/replay/replay.ts \
+  --window ./window.jsonl \
+  --target http://127.0.0.1:3901 --key-env REPLAY_PGRST_KEY \
+  --engram-dist /path/to/engram-checkout --arm control \
+  [--env ENGRAM_RECALL_FUSION='{"accessBoostCap":0}' …] \
+  [--conversation-key logged|sessionize|none] \
+  --pins ./pins.json [--pins-mode fill|strict] \
+  --out ./replay/control
+```
+
+- **Window:** JSONL, one event per line. `{"kind":"recall", ts, query, project_id, session_id, conversation_id}`
+  lines come from the server's recall log (`ENGRAM_RECALL_LOG`); `{"kind":"episode", id, session_id,
+  project_id, role, content, embedding, metadata, created_at}` lines are the episodes created in the window,
+  with their stored embeddings. Events run ordered by `ts` / `created_at`, ties in file order.
+- **An arm** is an engram build (`--engram-dist`: a checkout root whose packages are built), env switches and
+  its own copy. Storage, intelligence and reranker are loaded from that build and composed as the MCP server
+  composes them: PostgREST storage at `--target` with the key read from the variable `--key-env` names,
+  OpenAI embeddings plus the `ENGRAM_CHAT_*` chat settings, and the local ONNX reranker
+  (`ENGRAM_RERANK_LOCAL_MODEL`, the package default when unset). No graph is wired and no consolidation cycle
+  runs; `run-meta.json` says so. `--env K=V` is set while the stack is built and for each recall, and
+  restored after each. `ENGRAM_RECALL_ENGINE=true` is refused: episode rows are written past the RAM engine.
+- **Copy guards:** the run refuses to start when `--target` is a loopback address on port 3001 (the prod
+  PostgREST address) or a host named `rexvps`, when the target has no readable `engram_replay_copy` table,
+  or when that table does not hold exactly one row whose `arm` equals `--arm`. Prod never has the table:
+  create it on each copy (`CREATE TABLE engram_replay_copy (arm text NOT NULL)` plus the row) and expose it
+  to the PostgREST role.
+- **Episodes** are inserted as rows through the arm's PostgREST client, keeping the window's id, embedding
+  and `created_at`, with no embed or chat call. An id already in the copy is left as it is and logged as
+  `inserted: false`. A missing embedding is inserted as NULL and counted.
+- **Recalls** run `memory.recall(query, { projectId, conversationKey, reconsolidate: true })` on one long-lived
+  memory, so priming carries from one recall to the next. `--conversation-key logged` sends the log's
+  `conversation_id`; `sessionize` groups recalls by project with a 30-minute inactivity gap, because clients
+  send no conversation id today; `none` (the default) sends no key. A build without per-conversation recall
+  state ignores the key.
+- **Pins:** `embed`, `embedQuery`, `expandQuery` and `generateHypotheticalDoc` are memoised per text in the
+  pins file, one JSON object per method (`embed`, `embedQuery`, `expand`, `hyde`) keyed by input text. The first arm runs `--pins-mode fill`; later arms run `strict`, where
+  a miss throws without calling the model. Every other model method is blocked and counted. A strict miss or a
+  blocked call stops the run (exit 4), because the engine swallows expansion and HyDE errors.
+- **Outputs:** `<out>/steps.jsonl`, one line per event: `step`, `kind`, `pins_sha256`, and for recalls
+  `query_id` (`r<n>`, the recall's ordinal in the window), `project_id`, `conversation_key`, `emitted`
+  (`{id, tier, rank}` in display order), `associated` (`{id, tier, section}`), `timings`, `degraded`,
+  `wall_ms`. `<out>/run-meta.json` holds the run identity, counts and pin stats.
+- **Resume:** rerunning with the same `--out` continues after the last logged step only when the identity (arm,
+  target, build path, env, key mode, window sha256, pins path and mode) matches and the pins file is the one the
+  last step recorded; anything else is refused.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)
