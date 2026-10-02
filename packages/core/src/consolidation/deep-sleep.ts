@@ -771,8 +771,10 @@ export async function promoteFactCandidates(
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
  * - DERIVES_FROM edges to source digests
- * - CONTEXTUAL edges to the source digests' context nodes that the fact's
- *   topic and content name, at the strongest digest weight attenuated
+ * - CONTEXTUAL edges to the entities the fact's topic and content name among
+ *   its cited episodes' context nodes, weighted by the share of cited
+ *   episodes that link each one; a fact with no citation falls back to the
+ *   source digests' context nodes at the strongest digest weight attenuated
  * - CONTRADICTS relationships on supersession
  * - Temporal validity (validFrom from earliest source episode)
  */

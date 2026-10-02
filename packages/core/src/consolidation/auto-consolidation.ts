@@ -31,7 +31,7 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import type { SupersessionSettings } from './deep-sleep.js'
 import { lightSleep } from './light-sleep.js'
-import { deepSleep } from './deep-sleep.js'
+import { deepSleep, DEFAULT_MAX_EXTRACTION_ATTEMPTS } from './deep-sleep.js'
 import { dreamCycle } from './dream-cycle.js'
 import { decayPass } from './decay-pass.js'
 
@@ -39,17 +39,12 @@ export type ConsolidationCycle = 'light' | 'deep' | 'dream' | 'decay'
 
 export interface AutoConsolidationOpts {
   lightSleepThreshold?: number
-  deepSleepThreshold?: number
   /**
-   * Delta gate: minimum new digests since the last completed deep sleep
-   * required to consider deep cycle due. Without this gate, isDeepSleepDue
-   * keeps returning true as long as 5+ digests exist in the last 7 days —
-   * deep sleep doesn't mark digests as processed, so it runs every tick
-   * forever (Supabase IO budget killer, observed in v0.3.13 prod). With
-   * the delta gate, deep sleep only fires when ingest has produced enough
-   * new digests to be worth re-processing. Default 5. Set to 0 to disable.
+   * Deep sleep is due once this many digests await fact extraction (not yet
+   * extracted, under the attempt cap). Also passed to deep sleep as its
+   * minDigests, so the gate and the run agree. Default 5.
    */
-  deepSleepMinNewDigests?: number
+  deepSleepThreshold?: number
   dreamCycleIntervalHours?: number
   dreamCycleMinEpisodes?: number
   /**
@@ -73,7 +68,6 @@ export interface AutoConsolidationOpts {
 const DEFAULTS: Required<Omit<AutoConsolidationOpts, 'cycles' | 'supersession'>> = {
   lightSleepThreshold: 20,
   deepSleepThreshold: 5,
-  deepSleepMinNewDigests: 5,
   dreamCycleIntervalHours: 24,
   dreamCycleMinEpisodes: 50,
   dreamCycleMinNewEpisodes: 100,
@@ -136,25 +130,12 @@ export async function runAutoConsolidation(
         lightSleep(storage, intelligence, undefined, graph)))
     }
 
-    if (await eligible('deep') && await isDeepSleepDue(
-      storage,
-      tracker,
-      config.deepSleepThreshold,
-      config.deepSleepMinNewDigests,
-    )) {
-      results.push(await runTracked('deep', tracker, async () => {
-        const result = await deepSleep(storage, intelligence, { supersession: config.supersession }, graph)
-        // v0.3.14: snapshot digest count for the next run's delta gate.
-        // Without this, the next isDeepSleepDue() call has no prior count
-        // to diff against and falls back to the old "any 5+ digests in last
-        // 7 days" check — which fires every tick.
-        if (storage.digests.count) {
-          try {
-            result.digestCount = await storage.digests.count()
-          } catch { /* non-fatal — gate falls back to threshold check */ }
-        }
-        return result
-      }))
+    if (await eligible('deep') && await isDeepSleepDue(storage, config.deepSleepThreshold)) {
+      results.push(await runTracked('deep', tracker, () =>
+        deepSleep(storage, intelligence, {
+          minDigests: config.deepSleepThreshold,
+          supersession: config.supersession,
+        }, graph)))
     }
 
     if (await eligible('dream') && await isDreamCycleDue(
@@ -322,35 +303,21 @@ async function isLightSleepDue(storage: StorageAdapter, threshold: number): Prom
   } catch { return false }
 }
 
+/**
+ * Due when at least `threshold` digests await fact extraction. Deep sleep
+ * stamps each digest it extracts and a digest leaves the pending set at the
+ * attempt cap, so a quiet store stops being due on its own.
+ */
 async function isDeepSleepDue(
   storage: StorageAdapter,
-  tracker: StorageAdapter['consolidationRuns'],
   threshold: number,
-  minNewDigests: number,
 ): Promise<boolean> {
   try {
-    // Bootstrap check: do we have enough digests in the last 7 days to be
-    // worth running deep sleep at all?
-    const digests = await storage.digests.getRecent(7)
-    if (digests.length < threshold) return false
-
-    // v0.3.14 delta gate — skip when no new digests have arrived since
-    // the last completed deep run, so isDeepSleepDue does not fire a run
-    // with nothing new to extract on every tick.
-    // Falls back to "always fire when threshold met" if either count()
-    // isn't implemented or there's no prior run to compare against.
-    if (minNewDigests > 0 && tracker && storage.digests.count) {
-      try {
-        const lastRun = await tracker.getLastRun('deep')
-        if (lastRun?.result?.digestCount !== undefined) {
-          const currentCount = await storage.digests.count()
-          const delta = currentCount - lastRun.result.digestCount
-          if (delta < minNewDigests) return false
-        }
-      } catch { /* fall through to threshold-only check */ }
-    }
-
-    return true
+    const pending = await storage.digests.getPendingFactExtraction(
+      threshold,
+      DEFAULT_MAX_EXTRACTION_ATTEMPTS,
+    )
+    return pending.length >= threshold
   } catch { return false }
 }
 

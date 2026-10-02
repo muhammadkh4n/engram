@@ -2,13 +2,14 @@
  * Focused tests for v0.3.12 additions to auto-consolidation:
  *   - `cycles` filter (which cycle types this run/worker handles)
  *   - `dreamCycleMinNewEpisodes` delta gate (skip no-op runs on quiet days)
+ *   - the deep-sleep gate, which counts digests awaiting fact extraction
  *
  * Keeps a tight scope on the new behavior — full-pipeline cycle tests live
  * in auto-consolidation.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
 import { runAutoConsolidation } from '../../src/consolidation/auto-consolidation.js'
-import { makeMockStorage, makeEpisode } from './mock-storage.js'
+import { makeMockStorage, makeEpisode, makeDigest } from './mock-storage.js'
 import type { ConsolidationRun, ConsolidateResult } from '../../src/types.js'
 import type { ConsolidationRunStorage } from '../../src/adapters/storage.js'
 
@@ -254,5 +255,60 @@ describe('Auto-consolidation dream-cycle delta gate', () => {
     })
 
     expect(results.find((r) => r.cycle === 'dream')).toBeDefined()
+  })
+})
+
+describe('Auto-consolidation deep-sleep gate', () => {
+  function pendingDigests(count: number, overrides: Parameters<typeof makeDigest>[0] = {}) {
+    return Array.from({ length: count }, () => makeDigest({ factsExtractedAt: null, ...overrides }))
+  }
+
+  it('runs deep sleep when enough digests are pending, though none arrived since the last run', async () => {
+    const tracker = makeTracker()
+    const lastRunId = await tracker.recordStart('deep')
+    await tracker.recordComplete(lastRunId, { cycle: 'deep', promoted: 0 } as ConsolidateResult, 1)
+    const storage = makeMockStorage({ initialDigests: pendingDigests(5) })
+    storage.consolidationRuns = tracker
+
+    const results = await runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })
+
+    expect(results.map((r) => r.cycle)).toEqual(['deep'])
+    expect(storage.digests.getPendingFactExtraction).toHaveBeenCalledWith(5, 3)
+    expect(storage.digests.markFactsExtracted).toHaveBeenCalledTimes(5)
+  })
+
+  it('skips deep sleep while fewer digests than the threshold are pending', async () => {
+    const storage = makeMockStorage({
+      initialDigests: [
+        ...pendingDigests(4),
+        ...pendingDigests(6, { factsExtractedAt: new Date('2026-01-01T00:00:00Z') }),
+      ],
+    })
+
+    const results = await runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })
+
+    expect(results).toEqual([])
+  })
+
+  it('does not count digests at the extraction attempt cap toward the threshold', async () => {
+    const storage = makeMockStorage({
+      initialDigests: [...pendingDigests(4), ...pendingDigests(3, { factExtractionAttempts: 3 })],
+    })
+
+    const results = await runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })
+
+    expect(results).toEqual([])
+  })
+
+  it('passes its threshold to deep sleep, so the run does not stop below the gate', async () => {
+    const storage = makeMockStorage({ initialDigests: pendingDigests(2) })
+
+    const results = await runAutoConsolidation(storage, undefined, null, {
+      cycles: ['deep'],
+      deepSleepThreshold: 2,
+    })
+
+    expect(results.map((r) => r.cycle)).toEqual(['deep'])
+    expect(storage.digests.markFactsExtracted).toHaveBeenCalledTimes(2)
   })
 })
