@@ -696,7 +696,9 @@ export async function runMemoryRecall(
   const recallOpts = recallOptionsFromArgs(args)
   if ('error' in recallOpts) return toolError(recallOpts.error)
 
-  const result = await mem.recall(query.trim(), recallOpts)
+  // The request time is the reference date for relative time phrases
+  // ("last week") in query expansion and in the opt-in synthesis block.
+  const result = await mem.recall(query.trim(), { ...recallOpts, now: new Date() })
   recallLog?.record(query.trim(), args, recallOpts.projectId, result)
 
   if (result.timings) {

@@ -642,7 +642,8 @@ export class Memory {
       projectStrict?: boolean
       /** Opt-in synthesis block computed from the returned memories. */
       synthesize?: boolean | SynthesizeOpts
-      /** Anchor for now-relative temporal arithmetic in synthesis. */
+      /** Reference date for relative time phrases: query expansion resolves
+       *  them to concrete dates, synthesis does now-relative arithmetic. */
       now?: Date
       /** Skip acknowledgements, greetings and emoji-only text instead of
        *  searching. For callers that recall on every conversation turn;

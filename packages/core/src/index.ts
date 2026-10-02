@@ -49,6 +49,7 @@ export type {
   SalienceCategory,
   SalienceClassification,
   SalienceOpts,
+  ExpandQueryOpts,
   EvidenceItem,
   EvidenceSelection,
 } from './adapters/intelligence.js'

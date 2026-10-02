@@ -300,6 +300,22 @@ describe('runMemoryRecall', () => {
     return { recall: async () => r }
   }
 
+  it('passes the request time as now and keeps the argument-derived options', async () => {
+    const seen: unknown[] = []
+    const mem = { recall: async (_q: string, opts?: unknown) => { seen.push(opts); return result({}) } }
+    const before = Date.now()
+
+    await runMemoryRecall(mem, { query: 'what did we ship last week', project_id: 'engram', synthesize: true })
+
+    const after = Date.now()
+    expect(seen).toHaveLength(1)
+    const { now, ...rest } = seen[0] as { now: Date }
+    expect(now).toBeInstanceOf(Date)
+    expect(now.getTime()).toBeGreaterThanOrEqual(before)
+    expect(now.getTime()).toBeLessThanOrEqual(after)
+    expect(rest).toEqual({ projectId: 'engram', synthesize: true })
+  })
+
   it('returns a degraded recall as normal content that leads with the notice', async () => {
     const formatted = `${NOTICE}\n## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
     const res = await runMemoryRecall(

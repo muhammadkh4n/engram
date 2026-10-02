@@ -88,6 +88,11 @@ export interface SalienceOpts {
   priorTurn?: string
 }
 
+export interface ExpandQueryOpts {
+  /** Reference date that relative time phrases in the query resolve against. */
+  now?: Date
+}
+
 // ---------------------------------------------------------------------------
 // Synthesis evidence selection (opt-in `synthesize` recall mode)
 // ---------------------------------------------------------------------------
@@ -159,8 +164,12 @@ export interface IntelligenceAdapter {
   ): Promise<SalienceClassification>
   /** Generate a hypothetical document that would answer the query (HyDE) */
   generateHypotheticalDoc?(query: string): Promise<string>
-  /** Generate 3-5 keyword variants to bridge vocabulary gap for BM25 boost */
-  expandQuery?(query: string): Promise<string[]>
+  /**
+   * Generate 3-5 keyword variants to bridge vocabulary gap for BM25 boost.
+   * `now` is the reference date for relative time phrases; without it the
+   * variants must not contain concrete dates, which would be guesses.
+   */
+  expandQuery?(query: string, opts?: ExpandQueryOpts): Promise<string[]>
   /**
    * Anthropic-style Contextual Retrieval: given a chunk and surrounding
    * conversation context, produce a 1-2 sentence preamble that situates

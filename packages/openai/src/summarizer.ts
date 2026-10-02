@@ -8,6 +8,7 @@ import type {
   SalienceClassification,
   SalienceCategory,
   SalienceOpts,
+  ExpandQueryOpts,
   EvidenceItem,
   EvidenceSelection,
 } from '@engram-mem/core'
@@ -428,7 +429,7 @@ export class OpenAISummarizer {
     return doc
   }
 
-  async expandQuery(query: string): Promise<string[]> {
+  async expandQuery(query: string, opts?: ExpandQueryOpts): Promise<string[]> {
     // Query expansion for BM25 rescue — generate alternative keyword
     // phrases that might appear in stored conversation turns. The
     // output feeds textBoost() which does tsquery OR-matching.
@@ -437,38 +438,19 @@ export class OpenAISummarizer {
     // - Always include the ORIGINAL proper nouns from the query (they
     //   are the strongest retrieval signal and should never be
     //   rephrased away).
-    // - For temporal queries, emit both the relative phrase ("last
-    //   week") and plausible concrete dates ("May 7", "2023-05-07")
-    //   since stored turns often contain both forms.
+    // - For temporal queries with a reference date, emit both the
+    //   relative phrase ("last week") and the concrete dates computed
+    //   from that date, since stored turns often contain both forms.
+    //   Without a reference date the model can only guess dates, and a
+    //   guessed date in the OR-terms matches unrelated turns, so the
+    //   prompt then asks for relative phrases only.
     // - Focus on nouns/verbs/entities, not stopwords. BM25 weights
     //   IDF naturally, but short queries get dropped entirely if
     //   they're all stopwords.
     const response = await this.chatCreate('expandQuery', {
       model: this.model,
       messages: [
-        {
-          role: 'system',
-          content:
-            [
-              'You generate keyword variants for retrieval from past conversations.',
-              '',
-              'Given a question, output 4-6 alternative phrases that might appear',
-              'verbatim in the stored dialogue turns answering the question.',
-              '',
-              'Rules:',
-              '1. INCLUDE every proper noun from the question unchanged (names, places, products).',
-              '2. For temporal queries, include BOTH relative phrases ("last week") AND',
-              '   plausible concrete forms ("Monday", "May 7", "last month", "2023").',
-              '3. Prefer nouns, verbs, and named entities. Skip articles and auxiliaries.',
-              '4. Output ONLY a JSON array of strings, no explanation.',
-              '',
-              'Examples:',
-              '- Q: "Where did Alice and Bob meet?"',
-              '  A: ["Alice Bob", "Alice met Bob", "Bob and Alice", "first time meeting", "meeting place"]',
-              '- Q: "What did we discuss last week?"',
-              '  A: ["last week", "discussed", "previous week", "Monday Tuesday Wednesday", "talked about"]',
-            ].join('\n'),
-        },
+        { role: 'system', content: expansionSystemPrompt(opts?.now) },
         { role: 'user', content: query },
       ],
       max_tokens: 100,
@@ -962,6 +944,50 @@ const MAX_EXPANSION_TERMS = 5
  * a fence, or an object. The first array holding at least one string is used;
  * a reply with none yields no terms.
  */
+/**
+ * System prompt for query expansion. With a valid reference date the prompt
+ * opens with it (UTC calendar day) and asks for the concrete dates relative
+ * phrases resolve to; without one it forbids concrete dates, since any date
+ * the model produced would be invented.
+ */
+function expansionSystemPrompt(now: Date | undefined): string {
+  const today = now !== undefined && !Number.isNaN(now.getTime()) ? now.toISOString().slice(0, 10) : null
+  const temporalRule = today !== null
+    ? [
+        '2. For temporal queries, include BOTH relative phrases ("last week") AND the',
+        '   concrete dates they refer to, computed from today\'s date (weekday names,',
+        '   "May 7", "2023-05-07", month names, the year).',
+      ]
+    : [
+        '2. For temporal queries, include relative phrases only ("last week",',
+        '   "yesterday", "last month"). Never output a concrete date, weekday, month',
+        '   or year the question does not state: the current date is unknown, so',
+        '   any computed date would be a guess.',
+      ]
+  const temporalExample = today !== null
+    ? '  A: ["last week", "discussed", "previous week", "Monday Tuesday Wednesday", "talked about"]'
+    : '  A: ["last week", "discussed", "previous week", "a week ago", "talked about"]'
+  return [
+    ...(today !== null ? [`Today's date is ${today}.`, ''] : []),
+    'You generate keyword variants for retrieval from past conversations.',
+    '',
+    'Given a question, output 4-6 alternative phrases that might appear',
+    'verbatim in the stored dialogue turns answering the question.',
+    '',
+    'Rules:',
+    '1. INCLUDE every proper noun from the question unchanged (names, places, products).',
+    ...temporalRule,
+    '3. Prefer nouns, verbs, and named entities. Skip articles and auxiliaries.',
+    '4. Output ONLY a JSON array of strings, no explanation.',
+    '',
+    'Examples:',
+    '- Q: "Where did Alice and Bob meet?"',
+    '  A: ["Alice Bob", "Alice met Bob", "Bob and Alice", "first time meeting", "meeting place"]',
+    '- Q: "What did we discuss last week?"',
+    temporalExample,
+  ].join('\n')
+}
+
 function parseExpansionTerms(raw: string): string[] {
   try {
     const terms = extractJsonReply(

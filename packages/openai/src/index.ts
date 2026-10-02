@@ -86,8 +86,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     generateHypotheticalDoc(query) {
       return summarizer.generateHypotheticalDoc(query)
     },
-    expandQuery(query: string) {
-      return summarizer.expandQuery(query)
+    expandQuery(query, expandOpts) {
+      return summarizer.expandQuery(query, expandOpts)
     },
     rerank(query, documents) {
       return summarizer.rerank(query, documents)

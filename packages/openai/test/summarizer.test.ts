@@ -418,6 +418,39 @@ describe('OpenAISummarizer', () => {
       expect(await expand('] not [ an array')).toEqual([])
       expect(await expand(null)).toEqual([])
     })
+
+    async function expansionPrompt(opts?: { now?: Date }): Promise<string> {
+      mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: '["last week"]' } }] })
+      await new OpenAISummarizer({ apiKey: 'test-key' }).expandQuery('What did we discuss last week?', opts)
+      const body = mockChatCreate.mock.calls.at(-1)![0] as { messages: { role: string; content: string }[] }
+      return body.messages[0]!.content
+    }
+
+    it('opens the prompt with the reference date and asks for dates computed from it', async () => {
+      const prompt = await expansionPrompt({ now: new Date('2023-05-14T09:30:00Z') })
+
+      expect(prompt.split('\n')[0]).toBe("Today's date is 2023-05-14.")
+      expect(prompt).toContain("concrete dates they refer to, computed from today's date")
+      expect(prompt).not.toContain('relative phrases only')
+    })
+
+    it('asks for relative phrases only and states no date when none is given', async () => {
+      const prompt = await expansionPrompt()
+
+      expect(prompt).not.toContain("Today's date")
+      expect(prompt).toContain('include relative phrases only')
+      expect(prompt).toContain('Never output a concrete date')
+      expect(prompt).not.toContain('plausible concrete forms')
+      expect(prompt).not.toMatch(/\b(19|20)\d\d\b/)
+      expect(prompt).not.toMatch(/Monday|Tuesday|May 7/)
+    })
+
+    it('treats an invalid reference date as absent', async () => {
+      const prompt = await expansionPrompt({ now: new Date('not a date') })
+
+      expect(prompt).not.toContain("Today's date")
+      expect(prompt).toContain('include relative phrases only')
+    })
   })
 
   describe('digestTranscript()', () => {
