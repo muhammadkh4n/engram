@@ -105,9 +105,12 @@ Search memory for content relevant to a query.
 {
   "query": "What deployment preferences did we discuss?",
   "session_id": "optional-session-id",
+  "conversation_id": "optional-conversation-id",
   "token_budget": 4000
 }
 ```
+
+`conversation_id` is optional: a non-blank string of at most 200 characters (trimmed) naming the caller's current conversation. It scopes priming to that conversation: keywords shared by several memories an earlier recall of the same `conversation_id` returned give a small score boost (whole-token match, capped) and seed the graph walk in its next recalls, and the last recall's intent informs the next one. It does **not** filter results, unlike `session_id`. A recall without `conversation_id` gets no priming and writes no priming state, so until a client sends it, priming is off. `ENGRAM_RECALL_PRIMING=off` disables priming even when it is sent. A blank, non-string or longer value returns an error result.
 
 `token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset).
 
@@ -326,7 +329,7 @@ Returns cross-project connections (people/entities shared between projects). Use
 
 Engram has 5 cognitive systems:
 
-1. **Sensory Buffer** — In-memory working memory (~100 items). Primed topics boost future recall.
+1. **Sensory Buffer** — In-memory working memory (~100 items). Primed topics boost later recalls of the same conversation (`conversation_id`).
 2. **Episodic System** — Raw conversation turns (ground truth, never deleted).
 3. **Semantic System** — Extracted facts with confidence scores. Decays over time.
 4. **Procedural System** — Learned workflows, preferences, habits.
