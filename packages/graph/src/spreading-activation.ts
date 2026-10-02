@@ -33,17 +33,27 @@ function compareActivation(a: ActivationResult, b: ActivationResult): number {
 }
 
 /**
- * ACT-R fan effect. Each step is scaled by the fan factor of the node it spreads
- * out of: f = ln(N / deg) / ln(N), with N the Memory node count and deg the
- * node's relationship count. A node linked to most of the graph passes on
- * almost nothing, and one whose degree reaches N passes on nothing; a graph
- * under two memories applies no factor, since ln 1 = 0. A literal 1/deg is
- * not used: two hops at a typical degree fall under the activation floor.
- * Project nodes and the default Session link whole populations, so a walk
- * through them gives every member the same activation; they never relay, and
- * a Project is never a seed. A neighbour's activation is its best path per
- * seed, summed across seeds, so a memory several seeds reach outranks one
- * reached from a single seed. The sum can exceed 1.
+ * ACT-R fan effect. Each step is scaled by decay and by the fan factor of the
+ * node it spreads out of: f = ln(N / deg) / ln(N), with N the Memory node count
+ * and deg the node's relationship count. A node linked to most of the graph
+ * passes on almost nothing, and one whose degree reaches N passes on nothing;
+ * a graph under two memories applies no factor, since ln 1 = 0. A literal
+ * 1/deg is not used: two hops at a typical degree fall under the activation
+ * floor. Project nodes and the default Session link whole populations, so a
+ * walk through them gives every member the same activation; they never relay,
+ * and a Project is never a seed.
+ *
+ * Strength comes from fan alone. Edge weights are not comparable across
+ * relationship types: they mix per-type ingest constants, shares of a digest's
+ * sources, and time decay that only some types receive, so multiplying them
+ * would rank a hub edge left at 1.0 above a decayed entity link. They still
+ * gate which edges a path may use (minWeight).
+ *
+ * A neighbour's activation per seed is the sum over its distinct routes: paths
+ * that visit no node twice, one entry per sequence of intermediate nodes, so
+ * parallel relationships between the same nodes count once. A memory sharing
+ * two entities with a seed therefore outranks one sharing a single entity.
+ * Per-seed totals then sum across seeds. The sum can exceed 1.
  */
 function fanEffectCypher(relFilter: string, maxHops: number): string {
   return `
@@ -58,6 +68,7 @@ function fanEffectCypher(relFilter: string, maxHops: number): string {
         MATCH path = (seed)-[rels${relFilter}*1..${maxHops}]-(neighbor)
         WHERE neighbor <> seed
           AND ALL(r IN rels WHERE r.weight >= $minWeight)
+          AND ALL(i IN range(1, length(path)) WHERE NOT nodes(path)[i] IN nodes(path)[0..i])
           AND NONE(n IN nodes(path)[1..-1] WHERE
                 n:Project
                 OR (n:Session AND n.id = 'default'))
@@ -69,7 +80,8 @@ function fanEffectCypher(relFilter: string, maxHops: number): string {
           AND ALL(n IN nodes(path) WHERE
                 NOT n:Memory
                 OR coalesce(n.forgottenAt, n.deletedAt) IS NULL)
-        WITH seedId, neighbor, rels, length(path) AS hops,
+        WITH seedId, neighbor, length(path) AS hops,
+             [n IN nodes(path)[1..-1] | elementId(n)] AS via,
              [degree IN [n IN nodes(path)[0..-1] | COUNT { (n)--() }] |
                CASE
                  WHEN memoryCount < 2 THEN 1.0
@@ -77,14 +89,14 @@ function fanEffectCypher(relFilter: string, maxHops: number): string {
                  ELSE log(toFloat(memoryCount) / degree) / log(toFloat(memoryCount))
                END
              ] AS fans
-        WITH neighbor, hops,
+        WITH neighbor, via, hops,
              reduce(
                activation = coalesce($seedWeights[seedId], 1.0),
-               i IN range(0, size(rels) - 1) |
-                 activation * rels[i].weight * $decayPerHop * fans[i]
+               fan IN fans | activation * $decayPerHop * fan
              ) AS activation
-        WITH neighbor, MAX(activation) AS seedBest, MIN(hops) AS seedHops
-        RETURN neighbor, seedBest AS activation, seedHops AS hops
+        WITH neighbor, via, MAX(activation) AS routeActivation, MIN(hops) AS routeHops
+        WITH neighbor, SUM(routeActivation) AS seedSum, MIN(routeHops) AS seedHops
+        RETURN neighbor, seedSum AS activation, seedHops AS hops
       }
       WITH neighbor, SUM(activation) AS bestActivation, MIN(hops) AS shortestPath
       WHERE bestActivation >= $minActivation

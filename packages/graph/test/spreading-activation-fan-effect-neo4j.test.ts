@@ -14,16 +14,18 @@ import { createTestGraph, getTestConfig, neo4jReady } from './helpers/setup.js'
  *   25 other memories. Every hub edge has weight 1.0;
  * - specific links: M_a and M_b share an entity with S1 (CONTEXTUAL 0.5);
  *   M_c shares one entity with S1 and another with S2 (CONTEXTUAL 0.5);
- *   M_d has a TEMPORAL 0.8 edge to S1.
+ *   M_d has a TEMPORAL 0.8 edge to S1; M_e shares two entities with S1, each
+ *   linked to nothing else (CONTEXTUAL 0.5), and has a second, parallel
+ *   relationship to the first of them (MENTIONS 0.9).
  *
- * 61 Memory nodes in total. Parameters are the recall graph stage defaults
+ * 62 Memory nodes in total. Parameters are the recall graph stage defaults
  * (2 hops, decay 0.6, faint floor 0.03).
  */
 
 const CREATED_AT = '2026-09-01T00:00:00.000Z'
 const HUB_MEMBERS = 30
 const COMMUNITY_MEMBERS = 25
-const MEMORY_COUNT = 6 + HUB_MEMBERS + COMMUNITY_MEMBERS
+const MEMORY_COUNT = 7 + HUB_MEMBERS + COMMUNITY_MEMBERS
 const DECAY = 0.6
 
 const SEED_WEIGHTS = new Map<string, number>([
@@ -46,12 +48,15 @@ const SEED_GRAPH = `
   CREATE (mb:Memory {id: 'M_b', createdAt: $createdAt})
   CREATE (mc:Memory {id: 'M_c', createdAt: $createdAt})
   CREATE (md:Memory {id: 'M_d', createdAt: $createdAt})
+  CREATE (me:Memory {id: 'M_e', createdAt: $createdAt})
   CREATE (session:Session {id: 'default'})
   CREATE (project:Project {id: 'project:p'})
   CREATE (community:Community {id: 'community:c'})
   CREATE (eab:Entity {id: 'entity:ab'})
   CREATE (ec1:Entity {id: 'entity:c1'})
   CREATE (ec2:Entity {id: 'entity:c2'})
+  CREATE (ee1:Entity {id: 'entity:e1'})
+  CREATE (ee2:Entity {id: 'entity:e2'})
   CREATE (s1)-[:OCCURRED_IN {weight: 1.0}]->(session)
   CREATE (s1)-[:PROJECT {weight: 1.0}]->(project)
   CREATE (s2)-[:PROJECT {weight: 1.0}]->(project)
@@ -64,6 +69,11 @@ const SEED_GRAPH = `
   CREATE (s2)-[:CONTEXTUAL {weight: 0.5}]->(ec2)
   CREATE (mc)-[:CONTEXTUAL {weight: 0.5}]->(ec2)
   CREATE (md)-[:TEMPORAL {weight: 0.8}]->(s1)
+  CREATE (s1)-[:CONTEXTUAL {weight: 0.5}]->(ee1)
+  CREATE (me)-[:CONTEXTUAL {weight: 0.5}]->(ee1)
+  CREATE (me)-[:MENTIONS {weight: 0.9}]->(ee1)
+  CREATE (s1)-[:CONTEXTUAL {weight: 0.5}]->(ee2)
+  CREATE (me)-[:CONTEXTUAL {weight: 0.5}]->(ee2)
   WITH session, project, community
   CALL {
     WITH session, project
@@ -86,8 +96,11 @@ function fan(degree: number): number {
 }
 
 // Degrees in the seeded graph.
-const DEG_S1 = 6 // session, project, community, two entities, M_d
+const DEG_S1 = 8 // session, project, community, four entities, M_d
+const DEG_S2 = 2 // project, entity:c2
 const DEG_ENTITY_AB = 3 // S1, M_a, M_b
+const DEG_PAIR_ENTITY = 2 // entity:c1, entity:c2, entity:e2
+const DEG_ENTITY_E1 = 3 // S1, and M_e twice
 const DEG_COMMUNITY = 1 + COMMUNITY_MEMBERS
 
 function ids(results: ActivationResult[]): string[] {
@@ -163,6 +176,9 @@ describe.skipIf(!neo4jReady)('SpreadingActivation fan effect (integration, real 
         expect(ids(top10)).not.toContain(id)
         expect(activationOf(all, id)).toBeCloseTo(DECAY * 0.5 * DECAY * 0.5, 12)
       }
+      // Off takes M_e's best path, through the 0.9 parallel edge.
+      expect(ids(top10)).not.toContain('M_e')
+      expect(activationOf(all, 'M_e')).toBeCloseTo(DECAY * 0.5 * DECAY * 0.9, 12)
       // A direct TEMPORAL 0.8 edge (0.48) still sits above the 0.36 block.
       expect(activationOf(top10, 'M_d')).toBeCloseTo(0.8 * DECAY, 12)
     })
@@ -170,6 +186,7 @@ describe.skipIf(!neo4jReady)('SpreadingActivation fan effect (integration, real 
 
   describe('fan effect on', () => {
     const onParams: ActivationParams = { ...BASE_PARAMS, maxNodes: 100, fanEffect: true }
+    const SPECIFIC = ['M_a', 'M_b', 'M_c', 'M_d', 'M_e']
 
     it('returns no node reached only through Session:default or the Project node', async () => {
       const results = await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS)
@@ -179,34 +196,46 @@ describe.skipIf(!neo4jReady)('SpreadingActivation fan effect (integration, real 
       expect(ids(results)).not.toContain('S2')
     })
 
-    it('ranks a memory two seeds reach above one reached from a single seed', async () => {
-      const results = await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS)
-      const order = ids(results)
-      expect(order.indexOf('M_c')).toBeGreaterThanOrEqual(0)
-      expect(order.indexOf('M_c')).toBeLessThan(order.indexOf('M_a'))
-    })
-
-    it('ranks M_c and M_d above every Community-only member', async () => {
+    it('ranks every entity- or edge-linked memory above every Community-only member', async () => {
       const results = await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS)
       const order = ids(results)
       const communityIdx = order
         .map((id, i) => (id.startsWith('comm-') ? i : -1))
         .filter(i => i >= 0)
       expect(communityIdx).toHaveLength(COMMUNITY_MEMBERS)
-      for (const id of ['M_c', 'M_d']) {
+      for (const id of SPECIFIC) {
         expect(order.indexOf(id)).toBeGreaterThanOrEqual(0)
         expect(order.indexOf(id)).toBeLessThan(Math.min(...communityIdx))
       }
     })
 
-    it('matches the hand-computed fan formula for a Community member and for M_a', async () => {
-      const results = await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS)
+    it('ranks a memory two seeds reach above one reached from a single seed', async () => {
+      const order = ids(await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS))
+      expect(order.indexOf('M_c')).toBeLessThan(order.indexOf('M_a'))
+    })
 
-      const viaCommunity = 1.0 * 1.0 * DECAY * fan(DEG_S1) * 1.0 * DECAY * fan(DEG_COMMUNITY)
-      const viaEntity = 1.0 * 0.5 * DECAY * fan(DEG_S1) * 0.5 * DECAY * fan(DEG_ENTITY_AB)
+    it('ranks a memory sharing two entities with a seed above one sharing a single entity', async () => {
+      const order = ids(await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS))
+      expect(order.indexOf('M_e')).toBeLessThan(order.indexOf('M_a'))
+      expect(order.indexOf('M_e')).toBeLessThan(order.indexOf('M_b'))
+    })
+
+    it('matches the hand-computed values: fan factors and decay only, no edge weights', async () => {
+      const results = await activation.activate(SEED_IDS, onParams, SEED_WEIGHTS)
+      const step = DECAY * fan(DEG_S1)
+
+      const viaCommunity = 1.0 * step * DECAY * fan(DEG_COMMUNITY)
+      const viaEntity = 1.0 * step * DECAY * fan(DEG_ENTITY_AB)
+      // The parallel M_e relationships form one route through entity:e1.
+      const viaTwoEntities = 1.0 * step * DECAY * (fan(DEG_ENTITY_E1) + fan(DEG_PAIR_ENTITY))
+      const viaTwoSeeds = 1.0 * step * DECAY * fan(DEG_PAIR_ENTITY)
+        + 0.8 * DECAY * fan(DEG_S2) * DECAY * fan(DEG_PAIR_ENTITY)
 
       expect(Math.abs(activationOf(results, 'comm-07') - viaCommunity)).toBeLessThan(1e-9)
       expect(Math.abs(activationOf(results, 'M_a') - viaEntity)).toBeLessThan(1e-9)
+      expect(Math.abs(activationOf(results, 'M_e') - viaTwoEntities)).toBeLessThan(1e-9)
+      expect(Math.abs(activationOf(results, 'M_c') - viaTwoSeeds)).toBeLessThan(1e-9)
+      expect(Math.abs(activationOf(results, 'M_d') - 1.0 * step)).toBeLessThan(1e-9)
     })
 
     it('returns identical ordered lists on repeated calls', async () => {

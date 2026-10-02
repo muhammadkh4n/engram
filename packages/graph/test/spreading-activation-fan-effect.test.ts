@@ -164,7 +164,7 @@ describe('SpreadingActivation with the fan effect on (unit, no Neo4j)', () => {
     )
   })
 
-  it('scales each step by the fan factor of the node it spreads out of', async () => {
+  it('scales each step by decay and the fan factor of the node it spreads out of', async () => {
     const { captured } = await run(['a'], { fanEffect: true })
     const cypher = flat(captured.cypher)
     expect(cypher).toContain('[n IN nodes(path)[0..-1] | COUNT { (n)--() }]')
@@ -172,15 +172,38 @@ describe('SpreadingActivation with the fan effect on (unit, no Neo4j)', () => {
     expect(cypher).toContain('WHEN degree >= memoryCount THEN 0.0')
     expect(cypher).toContain('ELSE log(toFloat(memoryCount) / degree) / log(toFloat(memoryCount))')
     expect(cypher).toContain(
-      'reduce( activation = coalesce($seedWeights[seedId], 1.0), i IN range(0, size(rels) - 1) | activation * rels[i].weight * $decayPerHop * fans[i] )',
+      'reduce( activation = coalesce($seedWeights[seedId], 1.0), fan IN fans | activation * $decayPerHop * fan )',
     )
   })
 
-  it('takes the best path per seed and sums the bests across seeds', async () => {
+  it('reads edge weights only in the path filter, never in the activation product', async () => {
+    const { captured } = await run(['a'], { fanEffect: true })
+    const cypher = flat(captured.cypher)
+    expect(cypher).toContain('AND ALL(r IN rels WHERE r.weight >= $minWeight)')
+    expect(cypher.match(/\.weight/g)).toHaveLength(1)
+    expect(cypher).not.toContain('rels[i]')
+  })
+
+  it('counts only paths that visit no node twice', async () => {
+    const { captured } = await run(['a'], { fanEffect: true })
+    expect(flat(captured.cypher)).toContain(
+      'AND ALL(i IN range(1, length(path)) WHERE NOT nodes(path)[i] IN nodes(path)[0..i])',
+    )
+  })
+
+  it('dedupes parallel relationships by the nodes a path passes through, then sums per seed', async () => {
     const { captured } = await run(['a', 'b'], { fanEffect: true })
     const cypher = flat(captured.cypher)
-    expect(cypher).toContain('WITH neighbor, MAX(activation) AS seedBest, MIN(hops) AS seedHops')
-    expect(cypher).toContain('RETURN neighbor, seedBest AS activation, seedHops AS hops }')
+    expect(cypher).toContain('[n IN nodes(path)[1..-1] | elementId(n)] AS via')
+    expect(cypher).toContain('WITH neighbor, via, MAX(activation) AS routeActivation, MIN(hops) AS routeHops')
+    expect(cypher).toContain('WITH neighbor, SUM(routeActivation) AS seedSum, MIN(routeHops) AS seedHops')
+    expect(cypher).toContain('RETURN neighbor, seedSum AS activation, seedHops AS hops }')
+    expect(cypher).not.toContain('MAX(activation) AS seedBest')
+  })
+
+  it('sums the per-seed totals across seeds', async () => {
+    const { captured } = await run(['a', 'b'], { fanEffect: true })
+    const cypher = flat(captured.cypher)
     expect(cypher).toContain('WITH neighbor, SUM(activation) AS bestActivation, MIN(hops) AS shortestPath')
     expect(cypher).not.toContain('MAX(activation) AS bestActivation')
   })
