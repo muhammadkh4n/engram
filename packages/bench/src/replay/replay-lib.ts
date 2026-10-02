@@ -416,12 +416,25 @@ const VALUE_FLAGS = new Set([
   '--window', '--target', '--key-env', '--engram-dist', '--arm', '--env', '--conversation-key', '--pins', '--pins-mode', '--out',
 ])
 
-export function parseReplayArgs(argv: readonly string[]): ReplayArgs {
+export interface ParsedFlags {
+  one: Record<string, string>
+  env: Record<string, string>
+}
+
+/**
+ * `--flag value` pairs: every flag takes a value, `--env K=V` repeats, any
+ * other flag may appear once, and each of `required` must be present.
+ */
+export function parseFlagValues(
+  argv: readonly string[],
+  flags: ReadonlySet<string>,
+  required: readonly string[],
+): ParsedFlags {
   const one: Record<string, string> = {}
   const env: Record<string, string> = {}
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i]!
-    if (!VALUE_FLAGS.has(flag)) throw new Error(`unknown flag ${flag}`)
+    if (!flags.has(flag)) throw new Error(`unknown flag ${flag}`)
     const value = argv[++i]
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`)
     if (flag === '--env') {
@@ -433,16 +446,32 @@ export function parseReplayArgs(argv: readonly string[]): ReplayArgs {
     if (flag in one) throw new Error(`${flag} given twice`)
     one[flag] = value
   }
-  for (const required of ['--window', '--target', '--key-env', '--engram-dist', '--arm', '--pins', '--out']) {
-    if (!one[required]) throw new Error(`${required} is required`)
+  for (const r of required) {
+    if (!one[r]) throw new Error(`${r} is required`)
   }
+  return { one, env }
+}
+
+export function parsePinsMode(raw: string | undefined): PinsMode {
+  const pinsMode = (raw ?? 'fill') as PinsMode
+  if (pinsMode !== 'fill' && pinsMode !== 'strict') throw new Error('--pins-mode must be fill or strict')
+  return pinsMode
+}
+
+export function assertArmName(arm: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(arm)) throw new Error('--arm may hold only letters, digits, ".", "_" and "-"')
+}
+
+export function parseReplayArgs(argv: readonly string[]): ReplayArgs {
+  const { one, env } = parseFlagValues(argv, VALUE_FLAGS, [
+    '--window', '--target', '--key-env', '--engram-dist', '--arm', '--pins', '--out',
+  ])
   const conversationKey = (one['--conversation-key'] ?? 'none') as ConversationKeyMode
   if (!CONVERSATION_KEY_MODES.includes(conversationKey)) {
     throw new Error(`--conversation-key must be one of ${CONVERSATION_KEY_MODES.join('|')}`)
   }
-  const pinsMode = (one['--pins-mode'] ?? 'fill') as PinsMode
-  if (pinsMode !== 'fill' && pinsMode !== 'strict') throw new Error('--pins-mode must be fill or strict')
-  if (!/^[A-Za-z0-9._-]+$/.test(one['--arm']!)) throw new Error('--arm may hold only letters, digits, ".", "_" and "-"')
+  const pinsMode = parsePinsMode(one['--pins-mode'])
+  assertArmName(one['--arm']!)
   return {
     window: one['--window']!,
     target: one['--target']!,

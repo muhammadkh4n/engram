@@ -209,6 +209,44 @@ npx tsx packages/bench/src/replay/replay.ts \
   target, build path, env, key mode, window sha256, pins path and mode) matches and the pins file is the one the
   last step recorded; anything else is refused.
 
+### Final-state probe and exposure metrics
+
+After an arm's replay, `src/replay/probe.ts` reads the state the replay left on that arm's copy with a held-out
+query file (JSON `[{q, p}]`, `p` the project or absent):
+
+```bash
+npx tsx packages/bench/src/replay/probe.ts \
+  --queries ./probe.json \
+  --target http://127.0.0.1:3901 --key-env REPLAY_PGRST_KEY \
+  --engram-dist /path/to/engram-checkout --arm control [--env K=V …] \
+  --pins ./pins.json [--pins-mode fill|strict] \
+  --out ./probe
+```
+
+- Same build loading, stack composition, `--env` handling, copy guards and pins as the replay. Each query runs
+  `memory.recall(q, { projectId: p, reconsolidate: false })` with no conversation key, on a fresh memory, so
+  in-process priming from the replay does not carry over.
+- Writes `<out>/<arm>/s00.txt` (the formatted payload) and `<out>/<arm>/s00.json` (`label`, `arm`, `query`,
+  `projectId`, the top 10 `memories` with `rank`, `id`, `type`, `content`, `relevance`, `metadata`, and the
+  associated ids), one pair per query, plus `<out>/probe-meta-<arm>.json`. This is the layout the pairwise
+  judge scripts read. A non-empty `<out>/<arm>` is refused. A strict pin miss or a blocked model call stops the
+  probe (exit 4).
+
+`src/replay/exposure.ts` computes concentration from step logs and prints JSON:
+
+```bash
+npx tsx packages/bench/src/replay/exposure.ts \
+  --steps control=./replay/control/steps.jsonl [--steps NB=./replay/NB/steps.jsonl] \
+  [--population <rows in the copy>]
+```
+
+- Per arm: recalls, emitted slots, distinct rows ever emitted, the Gini coefficient of per-row exposure and the
+  share of slots taken by the top 1% and top 10% most-shown rows (rounded up to at least one row). Exposure
+  counts emitted (recalled-section) slots only. Without `--population` the distribution covers the rows shown
+  at least once; with it, never-shown rows count as zero.
+- With two arms: the per-step Jaccard of their top 10, aligned by `query_id`, with mean, median and min, and
+  the query ids only one arm logged.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)
