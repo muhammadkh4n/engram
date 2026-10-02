@@ -22,6 +22,7 @@ import {
   MAX_FORGET_IDS,
   recallOutputPolicyFromEnv,
   degradedRecallNotice,
+  supersessionSettingsFromEnv,
 } from '@engram-mem/core'
 import type {
   StorageAdapter,
@@ -30,9 +31,10 @@ import type {
   ForgetPreview,
   ForgetByIdsResult,
   RecallOutputPolicy,
+  SupersessionSettings,
 } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
+import { openaiIntelligence, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
@@ -231,6 +233,48 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
   return out
 }
 
+/**
+ * Chat-model override: ENGRAM_CHAT_MODEL / ENGRAM_CHAT_BASE_URL /
+ * ENGRAM_CHAT_API_KEY route every LLM call (summarize, extraction, synthesis
+ * selection, supersession judging) to any OpenAI-compatible host, e.g. a
+ * V4-Flash-class model via OpenRouter. Embeddings always stay on
+ * OPENAI_API_KEY's default endpoint so the vector space of stored memories is
+ * independent of the chat model.
+ *
+ * ENGRAM_CHAT_PROVIDER_PREFS: JSON object sent verbatim as the request body's
+ * `provider` field (OpenRouter provider routing: pin/order hosts,
+ * quantization floor, fallback policy). Malformed JSON is a config error and
+ * throws: silently dropping it would route private memory content to
+ * whatever host the account default picks.
+ */
+export function chatIntelligenceOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): Omit<OpenAIIntelligenceOptions, 'apiKey'> {
+  const chatModel = env['ENGRAM_CHAT_MODEL']?.trim() || undefined
+  const chatBaseUrl = env['ENGRAM_CHAT_BASE_URL']?.trim() || undefined
+  const chatApiKey = env['ENGRAM_CHAT_API_KEY']?.trim() || undefined
+  const chatProviderPrefsRaw = env['ENGRAM_CHAT_PROVIDER_PREFS']?.trim() || undefined
+  let chatProviderPrefs: Record<string, unknown> | undefined
+  if (chatProviderPrefsRaw) {
+    try {
+      const parsed: unknown = JSON.parse(chatProviderPrefsRaw)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('not a JSON object')
+      }
+      chatProviderPrefs = parsed as Record<string, unknown>
+    } catch (err) {
+      throw new Error(`ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return {
+    ...(chatModel ? { summarizationModel: chatModel } : {}),
+    ...(chatBaseUrl ? { chatBaseUrl } : {}),
+    ...(chatApiKey ? { chatApiKey } : {}),
+    ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
+    ...parseChatReasoningEnv(env),
+  }
+}
+
 const DEFAULT_SALIENCE_THRESHOLD = 0.7
 
 /**
@@ -320,8 +364,20 @@ export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env
   return policy
 }
 
+/**
+ * Parse ENGRAM_SUPERSESSION and ENGRAM_SUPERSESSION_MIN_COSINE once, at
+ * startup, and log the result. A malformed value throws here, so the server
+ * does not start, instead of every deep sleep failing later.
+ */
+export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.env): SupersessionSettings {
+  const settings = supersessionSettingsFromEnv(env)
+  console.error(`[engram-mcp] fact supersession: mode=${settings.mode} minCosine=${settings.minCosine}`)
+  return settings
+}
+
 async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyAtStartup()
+  const supersession = supersessionSettingsAtStartup()
   const recallLog = recallLogFromEnv()
   if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
 
@@ -334,40 +390,9 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // quantized recall engine. See maybeWithRecallEngine's doc comment for why
   // exactRescore is always forced true here regardless of ENGRAM_ENGINE_EXACT.
   const storage: StorageAdapter = await maybeWithRecallEngine(rawStorage, supabaseUrl)
-  // Chat-model override (v0.6.1): ENGRAM_CHAT_MODEL / ENGRAM_CHAT_BASE_URL /
-  // ENGRAM_CHAT_API_KEY route every LLM call (summarize, extraction, synthesis
-  // selection) to any OpenAI-compatible host — e.g. a V4-Flash-class model via
-  // OpenRouter. Embeddings always stay on OPENAI_API_KEY's default endpoint so
-  // the vector space of stored memories is independent of the chat model.
-  const chatModel = process.env['ENGRAM_CHAT_MODEL']?.trim() || undefined
-  const chatBaseUrl = process.env['ENGRAM_CHAT_BASE_URL']?.trim() || undefined
-  const chatApiKey = process.env['ENGRAM_CHAT_API_KEY']?.trim() || undefined
-  // ENGRAM_CHAT_PROVIDER_PREFS: JSON object sent verbatim as the request
-  // body's `provider` field (OpenRouter provider routing — pin/order hosts,
-  // quantization floor, fallback policy). Malformed JSON is a config error
-  // and must fail startup: silently dropping it would route private memory
-  // content to whatever host the account default picks.
-  const chatProviderPrefsRaw = process.env['ENGRAM_CHAT_PROVIDER_PREFS']?.trim() || undefined
-  let chatProviderPrefs: Record<string, unknown> | undefined
-  if (chatProviderPrefsRaw) {
-    try {
-      const parsed: unknown = JSON.parse(chatProviderPrefsRaw)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error('not a JSON object')
-      }
-      chatProviderPrefs = parsed as Record<string, unknown>
-    } catch (err) {
-      throw new Error(`ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
-  const chatReasoning = parseChatReasoningEnv()
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
     apiKey: openaiApiKey,
-    ...(chatModel ? { summarizationModel: chatModel } : {}),
-    ...(chatBaseUrl ? { chatBaseUrl } : {}),
-    ...(chatApiKey ? { chatApiKey } : {}),
-    ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
-    ...chatReasoning,
+    ...chatIntelligenceOptionsFromEnv(),
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local ONNX
   // cross-encoder over the openaiIntelligence adapter so the rerank stage
@@ -388,6 +413,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
     storage,
     intelligence,
     autoConsolidate: true,
+    supersession,
     // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true enables Anthropic-style
     // Contextual Retrieval. Memory.ingest will call
     // intelligence.contextualizeChunk to generate a short preamble per
@@ -405,6 +431,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   const worker = startConsolidationWorker(storage, intelligence, graph, {
     cycles: [...CONSOLIDATION_WORKER_CYCLES],
     intervalMs: 60_000,
+    supersession,
   })
   // Best-effort graceful shutdown — stops the interval so the process can exit
   // cleanly when systemd / docker / a test harness sends SIGTERM.
