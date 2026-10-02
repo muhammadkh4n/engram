@@ -221,6 +221,13 @@ export interface ActivationParams {
    * value here disables the filter entirely (unscoped recall).
    */
   projectId?: string | null
+  /**
+   * ACT-R fan effect: each node a path spreads out of scales the step by how
+   * specific its links are, and activation from different seeds sums. Hub
+   * nodes (Project, the default Session) then stop handing equal activation
+   * to every member. Off by default; only recall's association stage sets it.
+   */
+  fanEffect?: boolean
 }
 
 export interface ActivationResult {

@@ -94,6 +94,8 @@ export interface SpreadActivationOpts {
    * memories are always reachable; null/undefined disables the filter.
    */
   projectId?: string | null
+  /** Fan-effect activation (see ActivationParams.fanEffect). Unset means off. */
+  fanEffect?: boolean
 }
 
 /** Wave 2 ActivatedNode — matches ActivationResult with stable field names */
@@ -963,6 +965,7 @@ export class NeuralGraph {
       maxNodes: opts.budget ?? 100,
       edgeTypeFilter: (opts.edgeFilter ?? []) as ActivationParams['edgeTypeFilter'],
       projectId: opts.projectId ?? null,
+      ...(opts.fanEffect === true ? { fanEffect: true } : {}),
     }
     const results: ActivationResult[] = await sa.activate(opts.seedNodeIds, params, opts.seedActivations)
     const activated: ActivatedNode[] = results.map((r) => ({

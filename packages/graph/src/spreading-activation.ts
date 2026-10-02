@@ -9,6 +9,7 @@ const DEFAULT_PARAMS: Required<ActivationParams> = {
   minWeight: 0.01,
   edgeTypeFilter: [],
   projectId: null,
+  fanEffect: false,
 }
 
 function createdAtOf(result: ActivationResult): string {

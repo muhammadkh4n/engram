@@ -160,6 +160,8 @@ Recall links (read on every recall call; a malformed value throws, naming the va
 
 Exposure is recorded whatever these are set to.
 
+Graph fan effect (`ENGRAM_RECALL_FAN`, read on every recall call; a value other than `on`, `off` or empty throws, naming the variable). `off` (default, also when unset or empty) leaves recall unchanged. `on` changes only recall's graph association stage: it passes `fanEffect: true` to `spreadActivation` and does not seed the Project node, since the vector and lexical stages already apply the project boost and every project member would tie from that node. Dream-cycle replay and attribute pattern completion never set the option and spread exactly as before.
+
 Fusion config (`ENGRAM_RECALL_FUSION`). The weights, thresholds and candidate counts that merge the vector and lexical legs, trigger the HyDE and pattern-completion passes and blend in the reranker are one validated config, resolved per recall and per key from, highest precedence first: the call's `strategyOverride: { fusion }` (a `Partial<FusionConfig>`), the `ENGRAM_RECALL_FUSION` environment variable (a JSON object, read on every call; empty means unset), and the defaults (`DEFAULT_FUSION_CONFIG`). With neither override set, ranking is byte-identical to the built-in constants. An unknown key, a non-number or an out-of-range value throws an error naming the key. The env variable is meant only for adopting a config that a measured grid (`packages/bench`, `fusion-grid`) has shown to beat the defaults, not for hand tuning.
 
 | Key | Default | Range | Meaning |

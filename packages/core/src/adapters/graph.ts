@@ -61,6 +61,12 @@ export interface GraphSpreadActivationOpts {
    * reachable; null/undefined disables the filter (unscoped recall).
    */
   projectId?: string | null
+  /**
+   * Fan-effect activation: a node's outgoing step is scaled by how specific
+   * its links are and activation from separate seeds sums, so hubs stop tying
+   * their members. Only recall's association stage sets it; unset means off.
+   */
+  fanEffect?: boolean
 }
 
 export interface GraphActivatedNode {
