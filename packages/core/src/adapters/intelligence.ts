@@ -265,6 +265,13 @@ export interface IntelligenceAdapter {
    */
   expandQuery?(query: string, opts?: ExpandQueryOpts): Promise<string[]>
   /**
+   * The calendar date (YYYY-MM-DD) that `expandQuery` states as today's date
+   * for `now`. Recall caches an expansion by this date, so two instants on the
+   * same day of the adapter's time zone share one expansion. Without it the
+   * cache keys a dated expansion by the exact instant.
+   */
+  expansionReferenceDate?(now: Date): string
+  /**
    * Anthropic-style Contextual Retrieval: given a chunk and surrounding
    * conversation context, produce a 1-2 sentence preamble that situates
    * the chunk. The preamble is prepended to the chunk before embedding

@@ -466,6 +466,12 @@ export class OpenAISummarizer {
     return doc
   }
 
+  /** The calendar date that the expansion prompt states for `now`: its day in
+   *  the configured time zone. */
+  expansionReferenceDate(now: Date): string {
+    return calendarDateIn(now, this.timeZone)
+  }
+
   async expandQuery(query: string, opts?: ExpandQueryOpts): Promise<string[]> {
     // Query expansion for BM25 rescue — generate alternative keyword
     // phrases that might appear in stored conversation turns. The

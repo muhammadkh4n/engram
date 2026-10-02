@@ -5,6 +5,7 @@ import {
   DIGEST_SEARCH_RESULTS,
   EPISODE_SEARCH_RESULTS,
   SEMANTIC_SEARCH_RESULTS,
+  MOCK_EPISODE,
 } from './mock-storage.js'
 import { SensoryBuffer } from '../../src/systems/sensory-buffer.js'
 import type { Episode, MemoryType, RecallStrategy, SearchResult, TypedMemory } from '../../src/types.js'
@@ -933,5 +934,51 @@ describe('unifiedSearch — fusion config', () => {
       process.env[ENV] = JSON.stringify(DEFAULT_FUSION_CONFIG)
       expect(JSON.stringify(await run(strategy))).toBe(baseline)
     }
+  })
+})
+
+describe('unifiedSearch — recency clock', () => {
+  const NOW = new Date('2026-10-01T12:00:00Z')
+  const rows: SearchResult<TypedMemory>[] = [{
+    item: {
+      type: 'episode',
+      data: { ...MOCK_EPISODE, id: 'r1', accessCount: 0, createdAt: new Date('2026-10-01T02:00:00Z') },
+    },
+    similarity: 0.5,
+  }]
+
+  afterEach(() => vi.restoreAllMocks())
+
+  function run(now?: Date): Promise<Array<{ id: string; relevance: number }>> {
+    return unifiedSearch({
+      query: 'fence', embedding: [0.1, 0.2], strategy: LIGHT_STRATEGY,
+      storage: createMockStorage({ vectorSearchResults: rows, textBoostResults: [] }),
+      sensory: null,
+      ...(now !== undefined ? { now } : {}),
+    })
+  }
+
+  it('ages rows against the given now, so scores do not drift with the wall clock', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW.getTime() + 3_600_000)
+    const first = await run(NOW)
+    vi.spyOn(Date, 'now').mockReturnValue(NOW.getTime() + 90 * 86_400_000)
+    const second = await run(NOW)
+    expect(second).toEqual(first)
+    const ageHours = 10
+    const recency = LIGHT_STRATEGY.recencyBias * Math.exp(-ageHours / DEFAULT_FUSION_CONFIG.recencyDecayHours)
+    expect(first[0]!.relevance).toBeCloseTo(0.5 + recency, 12)
+  })
+
+  it('caps the recency of a row stored after now at the recency bias', async () => {
+    const [hit] = await run(new Date('2023-05-14T00:00:00Z'))
+    expect(hit!.relevance).toBeCloseTo(0.5 + LIGHT_STRATEGY.recencyBias, 12)
+  })
+
+  it('falls back to the wall clock without a now', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW.getTime())
+    const atNow = await run()
+    expect(atNow).toEqual(await run(NOW))
+    vi.spyOn(Date, 'now').mockReturnValue(NOW.getTime() + 90 * 86_400_000)
+    expect((await run())[0]!.relevance).toBeLessThan(atNow[0]!.relevance)
   })
 })

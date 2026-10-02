@@ -94,6 +94,9 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     expandQuery(query, expandOpts) {
       return summarizer.expandQuery(query, expandOpts)
     },
+    expansionReferenceDate(now) {
+      return summarizer.expansionReferenceDate(now)
+    },
     rerank(query, documents) {
       return summarizer.rerank(query, documents)
     },

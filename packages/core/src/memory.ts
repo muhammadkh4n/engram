@@ -25,6 +25,7 @@ import { parseContent } from './ingestion/content-parser.js'
 import { buildTextToEmbed, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
 import { embedFailureReason } from './retrieval/embed-failure.js'
 import { primingEnabledFromEnv } from './retrieval/priming.js'
+import { recallLlmCacheFromEnv, type RecallLlmCache } from './retrieval/llm-step-cache.js'
 import { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 import { generateId } from './utils/id.js'
 import { resolveEventDate, isoDate } from './utils/event-date.js'
@@ -187,6 +188,10 @@ export class Memory {
   // Wave 5: project namespace for multi-agent isolation
   private _projectId: string | undefined
   private opts: MemoryOptions
+  // Expansion and HyDE outputs, shared by every recall on this instance (one
+  // server process serves all its clients from one Memory), so a repeated
+  // question gets the same expansion and therefore the same ranking.
+  private readonly recallLlmCache: RecallLlmCache
 
   constructor(opts: MemoryOptions) {
     this.opts = opts
@@ -197,6 +202,7 @@ export class Memory {
     this._graph = opts.graph ?? null
     this._defaultProject = opts.project
     this._projectId = opts.projectId
+    this.recallLlmCache = recallLlmCacheFromEnv(process.env)
   }
 
   private get associations(): AssociationManager {
@@ -716,6 +722,7 @@ export class Memory {
       embedding: embedding ?? [],
       tokenBudget: opts?.tokenBudget,
       intelligence: this.intelligence,
+      llmCache: this.recallLlmCache,
       graph: this._graph,
       ...(effectiveProject ? { project: effectiveProject } : {}),
       ...(effectiveProjectId ? { projectId: effectiveProjectId } : {}),
@@ -1005,6 +1012,7 @@ export class Memory {
       strategy: RECALL_STRATEGIES['light'],
       embedding,
       intelligence: this.intelligence,
+      llmCache: this.recallLlmCache,
       graph: this._graph,
       ...(this._defaultProject ? { project: this._defaultProject } : {}),
       // A scoped instance only lists its own project's and untagged memories,

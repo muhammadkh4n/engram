@@ -54,6 +54,11 @@ Recall output policy (server-wide; every variable unset means an unbounded paylo
 
 An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable; the resolved policy is logged once at startup.
 
+Recall LLM step cache (read once when the server builds its memory instance; an empty value counts as unset, any other malformed value fails startup with an error naming the variable):
+
+- `ENGRAM_RECALL_LLM_CACHE_MAX` — non-negative integer, default `1000`: query expansions and HyDE documents the server keeps, so a repeated question on the same day reuses its first expansion instead of sampling a new one. `0` disables the cache.
+- `ENGRAM_RECALL_LLM_CACHE_TTL_MIN` — positive integer, default `1440`: minutes a cached expansion is reused.
+
 Fact supersession in deep sleep (parsed once at server startup; a malformed value fails startup with an error naming the variable, and the resolved settings are logged once):
 
 - `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and whether each fact is a state, an event or a plan, orders a conflict by when each fact was stated, and retires only a current-state fact. See "Fact supersession in deep sleep" in the core README.

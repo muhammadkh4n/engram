@@ -127,7 +127,7 @@ interface RecallOptions {
   tokenBudget?: number    // Cap on estimateTokens(formatted); overrides ENGRAM_RECALL_TOKEN_BUDGET
   projectId?: string      // Per-call project scope (overrides the instance default)
   synthesize?: boolean | SynthesizeOpts  // Opt-in synthesis block (see below)
-  now?: Date              // Anchor for now-relative temporal arithmetic in synthesis
+  now?: Date              // Reference instant: synthesis arithmetic, expansion's date, recency aging
   reconsolidate?: boolean // Default true; false makes the recall read-only
   conversationKey?: string // The caller's conversation, for priming only; never filters results
 }
@@ -136,6 +136,8 @@ const result = await memory.recall(query, { tokenBudget: 2000 })
 ```
 
 `tokenBudget` bounds the `formatted` text, not retrieval: `memories` and `associations` still hold the full ranked lists, and `result.payload` says what the text carried (`emittedMemories`, `emittedAssociations`, `emittedFaint`, `truncated`, and the character span of each emitted item). It must be a positive integer (a `RangeError` otherwise) and takes precedence over the `ENGRAM_RECALL_TOKEN_BUDGET` environment variable. Tokens are estimated as `ceil(chars / 4)`, headers included.
+
+Repeatable recall. Query expansion and HyDE are sampled model calls, so the same question would get different keyword variants on every call and a different ranking each time. Each `Memory` instance keeps their outputs in an in-memory LRU cache shared by every recall on it, keyed by the step, the query (trimmed, inner whitespace collapsed, case kept) and, for expansion, the calendar date its prompt states (`expansionReferenceDate` on the intelligence adapter; the exact instant when the adapter does not report it; `undated` without `now`). A rejected call, an empty expansion or a blank HyDE document is never cached. `ENGRAM_RECALL_LLM_CACHE_MAX` sets the entry count (non-negative integer, default `1000`, `0` disables the cache) and `ENGRAM_RECALL_LLM_CACHE_TTL_MIN` the minutes an entry is served (positive integer, default `1440`); both are read when the `Memory` is constructed, and a malformed value throws, naming the variable. The recency term ages each row against the recall's `now` when given (else the wall clock, read once per search), so a fixed `now` gives the same scores however much real time passes between calls.
 
 The text is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Items are added in rank order and assembly stops at the first item that would exceed the budget (the prefix rule): later items and sections are not tried, so a smaller item never jumps a better-ranked one. The first item is always emitted whole. Two more environment variables shape the text: `ENGRAM_RECALL_EMIT_K` (emit only the first K Recalled memories) and `ENGRAM_RECALL_FAINT` (`on` by default, `off` drops the Faint Associations section). Unset, empty or absent, each means no limit, so `formatted` is the same unbounded text as before; a malformed value throws, naming the variable.
 
