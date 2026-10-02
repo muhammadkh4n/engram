@@ -445,6 +445,8 @@ export interface ConsolidateResult {
   procedural?: number
   deduplicated?: number
   superseded?: number
+  /** Supersession judge calls made by deep sleep (ENGRAM_SUPERSESSION=llm). */
+  supersessionJudged?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

@@ -874,6 +874,7 @@ export class Memory {
       procedural: deepResult.procedural ?? 0,
       deduplicated: deepResult.deduplicated ?? 0,
       superseded: deepResult.superseded ?? 0,
+      supersessionJudged: deepResult.supersessionJudged ?? 0,
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,

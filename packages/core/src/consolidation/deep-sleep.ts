@@ -1,12 +1,61 @@
 import type { StorageAdapter } from '../adapters/storage.js'
-import type { IntelligenceAdapter } from '../adapters/intelligence.js'
+import type { IntelligenceAdapter, SupersessionCandidate } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
-import type { ConsolidateResult } from '../types.js'
+import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
 import { majorityProjectId } from './inherit-project.js'
 
 export interface DeepSleepOptions {
   minDigests?: number
+  /** Overrides ENGRAM_SUPERSESSION / ENGRAM_SUPERSESSION_MIN_COSINE. */
+  supersession?: SupersessionSettings
+}
+
+/**
+ * How deep sleep decides that a new semantic fact replaces a stored one.
+ * - `regex`: a fixed list of English contradiction pairs.
+ * - `llm`: the intelligence adapter's supersession judge, over the new fact's
+ *   nearest live neighbours in its own project.
+ * - `off`: no stored fact is ever retired.
+ */
+export type SupersessionMode = 'regex' | 'llm' | 'off'
+
+export interface SupersessionSettings {
+  mode: SupersessionMode
+  /** Cosine floor for a stored fact to be a neighbour of the new fact. */
+  minCosine: number
+}
+
+/** Default neighbour cosine floor: on text-embedding-3-small, facts below it
+ *  rarely share a subject, so they can neither repeat nor replace each other. */
+export const SUPERSESSION_MIN_COSINE = 0.6
+/** Nearest rows read per candidate before the liveness/project/cosine filter. */
+const NEIGHBOUR_SCAN = 10
+/** Neighbours kept after filtering; bounds the judge prompt. */
+const NEIGHBOUR_POOL_MAX = 5
+
+const SUPERSESSION_MODES: ReadonlySet<string> = new Set(['regex', 'llm', 'off'])
+
+/**
+ * Read ENGRAM_SUPERSESSION (regex|llm|off, default regex) and
+ * ENGRAM_SUPERSESSION_MIN_COSINE (a number in [-1, 1], default 0.6). Unset or
+ * empty means the default; any other value throws, naming the variable.
+ */
+export function supersessionSettingsFromEnv(env: NodeJS.ProcessEnv = process.env): SupersessionSettings {
+  const rawMode = env['ENGRAM_SUPERSESSION']
+  const mode = rawMode === undefined || rawMode.trim() === '' ? 'regex' : rawMode.trim()
+  if (!SUPERSESSION_MODES.has(mode)) {
+    throw new Error(`ENGRAM_SUPERSESSION must be "regex", "llm" or "off", got "${rawMode}"`)
+  }
+  const rawCosine = env['ENGRAM_SUPERSESSION_MIN_COSINE']
+  let minCosine = SUPERSESSION_MIN_COSINE
+  if (rawCosine !== undefined && rawCosine.trim() !== '') {
+    minCosine = Number(rawCosine.trim())
+    if (!Number.isFinite(minCosine) || minCosine < -1 || minCosine > 1) {
+      throw new Error(`ENGRAM_SUPERSESSION_MIN_COSINE must be a number in [-1, 1], got "${rawCosine}"`)
+    }
+  }
+  return { mode: mode as SupersessionMode, minCosine }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +193,93 @@ function detectSupersession(newPhrase: string, existingContent: string): boolean
   return false
 }
 
+type SemanticNeighbour = SearchResult<SemanticMemory>
+
+/** Outcome for one semantic candidate: boost a stored duplicate, or insert
+ *  the candidate and retire the listed stored facts. */
+type SemanticDecision =
+  | { kind: 'duplicate'; id: string }
+  | { kind: 'insert'; supersededIds: string[] }
+
+/** Stores without project tags report undefined; that is the shared scope. */
+function inProject(memory: SemanticMemory, projectId: string | null): boolean {
+  return (memory.projectId ?? null) === projectId
+}
+
+/**
+ * Live stored facts in the candidate's project at cosine >= minCosine, nearest
+ * first, at most NEIGHBOUR_POOL_MAX. A shared (NULL-project) candidate pairs
+ * only with shared facts, so one project's fact never repeats or replaces
+ * another project's.
+ */
+function neighbourPool(
+  nearest: ReadonlyArray<SemanticNeighbour>,
+  projectId: string | null,
+  minCosine: number,
+): SemanticNeighbour[] {
+  return nearest
+    .filter(e => e.item.supersededBy == null && inProject(e.item, projectId) && e.similarity >= minCosine)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, NEIGHBOUR_POOL_MAX)
+}
+
+/** A stored fact that restates the candidate: a near-identical vector in the
+ *  pool, else (no vector available) text equal after normalisation. */
+function findDuplicate(
+  content: string,
+  pool: ReadonlyArray<SemanticNeighbour>,
+  scopedExisting: ReadonlyArray<SemanticNeighbour>,
+): string | undefined {
+  return (
+    pool.find(e => e.similarity > DUPLICATE_COSINE) ??
+    scopedExisting.find(e => sameContent(e.item.content, content))
+  )?.item.id
+}
+
+/** The regex path, and with `retire` false the no-supersession path. */
+function ruleDecision(
+  candidate: KnowledgeCandidate,
+  pool: ReadonlyArray<SemanticNeighbour>,
+  scopedExisting: ReadonlyArray<SemanticNeighbour>,
+  existing: ReadonlyArray<SemanticNeighbour>,
+  retire: boolean,
+): SemanticDecision {
+  const duplicateId = findDuplicate(candidate.content, pool, scopedExisting)
+  if (duplicateId) return { kind: 'duplicate', id: duplicateId }
+  if (!retire) return { kind: 'insert', supersededIds: [] }
+  const phrase = candidate.fullMatch ?? candidate.content
+  const contradicted = existing.find(e => detectSupersession(phrase, e.item.content))
+  return { kind: 'insert', supersededIds: contradicted ? [contradicted.item.id] : [] }
+}
+
+/**
+ * The judge decides first, so an update that differs from the stored fact by
+ * a word (cosine above DUPLICATE_COSINE) retires it instead of being dropped
+ * as its duplicate. Verdict ids outside the pool are ignored. Throws when the
+ * judge does; the caller falls back to the regex path.
+ */
+async function judgedDecision(
+  judge: NonNullable<IntelligenceAdapter['judgeSupersession']>,
+  candidate: KnowledgeCandidate,
+  pool: ReadonlyArray<SemanticNeighbour>,
+  scopedExisting: ReadonlyArray<SemanticNeighbour>,
+): Promise<SemanticDecision> {
+  const candidates: SupersessionCandidate[] = pool.map(e => ({
+    id: e.item.id,
+    topic: e.item.topic,
+    content: e.item.content,
+    createdAt: e.item.createdAt,
+  }))
+  const verdict = await judge({ topic: candidate.topic, content: candidate.content }, candidates)
+  const poolIds = new Set(candidates.map(c => c.id))
+  const replaces = [...new Set(verdict.replaces.filter(id => poolIds.has(id)))]
+  if (replaces.length > 0) return { kind: 'insert', supersededIds: replaces }
+  const sameId = verdict.same.find(id => poolIds.has(id))
+  const duplicateId = sameId ?? findDuplicate(candidate.content, pool, scopedExisting)
+  if (duplicateId) return { kind: 'duplicate', id: duplicateId }
+  return { kind: 'insert', supersededIds: [] }
+}
+
 /**
  * Deep Sleep (Weekly) — Digests -> Semantic + Procedural.
  *
@@ -164,11 +300,12 @@ export async function deepSleep(
   graph?: GraphPort | null,
 ): Promise<ConsolidateResult> {
   const minDigests = opts?.minDigests ?? 3
+  const supersession = opts?.supersession ?? supersessionSettingsFromEnv()
 
   const digests = await storage.digests.getRecent(7)
 
   if (digests.length < minDigests) {
-    return { cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0 }
+    return { cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0, supersessionJudged: 0 }
   }
 
   const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
@@ -177,6 +314,7 @@ export async function deepSleep(
   let procedural = 0
   let deduplicated = 0
   let superseded = 0
+  let supersessionJudged = 0
   let graphNodesCreated = 0
   let graphEdgesCreated = 0
 
@@ -243,28 +381,42 @@ export async function deepSleep(
     // "same claim". The paraphrase check uses findNearest's raw cosine; the
     // lexical fallback is an exact match after normalisation.
     const nearest = candidateEmbedding
-      ? await storage.semantic.findNearest(candidateEmbedding, 5)
+      ? await storage.semantic.findNearest(candidateEmbedding, NEIGHBOUR_SCAN)
       : []
-    const duplicate =
-      nearest.find(e => e.similarity > DUPLICATE_COSINE) ??
-      existing.find(e => sameContent(e.item.content, candidate.content))
+    const projectId = candidateProjectId(candidate)
+    const pool = neighbourPool(nearest, projectId, supersession.minCosine)
+    const scopedExisting = existing.filter(e => inProject(e.item, projectId))
 
-    if (duplicate) {
+    // The judge needs a vector-built pool; without a judge or a vector, llm
+    // mode behaves as regex mode.
+    const judge = intelligence?.judgeSupersession?.bind(intelligence)
+    let decision: SemanticDecision
+    if (supersession.mode === 'llm' && judge && candidateEmbedding) {
+      if (pool.length === 0) {
+        decision = ruleDecision(candidate, pool, scopedExisting, existing, false)
+      } else {
+        supersessionJudged++
+        try {
+          decision = await judgedDecision(judge, candidate, pool, scopedExisting)
+        } catch {
+          console.warn(
+            `[deep-sleep] supersession judge failed; regex path for neighbours ${pool.map(e => e.item.id).join(',')}`,
+          )
+          decision = ruleDecision(candidate, pool, scopedExisting, existing, true)
+        }
+      }
+    } else {
+      decision = ruleDecision(candidate, pool, scopedExisting, existing, supersession.mode !== 'off')
+    }
+
+    if (decision.kind === 'duplicate') {
       // Re-extracting a known fact is a recurrence: it raises the access
       // count and the fact's confidence.
-      await storage.semantic.recordAccessAndBoost(duplicate.item.id, 0.1)
+      await storage.semantic.recordAccessAndBoost(decision.id, 0.1)
       deduplicated++
       continue
     }
-
-    let supersededId: string | null = null
-    const phraseForSupersession = candidate.fullMatch ?? candidate.content
-    for (const e of existing) {
-      if (detectSupersession(phraseForSupersession, e.item.content)) {
-        supersededId = e.item.id
-        break
-      }
-    }
+    const supersededIds = decision.supersededIds
 
     // Persist the embedding computed for dedup above: a null embedding
     // leaves the row invisible to vector search AND to this same
@@ -277,14 +429,14 @@ export async function deepSleep(
       sourceDigestIds: candidate.sourceDigestIds,
       sourceEpisodeIds: candidate.sourceEpisodeIds,
       decayRate: 0.02,
-      supersedes: supersededId,
+      supersedes: supersededIds[0] ?? null,
       supersededBy: null,
       embedding: candidateEmbedding ?? null,
       metadata: {},
-      projectId: candidateProjectId(candidate),
+      projectId,
     })
 
-    if (supersededId) {
+    for (const supersededId of supersededIds) {
       await storage.semantic.markSuperseded(supersededId, knowledge.id)
       superseded++
     }
@@ -371,7 +523,7 @@ export async function deepSleep(
         graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
 
         // Step 4: Supersession → CONTRADICTS + validUntil
-        if (supersededId) {
+        for (const supersededId of supersededIds) {
           await graph.runCypherWrite(`
             MATCH (old:Memory {id: $oldId})
             MATCH (new:Memory {id: $newId})
@@ -481,6 +633,7 @@ export async function deepSleep(
     procedural,
     deduplicated,
     superseded,
+    supersessionJudged,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
   }
