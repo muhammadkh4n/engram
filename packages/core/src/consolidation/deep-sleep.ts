@@ -4,6 +4,7 @@ import { SUPERSESSION_NEW_FACT_KEY, isSupersessionFactKind, supersessionRuleOutc
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
+import { linkFactContext } from './own-text-links.js'
 import { majorityProjectId } from './inherit-project.js'
 import { epochMs, statementClock } from './statement-time.js'
 import type { StatementClock } from './statement-time.js'
@@ -464,7 +465,8 @@ async function llmDecision(
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
  * - DERIVES_FROM edges to source digests
- * - Transitive context inheritance with MAX weight attenuation
+ * - CONTEXTUAL edges to the source digests' context nodes that the fact's
+ *   topic and content name, at the strongest digest weight attenuated
  * - CONTRADICTS relationships on supersession
  * - Temporal validity (validFrom from earliest source episode)
  */
@@ -502,6 +504,8 @@ export async function deepSleep(
   let kindMissing = 0
   let graphNodesCreated = 0
   let graphEdgesCreated = 0
+  let graphContextKept = 0
+  let graphContextDropped = 0
 
   // Collect all candidates from all digests
   const allCandidates: KnowledgeCandidate[] = []
@@ -688,25 +692,16 @@ export async function deepSleep(
         `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
         graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
 
-        // Step 3: Transitive context inheritance with MAX weight
-        const ctxResult = await graph.runCypherWrite(`
-          MATCH (dig:Memory)-[r:CONTEXTUAL]->(ctx)
-          WHERE dig.id IN $sourceDigestIds
-            AND (ctx:Person OR ctx:Entity OR ctx:Topic)
-          WITH ctx, max(r.weight) * 0.7 AS inheritedWeight
-          MATCH (s:Memory {id: $semanticId})
-          MERGE (s)-[rel:CONTEXTUAL]->(ctx)
-          ON CREATE SET rel.weight = inheritedWeight,
-                        rel.createdAt = $now,
-                        rel.lastTraversed = null,
-                        rel.traversalCount = 0
-          ON MATCH SET rel.weight = CASE
-                         WHEN rel.weight < inheritedWeight THEN inheritedWeight
-                         ELSE rel.weight
-                       END,
-                       rel.lastTraversed = $now
-        `, { sourceDigestIds: candidate.sourceDigestIds, semanticId: knowledge.id, now })
-        graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
+        // Step 3: Context of the source digests that the fact's own text names
+        const ctxLinks = await linkFactContext(graph, {
+          semanticId: knowledge.id,
+          text: `${candidate.topic} ${candidate.content}`,
+          sourceDigestIds: candidate.sourceDigestIds,
+          now,
+        })
+        graphEdgesCreated += ctxLinks.relationshipsCreated
+        graphContextKept += ctxLinks.kept
+        graphContextDropped += ctxLinks.dropped
 
         // Step 4: Supersession → CONTRADICTS + validUntil + forgottenAt.
         // Spreading activation skips only nodes with forgottenAt; without it
@@ -836,5 +831,7 @@ export async function deepSleep(
     kindMissing,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
+    graphContextKept: graphAvailable ? graphContextKept : undefined,
+    graphContextDropped: graphAvailable ? graphContextDropped : undefined,
   }
 }

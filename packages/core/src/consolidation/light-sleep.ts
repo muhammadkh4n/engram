@@ -3,6 +3,7 @@ import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
 import { extractCounters } from './graph-counters.js'
+import { linkDigestContext } from './own-text-links.js'
 import { heuristicSummarize } from './heuristic-summarize.js'
 import { majorityProjectId } from './inherit-project.js'
 import { estimateTokens } from '../utils/tokens.js'
@@ -30,7 +31,8 @@ export interface LightSleepOptions {
  * Neo4j operations (when graph is available):
  * - Creates a Digest Memory node
  * - DERIVES_FROM edges from digest to each source episode
- * - Merges context connections (Person/Entity/Topic) with frequency weight
+ * - CONTEXTUAL edges to the source episodes' Person/Entity/Topic nodes that
+ *   the digest summary names, weighted by frequency among the sources
  * - Attaches dominant Emotion node
  */
 export async function lightSleep(
@@ -47,6 +49,8 @@ export async function lightSleep(
   let episodesProcessed = 0
   let graphNodesCreated = 0
   let graphEdgesCreated = 0
+  let graphContextKept = 0
+  let graphContextDropped = 0
 
   const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
 
@@ -212,27 +216,17 @@ export async function lightSleep(
           `, { sourceEpisodeIds: sourceIds, digestId: digest.id, now })
           graphEdgesCreated += extractCounters(derivesResult).relationshipsCreated
 
-          // Step 3: Merge context connections from source episodes
-          const ctxResult = await graph.runCypherWrite(`
-            MATCH (ep:Memory)-[r:SPOKE|CONTEXTUAL|TOPICAL]->(ctx)
-            WHERE ep.id IN $sourceEpisodeIds
-              AND (ctx:Person OR ctx:Entity OR ctx:Topic)
-            WITH ctx, count(DISTINCT ep) AS frequency, $totalSources AS total
-            MATCH (d:Memory {id: $digestId})
-            MERGE (d)-[rel:CONTEXTUAL]->(ctx)
-            ON CREATE SET rel.weight = toFloat(frequency) / total,
-                          rel.createdAt = $now,
-                          rel.lastTraversed = null,
-                          rel.traversalCount = 0
-            ON MATCH SET rel.weight = toFloat(frequency) / total,
-                         rel.lastTraversed = $now
-          `, {
+          // Step 3: Context connections the digest's own summary names
+          const ctxLinks = await linkDigestContext(graph, {
+            digestId: digest.id,
+            summary: digest.summary,
             sourceEpisodeIds: sourceIds,
             totalSources: batch.length,
-            digestId: digest.id,
             now,
           })
-          graphEdgesCreated += extractCounters(ctxResult).relationshipsCreated
+          graphEdgesCreated += ctxLinks.relationshipsCreated
+          graphContextKept += ctxLinks.kept
+          graphContextDropped += ctxLinks.dropped
 
           // Step 4: Dominant emotion for the digest
           const emotionResult = await graph.runCypherWrite(`
@@ -274,5 +268,7 @@ export async function lightSleep(
     episodesProcessed,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
+    graphContextKept: graphAvailable ? graphContextKept : undefined,
+    graphContextDropped: graphAvailable ? graphContextDropped : undefined,
   }
 }

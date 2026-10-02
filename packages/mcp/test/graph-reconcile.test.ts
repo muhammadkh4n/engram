@@ -14,6 +14,12 @@ import {
   type GraphMemoryNode,
   type SqlMemoryRow,
 } from '../src/graph-reconcile-lib.js'
+import {
+  undoContextLinks,
+  type ContextLinkNode,
+  type ContextLinkRef,
+  type ContextUndoLine,
+} from '../src/graph-reconcile-context.js'
 
 const row = (id: string, over: Partial<SqlMemoryRow> = {}): SqlMemoryRow => ({
   id,
@@ -134,11 +140,20 @@ describe('parseReconcileArgs', () => {
       apply: false,
       deleteMissing: false,
       deleteOrphans: false,
+      pruneContextLinks: false,
       undoLog: null,
+      undo: null,
       pageSize: 1000,
       batchSize: 1000,
       help: false,
     })
+  })
+
+  it('accepts --undo on its own and rejects it with a write flag or an undo log', () => {
+    expect(parseReconcileArgs(['--undo', 'u.jsonl', '--batch-size', '10'])).toMatchObject({ undo: 'u.jsonl', batchSize: 10 })
+    expect(() => parseReconcileArgs(['--undo', 'u.jsonl', '--apply', '--undo-log', 'v.jsonl'])).toThrow(/--undo/)
+    expect(() => parseReconcileArgs(['--undo', 'u.jsonl', '--undo-log', 'v.jsonl'])).toThrow(/--undo/)
+    expect(() => parseReconcileArgs(['--undo'])).toThrow(ReconcileArgsError)
   })
 
   it('accepts every write flag with an undo log', () => {
@@ -169,6 +184,18 @@ describe('parseReconcileArgs', () => {
 
   it('rejects a delete flag without --apply', () => {
     expect(() => parseReconcileArgs(['--delete-orphans', '--undo-log', 'u.jsonl'])).toThrow(/require --apply/)
+  })
+
+  it('accepts --prune-context-links only with --apply and an undo log, and never with --undo', () => {
+    expect(parseReconcileArgs(['--apply', '--prune-context-links', '--undo-log', 'u.jsonl'])).toMatchObject({
+      apply: true,
+      pruneContextLinks: true,
+    })
+    expect(parseReconcileArgs(['--apply', '--undo-log', 'u.jsonl']).pruneContextLinks).toBe(false)
+    expect(() => parseReconcileArgs(['--prune-context-links', '--undo-log', 'u.jsonl'])).toThrow(/require --apply/)
+    expect(() => parseReconcileArgs(['--apply', '--prune-context-links'])).toThrow(/--undo-log/)
+    expect(() => parseReconcileArgs(['--prune-context-links'])).toThrow(ReconcileArgsError)
+    expect(() => parseReconcileArgs(['--undo', 'u.jsonl', '--prune-context-links'])).toThrow(/--undo/)
   })
 
   it.each([
@@ -203,10 +230,37 @@ describe('formatReconcileReport', () => {
   })
 })
 
-type Event = { kind: 'undo'; lines: UndoLine[] } | { kind: 'stamp' | 'project' | 'tier' | 'delete'; ids: string[] }
+type Event =
+  | { kind: 'undo'; lines: UndoLine[] }
+  | { kind: 'stamp' | 'project' | 'tier' | 'delete'; ids: string[] }
+  | { kind: 'ctx'; links: ContextLinkRef[] }
 
-function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = Infinity): ReconcileSqlSource {
+/** A graph relationship between a Memory node and a Person/Entity/Topic node. */
+interface FakeLink {
+  memoryId: string
+  ctxId: string
+  name: string | null
+  type: 'CONTEXTUAL' | 'SPOKE'
+  props: Record<string, unknown>
+}
+
+function fakeSql(
+  tables: Partial<Record<SqlTier, SqlSourceRow[]>>,
+  serverCap = Infinity,
+  texts: Record<string, string> = {},
+): ReconcileSqlSource {
   return {
+    async fetchTexts(tier, ids) {
+      const wanted = new Set(ids.map((id) => id.toLowerCase()))
+      return (tables[tier] ?? [])
+        .filter((r) => wanted.has(r.id.toLowerCase()))
+        .map((r) => ({
+          id: r.id,
+          tier,
+          text: texts[r.id] ?? '',
+          inactive: r.forgotten_at != null || r.superseded_by != null,
+        }))
+    },
     async fetchByIds(tier, ids) {
       const wanted = new Set(ids.map((id) => id.toLowerCase()))
       return (tables[tier] ?? []).filter((r) => wanted.has(r.id.toLowerCase())).map((r) => ({ ...r }))
@@ -225,9 +279,73 @@ function fakeSql(tables: Partial<Record<SqlTier, SqlSourceRow[]>>, serverCap = I
   }
 }
 
-function fakeGraph(initial: GraphMemoryNode[], events: Event[]): ReconcileGraph & { nodes: GraphMemoryNode[] } {
+function fakeGraph(
+  initial: GraphMemoryNode[],
+  events: Event[],
+  initialLinks: FakeLink[] = [],
+): ReconcileGraph & { nodes: GraphMemoryNode[]; links: FakeLink[] } {
+  const ctxNames = new Map(initialLinks.map((l) => [l.ctxId, l.name]))
   const state = {
+    /** Context nodes by id; the fake uses one id as both element id and `id` property. */
+    ctxNodes: new Set(initialLinks.map((l) => l.ctxId)),
     nodes: initial.map((n) => ({ ...n })),
+    links: initialLinks.map((l) => ({ ...l, props: { ...l.props } })),
+    async fetchContextPage(after: string | null, limit: number): Promise<ContextLinkNode[]> {
+      return [...state.nodes]
+        .filter((n) => n.memoryType === 'semantic' || n.memoryType === 'digest')
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .filter((n) => after === null || n.id > after)
+        .slice(0, limit)
+        .map((n) => ({
+          id: n.id,
+          forgotten: n.forgotten,
+          edges: state.links
+            .filter((l) => l.memoryId === n.id && l.type === 'CONTEXTUAL')
+            .map((l) => ({
+              ctxId: l.ctxId,
+              ctxLabel: 'Entity' as const,
+              ctxNodeId: l.ctxId,
+              name: l.name,
+              props: { ...l.props },
+            })),
+        }))
+    },
+    async remainingLiveLinks(rows: ReadonlyArray<{ ctxId: string; prunedMemoryIds: string[] }>) {
+      return rows.map((row) => {
+        const live = new Set(
+          state.links
+            .filter((l) => l.ctxId === row.ctxId)
+            .filter((l) => state.nodes.some((n) => n.id === l.memoryId && !n.forgotten))
+            .filter((l) => !(l.type === 'CONTEXTUAL' && row.prunedMemoryIds.includes(l.memoryId)))
+            .map((l) => l.memoryId),
+        )
+        const name = ctxNames.get(row.ctxId) ?? null
+        return { ctxId: row.ctxId, name, remaining: live.size }
+      })
+    },
+    async deleteContextLinks(links: readonly ContextLinkRef[]) {
+      events.push({ kind: 'ctx', links: [...links] })
+      const before = state.links.length
+      state.links = state.links.filter(
+        (l) => !(l.type === 'CONTEXTUAL' && links.some((d) => d.memoryId === l.memoryId && d.ctxId === l.ctxId)),
+      )
+      return before - state.links.length
+    },
+    async restoreContextLinks(lines: readonly ContextUndoLine[]) {
+      let n = 0
+      for (const line of lines) {
+        if (!state.nodes.some((node) => node.id === line.memoryId)) continue
+        if (!state.ctxNodes.has(line.ctxNodeId)) continue
+        const ctxId = line.ctxNodeId
+        const name = ctxNames.get(ctxId) ?? null
+        state.links = state.links.filter(
+          (l) => !(l.type === 'CONTEXTUAL' && l.memoryId === line.memoryId && l.ctxId === ctxId),
+        )
+        state.links.push({ memoryId: line.memoryId, ctxId, name, type: 'CONTEXTUAL', props: { ...line.props } })
+        n++
+      }
+      return n
+    },
     async fetchNodePage(after: string | null, limit: number) {
       return [...state.nodes]
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -276,14 +394,20 @@ const sqlRow = (id: string, over: Partial<SqlSourceRow> = {}): SqlSourceRow => (
   ...over,
 })
 
-function harness(argv: string[], nodes: GraphMemoryNode[], tables: Partial<Record<SqlTier, SqlSourceRow[]>>) {
+function harness(
+  argv: string[],
+  nodes: GraphMemoryNode[],
+  tables: Partial<Record<SqlTier, SqlSourceRow[]>>,
+  links: FakeLink[] = [],
+  texts: Record<string, string> = {},
+) {
   const events: Event[] = []
-  const graph = fakeGraph(nodes, events)
+  const graph = fakeGraph(nodes, events, links)
   const logs: string[] = []
   const run = () =>
     runReconcile(
       {
-        sql: fakeSql(tables, 2),
+        sql: fakeSql(tables, 2, texts),
         graph,
         appendUndo: async (lines) => {
           events.push({ kind: 'undo', lines: [...lines] })
@@ -291,6 +415,7 @@ function harness(argv: string[], nodes: GraphMemoryNode[], tables: Partial<Recor
         log: (line) => logs.push(line),
         now: () => '2026-10-01T00:00:00.000Z',
         nodePageSize: 2,
+        contextPageSize: 2,
       },
       parseReconcileArgs(argv),
     )
@@ -492,5 +617,214 @@ describe('readGraphNodes', () => {
 
     expect(new Set(ids).size).toBe(ids.length)
     for (const id of ['a', 'c', 'e', 'g', 'i', 'h']) expect(ids).toContain(id)
+  })
+})
+
+const ctxLink = (
+  memoryId: string,
+  ctxId: string,
+  name: string,
+  props: Record<string, unknown> = {},
+  type: FakeLink['type'] = 'CONTEXTUAL',
+): FakeLink => ({ memoryId, ctxId, name, type, props })
+
+const EDGE_PROPS = { weight: 0.42, createdAt: '2026-09-01T00:00:00Z', traversalCount: { $int: '3' } }
+
+const CTX_TABLES: Partial<Record<SqlTier, SqlSourceRow[]>> = {
+  semantic: [
+    sqlRow('s-1'),
+    sqlRow('s-2', { created_at: '2026-01-02T00:00:00Z' }),
+    sqlRow('s-old', { forgotten_at: '2026-02-01T00:00:00Z', created_at: '2026-01-03T00:00:00Z' }),
+  ],
+  digest: [sqlRow('d-1')],
+  episode: [sqlRow('e-1')],
+}
+
+const CTX_TEXTS: Record<string, string> = {
+  's-1': "Kam's review of the PostgREST change",
+  's-2': 'nothing in this fact names a context node',
+  's-old': 'Kam',
+  'd-1': 'Session about Jira triage',
+}
+
+const CTX_NODES: GraphMemoryNode[] = [
+  node('s-1'),
+  node('s-2'),
+  node('s-old', { forgotten: true }),
+  node('s-ghost'),
+  node('d-1', { memoryType: 'digest' }),
+  node('e-1', { memoryType: 'episode' }),
+]
+
+const CTX_LINKS: FakeLink[] = [
+  ctxLink('s-1', 'ctx-kam', 'Kam', EDGE_PROPS),
+  ctxLink('s-1', 'ctx-pg', 'PostgREST', { weight: 0.3 }),
+  ctxLink('s-1', 'ctx-jira', 'Jira', { weight: 0.21, createdAt: '2026-09-02T00:00:00Z' }),
+  ctxLink('s-2', 'ctx-solo', 'Orphanly', EDGE_PROPS),
+  ctxLink('s-2', 'ctx-atlas', 'Atlas', { weight: 0.1 }),
+  ctxLink('s-old', 'ctx-kam', 'Kam', { weight: 0.5 }),
+  ctxLink('s-old', 'ctx-pg', 'PostgREST', { weight: 0.5 }),
+  ctxLink('s-ghost', 'ctx-kam', 'Kam', { weight: 0.9 }),
+  ctxLink('d-1', 'ctx-kam', 'Kam', { weight: 0.6 }),
+  ctxLink('d-1', 'ctx-jira', 'Jira', { weight: 0.6 }),
+  // An episode keeps Atlas linked from a live memory once the fact's edge goes.
+  ctxLink('e-1', 'ctx-atlas', 'Atlas', {}, 'SPOKE'),
+]
+
+const PRUNED = [
+  { memoryId: 's-1', ctxId: 'ctx-jira' },
+  { memoryId: 's-2', ctxId: 'ctx-solo' },
+  { memoryId: 's-2', ctxId: 'ctx-atlas' },
+  { memoryId: 's-old', ctxId: 'ctx-pg' },
+  { memoryId: 'd-1', ctxId: 'ctx-kam' },
+]
+
+const PRUNE_ARGS = ['--apply', '--prune-context-links', '--undo-log', 'u.jsonl']
+
+const pairKey = (l: { memoryId: string; ctxId: string }): string => `${l.memoryId}->${l.ctxId}`
+const contextPairs = (links: readonly FakeLink[]): string[] =>
+  links.filter((l) => l.type === 'CONTEXTUAL').map(pairKey).sort()
+
+describe('context links', () => {
+  it('a dry run reports per tier and liveness, skips nodes without a row, and writes nothing', async () => {
+    const { events, logs, run } = harness([], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+
+    const outcome = await run()
+
+    expect(events).toEqual([])
+    const report = outcome.contextLinks.before
+    expect(report.tiers.semantic.live).toEqual({ nodes: 2, edges: 5, kept: 2, pruned: 3, zeroLinks: 1 })
+    expect(report.tiers.semantic.retired).toEqual({ nodes: 1, edges: 2, kept: 1, pruned: 1, zeroLinks: 0 })
+    expect(report.tiers.digest.live).toEqual({ nodes: 1, edges: 2, kept: 1, pruned: 1, zeroLinks: 0 })
+    expect(report.tiers.digest.retired).toEqual({ nodes: 0, edges: 0, kept: 0, pruned: 0, zeroLinks: 0 })
+    expect(report.skippedNoRow).toBe(1)
+    expect(logs).toHaveLength(1)
+    expect(logs[0]).toContain('semantic live      nodes 2, edges 5, kept 2, pruned 3, left with 0 links 1')
+    expect(logs[0]).toContain('nodes without a SQL row (skipped): 1')
+    expect(logs[0]).toContain('context link prune not requested')
+    for (const leak of ['s-1', 's-ghost', 'd-1', CTX_TEXTS['s-1']!]) expect(logs[0]).not.toContain(leak)
+  })
+
+  it('reports an entity whose only live link is a pruned edge, and no entity another live memory still links', async () => {
+    const { logs, run } = harness([], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+
+    const outcome = await run()
+
+    expect(outcome.contextLinks.before.orphanedEntities).toEqual([{ name: 'Orphanly' }])
+    expect(logs[0]).toContain('entities losing their last live link: 1\n    - "Orphanly"')
+  })
+
+  it('--apply prunes exactly the unnamed edges, each batch after its undo lines, and nothing else when other checks are clean', async () => {
+    const { events, graph, logs, run } = harness(
+      ['--apply', '--prune-context-links', '--undo-log', 'u.jsonl', '--batch-size', '2'],
+      CTX_NODES,
+      CTX_TABLES,
+      CTX_LINKS,
+      CTX_TEXTS,
+    )
+
+    const outcome = await run()
+
+    expect(events.every((e) => e.kind === 'undo' || e.kind === 'ctx')).toBe(true)
+    const deleted = events.flatMap((e) => (e.kind === 'ctx' ? e.links : []))
+    expect(deleted.map(pairKey).sort()).toEqual(PRUNED.map(pairKey).sort())
+    events.forEach((e, i) => {
+      if (e.kind !== 'ctx') return
+      expect(e.links.length).toBeLessThanOrEqual(2)
+      const prev = events[i - 1]
+      expect(prev?.kind === 'undo' && prev.lines.map((l) => (l.op === 'ctx' ? pairKey(l) : null))).toEqual(
+        e.links.map(pairKey),
+      )
+    })
+    const undo = events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    expect(undo).toContainEqual({
+      op: 'ctx',
+      memoryId: 's-2',
+      ctxId: 'ctx-solo',
+      ctxLabel: 'Entity',
+      ctxNodeId: 'ctx-solo',
+      props: EDGE_PROPS,
+    })
+
+    expect(outcome.contextLinks.pruned).toBe(5)
+    expect(outcome.written).toEqual({ stamped: 0, projects: 0, tiers: 0, deleted: 0, skippedChangedSinceSnapshot: 0 })
+    expect(contextPairs(graph.links)).toEqual(
+      ['s-1->ctx-kam', 's-1->ctx-pg', 's-old->ctx-kam', 's-ghost->ctx-kam', 'd-1->ctx-jira'].sort(),
+    )
+    expect(outcome.contextLinks.after?.tiers.semantic.live.pruned).toBe(0)
+    expect(outcome.contextLinks.after?.orphanedEntities).toEqual([])
+    expect(logs).toContainEqual(expect.stringContaining('context links pruned 5'))
+  })
+
+  it('undo re-creates every pruned edge with its properties and leaves other undo lines alone', async () => {
+    const applied = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+    await applied.run()
+    const lines = applied.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    const undoText =
+      [{ op: 'stamp', id: 's-1', at: '2026-10-01T00:00:00.000Z' }, ...lines].map((l) => JSON.stringify(l)).join('\n') +
+      '\n'
+    const logs: string[] = []
+
+    const result = await undoContextLinks(applied.graph, (l) => logs.push(l), undoText, 2)
+
+    expect(result).toEqual({ restored: 5, requested: 5, unmatched: 0, other: 1 })
+    const byPair = (links: readonly FakeLink[]) =>
+      Object.fromEntries(links.filter((l) => l.type === 'CONTEXTUAL').map((l) => [pairKey(l), l.props]))
+    expect(byPair(applied.graph.links)).toEqual(byPair(CTX_LINKS))
+    expect(logs[0]).toContain('context links restored: 5 of 5')
+    expect(logs[0]).toContain('unmatched (memory or context node not found): 0')
+    expect(logs[0]).toContain('other undo lines left as they are: 1')
+  })
+
+  it('undo counts a line whose context node no longer exists as unmatched', async () => {
+    const applied = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+    await applied.run()
+    const lines = applied.events.flatMap((e) => (e.kind === 'undo' ? e.lines : []))
+    applied.graph.ctxNodes.delete('ctx-solo')
+    const logs: string[] = []
+
+    const result = await undoContextLinks(
+      applied.graph,
+      (l) => logs.push(l),
+      lines.map((l) => JSON.stringify(l)).join('\n'),
+      10,
+    )
+
+    expect(result).toEqual({ restored: 4, requested: 5, unmatched: 1, other: 0 })
+    expect(contextPairs(applied.graph.links)).not.toContain('s-2->ctx-solo')
+    expect(logs[0]).toContain('unmatched (memory or context node not found): 1')
+  })
+
+  it('undo refuses a ctx line whose label is not a context label', async () => {
+    const line = { op: 'ctx', memoryId: 's-1', ctxId: 'x', ctxLabel: 'Memory`) DETACH DELETE (n', ctxNodeId: 'x', props: {} }
+    const graph = fakeGraph(CTX_NODES, [], CTX_LINKS)
+
+    await expect(undoContextLinks(graph, () => {}, JSON.stringify(line), 10)).rejects.toThrow(/unknown context label/)
+    await expect(
+      undoContextLinks(graph, () => {}, JSON.stringify({ ...line, ctxLabel: 'Entity', ctxNodeId: undefined }), 10),
+    ).rejects.toThrow(/malformed ctx line/)
+  })
+
+  it('--apply without --prune-context-links deletes no context link but still reports the planned prune', async () => {
+    const { events, graph, logs, run } = harness(['--apply', '--undo-log', 'u.jsonl'], CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+
+    const outcome = await run()
+
+    expect(events.filter((e) => e.kind === 'ctx')).toEqual([])
+    expect(events.flatMap((e) => (e.kind === 'undo' ? e.lines : [])).filter((l) => l.op === 'ctx')).toEqual([])
+    expect(contextPairs(graph.links)).toEqual(contextPairs(CTX_LINKS))
+    expect(outcome.contextLinks.pruned).toBe(0)
+    expect(outcome.contextLinks.before.tiers.semantic.live.pruned).toBe(3)
+    expect(outcome.contextLinks.after?.tiers.semantic.live.pruned).toBe(3)
+    expect(logs[0]).toContain('context link prune not requested')
+    expect(logs).toContainEqual(expect.stringContaining('context links pruned 0 (not requested)'))
+  })
+
+  it('a node without a SQL row keeps every link', async () => {
+    const { graph, run } = harness(PRUNE_ARGS, CTX_NODES, CTX_TABLES, CTX_LINKS, CTX_TEXTS)
+
+    await run()
+
+    expect(contextPairs(graph.links.filter((l) => l.memoryId === 's-ghost'))).toEqual(['s-ghost->ctx-kam'])
   })
 })
