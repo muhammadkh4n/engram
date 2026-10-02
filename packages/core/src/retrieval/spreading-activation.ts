@@ -316,13 +316,24 @@ export async function stageActivate(
     }
   }
 
+  // getByIds returns rows in no defined order, so activation ties must be
+  // broken by the graph's own ranking (activation, newest createdAt, id) or
+  // identical recalls render Related in a different order each time.
+  const graphRankByNodeId = new Map(
+    activatedNodes.map((n, index) => [n.nodeId, index]),
+  )
+  const byActivationThenGraphRank = (a: RetrievedMemory, b: RetrievedMemory): number =>
+    b.relevance - a.relevance ||
+    (graphRankByNodeId.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
+      (graphRankByNodeId.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+
   const associations = primaryEpisodes
     .map(toRetrievedMemory)
-    .sort((a, b) => b.relevance - a.relevance)
+    .sort(byActivationThenGraphRank)
 
   const faintAssociations = faintEpisodes
     .map(toRetrievedMemory)
-    .sort((a, b) => b.relevance - a.relevance)
+    .sort(byActivationThenGraphRank)
     .slice(0, 5) // cap faint associations at 5
 
   // --- Assemble context from non-Memory activated nodes ---
