@@ -157,6 +157,15 @@ describe('chat reasoning control', () => {
     expect(mockChatCreate.mock.calls[1]![0]).toMatchObject({ reasoning: { effort: 'none' } })
   })
 
+  it('openaiIntelligence forwards timeZone and the expansion reference date', async () => {
+    mockChatCreate.mockResolvedValueOnce(chatReply('["a"]'))
+    const intel = openaiIntelligence({ apiKey: 'k', timeZone: 'Asia/Karachi' })
+    await intel.expandQuery!('q', { now: new Date('2026-10-01T22:00:00Z') })
+    const body = mockChatCreate.mock.calls[0]![0] as { messages: Array<{ content: string }> }
+    expect(body.messages[0]!.content.split('\n')[0]).toBe("Today's date is Friday, 2026-10-02.")
+    expect(() => openaiIntelligence({ apiKey: 'k', timeZone: 'Not/AZone' })).toThrow(/not a valid IANA time zone name/)
+  })
+
   it("finish_reason 'length' writes exactly one stderr line with the label and reasoning count, no content", async () => {
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     try {

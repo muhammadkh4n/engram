@@ -34,6 +34,8 @@ export interface ArmRecallOptions {
   projectId?: string
   conversationKey?: string
   reconsolidate: boolean
+  /** Reference date for query expansion, as the server passes the request time. */
+  now?: Date
 }
 
 export interface ArmRecallMemory {
@@ -66,6 +68,7 @@ export interface ArmModules {
   }
   DEFAULT_RERANK_MODEL: string
   parseChatReasoningEnv?: (env: NodeJS.ProcessEnv) => Record<string, unknown>
+  parseTimeZoneEnv?: (env: NodeJS.ProcessEnv) => Record<string, unknown>
 }
 
 export async function importFrom(dist: string, rel: string): Promise<Record<string, unknown>> {
@@ -88,6 +91,9 @@ export async function loadArmModules(dist: string): Promise<ArmModules> {
     DEFAULT_RERANK_MODEL: onnx['DEFAULT_RERANK_MODEL'] as string,
     ...(typeof serverCore['parseChatReasoningEnv'] === 'function'
       ? { parseChatReasoningEnv: serverCore['parseChatReasoningEnv'] as ArmModules['parseChatReasoningEnv'] }
+      : {}),
+    ...(typeof serverCore['parseTimeZoneEnv'] === 'function'
+      ? { parseTimeZoneEnv: serverCore['parseTimeZoneEnv'] as ArmModules['parseTimeZoneEnv'] }
       : {}),
   }
 }
@@ -115,6 +121,9 @@ export function buildIntelligence(mods: ArmModules, strictPins: boolean): Intell
       throw new Error('ENGRAM_CHAT_PROVIDER_PREFS is not a JSON object')
     }
   }
+  if (!mods.parseTimeZoneEnv && process.env['ENGRAM_TIMEZONE']?.trim()) {
+    throw new Error('ENGRAM_TIMEZONE is set but this engram build has no time zone setting')
+  }
   if (!mods.parseChatReasoningEnv && process.env['ENGRAM_CHAT_REASONING']?.trim()) {
     throw new Error('ENGRAM_CHAT_REASONING is set but this engram build has no reasoning setting')
   }
@@ -126,6 +135,7 @@ export function buildIntelligence(mods: ArmModules, strictPins: boolean): Intell
     ...(chatApiKey ? { chatApiKey } : {}),
     ...(chatProviderPrefs ? { chatProviderPrefs } : {}),
     ...(mods.parseChatReasoningEnv ? mods.parseChatReasoningEnv(process.env) : {}),
+    ...(mods.parseTimeZoneEnv ? mods.parseTimeZoneEnv(process.env) : {}),
   })
 }
 

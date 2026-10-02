@@ -56,6 +56,7 @@ export type {
   SalienceCategory,
   SalienceClassification,
   SalienceOpts,
+  ExpandQueryOpts,
   EvidenceItem,
   EvidenceSelection,
   SupersessionFact,

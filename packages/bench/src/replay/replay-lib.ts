@@ -14,7 +14,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import type { IntelligenceAdapter, MemoryType } from '@engram-mem/core'
+import type { ExpandQueryOpts, IntelligenceAdapter, MemoryType } from '@engram-mem/core'
+import { expansionKey } from '../expansion-key.js'
 
 // --- window ---------------------------------------------------------------
 
@@ -270,7 +271,8 @@ export function parsePins(text: string | null): PinsData {
 export interface PinStats {
   hits: number
   fills: number
-  misses: Array<{ bucket: keyof PinsData; text: string }>
+  /** `now` is the reference date of a dated expansion miss. */
+  misses: Array<{ bucket: keyof PinsData; text: string; now?: string }>
   blocked: Record<string, number>
 }
 
@@ -294,7 +296,9 @@ const PASS_THROUGH = new Set(['dimensions', 'rerank'])
 /**
  * Memoises the recall-time model calls per input text so every arm sees the
  * same expansion, HyDE document and vectors (chat replies are not
- * deterministic). `fill` calls the model on a miss and records it; `strict`
+ * deterministic). Expansion is keyed by text plus reference date and its
+ * options are forwarded, so a pins file written with text-only keys still
+ * serves calls that carry no date. `fill` calls the model on a miss and records it; `strict`
  * throws on a miss without calling anything. Every other model method throws
  * and is counted, so no ingest-side or chat call can run unseen. The engine
  * swallows expansion and HyDE errors, so callers check `stats` after each
@@ -316,18 +320,21 @@ export function createPins(
   let dirty = false
   let currentSha = initialSha
 
-  const memo = (bucket: keyof PinsData, fn: (text: string) => Promise<unknown>) => async (text: string) => {
+  const memo = (bucket: keyof PinsData, fn: (...args: unknown[]) => Promise<unknown>) => async (...args: unknown[]) => {
+    const text = args[0] as string
+    const opts = bucket === 'expand' ? (args[1] as ExpandQueryOpts | undefined) : undefined
+    const key = expansionKey(text, opts)
     const store = pins[bucket]
-    if (Object.prototype.hasOwnProperty.call(store, text)) {
+    if (Object.prototype.hasOwnProperty.call(store, key)) {
       stats.hits++
-      return structuredClone(store[text])
+      return structuredClone(store[key])
     }
     if (mode === 'strict') {
-      stats.misses.push({ bucket, text: text.slice(0, 120) })
+      stats.misses.push({ bucket, text: text.slice(0, 120), ...(key !== text ? { now: opts!.now!.toISOString() } : {}) })
       throw new Error(`strict pins: no pinned ${bucket} for this text; refusing to call the model`)
     }
-    const out = await fn(text)
-    store[text] = out
+    const out = await fn(...args)
+    store[key] = out
     stats.fills++
     dirty = true
     return structuredClone(out)
@@ -342,7 +349,7 @@ export function createPins(
       }
       const bucket = PINNED_METHODS[name]
       if (bucket) {
-        out[name] = memo(bucket, (text) => (value as (t: string) => Promise<unknown>).call(intel, text))
+        out[name] = memo(bucket, (...args) => (value as (...a: unknown[]) => Promise<unknown>).apply(intel, args))
         continue
       }
       out[name] = () => {
@@ -578,6 +585,8 @@ export interface ReplayRecallOptions {
   projectId?: string
   conversationKey?: string
   reconsolidate: true
+  /** The logged recall's own time, as the server passes the request time. */
+  now: Date
 }
 
 interface RecallMemoryLike {
@@ -696,6 +705,7 @@ export async function runReplay(deps: ReplayDeps): Promise<ReplayCounts> {
       ...(recall.project_id ? { projectId: recall.project_id } : {}),
       ...(key !== undefined ? { conversationKey: key } : {}),
       reconsolidate: true,
+      now: new Date(e.at),
     }
     const t0 = clock()
     const result = await deps.aroundRecall(() => deps.recall(recall.query.trim(), opts))

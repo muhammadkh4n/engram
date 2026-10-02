@@ -18,6 +18,7 @@ import type { Memory } from '@engram-mem/core'
 import type { LoCoMoConversationFile, LoCoMoTurn, LoCoMoQA } from './types.js'
 import { createBenchMemory } from '../memory-factory.js'
 import { assertRecallNotDegraded } from '../refuse-degraded.js'
+import { latestSessionDate, parseLoCoMoDateTime } from './session-date.js'
 
 // ── TrueMemory protocol constants ──────────────────────────────────────────
 
@@ -63,28 +64,6 @@ Output ONLY: {"label": "CORRECT"} or {"label": "WRONG"}`
 
 // ── Relative-date resolution (port of _rtime from bench_engram.py) ─────────
 
-function parseDateTime(dateStr: string): Date | null {
-  // Formats: "I:MM am/pm on DD Month, YYYY" or "I:MM am/pm on DD Month YYYY"
-  const trimmed = dateStr.trim()
-  const monthNames: Record<string, number> = {
-    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
-    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
-  }
-  const re = /^(\d{1,2}):(\d{2})\s+(am|pm)\s+on\s+(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})$/i
-  const m = trimmed.match(re)
-  if (!m) return null
-  let hour = parseInt(m[1]!, 10)
-  const minute = parseInt(m[2]!, 10)
-  const ampm = m[3]!.toLowerCase()
-  const day = parseInt(m[4]!, 10)
-  const month = monthNames[m[5]!.toLowerCase()]
-  const year = parseInt(m[6]!, 10)
-  if (month === undefined) return null
-  if (ampm === 'pm' && hour < 12) hour += 12
-  if (ampm === 'am' && hour === 12) hour = 0
-  return new Date(year, month, day, hour, minute, 0)
-}
-
 const RELATIVE_DATES: Array<[RegExp, number]> = [
   [/\byesterday\b/i, 1],
   [/\blast week\b/i, 7],
@@ -104,7 +83,7 @@ function formatDateLong(d: Date): string {
 }
 
 function resolveRelativeDates(text: string, dateStr: string): string {
-  const base = parseDateTime(dateStr)
+  const base = parseLoCoMoDateTime(dateStr)
   if (!base) return text
   let out = text
   for (const [pat, daysBack] of RELATIVE_DATES) {
@@ -150,7 +129,7 @@ function parseConv(conv: LoCoMoConversationFile): ParsedMessage[] {
   const msgs: ParsedMessage[] = []
   for (const sk of sessionKeys) {
     const ds = (c[`${sk}_date_time`] as string | undefined) ?? ''
-    const sdt = ds ? parseDateTime(ds) : null
+    const sdt = ds ? parseLoCoMoDateTime(ds) : null
     const turns = (c[sk] as LoCoMoTurn[] | undefined) ?? []
     for (let i = 0; i < turns.length; i++) {
       const t = turns[i]!
@@ -302,8 +281,16 @@ function getQa(conv: LoCoMoConversationFile): LoCoMoQA[] {
   return conv.qa.filter(q => q.category !== 5)
 }
 
-export async function retrieveContext(memory: Pick<Memory, 'recall'>, question: string): Promise<string> {
-  const result = await memory.recall(question)
+/**
+ * Recall the answer context for one question. `now` is the conversation's
+ * latest session date: query expansion resolves relative dates against it.
+ */
+export async function retrieveContext(
+  memory: Pick<Memory, 'recall'>,
+  question: string,
+  now?: Date | null,
+): Promise<string> {
+  const result = await memory.recall(question, now ? { now } : {})
   assertRecallNotDegraded(result, question)
   const top = result.memories.slice(0, 100)
   if (top.length === 0) return 'No memories found.'
@@ -384,10 +371,11 @@ async function benchConversation(
   const ingestMs = Date.now() - ingestStart
   console.log(`    Ingested ${msgCount} msgs, consolidated=${opts.consolidate !== false}, in ${(ingestMs / 1000).toFixed(1)}s`)
 
+  const referenceDate = latestSessionDate(conv)
   const details: QuestionDetail[] = []
   for (let i = 0; i < nQs; i++) {
     const qa = qas[i]!
-    const ctx = await retrieveContext(memory, qa.question)
+    const ctx = await retrieveContext(memory, qa.question, referenceDate)
 
     const tAns = Date.now()
     const answer = await generateAnswer(client, ctx, qa.question)

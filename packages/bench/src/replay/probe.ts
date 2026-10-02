@@ -42,6 +42,8 @@ async function main(args: ProbeArgs): Promise<number> {
     writeAtomic(pinsPath, json),
   )
   const rerankModel = armRerankModel(args.env)
+  // One reference date for the whole run: expansion pins are keyed by it.
+  const referenceDate = args.referenceDate ?? new Date()
   const metaPath = path.join(args.out, `probe-meta-${args.arm}.json`)
   const meta: Record<string, unknown> = {
     identity: {
@@ -52,12 +54,13 @@ async function main(args: ProbeArgs): Promise<number> {
       queries_sha256: sha256(queriesText),
       pins_path: pinsPath,
       pins_mode: args.pinsMode,
+      reference_date: referenceDate.toISOString(),
     },
     started: new Date().toISOString(),
     queries: queries.length,
     graph: 'none: this probe wires no graph',
     reranker: rerankModel ?? `${copy.mods.DEFAULT_RERANK_MODEL} (default)`,
-    recall_options: 'projectId from the query file, no conversation key, reconsolidate off',
+    recall_options: 'projectId from the query file, now = reference_date, no conversation key, reconsolidate off',
     sensory: 'reset before each query',
   }
   const writeMeta = (extra: Record<string, unknown> = {}) =>
@@ -77,6 +80,7 @@ async function main(args: ProbeArgs): Promise<number> {
       aroundRecall: (fn) => withEnv(args.env, fn),
       beforeQuery: resetSensory,
       violations: () => pinViolations(pins),
+      referenceDate,
       write: (record, formatted) => {
         fs.writeFileSync(path.join(armDir, `${record.label}.txt`), formatted)
         fs.writeFileSync(path.join(armDir, `${record.label}.json`), JSON.stringify(record))

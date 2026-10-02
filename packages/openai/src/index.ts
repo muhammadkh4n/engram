@@ -7,6 +7,7 @@ export { OpenAIEmbeddingService } from './embeddings.js'
 export type { OpenAIEmbeddingServiceOptions } from './embeddings.js'
 export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM, DEFAULT_CHAT_MODEL } from './summarizer.js'
 export type { OpenAISummarizerOptions, ChatReasoningMode, TranscriptDigestKind } from './summarizer.js'
+export { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
 export interface OpenAIIntelligenceOptions {
   apiKey: string
@@ -32,6 +33,9 @@ export interface OpenAIIntelligenceOptions {
   chatReasoning?: ChatReasoningMode
   /** Tokens added to every chat cap in `'default'` reasoning mode (default 2048). */
   chatReasoningHeadroom?: number
+  /** IANA time zone whose calendar date query expansion states as today's
+   *  date (default `UTC`). An invalid name throws when the adapter is built. */
+  timeZone?: string
   /** Reserved for future LLM-powered intent classification. */
   intentAnalysis?: boolean
 }
@@ -59,6 +63,7 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     ...(opts.chatProviderPrefs ? { providerPrefs: opts.chatProviderPrefs } : {}),
     ...(opts.chatReasoning ? { reasoning: opts.chatReasoning } : {}),
     ...(opts.chatReasoningHeadroom !== undefined ? { reasoningHeadroom: opts.chatReasoningHeadroom } : {}),
+    ...(opts.timeZone !== undefined ? { timeZone: opts.timeZone } : {}),
   })
 
   return {
@@ -86,8 +91,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     generateHypotheticalDoc(query) {
       return summarizer.generateHypotheticalDoc(query)
     },
-    expandQuery(query: string) {
-      return summarizer.expandQuery(query)
+    expandQuery(query, expandOpts) {
+      return summarizer.expandQuery(query, expandOpts)
     },
     rerank(query, documents) {
       return summarizer.rerank(query, documents)

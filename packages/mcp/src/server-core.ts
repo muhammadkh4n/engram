@@ -34,7 +34,7 @@ import type {
   SupersessionSettings,
 } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
+import { openaiIntelligence, assertTimeZone, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
 import type { Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
@@ -234,6 +234,21 @@ export function parseChatReasoningEnv(env: NodeJS.ProcessEnv = process.env): Cha
 }
 
 /**
+ * ENGRAM_TIMEZONE: the IANA zone whose calendar date query expansion states as
+ * today's date, so "yesterday" means the user's yesterday when the server runs
+ * on UTC. Read once at startup; unset or blank → `UTC`. A name Intl rejects
+ * fails startup instead of the first recall.
+ */
+export function parseTimeZoneEnv(env: NodeJS.ProcessEnv = process.env): { timeZone: string } {
+  const name = env['ENGRAM_TIMEZONE']?.trim() || 'UTC'
+  try {
+    return { timeZone: assertTimeZone(name) }
+  } catch {
+    throw new Error(`ENGRAM_TIMEZONE must be an IANA time zone name such as "Asia/Karachi", got "${name}"`)
+  }
+}
+
+/**
  * Chat-model override: ENGRAM_CHAT_MODEL / ENGRAM_CHAT_BASE_URL /
  * ENGRAM_CHAT_API_KEY route every LLM call (summarize, extraction, synthesis
  * selection, supersession judging) to any OpenAI-compatible host, e.g. a
@@ -377,6 +392,7 @@ export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.e
 
 async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyAtStartup()
+  const { timeZone } = parseTimeZoneEnv()
   const supersession = supersessionSettingsAtStartup()
   const recallLog = recallLogFromEnv()
   if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
@@ -393,6 +409,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
     apiKey: openaiApiKey,
     ...chatIntelligenceOptionsFromEnv(),
+    timeZone,
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local ONNX
   // cross-encoder over the openaiIntelligence adapter so the rerank stage
@@ -747,7 +764,9 @@ export async function runMemoryRecall(
   const recallOpts = recallOptionsFromArgs(args)
   if ('error' in recallOpts) return toolError(recallOpts.error)
 
-  const result = await mem.recall(query.trim(), recallOpts)
+  // The request time is the reference date for relative time phrases
+  // ("last week") in query expansion and in the opt-in synthesis block.
+  const result = await mem.recall(query.trim(), { ...recallOpts, now: new Date() })
   recallLog?.record(query.trim(), args, recallOpts.projectId, result)
 
   if (result.timings) {

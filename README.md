@@ -336,7 +336,8 @@ Add to your `~/.claude/settings.json`:
   "ENGRAM_CHAT_API_KEY": "sk-or-...",
   "ENGRAM_CHAT_PROVIDER_PREFS": "{\"order\":[\"baidu\"],\"quantizations\":[\"fp8\"]}", // v0.6.2+: OpenRouter provider routing — pin/order hosts, quantization floor
   "ENGRAM_CHAT_REASONING": "off",                 // OpenRouter-compatible hosts only (requires ENGRAM_CHAT_BASE_URL); reasoning models: "off" sends reasoning {effort:"none"}; "default" keeps the model's effort and raises every max_tokens cap; unset = requests unchanged
-  "ENGRAM_CHAT_REASONING_HEADROOM": "2048"        // tokens added to every cap in "default" mode (positive integer, default 2048)
+  "ENGRAM_CHAT_REASONING_HEADROOM": "2048",       // tokens added to every cap in "default" mode (positive integer, default 2048)
+  "ENGRAM_TIMEZONE": "Asia/Karachi"               // IANA zone whose calendar date query expansion uses as today's date (default UTC; an unknown name fails startup)
 }
 ```
 

@@ -295,7 +295,7 @@ describe('bm25.sql engram_bm25_match matching', () => {
     for (const type of Object.keys(TIERS)) {
       const expected = conjuncts(whereOf(textBranches.get(type)!, /(?:\) combined|$)/))
       const candidate = candidateQuery(branches.get(type)!)
-      expect(conjuncts(whereOf(candidate, /LIMIT/))).toEqual(expected)
+      expect(conjuncts(whereOf(candidate, /ORDER BY/))).toEqual(expected)
       expect(squash(candidate)).toMatch(/FROM memory_\w+ [a-z] WHERE [a-z]\.fts @@ mt\.q/)
     }
   })
@@ -331,10 +331,10 @@ describe('bm25.sql engram_bm25_match scoring', () => {
     for (const branch of tierBranches().values()) {
       expect(branch.match(/LIMIT \(SELECT candidate_cap FROM bounds\)/g)).toHaveLength(2)
       expect(squash(branch)).toMatch(
-        /row_number\(\) OVER \(ORDER BY ts_rank_cd\([a-z]\.fts, mt\.q, 2\) DESC\) AS term_rank/,
+        /row_number\(\) OVER \(ORDER BY ts_rank_cd\(([a-z])\.fts, mt\.q, 2\) DESC, \1\.id\) AS term_rank/,
       )
       expect(squash(branch)).toContain(
-        'GROUP BY c.id ORDER BY min(c.term_rank) LIMIT (SELECT candidate_cap FROM bounds)',
+        'GROUP BY c.id ORDER BY min(c.term_rank), c.id LIMIT (SELECT candidate_cap FROM bounds)',
       )
     }
   })
@@ -357,7 +357,7 @@ describe('bm25.sql engram_bm25_match scoring', () => {
   it('selects the bare score once per row and orders each tier by that column', () => {
     for (const branch of tierBranches().values()) {
       expect(branch).not.toMatch(/-\s*\(?[^\n]*<@>/)
-      expect(squash(branch)).toMatch(/\) ORDER BY bm25_score LIMIT p_match_count \) \w+\s*$/)
+      expect(squash(branch)).toMatch(/\) ORDER BY bm25_score, [a-z]{2}\.id LIMIT p_match_count \) \w+\s*$/)
       expect(branch).not.toContain('rank_score')
     }
   })
@@ -365,7 +365,40 @@ describe('bm25.sql engram_bm25_match scoring', () => {
   it('negates the score and filters rank_score > 0 only outside the tiers', () => {
     const outer = squash(body.slice(body.indexOf(') tiers')))
     expect(squash(body)).toContain('SELECT id, memory_type, -bm25_score::float AS rank_score FROM (')
-    expect(outer).toMatch(/\) combined WHERE rank_score > 0 ORDER BY rank_score DESC LIMIT p_match_count$/)
+    expect(outer).toMatch(
+      /\) combined WHERE rank_score > 0 ORDER BY rank_score DESC, memory_type, id LIMIT p_match_count$/,
+    )
+  })
+})
+
+// A cut over tied scores keeps whichever tied rows the scan meets first, and
+// heap order changes whenever a row is rewritten (recall's own shown_count
+// update writes a new tuple). Every ORDER BY that feeds a LIMIT or a
+// row_number() therefore ends in a key that is unique within its rows.
+describe('bm25.sql engram_bm25_match cuts are deterministic under ties', () => {
+  it("orders each term's candidate LIMIT by the window's key, ending in the row id", () => {
+    for (const branch of tierBranches().values()) {
+      const lateral = squash(candidateQuery(branch))
+      expect(lateral).toMatch(
+        /^SELECT ([a-z])\.id, row_number\(\) OVER \(ORDER BY ts_rank_cd\(\1\.fts, mt\.q, 2\) DESC, \1\.id\) AS term_rank .* ORDER BY ts_rank_cd\(\1\.fts, mt\.q, 2\) DESC, \1\.id LIMIT \(SELECT candidate_cap FROM bounds\)$/,
+      )
+    }
+  })
+
+  it('ends every tier cut in the id of the row it scores', () => {
+    const branches = tierBranches()
+    for (const [type, tier] of Object.entries(TIERS)) {
+      const branch = squash(branches.get(type)!)
+      expect(branch).toContain(`ORDER BY bm25_score, ${tier.alias}.id LIMIT p_match_count`)
+    }
+  })
+
+  it('breaks ties across tiers on memory_type then id, unique over the union', () => {
+    // Each ORDER BY immediately followed by its LIMIT: three per tier and the outer one.
+    const orderBys = [...squash(body).matchAll(/ORDER BY ((?:(?!ORDER BY)[^;])*?) LIMIT/g)].map((m) => m[1]!)
+    expect(orderBys).toHaveLength(13)
+    for (const orderBy of orderBys) expect(orderBy).toMatch(/\bid$/)
+    expect(orderBys.at(-1)).toBe('rank_score DESC, memory_type, id')
   })
 })
 
