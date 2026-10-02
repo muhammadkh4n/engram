@@ -19,13 +19,17 @@
  * Merge is conservative: only a cluster whose every member pair (not just
  * the kept edges) is at cosine >= `mergeSim` is merged, and `mergeSim` may
  * not be below MERGE_SIM_FLOOR. Non-canonical rows get
- * `superseded_by = <canonical>`; nothing is deleted, and clearing
- * `superseded_by` restores a row (recall skips superseded rows). Every row
- * written is recorded in a rollback CSV as it is written.
+ * `superseded_by = <canonical>` and a fresh `updated_at`, which is how
+ * tombstone readers (the graph decay pass, the recall-engine index) learn of
+ * a supersession. Nothing is deleted. Clearing `superseded_by` restores a
+ * row in Postgres (recall skips superseded rows), but the recall-engine
+ * index adds it back only on a rebuild. Every row written is recorded in a
+ * rollback CSV as it is written.
  */
 
 import { closeSync, openSync, writeSync } from 'node:fs'
-import { chunk, nextCursor, type PageCursor } from './embed-backfill-lib.js'
+import type { PostgrestClient } from '@supabase/postgrest-js'
+import { buildKeysetFilter, chunk, nextCursor, type PageCursor } from './embed-backfill-lib.js'
 
 /** Lowest similarity at which rows are merged rather than only reported. */
 export const MERGE_SIM_FLOOR = 0.95
@@ -252,22 +256,27 @@ export function compareCanonical(a: CanonicalCandidate, b: CanonicalCandidate): 
   if (conf !== 0 && !Number.isNaN(conf)) return conf
   const sources = b.derives_from_sources - a.derives_from_sources
   if (sources !== 0) return sources
-  const age = b.created_at.localeCompare(a.created_at)
-  if (age !== 0) return age
+  // Timestamps compare as instants: as strings, "...:01Z" sorts after
+  // "...:01.5Z" although it is the earlier time.
+  const age = Date.parse(b.created_at) - Date.parse(a.created_at)
+  if (age !== 0 && !Number.isNaN(age)) return age
   return a.id.localeCompare(b.id)
 }
 
+/**
+ * Every live row. Only an empty page ends the walk: PostgREST truncates a
+ * response at its max-rows setting without saying so, so a page shorter
+ * than `pageSize` may just be that cap.
+ */
 async function scanLive(store: SemanticDedupStore, pageSize: number): Promise<LiveSemanticRow[]> {
   const rows: LiveSemanticRow[] = []
   let cursor: PageCursor | null = null
   for (;;) {
     const page = await store.fetchLive(cursor, pageSize)
-    if (page.length === 0) break
+    if (page.length === 0) return rows
     rows.push(...page)
     cursor = nextCursor(page)
-    if (page.length < pageSize) break
   }
-  return rows
 }
 
 /** Rows bucketed by exact project_id and vector dimension. */
@@ -399,6 +408,78 @@ export async function runSemanticDedup(store: SemanticDedupStore, opts: Semantic
     merge_sim: opts.mergeSim,
     applied: opts.apply,
     superseded,
+  }
+}
+
+const TABLE = 'memory_semantic'
+
+interface LiveRowWire extends Omit<LiveSemanticRow, 'embedding'> {
+  embedding: unknown
+}
+
+/**
+ * The store over PostgREST. Every paged read walks a key and ends only on an
+ * empty page, because the server's max-rows cap can cut any page short
+ * without signalling it.
+ */
+export function postgrestDedupStore(client: PostgrestClient, pageSize: number): SemanticDedupStore {
+  return {
+    async fetchLive(cursor, limit) {
+      let q = client
+        .from(TABLE)
+        .select('id, project_id, confidence, access_count, shown_count, created_at, embedding')
+        .is('forgotten_at', null)
+        .is('superseded_by', null)
+        .not('embedding', 'is', null)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(limit)
+      const filter = buildKeysetFilter(cursor)
+      if (filter) q = q.or(filter)
+      const { data, error } = await q
+      if (error) throw new Error(`fetchLive failed: ${error.message}`)
+      return ((data ?? []) as LiveRowWire[]).map((r) => ({ ...r, embedding: parseEmbedding(r.embedding) }))
+    },
+    async fetchDerivationEdges(targetIds) {
+      const edges: DerivationEdge[] = []
+      let after: string | null = null
+      for (;;) {
+        let q = client
+          .from('memory_associations')
+          .select('id, source_id, target_id')
+          .eq('edge_type', 'derives_from')
+          .eq('target_type', 'semantic')
+          .in('target_id', [...targetIds])
+        if (after !== null) q = q.gt('id', after)
+        const { data, error } = await q.order('id', { ascending: true }).limit(pageSize)
+        if (error) throw new Error(`fetchDerivationEdges failed: ${error.message}`)
+        const page = (data ?? []) as Array<DerivationEdge & { id: string }>
+        if (page.length === 0) return edges
+        for (const { source_id, target_id } of page) edges.push({ source_id, target_id })
+        after = page[page.length - 1]!.id
+      }
+    },
+    async fetchContent(ids) {
+      const { data, error } = await client.from(TABLE).select('id, topic, content').in('id', [...ids])
+      if (error) throw new Error(`fetchContent failed: ${error.message}`)
+      return (data ?? []) as SemanticContent[]
+    },
+    async markSuperseded(ids, canonical) {
+      // updated_at has no trigger on Postgres, and listTombstonesSince finds
+      // supersessions by `updated_at >= since AND superseded_by IS NOT NULL`;
+      // without the bump the graph decay pass and the recall-engine index
+      // never drop these rows.
+      const { data, error } = await client
+        .from(TABLE)
+        .update({ superseded_by: canonical, updated_at: new Date().toISOString() })
+        .in('id', [...ids])
+        .neq('id', canonical)
+        .is('superseded_by', null)
+        .is('forgotten_at', null)
+        .select('id')
+      if (error) throw new Error(`supersede into ${canonical} failed: ${error.message}`)
+      return ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
+    },
   }
 }
 

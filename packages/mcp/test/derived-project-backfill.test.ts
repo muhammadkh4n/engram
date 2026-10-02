@@ -1,10 +1,17 @@
-import { describe, it, expect } from 'vitest'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, it, expect } from 'vitest'
 import type { PageCursor } from '../src/ingest/embed-backfill-lib.js'
 import {
+  APPLIED_CSV_HEADER,
   SAMPLE_SIZE,
   formatDerivedReport,
+  openAppliedCsv,
+  postgrestDerivedProjectStore,
   resolveDerivedProject,
   runDerivedProjectBackfill,
+  type AppliedEntry,
   type DerivationEdge,
   type DerivedKind,
   type DerivedProjectStore,
@@ -12,6 +19,7 @@ import {
   type SourceKind,
   type SourceProject,
 } from '../src/ingest/derived-project-backfill-lib.js'
+import { fakePostgrest } from './fake-postgrest.js'
 
 type Kind = DerivedKind | SourceKind
 
@@ -35,6 +43,8 @@ class StubStore implements DerivedProjectStore {
   readonly tables: Record<Kind, StoredRow[]> = { episode: [], digest: [], semantic: [] }
   readonly edges: Edge[] = []
   readonly updateCalls: Array<{ kind: DerivedKind; ids: string[]; project: string }> = []
+  /** rows returned per fetchUntagged at most, as a server max-rows cap would */
+  cap = Infinity
   private seq = 0
 
   add(kind: Kind, projectId: string | null): string {
@@ -76,7 +86,7 @@ class StubStore implements DerivedProjectStore {
           r.created_at > cursor.createdAt ||
           (r.created_at === cursor.createdAt && r.id > cursor.id),
       )
-      .slice(0, pageSize)
+      .slice(0, Math.min(pageSize, this.cap))
       .map(({ id, created_at }) => ({ id, created_at }))
   }
 
@@ -102,13 +112,13 @@ class StubStore implements DerivedProjectStore {
       .map(({ id, project_id }) => ({ id, project_id }))
   }
 
-  async assignProject(kind: DerivedKind, ids: readonly string[], project: string): Promise<number> {
+  async assignProject(kind: DerivedKind, ids: readonly string[], project: string): Promise<string[]> {
     this.updateCalls.push({ kind, ids: [...ids], project })
-    let changed = 0
+    const changed: string[] = []
     for (const r of this.tables[kind]) {
       if (ids.includes(r.id) && r.project_id === null) {
         r.project_id = project
-        changed++
+        changed.push(r.id)
       }
     }
     return changed
@@ -116,7 +126,15 @@ class StubStore implements DerivedProjectStore {
 }
 
 const DRY = { apply: false, pageSize: 2, batchSize: 2 }
-const APPLY = { apply: true, pageSize: 2, batchSize: 2 }
+/** Collects applied rows in memory. */
+class MemorySink {
+  readonly entries: AppliedEntry[] = []
+  write(entries: readonly AppliedEntry[]): void {
+    this.entries.push(...entries)
+  }
+}
+
+const APPLY = { apply: true, pageSize: 2, batchSize: 2, applied: new MemorySink() }
 
 describe('resolveDerivedProject', () => {
   it('takes the project every tagged source holds, ignoring untagged sources', () => {
@@ -260,5 +278,83 @@ describe('runDerivedProjectBackfill against a stubbed store', () => {
     const sampleLine = text.split('\n').find((l) => l.includes('sample:'))!
     expect(sampleLine.split(',').length).toBe(SAMPLE_SIZE)
     expect(text).not.toContain('synthetic')
+  })
+})
+
+describe('paging under a server row cap', () => {
+  it('a store capped below the page size still scans every untagged row', async () => {
+    const store = new StubStore()
+    const e = store.add('episode', 'engram')
+    const digests = Array.from({ length: 7 }, () => store.add('digest', null))
+    for (const d of digests) store.derive('episode', [e], 'digest', d)
+    store.cap = 2
+
+    const report = await runDerivedProjectBackfill(store, { ...DRY, pageSize: 5 })
+
+    expect(report.digest.scanned).toBe(7)
+    expect(report.digest.assignments.get('engram')).toEqual(digests)
+  })
+
+  it('the PostgREST store reads every derives_from edge when the server caps responses below the page size', async () => {
+    const target = '00000000-0000-0000-0000-0000000000aa'
+    const edges = Array.from({ length: 7 }, (_, i) => ({
+      id: `e${i}`,
+      source_id: `episode-${i}`,
+      source_type: 'episode',
+      target_id: target,
+      target_type: 'digest',
+      edge_type: 'derives_from',
+    }))
+    const { client } = fakePostgrest({ memory_associations: edges }, 2)
+
+    const read = await postgrestDerivedProjectStore(client, 5).fetchDerivationEdges('episode', 'digest', [target])
+
+    expect(read.map((e) => e.source_id).sort()).toEqual(edges.map((e) => e.source_id).sort())
+  })
+})
+
+describe('applied-rows file', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'derived-applied-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('lists every row the apply wrote, with its tier and project', async () => {
+    const { store, d1, s1 } = fixture()
+    const e = store.add('episode', 'ouija, "quoted"')
+    const extra = Array.from({ length: 3 }, () => store.add('digest', null))
+    for (const d of extra) store.derive('episode', [e], 'digest', d)
+    const path = join(dir, 'applied.csv')
+    const sink = openAppliedCsv(path)
+    try {
+      await runDerivedProjectBackfill(store, { ...APPLY, applied: sink })
+    } finally {
+      sink.close()
+    }
+
+    const [header, ...lines] = readFileSync(path, 'utf8').trimEnd().split('\n')
+    expect(header).toBe(APPLIED_CSV_HEADER)
+    const expected = [
+      `digest,${d1},engram`,
+      ...extra.map((d) => `digest,${d},"ouija, ""quoted"""`),
+      `semantic,${s1},engram`,
+    ]
+    expect([...lines].sort()).toEqual([...expected].sort())
+    expect(lines).toHaveLength(store.updateCalls.flatMap((c) => c.ids).length)
+  })
+
+  it('refuses apply without an applied-rows sink', async () => {
+    const { store } = fixture()
+    await expect(runDerivedProjectBackfill(store, { apply: true, pageSize: 2, batchSize: 2 })).rejects.toThrow(/applied/)
+    expect(store.updateCalls).toEqual([])
+  })
+
+  it('never overwrites an existing applied-rows file', () => {
+    const path = join(dir, 'applied.csv')
+    openAppliedCsv(path).close()
+    expect(() => openAppliedCsv(path)).toThrow()
   })
 })

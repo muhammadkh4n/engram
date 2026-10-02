@@ -11,10 +11,12 @@
  * access/shown counts, canonical choice); the summary goes to stderr.
  * Content is never printed: `--report FILE` writes it to a new local file.
  *
- * Apply never deletes: non-canonical rows get `superseded_by = <canonical>`,
- * and each written row is appended to the `--rollback-csv` file (created
- * new, never overwritten) as (row, canonical, sim). Clearing
- * `superseded_by` restores a row.
+ * Apply never deletes: non-canonical rows get `superseded_by = <canonical>`
+ * and a fresh `updated_at` (so tombstone readers see the supersession), and
+ * each written row is appended to the `--rollback-csv` file (created new,
+ * never overwritten) as (row, canonical, sim). Clearing `superseded_by`
+ * restores a row in Postgres; the recall-engine index re-adds it only on a
+ * rebuild.
  *
  * Usage:
  *   engram-semantic-dedup                                   # dry run
@@ -31,7 +33,7 @@
 
 import { existsSync } from 'node:fs'
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { buildKeysetFilter, chunk } from './embed-backfill-lib.js'
+import { chunk } from './embed-backfill-lib.js'
 import {
   DEFAULT_REPORT_SIM,
   DEFAULT_TOP_K,
@@ -40,19 +42,16 @@ import {
   dedupJson,
   dedupSummary,
   openRollbackCsv,
-  parseEmbedding,
+  postgrestDedupStore,
   runSemanticDedup,
   validateDedupOptions,
   writeNewFile,
-  type DerivationEdge,
-  type LiveSemanticRow,
   type SemanticContent,
   type SemanticDedupOptions,
   type SemanticDedupStore,
 } from './semantic-dedup-lib.js'
 
 const TAG = '[engram-semantic-dedup]'
-const TABLE = 'memory_semantic'
 
 interface Args {
   apply: boolean
@@ -138,68 +137,6 @@ function parseArgs(argv: readonly string[]): Args {
   return args
 }
 
-interface LiveRowWire extends Omit<LiveSemanticRow, 'embedding'> {
-  embedding: unknown
-}
-
-function postgrestStore(client: PostgrestClient, pageSize: number): SemanticDedupStore {
-  return {
-    async fetchLive(cursor, limit) {
-      let q = client
-        .from(TABLE)
-        .select('id, project_id, confidence, access_count, shown_count, created_at, embedding')
-        .is('forgotten_at', null)
-        .is('superseded_by', null)
-        .not('embedding', 'is', null)
-        .order('created_at', { ascending: true })
-        .order('id', { ascending: true })
-        .limit(limit)
-      const filter = buildKeysetFilter(cursor)
-      if (filter) q = q.or(filter)
-      const { data, error } = await q
-      if (error) throw new Error(`fetchLive failed: ${error.message}`)
-      return ((data ?? []) as LiveRowWire[]).map((r) => ({ ...r, embedding: parseEmbedding(r.embedding) }))
-    },
-    async fetchDerivationEdges(targetIds) {
-      // A batch of targets can have more edges than the server's row cap,
-      // so read them in ranged pages until a short one.
-      const edges: DerivationEdge[] = []
-      for (let from = 0; ; from += pageSize) {
-        const { data, error } = await client
-          .from('memory_associations')
-          .select('id, source_id, target_id')
-          .eq('edge_type', 'derives_from')
-          .eq('target_type', 'semantic')
-          .in('target_id', [...targetIds])
-          .order('id', { ascending: true })
-          .range(from, from + pageSize - 1)
-        if (error) throw new Error(`fetchDerivationEdges failed: ${error.message}`)
-        const page = (data ?? []) as Array<DerivationEdge & { id: string }>
-        for (const { source_id, target_id } of page) edges.push({ source_id, target_id })
-        if (page.length < pageSize) break
-      }
-      return edges
-    },
-    async fetchContent(ids) {
-      const { data, error } = await client.from(TABLE).select('id, topic, content').in('id', [...ids])
-      if (error) throw new Error(`fetchContent failed: ${error.message}`)
-      return (data ?? []) as SemanticContent[]
-    },
-    async markSuperseded(ids, canonical) {
-      const { data, error } = await client
-        .from(TABLE)
-        .update({ superseded_by: canonical })
-        .in('id', [...ids])
-        .neq('id', canonical)
-        .is('superseded_by', null)
-        .is('forgotten_at', null)
-        .select('id')
-      if (error) throw new Error(`supersede into ${canonical} failed: ${error.message}`)
-      return ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
-    },
-  }
-}
-
 async function fetchAllContent(store: SemanticDedupStore, ids: readonly string[], batchSize: number): Promise<SemanticContent[]> {
   const out: SemanticContent[] = []
   for (const batch of chunk(ids, batchSize)) out.push(...(await store.fetchContent(batch)))
@@ -229,7 +166,7 @@ async function main(): Promise<void> {
   const client = new PostgrestClient(url, {
     headers: { Authorization: `Bearer ${key}`, apikey: key },
   })
-  const store = postgrestStore(client, args.pageSize)
+  const store = postgrestDedupStore(client, args.pageSize)
   console.error(
     `${TAG} mode=${args.apply ? 'APPLY' : 'DRY-RUN'} report-sim=${args.reportSim} top-k=${args.topK} merge-sim=${args.mergeSim ?? '-'}`,
   )

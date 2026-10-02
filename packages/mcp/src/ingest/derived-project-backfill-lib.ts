@@ -18,10 +18,13 @@
  *
  * Only rows whose `project_id` is NULL are read or written, so a repeat run
  * touches nothing already tagged. A project tag only ranks memories, it
- * never hides one, so a wrong tag costs ranking, not recall.
+ * never hides one, so a wrong tag costs ranking, not recall. An apply
+ * records every row it tagged, so it can be undone exactly.
  */
 
-import { chunk, nextCursor, type PageCursor } from './embed-backfill-lib.js'
+import { closeSync, openSync, writeSync } from 'node:fs'
+import type { PostgrestClient } from '@supabase/postgrest-js'
+import { buildKeysetFilter, chunk, nextCursor, type PageCursor } from './embed-backfill-lib.js'
 
 export type DerivedKind = 'digest' | 'semantic'
 export type SourceKind = 'episode' | 'digest'
@@ -64,9 +67,21 @@ export interface DerivedProjectStore {
   fetchProjects(kind: SourceKind, ids: readonly string[]): Promise<SourceProject[]>
   /**
    * Sets `project_id` on the given ids that still have a NULL one; returns
-   * how many rows changed.
+   * the ids actually changed.
    */
-  assignProject(kind: DerivedKind, ids: readonly string[], project: string): Promise<number>
+  assignProject(kind: DerivedKind, ids: readonly string[], project: string): Promise<string[]>
+}
+
+/** One row an apply tagged. */
+export interface AppliedEntry {
+  tier: DerivedKind
+  id: string
+  project_id: string
+}
+
+/** Receives each written batch as soon as the store confirms it. */
+export interface AppliedSink {
+  write(entries: readonly AppliedEntry[]): void
 }
 
 export type UnresolvedReason = 'mixed' | 'no-source-tag'
@@ -113,6 +128,8 @@ export interface DerivedBackfillOptions {
   pageSize: number
   /** ids per lookup and per update */
   batchSize: number
+  /** required for apply: every row written, for an exact undo */
+  applied?: AppliedSink
 }
 
 function push<K>(map: Map<K, string[]>, key: K, id: string): void {
@@ -121,6 +138,11 @@ function push<K>(map: Map<K, string[]>, key: K, id: string): void {
   else map.set(key, [id])
 }
 
+/**
+ * Every untagged row of `kind`. Only an empty page ends the walk: PostgREST
+ * truncates a response at its max-rows setting without saying so, so a page
+ * shorter than `pageSize` may just be that cap.
+ */
 async function scanUntagged(
   store: DerivedProjectStore,
   kind: DerivedKind,
@@ -130,12 +152,10 @@ async function scanUntagged(
   let cursor: PageCursor | null = null
   for (;;) {
     const page = await store.fetchUntagged(kind, cursor, pageSize)
-    if (page.length === 0) break
+    if (page.length === 0) return rows
     rows.push(...page)
     cursor = nextCursor(page)
-    if (page.length < pageSize) break
   }
-  return rows
 }
 
 /** Source ids per target id, deduplicated (an edge may be recorded twice). */
@@ -206,7 +226,11 @@ async function runPass(
   for (const [project, ids] of report.assignments) {
     let count = 0
     if (opts.apply) {
-      for (const batch of chunk(ids, opts.batchSize)) count += await store.assignProject(kind, batch, project)
+      for (const batch of chunk(ids, opts.batchSize)) {
+        const changed = await store.assignProject(kind, batch, project)
+        opts.applied!.write(changed.map((id) => ({ tier: kind, id, project_id: project })))
+        count += changed.length
+      }
     }
     report.updated.set(project, count)
   }
@@ -222,6 +246,7 @@ export async function runDerivedProjectBackfill(
   store: DerivedProjectStore,
   opts: DerivedBackfillOptions,
 ): Promise<DerivedBackfillReport> {
+  if (opts.apply && !opts.applied) throw new Error('apply requires an applied-rows sink')
   const digest = await runPass(store, 'digest', new Map(), opts)
   const digestProjects = new Map<string, string>()
   for (const [project, ids] of digest.assignments) for (const id of ids) digestProjects.set(id, project)
@@ -262,4 +287,95 @@ function formatPass(pass: PassReport, apply: boolean): string[] {
 /** Counts, project names and up to ten sample ids per bucket: never content. */
 export function formatDerivedReport(report: DerivedBackfillReport, apply: boolean): string {
   return [...formatPass(report.digest, apply), ...formatPass(report.semantic, apply)].join('\n')
+}
+
+export const APPLIED_CSV_HEADER = 'tier,id,project_id'
+
+function csvField(value: string): string {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+
+/**
+ * The applied-rows CSV at `path`: created exclusively (0600) before any
+ * write, so an earlier run's file is never overwritten, and appended per
+ * batch with the rows the store confirmed. Undo a row with
+ * `UPDATE memory_<tier> SET project_id = NULL WHERE id = <id> AND project_id = <project_id>`.
+ */
+export function openAppliedCsv(path: string): AppliedSink & { close(): void } {
+  const fd = openSync(path, 'wx', 0o600)
+  writeSync(fd, `${APPLIED_CSV_HEADER}\n`)
+  return {
+    write(entries) {
+      if (entries.length === 0) return
+      writeSync(fd, entries.map((e) => [e.tier, e.id, e.project_id].map(csvField).join(',')).join('\n') + '\n')
+    },
+    close() {
+      closeSync(fd)
+    },
+  }
+}
+
+const TABLE: Readonly<Record<DerivedKind | SourceKind, string>> = {
+  episode: 'memory_episodes',
+  digest: 'memory_digests',
+  semantic: 'memory_semantic',
+}
+
+/**
+ * The store over PostgREST. Every paged read walks a key and ends only on an
+ * empty page, because the server's max-rows cap can cut any page short
+ * without signalling it.
+ */
+export function postgrestDerivedProjectStore(client: PostgrestClient, pageSize: number): DerivedProjectStore {
+  return {
+    async fetchUntagged(kind, cursor, limit) {
+      let q = client
+        .from(TABLE[kind])
+        .select('id, created_at')
+        .is('project_id', null)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(limit)
+      const filter = buildKeysetFilter(cursor)
+      if (filter) q = q.or(filter)
+      const { data, error } = await q
+      if (error) throw new Error(`fetchUntagged(${kind}) failed: ${error.message}`)
+      return (data ?? []) as DerivedRow[]
+    },
+    async fetchDerivationEdges(sourceKind, targetKind, targetIds) {
+      const edges: DerivationEdge[] = []
+      let after: string | null = null
+      for (;;) {
+        let q = client
+          .from('memory_associations')
+          .select('id, source_id, target_id')
+          .eq('edge_type', 'derives_from')
+          .eq('source_type', sourceKind)
+          .eq('target_type', targetKind)
+          .in('target_id', [...targetIds])
+        if (after !== null) q = q.gt('id', after)
+        const { data, error } = await q.order('id', { ascending: true }).limit(pageSize)
+        if (error) throw new Error(`fetchDerivationEdges(${targetKind}) failed: ${error.message}`)
+        const page = (data ?? []) as Array<DerivationEdge & { id: string }>
+        if (page.length === 0) return edges
+        for (const { source_id, target_id } of page) edges.push({ source_id, target_id })
+        after = page[page.length - 1]!.id
+      }
+    },
+    async fetchProjects(kind, ids) {
+      const { data, error } = await client.from(TABLE[kind]).select('id, project_id').in('id', [...ids])
+      if (error) throw new Error(`fetchProjects(${kind}) failed: ${error.message}`)
+      return (data ?? []) as SourceProject[]
+    },
+    async assignProject(kind, ids, project) {
+      const { data, error } = await client
+        .from(TABLE[kind])
+        .update({ project_id: project })
+        .in('id', [...ids])
+        .is('project_id', null)
+        .select('id')
+      if (error) throw new Error(`update ${kind} to ${project} failed: ${error.message}`)
+      return ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
+    },
+  }
 }

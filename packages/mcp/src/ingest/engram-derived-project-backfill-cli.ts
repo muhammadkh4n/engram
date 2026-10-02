@@ -9,45 +9,39 @@
  *
  * Dry run by default: prints, per kind, counts per target project and per
  * reason, with up to ten sample ids per bucket. `--apply` performs the
- * updates in batches and prints the same counts. Never prints content.
+ * updates in batches, prints the same counts, and writes every row it
+ * tagged to the `--applied-out` CSV (created new, never overwritten) as
+ * (tier, id, project_id), so the apply can be undone exactly. Never prints
+ * content.
  *
  * Idempotent: only rows whose `project_id` is still NULL are read or
  * written, so a repeat run touches nothing already tagged.
  *
  * Usage:
  *   engram-derived-project-backfill                  # dry run
- *   engram-derived-project-backfill --apply          # write project_id
+ *   engram-derived-project-backfill --apply --applied-out tagged.csv
  *   engram-derived-project-backfill --page-size N    # rows per fetch (default 1000)
  *   engram-derived-project-backfill --batch-size N   # ids per lookup and update (default 100)
  *
  * Required env: SUPABASE_URL, SUPABASE_KEY
  */
 
+import { existsSync } from 'node:fs'
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { buildKeysetFilter } from './embed-backfill-lib.js'
 import {
   formatDerivedReport,
+  openAppliedCsv,
+  postgrestDerivedProjectStore,
   runDerivedProjectBackfill,
-  type DerivationEdge,
-  type DerivedKind,
-  type DerivedProjectStore,
-  type DerivedRow,
-  type SourceKind,
-  type SourceProject,
 } from './derived-project-backfill-lib.js'
 
 const TAG = '[engram-derived-project-backfill]'
-
-const TABLE: Readonly<Record<DerivedKind | SourceKind, string>> = {
-  episode: 'memory_episodes',
-  digest: 'memory_digests',
-  semantic: 'memory_semantic',
-}
 
 interface Args {
   apply: boolean
   pageSize: number
   batchSize: number
+  appliedPath: string | null
 }
 
 function fail(message: string): never {
@@ -68,7 +62,8 @@ const HELP =
   '  from their derives_from sources (dry run by default)\n' +
   '  A row gets a project only when every tagged source holds that project;\n' +
   '  mixed or untagged sources leave it NULL.\n' +
-  '  --apply            write project_id\n' +
+  '  --apply            write project_id (needs --applied-out)\n' +
+  '  --applied-out FILE new CSV of (tier, id, project_id) for every row written\n' +
   '  --page-size N      rows per fetch (default 1000)\n' +
   '  --batch-size N     ids per lookup and update (default 100)\n'
 
@@ -76,72 +71,26 @@ function parseArgs(argv: readonly string[]): Args {
   let apply = false
   let pageSize = 1000
   let batchSize = 100
+  let appliedPath: string | null = null
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--apply') apply = true
     else if (a === '--page-size') pageSize = parsePositiveInt(argv[++i], 'page-size')
     else if (a === '--batch-size') batchSize = parsePositiveInt(argv[++i], 'batch-size')
+    else if (a === '--applied-out') {
+      const raw = argv[++i]
+      if (!raw || raw.startsWith('--')) fail('--applied-out requires a file path')
+      appliedPath = raw
+    }
     else if (a === '--help' || a === '-h') {
       console.log(HELP)
       process.exit(0)
     } else fail(`unknown argument "${a}"`)
   }
-  return { apply, pageSize, batchSize }
-}
-
-function postgrestStore(client: PostgrestClient, pageSize: number): DerivedProjectStore {
-  return {
-    async fetchUntagged(kind, cursor, limit) {
-      let q = client
-        .from(TABLE[kind])
-        .select('id, created_at')
-        .is('project_id', null)
-        .order('created_at', { ascending: true })
-        .order('id', { ascending: true })
-        .limit(limit)
-      const filter = buildKeysetFilter(cursor)
-      if (filter) q = q.or(filter)
-      const { data, error } = await q
-      if (error) throw new Error(`fetchUntagged(${kind}) failed: ${error.message}`)
-      return (data ?? []) as DerivedRow[]
-    },
-    async fetchDerivationEdges(sourceKind, targetKind, targetIds) {
-      // A batch of targets can have more edges than the server's row cap,
-      // so read them in ranged pages until a short one.
-      const edges: DerivationEdge[] = []
-      for (let from = 0; ; from += pageSize) {
-        const { data, error } = await client
-          .from('memory_associations')
-          .select('id, source_id, target_id')
-          .eq('edge_type', 'derives_from')
-          .eq('source_type', sourceKind)
-          .eq('target_type', targetKind)
-          .in('target_id', [...targetIds])
-          .order('id', { ascending: true })
-          .range(from, from + pageSize - 1)
-        if (error) throw new Error(`fetchDerivationEdges(${targetKind}) failed: ${error.message}`)
-        const page = (data ?? []) as Array<DerivationEdge & { id: string }>
-        for (const { source_id, target_id } of page) edges.push({ source_id, target_id })
-        if (page.length < pageSize) break
-      }
-      return edges
-    },
-    async fetchProjects(kind, ids) {
-      const { data, error } = await client.from(TABLE[kind]).select('id, project_id').in('id', [...ids])
-      if (error) throw new Error(`fetchProjects(${kind}) failed: ${error.message}`)
-      return (data ?? []) as SourceProject[]
-    },
-    async assignProject(kind, ids, project) {
-      const { data, error } = await client
-        .from(TABLE[kind])
-        .update({ project_id: project })
-        .in('id', [...ids])
-        .is('project_id', null)
-        .select('id')
-      if (error) throw new Error(`update ${kind} to ${project} failed: ${error.message}`)
-      return (data ?? []).length
-    },
-  }
+  if (apply && appliedPath === null) fail('--apply requires --applied-out FILE')
+  if (!apply && appliedPath !== null) fail('--applied-out is only written with --apply')
+  if (appliedPath !== null && existsSync(appliedPath)) fail(`--applied-out ${appliedPath} already exists`)
+  return { apply, pageSize, batchSize, appliedPath }
 }
 
 async function main(): Promise<void> {
@@ -157,12 +106,21 @@ async function main(): Promise<void> {
   console.log(
     `${TAG} mode=${args.apply ? 'APPLY' : 'DRY-RUN'} page-size=${args.pageSize} batch-size=${args.batchSize}`,
   )
-  const report = await runDerivedProjectBackfill(postgrestStore(client, args.pageSize), {
-    apply: args.apply,
-    pageSize: args.pageSize,
-    batchSize: args.batchSize,
-  })
+  // Created before any write so a failed apply still leaves its list.
+  const applied = args.appliedPath ? openAppliedCsv(args.appliedPath) : undefined
+  let report
+  try {
+    report = await runDerivedProjectBackfill(postgrestDerivedProjectStore(client, args.pageSize), {
+      apply: args.apply,
+      pageSize: args.pageSize,
+      batchSize: args.batchSize,
+      applied,
+    })
+  } finally {
+    applied?.close()
+  }
   console.log(formatDerivedReport(report, args.apply))
+  if (args.appliedPath) console.log(`${TAG} applied rows: ${args.appliedPath}`)
 }
 
 main().catch((err) => {

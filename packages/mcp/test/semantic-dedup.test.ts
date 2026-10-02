@@ -13,6 +13,7 @@ import {
   neighbourPairs,
   openRollbackCsv,
   parseEmbedding,
+  postgrestDedupStore,
   runSemanticDedup,
   unionFind,
   unitVector,
@@ -24,6 +25,7 @@ import {
   type SemanticDedupOptions,
   type SemanticDedupStore,
 } from '../src/ingest/semantic-dedup-lib.js'
+import { fakePostgrest } from './fake-postgrest.js'
 
 interface StoredRow extends LiveSemanticRow {
   topic: string
@@ -37,6 +39,8 @@ class StubStore implements SemanticDedupStore {
   readonly rows: StoredRow[] = []
   readonly edges: Array<DerivationEdge & { edge_type: string; target_type: string }> = []
   readonly calls: string[] = []
+  /** rows returned per fetchLive at most, as a server max-rows cap would */
+  cap = Infinity
   private seq = 0
 
   add(embedding: number[] | null, over: Partial<StoredRow> = {}): string {
@@ -76,7 +80,7 @@ class StubStore implements SemanticDedupStore {
       .filter((r) => r.forgotten_at === null && r.superseded_by === null && r.embedding !== null)
       .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
       .filter((r) => !cursor || r.created_at > cursor.createdAt || (r.created_at === cursor.createdAt && r.id > cursor.id))
-      .slice(0, pageSize)
+      .slice(0, Math.min(pageSize, this.cap))
       .map(({ id, project_id, confidence, access_count, shown_count, created_at, embedding }) => ({
         id,
         project_id,
@@ -388,5 +392,67 @@ describe('parseEmbedding', () => {
     expect(parseEmbedding('[1,"x"]')).toBeNull()
     expect(parseEmbedding('not a vector')).toBeNull()
     expect(parseEmbedding(null)).toBeNull()
+  })
+})
+
+describe('paging under a server row cap', () => {
+  it('a store capped below the page size still yields every live row', async () => {
+    const store = new StubStore()
+    for (let i = 0; i < 7; i++) store.add(E1)
+    store.cap = 2
+
+    const report = await runSemanticDedup(store, opts({ pageSize: 5 }))
+
+    expect(report.scanned).toBe(7)
+    expect(report.clusters).toHaveLength(1)
+    expect(report.clusters[0]!.members).toHaveLength(7)
+  })
+
+  it('the PostgREST store reads every derives_from edge when the server caps responses below the page size', async () => {
+    const target = '00000000-0000-0000-0000-0000000000aa'
+    const edges = Array.from({ length: 7 }, (_, i) => ({
+      id: `e${i}`,
+      source_id: `digest-${i}`,
+      target_id: target,
+      edge_type: 'derives_from',
+      target_type: 'semantic',
+    }))
+    const { client } = fakePostgrest({ memory_associations: edges }, 2)
+
+    const read = await postgrestDedupStore(client, 5).fetchDerivationEdges([target])
+
+    expect(read.map((e) => e.source_id).sort()).toEqual(edges.map((e) => e.source_id).sort())
+  })
+})
+
+describe('supersession reaches tombstone readers', () => {
+  it('every markSuperseded update payload carries updated_at as an ISO timestamp', async () => {
+    const canonical = '00000000-0000-0000-0000-000000000001'
+    const others = ['00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003']
+    const rows = [canonical, ...others].map((id) => ({ id, superseded_by: null, forgotten_at: null, updated_at: '2026-01-01T00:00:00.000Z' }))
+    const { client, requests } = fakePostgrest({ memory_semantic: rows }, 1000)
+    const store = postgrestDedupStore(client, 500)
+
+    const changed = [...(await store.markSuperseded([others[0]!], canonical)), ...(await store.markSuperseded([others[1]!], canonical))]
+
+    const patches = requests.filter((r) => r.method === 'PATCH')
+    expect(changed.sort()).toEqual([...others].sort())
+    expect(patches).toHaveLength(2)
+    for (const p of patches) {
+      const body = p.body as { superseded_by: string; updated_at: string }
+      expect(body.superseded_by).toBe(canonical)
+      expect(new Date(body.updated_at).toISOString()).toBe(body.updated_at)
+      expect(Date.parse(body.updated_at)).toBeGreaterThan(Date.parse('2026-01-01T00:00:00.000Z'))
+    }
+  })
+})
+
+describe('newest tie-break', () => {
+  it('compares instants, so a fractional second later in the same second is newer', () => {
+    const whole: CanonicalCandidate = { id: 'a', confidence: 0.8, created_at: '2026-09-01T00:00:01Z', derives_from_sources: 1 }
+    const fractional: CanonicalCandidate = { ...whole, id: 'b', created_at: '2026-09-01T00:00:01.5Z' }
+
+    expect([whole, fractional].sort(compareCanonical).map((r) => r.id)).toEqual(['b', 'a'])
+    expect([fractional, whole].sort(compareCanonical).map((r) => r.id)).toEqual(['b', 'a'])
   })
 })
