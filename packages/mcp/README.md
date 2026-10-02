@@ -385,6 +385,7 @@ The package includes CLI utilities for advanced use cases:
 - `engram-session-summary` — Summarize a session
 - `engram-git-setup` — Set up git hooks for automatic ingestion
 - `engram-shell-setup` — Set up shell hooks
+- `engram-derived-project-backfill` — Tag digests and semantic facts stored without a `project_id` from their `derives_from` sources: episodes → digests first, then digests → semantic facts in the same run. A row gets a project only when every tagged source holds that project; mixed sources (`mixed`) and rows with no tagged source (`no-source-tag`) stay NULL. Only NULL rows are read or written, so a repeat run is a no-op. Dry-run by default (counts per project and per reason, up to ten sample ids per bucket, never content); `--apply` writes in batches
 - `engram-episode-reembed` — Re-embed episodes whose stored vector was built from a cut text. Dry-run by default; `--apply` writes
 
 ## Troubleshooting
