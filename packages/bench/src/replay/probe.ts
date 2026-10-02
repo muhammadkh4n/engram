@@ -2,8 +2,9 @@
 /**
  * Final-state probe of an arm's copy after a replay: a held-out query file
  * (`[{q, p}]`) run with `reconsolidate: false` and no conversation key, on the
- * same build, env, pins and copy guards as the replay. The sensory buffer is
- * restored before each query, so no query's priming reaches the next.
+ * same build, env, pins and copy guards as the replay. The per-conversation
+ * priming store is restored before each query, so no query's priming reaches
+ * the next.
  *
  * Usage:
  *   npx tsx packages/bench/src/replay/probe.ts \

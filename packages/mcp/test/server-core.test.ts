@@ -20,6 +20,7 @@ import {
   maybeWithRecallEngine,
   formatRecallTimingLine,
   recallOptionsFromArgs,
+  RECALL_CONVERSATION_ID_MAX,
   parseChatReasoningEnv,
   chatIntelligenceOptionsFromEnv,
   supersessionSettingsAtStartup,
@@ -177,6 +178,29 @@ describe('formatRecallTimingLine', () => {
 })
 
 describe('recallOptionsFromArgs', () => {
+  it('passes conversation_id through as the priming key, trimmed', () => {
+    expect(recallOptionsFromArgs({ query: 'q', conversation_id: '  conv-1  ' })).toEqual({ conversationKey: 'conv-1' })
+  })
+
+  it('accepts a conversation_id of exactly the maximum length', () => {
+    const id = 'c'.repeat(RECALL_CONVERSATION_ID_MAX)
+    expect(recallOptionsFromArgs({ query: 'q', conversation_id: id })).toEqual({ conversationKey: id })
+  })
+
+  it('never turns session_id into a priming key', () => {
+    expect(recallOptionsFromArgs({ query: 'q', session_id: 'sess-1' })).toEqual({})
+  })
+
+  it.each(['', '   ', 42, null, 'c'.repeat(RECALL_CONVERSATION_ID_MAX + 1)])(
+    'rejects conversation_id %j',
+    (value) => {
+      const opts = recallOptionsFromArgs({ query: 'q', conversation_id: value })
+
+      expect(opts).toHaveProperty('error')
+      expect((opts as { error: string }).error).toMatch(/conversation_id must be a non-blank string of at most 200 characters/)
+    },
+  )
+
   it('trims the project id the way memory_ingest does', () => {
     expect(recallOptionsFromArgs({ query: 'q', project_id: '  engram  ' })).toEqual({ projectId: 'engram' })
   })
@@ -414,6 +438,54 @@ describe('runMemoryRecall', () => {
     const res = await runMemoryRecall(stubMemory(result({})), { query: '  ' })
 
     expect(res).toEqual({ content: [{ type: 'text', text: 'Error: query must be a non-empty string' }], isError: true })
+  })
+
+  function capturingMemory() {
+    const calls: Array<{ query: string; opts: unknown }> = []
+    return {
+      calls,
+      mem: {
+        recall: async (query: string, opts?: unknown) => {
+          calls.push({ query, opts })
+          return result({})
+        },
+      },
+    }
+  }
+
+  it('forwards conversation_id to the recall as conversationKey', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window', conversation_id: 'conv-1', project_id: 'engram' })
+
+    expect(calls).toEqual([{ query: 'deploy window', opts: { projectId: 'engram', conversationKey: 'conv-1' } }])
+  })
+
+  it('sends no conversationKey without conversation_id, so the recall gets no priming', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window' })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.opts).not.toHaveProperty('conversationKey')
+  })
+
+  it('leaves session_id out of the recall options, as before', async () => {
+    const { calls, mem } = capturingMemory()
+
+    await runMemoryRecall(mem, { query: 'deploy window', session_id: 'sess-1' })
+
+    expect(calls).toEqual([{ query: 'deploy window', opts: {} }])
+  })
+
+  it('rejects a blank conversation_id as a tool error without recalling', async () => {
+    const { calls, mem } = capturingMemory()
+
+    const res = await runMemoryRecall(mem, { query: 'deploy window', conversation_id: '  ' })
+
+    expect(res.isError).toBe(true)
+    expect(res.content[0]?.text).toMatch(/^Error: conversation_id must be a non-blank string/)
+    expect(calls).toHaveLength(0)
   })
 })
 

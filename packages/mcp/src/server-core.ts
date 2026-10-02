@@ -474,6 +474,12 @@ const TOOLS = [
           description:
             'Optional session ID to scope the search to a specific conversation.',
         },
+        conversation_id: {
+          type: 'string',
+          maxLength: 200,
+          description:
+            'Optional id of the caller\'s current conversation (at most 200 characters). Scopes priming to this conversation: topics this conversation\'s earlier recalls surfaced rank slightly higher in its later recalls. It does NOT filter results, unlike session_id. Omit it and the recall gets no priming.',
+        },
         project_id: {
           type: 'string',
           description:
@@ -626,10 +632,14 @@ const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'pattern', 'm
 export const RECALL_TOKEN_BUDGET_MIN = 256
 export const RECALL_TOKEN_BUDGET_MAX = 32000
 
+/** Longest conversation_id memory_recall accepts. */
+export const RECALL_CONVERSATION_ID_MAX = 200
+
 export interface RecallArgOptions {
   projectId?: string
   synthesize?: true
   tokenBudget?: number
+  conversationKey?: string
 }
 
 /**
@@ -637,7 +647,10 @@ export interface RecallArgOptions {
  * exactly as memory_ingest normalises it, so a padded id or a shared alias
  * (blank/global/none/shared) ranks against the same tag ingest wrote. An
  * out-of-range or non-integer token_budget is an error, not ignored, so a
- * caller never silently gets an unbounded payload.
+ * caller never silently gets an unbounded payload. conversation_id becomes the
+ * priming key; session_id is not, because it filters the search to one
+ * session and a priming key must never narrow results. A blank, non-string or
+ * over-long conversation_id is an error rather than a silent loss of priming.
  */
 export function recallOptionsFromArgs(args: Record<string, unknown>): RecallArgOptions | { error: string } {
   const projectId = normalizeProjectId(args['project_id'])
@@ -653,10 +666,21 @@ export function recallOptionsFromArgs(args: Record<string, unknown>): RecallArgO
       error: `token_budget must be an integer from ${RECALL_TOKEN_BUDGET_MIN} to ${RECALL_TOKEN_BUDGET_MAX}, got ${JSON.stringify(rawBudget)}`,
     }
   }
+  const rawConversation = args['conversation_id']
+  const conversationKey = typeof rawConversation === 'string' ? rawConversation.trim() : undefined
+  if (
+    rawConversation !== undefined &&
+    (conversationKey === undefined || conversationKey.length === 0 || conversationKey.length > RECALL_CONVERSATION_ID_MAX)
+  ) {
+    return {
+      error: `conversation_id must be a non-blank string of at most ${RECALL_CONVERSATION_ID_MAX} characters, got ${JSON.stringify(rawConversation)?.slice(0, 60)}`,
+    }
+  }
   return {
     ...(projectId ? { projectId } : {}),
     ...(args['synthesize'] === true ? { synthesize: true as const } : {}),
     ...(rawBudget !== undefined ? { tokenBudget: rawBudget } : {}),
+    ...(conversationKey ? { conversationKey } : {}),
   }
 }
 

@@ -43,7 +43,7 @@ function isEdgeType(value: string): value is EdgeType {
   return Object.prototype.hasOwnProperty.call(EDGE_TYPE_KEYS, value)
 }
 
-function onOffFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+export function onOffFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
   const raw = env[name]
   if (raw === undefined || raw.trim() === '') return fallback
   const value = raw.trim()
