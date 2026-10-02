@@ -4,10 +4,14 @@ import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
 import { majorityProjectId } from './inherit-project.js'
+import { epochMs, statementClock } from './statement-time.js'
+import type { StatementClock } from './statement-time.js'
 
 export interface DeepSleepOptions {
   minDigests?: number
-  /** Overrides ENGRAM_SUPERSESSION / ENGRAM_SUPERSESSION_MIN_COSINE. */
+  /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
+   *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
+   *  supersessionSettingsFromEnv and passes the result here. */
   supersession?: SupersessionSettings
 }
 
@@ -29,6 +33,8 @@ export interface SupersessionSettings {
 /** Default neighbour cosine floor: on text-embedding-3-small, facts below it
  *  rarely share a subject, so they can neither repeat nor replace each other. */
 export const SUPERSESSION_MIN_COSINE = 0.6
+/** The settings when none are passed: the regex check, today's behaviour. */
+export const DEFAULT_SUPERSESSION: SupersessionSettings = { mode: 'regex', minCosine: SUPERSESSION_MIN_COSINE }
 /** Nearest rows read per candidate before the liveness/project/cosine filter. */
 const NEIGHBOUR_SCAN = 10
 /** Neighbours kept after filtering; bounds the judge prompt. */
@@ -195,11 +201,15 @@ function detectSupersession(newPhrase: string, existingContent: string): boolean
 
 type SemanticNeighbour = SearchResult<SemanticMemory>
 
-/** Outcome for one semantic candidate: boost a stored duplicate, or insert
- *  the candidate and retire the listed stored facts. */
+/** Outcome for one semantic candidate: boost a stored duplicate; insert the
+ *  candidate and retire the listed stored facts; drop a candidate that a
+ *  later stored statement contradicts (`stale`); or leave a conflict between
+ *  two statements of the same time unresolved (`tie`). */
 type SemanticDecision =
   | { kind: 'duplicate'; id: string }
   | { kind: 'insert'; supersededIds: string[] }
+  | { kind: 'stale' }
+  | { kind: 'tie' }
 
 /** Stores without project tags report undefined; that is the shared scope. */
 function inProject(memory: SemanticMemory, projectId: string | null): boolean {
@@ -253,31 +263,124 @@ function ruleDecision(
 }
 
 /**
- * The judge decides first, so an update that differs from the stored fact by
- * a word (cosine above DUPLICATE_COSINE) retires it instead of being dropped
- * as its duplicate. Verdict ids outside the pool are ignored. Throws when the
- * judge does; the caller falls back to the regex path.
+ * The pool as stored. findNearest rows can be partial (PostgREST's vector
+ * recall maps no topic and no source digests) and a row may have been
+ * retired since it was read, so rows are read again by id and filtered again.
+ */
+async function rereadPool(
+  storage: StorageAdapter,
+  pool: ReadonlyArray<SemanticNeighbour>,
+  projectId: string | null,
+): Promise<SemanticNeighbour[]> {
+  if (pool.length === 0) return []
+  const rows = await storage.getByIds(pool.map(e => ({ id: e.item.id, type: 'semantic' as const })))
+  const stored = new Map<string, SemanticMemory>()
+  for (const m of rows) {
+    if (m.type === 'semantic') stored.set(m.data.id, m.data)
+  }
+  return pool.flatMap(e => {
+    const item = stored.get(e.item.id)
+    return item && item.supersededBy == null && inProject(item, projectId) ? [{ item, similarity: e.similarity }] : []
+  })
+}
+
+/** Statement times of the pool's facts. A fact whose source digests cannot
+ *  be read falls back to its insert time, which is never earlier than the
+ *  time it was stated. */
+async function poolStatementTimes(
+  clock: StatementClock,
+  pool: ReadonlyArray<SemanticNeighbour>,
+): Promise<Map<string, number | null>> {
+  // One call over every digest fills the clock's cache for the per-fact calls.
+  await clock(pool.flatMap(e => e.item.sourceDigestIds))
+  const times = new Map<string, number | null>()
+  for (const e of pool) {
+    times.set(e.item.id, (await clock(e.item.sourceDigestIds)) ?? epochMs(e.item.createdAt))
+  }
+  return times
+}
+
+/** Sign of a - b; an unknown time on either side compares as equal. */
+function compareStatementTimes(a: number | null, b: number | null): number {
+  if (a === null || b === null) return 0
+  return Math.sign(a - b)
+}
+
+const asDate = (ms: number | null): Date | null => (ms === null ? null : new Date(ms))
+
+/**
+ * The judge names the relation; the statement times decide the direction.
+ * A conflict with a later stored statement makes the candidate stale, one
+ * with a statement of the same time is left alone, and otherwise the
+ * candidate retires every fact it conflicts with. Because the judge runs
+ * before the duplicate check, an update that differs from the stored fact by
+ * a word (cosine above DUPLICATE_COSINE) is not dropped as its duplicate.
+ * Verdict ids outside the pool are ignored. Throws when the judge does.
  */
 async function judgedDecision(
   judge: NonNullable<IntelligenceAdapter['judgeSupersession']>,
   candidate: KnowledgeCandidate,
+  candidateStatedAt: number | null,
   pool: ReadonlyArray<SemanticNeighbour>,
+  storedStatedAt: ReadonlyMap<string, number | null>,
   scopedExisting: ReadonlyArray<SemanticNeighbour>,
 ): Promise<SemanticDecision> {
   const candidates: SupersessionCandidate[] = pool.map(e => ({
     id: e.item.id,
     topic: e.item.topic,
     content: e.item.content,
-    createdAt: e.item.createdAt,
+    statedAt: asDate(storedStatedAt.get(e.item.id) ?? null),
   }))
-  const verdict = await judge({ topic: candidate.topic, content: candidate.content }, candidates)
+  const verdict = await judge(
+    { topic: candidate.topic, content: candidate.content, statedAt: asDate(candidateStatedAt) },
+    candidates,
+  )
   const poolIds = new Set(candidates.map(c => c.id))
-  const replaces = [...new Set(verdict.replaces.filter(id => poolIds.has(id)))]
-  if (replaces.length > 0) return { kind: 'insert', supersededIds: replaces }
+  const conflicts = [...new Set(verdict.conflicts.filter(id => poolIds.has(id)))]
+  if (conflicts.length > 0) {
+    const order = conflicts.map(id => compareStatementTimes(candidateStatedAt, storedStatedAt.get(id) ?? null))
+    if (order.some(o => o < 0)) return { kind: 'stale' }
+    if (order.some(o => o === 0)) return { kind: 'tie' }
+    return { kind: 'insert', supersededIds: conflicts }
+  }
   const sameId = verdict.same.find(id => poolIds.has(id))
   const duplicateId = sameId ?? findDuplicate(candidate.content, pool, scopedExisting)
   if (duplicateId) return { kind: 'duplicate', id: duplicateId }
   return { kind: 'insert', supersededIds: [] }
+}
+
+interface JudgeContext {
+  storage: StorageAdapter
+  judge: NonNullable<IntelligenceAdapter['judgeSupersession']>
+  clock: StatementClock
+  projectId: string | null
+}
+
+/** llm mode with a judge and a candidate vector. `judged` is true when the
+ *  judge was called. A judge failure takes the regex path for this
+ *  candidate; a storage failure propagates as it does elsewhere here. */
+async function llmDecision(
+  ctx: JudgeContext,
+  candidate: KnowledgeCandidate,
+  nearestPool: ReadonlyArray<SemanticNeighbour>,
+  scopedExisting: ReadonlyArray<SemanticNeighbour>,
+  existing: ReadonlyArray<SemanticNeighbour>,
+): Promise<{ decision: SemanticDecision; judged: boolean }> {
+  const pool = await rereadPool(ctx.storage, nearestPool, ctx.projectId)
+  if (pool.length === 0) {
+    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, false), judged: false }
+  }
+  const candidateStatedAt = await ctx.clock(candidate.sourceDigestIds)
+  const storedStatedAt = await poolStatementTimes(ctx.clock, pool)
+  try {
+    const decision = await judgedDecision(ctx.judge, candidate, candidateStatedAt, pool, storedStatedAt, scopedExisting)
+    return { decision, judged: true }
+  } catch {
+    console.warn(
+      `[deep-sleep] supersession judge failed; regex path for neighbours ${pool.map(e => e.item.id).join(',')}`,
+    )
+    return { decision: ruleDecision(candidate, pool, scopedExisting, existing, true), judged: true }
+  }
 }
 
 /**
@@ -300,12 +403,18 @@ export async function deepSleep(
   graph?: GraphPort | null,
 ): Promise<ConsolidateResult> {
   const minDigests = opts?.minDigests ?? 3
-  const supersession = opts?.supersession ?? supersessionSettingsFromEnv()
+  const supersession = opts?.supersession ?? DEFAULT_SUPERSESSION
 
-  const digests = await storage.digests.getRecent(7)
+  // Oldest first, so within a run a fact is stored before the facts stated
+  // after it are judged against it. getRecent returns newest first.
+  const digests = [...await storage.digests.getRecent(7)]
+    .sort((a, b) => (epochMs(a.createdAt) ?? 0) - (epochMs(b.createdAt) ?? 0))
 
   if (digests.length < minDigests) {
-    return { cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0, supersessionJudged: 0 }
+    return {
+      cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
+      supersessionJudged: 0, stale: 0, tie: 0,
+    }
   }
 
   const graphAvailable = graph?.runCypherWrite && await graph.isAvailable().catch(() => false)
@@ -315,6 +424,8 @@ export async function deepSleep(
   let deduplicated = 0
   let superseded = 0
   let supersessionJudged = 0
+  let stale = 0
+  let tie = 0
   let graphNodesCreated = 0
   let graphEdgesCreated = 0
 
@@ -353,6 +464,8 @@ export async function deepSleep(
 
   // Process semantic candidates
   const semanticCandidates = allCandidates.filter(c => c.kind === 'semantic')
+  const judge = intelligence?.judgeSupersession?.bind(intelligence)
+  const clock = statementClock(storage, digests)
   for (const candidate of semanticCandidates) {
     // Pass an embedding so semantic.search uses hybrid BM25+vector.
     // BM25-only dedup misses LLM paraphrases of the same fact
@@ -389,26 +502,23 @@ export async function deepSleep(
 
     // The judge needs a vector-built pool; without a judge or a vector, llm
     // mode behaves as regex mode.
-    const judge = intelligence?.judgeSupersession?.bind(intelligence)
     let decision: SemanticDecision
     if (supersession.mode === 'llm' && judge && candidateEmbedding) {
-      if (pool.length === 0) {
-        decision = ruleDecision(candidate, pool, scopedExisting, existing, false)
-      } else {
-        supersessionJudged++
-        try {
-          decision = await judgedDecision(judge, candidate, pool, scopedExisting)
-        } catch {
-          console.warn(
-            `[deep-sleep] supersession judge failed; regex path for neighbours ${pool.map(e => e.item.id).join(',')}`,
-          )
-          decision = ruleDecision(candidate, pool, scopedExisting, existing, true)
-        }
-      }
+      const judged = await llmDecision({ storage, judge, clock, projectId }, candidate, pool, scopedExisting, existing)
+      decision = judged.decision
+      if (judged.judged) supersessionJudged++
     } else {
       decision = ruleDecision(candidate, pool, scopedExisting, existing, supersession.mode !== 'off')
     }
 
+    if (decision.kind === 'stale') {
+      stale++
+      continue
+    }
+    if (decision.kind === 'tie') {
+      tie++
+      continue
+    }
     if (decision.kind === 'duplicate') {
       // Re-extracting a known fact is a recurrence: it raises the access
       // count and the fact's confidence.
@@ -634,6 +744,8 @@ export async function deepSleep(
     deduplicated,
     superseded,
     supersessionJudged,
+    stale,
+    tie,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
   }

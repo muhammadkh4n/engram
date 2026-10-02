@@ -246,13 +246,21 @@ console.log(`Created ${fullResult.procedural} procedural memories`)
 
 When deep sleep promotes a semantic fact, it compares it with the fact's neighbours: the 10 nearest stored facts by cosine (`semantic.findNearest`), keeping only live facts in the new fact's project (a shared, NULL-project fact pairs only with shared facts) at cosine ≥ `ENGRAM_SUPERSESSION_MIN_COSINE` (default `0.6`, a number in [-1, 1]), at most 5, nearest first. A neighbour above cosine 0.88, or (without an embedding) one with the same normalised text in the same project, is a duplicate: it is boosted and the new fact is not stored.
 
-`ENGRAM_SUPERSESSION` decides when a newer fact retires a stored one. It is read once per deep-sleep run; unset or empty means `regex`, and any value other than the three below throws, naming the variable. `deepSleep(storage, intelligence, { supersession: { mode, minCosine } })` overrides both variables.
+`ENGRAM_SUPERSESSION` decides when a newer fact retires a stored one. Deep sleep reads no environment variable itself: pass `supersession: { mode, minCosine }` to `createMemory` (used by `consolidate()` and auto-consolidation), to `startConsolidationWorker`, or to `deepSleep(storage, intelligence, { supersession })`. `supersessionSettingsFromEnv()` parses `ENGRAM_SUPERSESSION` and `ENGRAM_SUPERSESSION_MIN_COSINE` (unset or empty means the default; any other value throws, naming the variable); call it once at startup, as the MCP server does. With no settings, deep sleep uses `regex` at cosine 0.6.
 
 - `regex` (default) — the duplicate check above, then a fixed list of English contradiction pairs ("I prefer X" vs "I don't like X", "I always" vs "I never", …) against the fact's search hits.
-- `llm` — the intelligence adapter's `judgeSupersession` runs first, over the neighbours. Every neighbour it says the new fact replaces is retired (`markSuperseded`, which bumps `updated_at`, plus a `CONTRADICTS` graph edge), and the new fact's `supersedes` holds the first. Otherwise a neighbour it calls the same claim, or the duplicate check above, makes the fact a duplicate; otherwise the fact is stored as new. So an update that differs from the old fact by one word replaces it instead of being dropped as its duplicate. No call is made when there are no neighbours. If the judge throws, that fact takes the `regex` path and one warning line with the neighbour ids is logged. With no `judgeSupersession` on the adapter, or no embedding for the fact, `llm` behaves as `regex`.
+- `llm` — the intelligence adapter's `judgeSupersession` runs first, over the neighbours, each read again by id first so the judge sees its topic and source digests (vector-recall rows carry neither), and a neighbour retired since the nearest-neighbour read is dropped. The judge only names the relation of each neighbour to the new fact, `same` or `conflicts`; the statement times decide the direction:
+  - conflict, new fact stated later → every conflicting neighbour is retired (`markSuperseded`, which bumps `updated_at`, plus a `CONTRADICTS` graph edge), and the new fact's `supersedes` holds the first;
+  - conflict with a neighbour stated later → the new fact is stale and not stored (`stale`);
+  - conflict with a neighbour stated at the same time → nothing is stored or retired (`tie`);
+  - no conflict → a neighbour the judge calls the same claim, or the duplicate check above, makes the fact a duplicate; otherwise it is stored as new.
+
+  So an update that differs from the old fact by one word replaces it instead of being dropped as its duplicate, and a fact re-extracted from an older digest of the 7-day window never retires the fact that replaced it. No call is made when there are no neighbours. If the judge throws, that fact takes the `regex` path and one warning line with the neighbour ids is logged. With no `judgeSupersession` on the adapter, or no embedding for the fact, `llm` behaves as `regex`.
 - `off` — the duplicate check only; no stored fact is retired.
 
-`ConsolidateResult.supersessionJudged` counts the judge calls of the run.
+A fact's statement time is the latest `createdAt` among the source episodes of its source digests, or a digest's own `createdAt` when none of its episodes can be read (`statementClock`). A stored fact whose digests cannot be read falls back to its own `createdAt`. Insert time cannot order facts: each deep-sleep run re-reads every digest of the last 7 days, so a fact inserted later can come from an older conversation. Digests are processed oldest first.
+
+`ConsolidateResult.supersessionJudged` counts the judge calls of the run; `stale` and `tie` count the new facts not stored for the two reasons above.
 
 #### `stats(): Promise<MemoryStats>`
 

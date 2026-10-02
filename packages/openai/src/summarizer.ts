@@ -13,6 +13,7 @@ import type {
   SupersessionFact,
   SupersessionCandidate,
   SupersessionVerdict,
+  SupersessionStatedAt,
 } from '@engram-mem/core'
 import { EmptyClassifierReplyError, UnclassifiableReplyError } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
@@ -213,17 +214,17 @@ const RERANK_MAX_CANDIDATES = 50
 const RERANK_REPLY_TOKENS_PER_DOC = 16
 const RERANK_MIN_REPLY_TOKENS = 400
 
-const SUPERSESSION_SYSTEM_PROMPT = `You maintain a memory of facts about a user and their work. A NEW FACT has just been stated. It is the most recent statement on its subject. Compare it with each STORED FACT (each shows when it was stored) and decide:
+const SUPERSESSION_SYSTEM_PROMPT = `You maintain a memory of facts about a user and their work. Compare a FACT with each STORED FACT. Every fact shows the date it was stated. Decide only how each stored fact relates to the FACT, whatever their dates:
 
-- "replaces": the new fact makes the stored fact no longer true. Examples: a decision was changed, a value was updated, a preference was reversed, a tool or setting was switched to something else.
-- "same": the stored fact states the same claim as the new fact, possibly in other words.
-- Neither list: the stored fact is about a different subject, adds or omits detail, or can be true at the same time as the new fact.
+- "same": the stored fact states the same claim as the FACT, possibly in other words.
+- "conflicts": the two cannot both be true now. Examples: a decision was changed, a value was updated, a preference was reversed, a tool or setting was switched to something else.
+- Neither list: the stored fact is about a different subject, adds or omits detail, or can be true at the same time as the FACT.
 
-Be conservative. Retiring a fact that is still true loses memory. When you are unsure about a stored fact, put it in neither list.
+Be conservative. A wrong "conflicts" can retire a fact that is still true. When you are unsure about a stored fact, put it in neither list.
 
 Use only the ids shown in STORED FACTS, each in at most one list. Reply with only JSON, exactly this shape:
-{"replaces": ["<id>"], "same": ["<id>"]}
-When no stored fact is replaced or repeated, reply {"replaces": [], "same": []}.`
+{"same": ["<id>"], "conflicts": ["<id>"]}
+When no stored fact repeats or conflicts with the FACT, reply {"same": [], "conflicts": []}.`
 
 /** Reply budget: the JSON frame plus one quoted id per candidate. */
 const SUPERSESSION_REPLY_BASE_TOKENS = 60
@@ -558,10 +559,11 @@ export class OpenAISummarizer {
     if (candidates.length === 0) return emptyVerdict()
 
     const lines = candidates.map(
-      (c) => `- id: ${c.id}\n  stored: ${formatStoredAt(c.createdAt)}\n  topic: ${c.topic}\n  fact: ${c.content}`,
+      (c) => `- id: ${c.id}\n  stated: ${formatStatedAt(c.statedAt)}\n  topic: ${c.topic}\n  fact: ${c.content}`,
     )
     const user = [
-      'NEW FACT (stated most recently):',
+      'FACT:',
+      `  stated: ${formatStatedAt(fact.statedAt)}`,
       `  topic: ${fact.topic}`,
       `  fact: ${fact.content}`,
       '',
@@ -1020,14 +1022,14 @@ function isCandidateList(value: unknown): boolean {
 }
 
 function emptyVerdict(): SupersessionVerdict {
-  return { replaces: [], same: [] }
+  return { same: [], conflicts: [] }
 }
 
 function isSupersessionVerdict(value: unknown): boolean {
   if (!isPlainObject(value)) return false
-  const { replaces, same } = value
-  if (replaces === undefined && same === undefined) return false
-  return (replaces === undefined || Array.isArray(replaces)) && (same === undefined || Array.isArray(same))
+  const { same, conflicts } = value
+  if (same === undefined && conflicts === undefined) return false
+  return (same === undefined || Array.isArray(same)) && (conflicts === undefined || Array.isArray(conflicts))
 }
 
 /**
@@ -1039,23 +1041,24 @@ function parseSupersessionVerdict(
   raw: string,
   candidates: ReadonlyArray<SupersessionCandidate>,
 ): SupersessionVerdict {
-  const parsed = extractJsonReply(raw, isSupersessionVerdict) as { replaces?: unknown[]; same?: unknown[] }
+  const parsed = extractJsonReply(raw, isSupersessionVerdict) as { same?: unknown[]; conflicts?: unknown[] }
   const known = new Set(candidates.map((c) => c.id))
   const pick = (list: unknown[] | undefined): string[] => [
     ...new Set((list ?? []).filter((id): id is string => typeof id === 'string' && known.has(id))),
   ]
-  const replaces = pick(parsed.replaces)
   const same = pick(parsed.same)
-  const both = new Set(replaces.filter((id) => same.includes(id)))
+  const conflicts = pick(parsed.conflicts)
+  const both = new Set(conflicts.filter((id) => same.includes(id)))
   return {
-    replaces: replaces.filter((id) => !both.has(id)),
     same: same.filter((id) => !both.has(id)),
+    conflicts: conflicts.filter((id) => !both.has(id)),
   }
 }
 
-/** ISO timestamp of a stored fact, or `unknown date` when it does not parse. */
-function formatStoredAt(createdAt: Date | string): string {
-  const ms = createdAt instanceof Date ? createdAt.getTime() : Date.parse(createdAt)
+/** ISO timestamp of a statement time, or `unknown date` when absent or unparseable. */
+function formatStatedAt(statedAt: SupersessionStatedAt): string {
+  if (statedAt === null) return 'unknown date'
+  const ms = statedAt instanceof Date ? statedAt.getTime() : Date.parse(statedAt)
   return Number.isFinite(ms) ? new Date(ms).toISOString() : 'unknown date'
 }
 

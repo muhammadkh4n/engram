@@ -29,6 +29,7 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult } from '../types.js'
+import type { SupersessionSettings } from './deep-sleep.js'
 import { lightSleep } from './light-sleep.js'
 import { deepSleep } from './deep-sleep.js'
 import { dreamCycle } from './dream-cycle.js'
@@ -65,9 +66,11 @@ export interface AutoConsolidationOpts {
    * (the prior behavior). Pass an explicit list to opt out of any.
    */
   cycles?: ConsolidationCycle[]
+  /** Passed to every deep sleep this run starts; see DeepSleepOptions. */
+  supersession?: SupersessionSettings
 }
 
-const DEFAULTS: Required<Omit<AutoConsolidationOpts, 'cycles'>> = {
+const DEFAULTS: Required<Omit<AutoConsolidationOpts, 'cycles' | 'supersession'>> = {
   lightSleepThreshold: 20,
   deepSleepThreshold: 5,
   deepSleepMinNewDigests: 5,
@@ -140,7 +143,7 @@ export async function runAutoConsolidation(
       config.deepSleepMinNewDigests,
     )) {
       results.push(await runTracked('deep', tracker, async () => {
-        const result = await deepSleep(storage, intelligence, undefined, graph)
+        const result = await deepSleep(storage, intelligence, { supersession: config.supersession }, graph)
         // v0.3.14: snapshot digest count for the next run's delta gate.
         // Without this, the next isDeepSleepDue() call has no prior count
         // to diff against and falls back to the old "any 5+ digests in last

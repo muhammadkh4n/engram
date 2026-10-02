@@ -71,7 +71,7 @@ function stubJudge(decide: (fact: SupersessionFact, ids: string[]) => Partial<Su
   const judge = async (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => {
     calls.push({ fact, candidates: [...candidates] })
     const v = decide(fact, candidates.map((c) => c.id))
-    return { replaces: v.replaces ?? [], same: v.same ?? [] }
+    return { same: v.same ?? [], conflicts: v.conflicts ?? [] }
   }
   return { judge, calls }
 }
@@ -149,7 +149,7 @@ describe('runFactSupersessionBackfill — order and pool', () => {
     expect(calls[0]!.fact.topic).toBe('topic new')
     expect(calls[0]!.candidates).toHaveLength(POOL_MAX)
     expect(calls[0]!.candidates.map((c) => c.id)).toEqual(['o0', 'o1', 'o2', 'o3', 'o4'])
-    expect(calls[0]!.candidates[0]!.createdAt).toBe('2026-03-01T10:00:00.000Z')
+    expect(calls[0]!.candidates[0]!.statedAt).toBe('2026-03-01T10:00:00.000Z')
   })
 
   it('makes no call for a fact with an empty pool', async () => {
@@ -184,7 +184,7 @@ describe('runFactSupersessionBackfill — order and pool', () => {
 describe('runFactSupersessionBackfill — verdicts', () => {
   it('skips a fact retired earlier in the pass, as judge and as candidate', async () => {
     const store = new StubStore([fact('a1', 1), fact('a2', 2), fact('a3', 3), fact('a4', 4)])
-    const { judge, calls } = stubJudge((f) => (f.topic === 'topic a4' ? { replaces: ['a2'] } : {}))
+    const { judge, calls } = stubJudge((f) => (f.topic === 'topic a4' ? { conflicts: ['a2'] } : {}))
     const result = await runFactSupersessionBackfill(store, judge, DRY)
 
     expect(calls.map((c) => c.fact.topic)).toEqual(['topic a4', 'topic a3'])
@@ -194,7 +194,7 @@ describe('runFactSupersessionBackfill — verdicts', () => {
 
   it('ignores ids outside the pool', async () => {
     const store = new StubStore([fact('a1', 1), fact('a2', 2), fact('b9', 9, { project: 'other' })])
-    const { judge } = stubJudge(() => ({ replaces: ['b9', 'nope', 'a1'] }))
+    const { judge } = stubJudge(() => ({ conflicts: ['b9', 'nope', 'a1'] }))
     const result = await runFactSupersessionBackfill(store, judge, DRY)
     expect(result.proposals.map((p) => p.oldId)).toEqual(['a1'])
   })
@@ -209,7 +209,7 @@ describe('runFactSupersessionBackfill — verdicts', () => {
     let n = 0
     const judge = async (_f: SupersessionFact, c: ReadonlyArray<SupersessionCandidate>) => {
       if (n++ === 0) throw new Error('upstream said: secret beta')
-      return { replaces: [c[0]!.id], same: [] }
+      return { conflicts: [c[0]!.id], same: [] }
     }
     const result = await runFactSupersessionBackfill(store, judge, { ...DRY, warn: (l) => warnings.push(l) })
 
@@ -249,7 +249,7 @@ describe('runFactSupersessionBackfill — cap', () => {
 
 describe('runFactSupersessionBackfill — dry run and apply', () => {
   const table = () => [fact('a1', 1), fact('a2', 2), fact('a3', 3), fact('b1', 1, { project: 'b' }), fact('b2', 2, { project: 'b' })]
-  const replaceAll = stubJudge((_f, ids) => ({ replaces: ids }))
+  const replaceAll = stubJudge((_f, ids) => ({ conflicts: ids }))
 
   it('a dry run proposes and writes nothing', async () => {
     const store = new StubStore(table())
@@ -310,7 +310,7 @@ describe('output', () => {
       fact('a1', 1, { content: 'private one', embedding: at(0.9) }),
       fact('a2', 2, { content: 'private two' }),
     ])
-    const result = await runFactSupersessionBackfill(store, stubJudge((_f, ids) => ({ replaces: ids })).judge, DRY)
+    const result = await runFactSupersessionBackfill(store, stubJudge((_f, ids) => ({ conflicts: ids })).judge, DRY)
     const json = summaryJson(result, DRY)
     const parsed = JSON.parse(json) as { proposals: Array<Record<string, unknown>>; bands: Array<Record<string, unknown>> }
 

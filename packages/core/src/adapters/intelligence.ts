@@ -121,32 +121,42 @@ export interface EvidenceSelection {
 // Semantic-fact supersession
 // ---------------------------------------------------------------------------
 
-/** The newly consolidated fact, the most recent statement on its subject. */
+/**
+ * When a fact was stated: a Date or an ISO timestamp string, null when
+ * unknown. This is the time of the conversation the fact came from, not the
+ * time the fact row was written.
+ */
+export type SupersessionStatedAt = Date | string | null
+
+/** The fact being consolidated. */
 export interface SupersessionFact {
   topic: string
   content: string
+  statedAt: SupersessionStatedAt
 }
 
-/** A stored live fact that the new fact may replace or repeat. */
+/** A stored live fact that the new fact may repeat or conflict with. */
 export interface SupersessionCandidate {
   id: string
   topic: string
   content: string
-  /** When the candidate was stored; a Date or an ISO timestamp string. */
-  createdAt: Date | string
+  statedAt: SupersessionStatedAt
 }
 
 /**
- * Verdict over a candidate set. Every id is one of the candidates' ids; an id
- * appears in at most one list. A candidate in neither list is unrelated, adds
- * detail, or is compatible with the new fact.
+ * The relation of each candidate to the new fact. Every id is one of the
+ * candidates' ids; an id appears in at most one list. A candidate in neither
+ * list is unrelated, adds detail, or is compatible with the new fact.
+ *
+ * The verdict carries no direction: which of two conflicting facts is the
+ * current one is decided by the caller from their statement times.
  */
 export interface SupersessionVerdict {
-  /** Candidates the new fact makes no longer true: a changed decision, an
-   *  updated value, a reversed preference. */
-  replaces: string[]
   /** Candidates that state the same claim as the new fact. */
   same: string[]
+  /** Candidates that cannot be true at the same time as the new fact: a
+   *  changed decision, a different value, a reversed preference. */
+  conflicts: string[]
 }
 
 export interface IntelligenceAdapter {
@@ -244,9 +254,9 @@ export interface IntelligenceAdapter {
     opts: { mode: 'temporal' | 'aggregation' },
   ): Promise<EvidenceSelection>
   /**
-   * Judge whether a new semantic fact replaces or repeats stored facts.
+   * Judge whether stored semantic facts repeat or conflict with a new fact.
    * Conservative: a candidate the model is unsure about is in neither list.
-   * Resolves `{replaces: [], same: []}` without a model call when
+   * Resolves `{same: [], conflicts: []}` without a model call when
    * `candidates` is empty, and when the reply cannot be read as a verdict.
    * A failed model call rejects, so the caller can fall back to another
    * supersession check.

@@ -282,21 +282,59 @@ export interface MockStorageOptions {
   discoveredEdges?: DiscoveredEdge[]
 }
 
+/**
+ * Id lookup over the mock's rows: episodes, digests, stored semantic rows and
+ * the rows the nearest-neighbour stub returns (a stored row wins on an id
+ * clash). Superseded semantic rows are skipped unless `includeInactive`, as
+ * the real adapters do.
+ */
+function mockGetByIds(
+  episodes: MockEpisodeStorage,
+  digests: MockDigestStorage,
+  semantic: MockSemanticStorage,
+  nearestResults: SearchResult<SemanticMemory>[],
+) {
+  return async (
+    ids: Array<{ id: string; type: MemoryType }>,
+    lookup?: { includeInactive?: boolean },
+  ): Promise<TypedMemory[]> => {
+    const semanticRows = new Map(nearestResults.map(r => [r.item.id, r.item]))
+    for (const m of semantic._memories) semanticRows.set(m.id, m)
+    const found: TypedMemory[] = []
+    for (const { id, type } of ids) {
+      if (type === 'episode') {
+        const ep = episodes._episodes.find(e => e.id === id)
+        if (ep) found.push({ type, data: ep })
+      } else if (type === 'digest') {
+        const d = digests._digests.find(x => x.id === id)
+        if (d) found.push({ type, data: d })
+      } else if (type === 'semantic') {
+        const m = semanticRows.get(id)
+        if (m && (lookup?.includeInactive || m.supersededBy == null)) found.push({ type, data: m })
+      }
+    }
+    return found
+  }
+}
+
 export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapter {
   const sessions = opts.sessions ?? []
   const episodesPerSession = opts.episodesPerSession ?? new Map()
+  const episodes = makeMockEpisodeStorage(sessions, episodesPerSession)
+  const digests = makeMockDigestStorage(opts.initialDigests)
+  const semantic = makeMockSemanticStorage(
+    opts.initialSemanticMemories,
+    opts.semanticSearchResults,
+    opts.semanticNearestResults,
+  )
 
   return {
     initialize: vi.fn(async () => {}),
     dispose: vi.fn(async () => {}),
 
-    episodes: makeMockEpisodeStorage(sessions, episodesPerSession),
-    digests: makeMockDigestStorage(opts.initialDigests),
-    semantic: makeMockSemanticStorage(
-      opts.initialSemanticMemories,
-      opts.semanticSearchResults,
-      opts.semanticNearestResults,
-    ),
+    episodes,
+    digests,
+    semantic,
     procedural: makeMockProceduralStorage(
       opts.initialProceduralMemories,
       opts.proceduralSearchResults,
@@ -306,7 +344,7 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
 
     getById: vi.fn(async (_id: string, _type: MemoryType): Promise<TypedMemory | null> => null),
 
-    getByIds: vi.fn(async (_ids: Array<{ id: string; type: MemoryType }>): Promise<TypedMemory[]> => []),
+    getByIds: vi.fn(mockGetByIds(episodes, digests, semantic, opts.semanticNearestResults ?? [])),
 
     saveSensorySnapshot: vi.fn(async (_sessionId: string, _snapshot: SensorySnapshot): Promise<void> => {}),
 

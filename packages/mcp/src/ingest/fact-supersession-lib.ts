@@ -298,8 +298,8 @@ export async function runFactSupersessionBackfill(
     let verdict: SupersessionVerdict
     try {
       verdict = await judge(
-        { topic: fact.topic, content: fact.content },
-        pool.map((e) => ({ id: e.fact.id, topic: e.fact.topic, content: e.fact.content, createdAt: e.fact.createdAt })),
+        { topic: fact.topic, content: fact.content, statedAt: fact.createdAt },
+        pool.map((e) => ({ id: e.fact.id, topic: e.fact.topic, content: e.fact.content, statedAt: e.fact.createdAt })),
       )
     } catch (err) {
       judgeErrors++
@@ -307,7 +307,8 @@ export async function runFactSupersessionBackfill(
       continue
     }
 
-    const replaced = new Set(verdict.replaces)
+    // Every pool fact is older than `fact`, so a conflict retires the pool fact.
+    const replaced = new Set(verdict.conflicts)
     for (const entry of pool) {
       if (!replaced.has(entry.fact.id) || retired.has(entry.fact.id)) continue
       retired.add(entry.fact.id)

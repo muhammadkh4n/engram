@@ -13,6 +13,7 @@ import { recall as engineRecall } from './retrieval/engine.js'
 import { selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
+import type { DeepSleepOptions, SupersessionSettings } from './consolidation/deep-sleep.js'
 import { dreamCycle } from './consolidation/dream-cycle.js'
 import { decayPass } from './consolidation/decay-pass.js'
 import { runAutoConsolidation } from './consolidation/auto-consolidation.js'
@@ -97,6 +98,13 @@ export interface MemoryOptions {
    * recommended value when enabling (only near-identical turns collapse).
    */
   dedupeThreshold?: number
+  /**
+   * How deep sleep retires a stored fact that a newer fact replaces, for
+   * consolidate() and auto-consolidation. Defaults to the regex check. A
+   * server builds it once at startup with supersessionSettingsFromEnv, so a
+   * malformed ENGRAM_SUPERSESSION* value fails there.
+   */
+  supersession?: SupersessionSettings
 }
 
 export interface SessionHandle {
@@ -230,7 +238,7 @@ export class Memory {
         this.storage,
         this.intelligence,
         this._graph,
-        autoOpts,
+        { ...autoOpts, supersession: autoOpts?.supersession ?? this.opts.supersession },
       ).catch(err => {
         console.warn('[engram] auto-consolidation failed:', (err as Error).message)
       })
@@ -838,6 +846,10 @@ export class Memory {
   // Consolidation
   // ---------------------------------------------------------------------------
 
+  private deepSleepOptions(): DeepSleepOptions | undefined {
+    return this.opts.supersession ? { supersession: this.opts.supersession } : undefined
+  }
+
   /** Run consolidation cycles. */
   async consolidate(
     cycle: 'light' | 'deep' | 'dream' | 'decay' | 'all' = 'all'
@@ -848,7 +860,7 @@ export class Memory {
       return lightSleep(this.storage, this.intelligence, undefined, this._graph)
     }
     if (cycle === 'deep') {
-      return deepSleep(this.storage, this.intelligence, undefined, this._graph)
+      return deepSleep(this.storage, this.intelligence, this.deepSleepOptions(), this._graph)
     }
     if (cycle === 'dream') {
       return dreamCycle(this.storage, undefined, this._graph, this.intelligence)
@@ -859,7 +871,7 @@ export class Memory {
 
     // 'all': run light → deep → dream → decay in sequence, merge results
     const lightResult = await lightSleep(this.storage, this.intelligence, undefined, this._graph)
-    const deepResult = await deepSleep(this.storage, this.intelligence, undefined, this._graph)
+    const deepResult = await deepSleep(this.storage, this.intelligence, this.deepSleepOptions(), this._graph)
     const dreamResult = await dreamCycle(this.storage, undefined, this._graph, this.intelligence)
     const decayResult = await decayPass(this.storage, undefined, this._graph)
 
@@ -875,6 +887,8 @@ export class Memory {
       deduplicated: deepResult.deduplicated ?? 0,
       superseded: deepResult.superseded ?? 0,
       supersessionJudged: deepResult.supersessionJudged ?? 0,
+      stale: deepResult.stale ?? 0,
+      tie: deepResult.tie ?? 0,
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,

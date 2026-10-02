@@ -22,6 +22,7 @@ import {
   recallOptionsFromArgs,
   parseChatReasoningEnv,
   chatIntelligenceOptionsFromEnv,
+  supersessionSettingsAtStartup,
   runMemoryForget,
   runMemoryRecall,
   parseSalienceThresholdEnv,
@@ -239,6 +240,41 @@ describe('recallOutputPolicyAtStartup', () => {
     } finally {
       if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
       else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
+    }
+  })
+})
+
+describe('supersessionSettingsAtStartup', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('resolves the regex default when nothing is set and logs it', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(supersessionSettingsAtStartup({})).toEqual({ mode: 'regex', minCosine: 0.6 })
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] fact supersession: mode=regex minCosine=0.6')
+  })
+
+  it('resolves a configured mode and floor', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_SUPERSESSION: 'llm', ENGRAM_SUPERSESSION_MIN_COSINE: '0.7' }
+
+    expect(supersessionSettingsAtStartup(env)).toEqual({ mode: 'llm', minCosine: 0.7 })
+  })
+
+  it.each([
+    ['ENGRAM_SUPERSESSION', 'LLM', /ENGRAM_SUPERSESSION must be "regex", "llm" or "off", got "LLM"/],
+    ['ENGRAM_SUPERSESSION_MIN_COSINE', 'high', /ENGRAM_SUPERSESSION_MIN_COSINE must be a number in \[-1, 1\], got "high"/],
+  ])('fails startup on a malformed %s before any backend is contacted', async (name, value, message) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const saved = process.env[name]
+    process.env[name] = value
+    try {
+      await expect(getMemory()).rejects.toThrow(message)
+    } finally {
+      if (saved === undefined) delete process.env[name]
+      else process.env[name] = saved
     }
   })
 })

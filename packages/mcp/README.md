@@ -54,6 +54,11 @@ Recall output policy (server-wide; every variable unset means an unbounded paylo
 
 An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable; the resolved policy is logged once at startup.
 
+Fact supersession in deep sleep (parsed once at server startup; a malformed value fails startup with an error naming the variable, and the resolved settings are logged once):
+
+- `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and orders a conflict by when each fact was stated. See "Fact supersession in deep sleep" in the core README.
+- `ENGRAM_SUPERSESSION_MIN_COSINE` — a number in [-1, 1], default `0.6`: the cosine floor for a stored fact to be compared with a new one.
+
 Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
 
 - `ENGRAM_RECALL_HUB_DAMPING` — damps memories recalled far more often than their tier. For episode, semantic and procedural candidates, T = max(p99 of the tier's access_count, 10); the factor is 1 when access ≤ T, else `1 / (1 + ln(access / T))`. Digests get 1. The p99 comes from the storage's `accessCountQuantile` and is cached per storage instance for 10 minutes. On PostgREST it needs the `engram_access_count_quantile` function, so re-apply `packages/postgrest/schema.sql` before turning this on; with the function missing, hub damping is a no-op that logs one warning per process.

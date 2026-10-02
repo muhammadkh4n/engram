@@ -1,7 +1,14 @@
 export * from './types.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
-export { deepSleep, supersessionSettingsFromEnv, SUPERSESSION_MIN_COSINE } from './consolidation/deep-sleep.js'
+export {
+  deepSleep,
+  supersessionSettingsFromEnv,
+  SUPERSESSION_MIN_COSINE,
+  DEFAULT_SUPERSESSION,
+} from './consolidation/deep-sleep.js'
+export { statementClock, epochMs } from './consolidation/statement-time.js'
+export type { StatementClock } from './consolidation/statement-time.js'
 export type { DeepSleepOptions, SupersessionMode, SupersessionSettings } from './consolidation/deep-sleep.js'
 export { dreamCycle } from './consolidation/dream-cycle.js'
 export type { DreamCycleOptions } from './consolidation/dream-cycle.js'
@@ -54,6 +61,7 @@ export type {
   SupersessionFact,
   SupersessionCandidate,
   SupersessionVerdict,
+  SupersessionStatedAt,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,

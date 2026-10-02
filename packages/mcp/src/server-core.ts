@@ -22,6 +22,7 @@ import {
   MAX_FORGET_IDS,
   recallOutputPolicyFromEnv,
   degradedRecallNotice,
+  supersessionSettingsFromEnv,
 } from '@engram-mem/core'
 import type {
   StorageAdapter,
@@ -30,6 +31,7 @@ import type {
   ForgetPreview,
   ForgetByIdsResult,
   RecallOutputPolicy,
+  SupersessionSettings,
 } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
@@ -362,8 +364,20 @@ export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env
   return policy
 }
 
+/**
+ * Parse ENGRAM_SUPERSESSION and ENGRAM_SUPERSESSION_MIN_COSINE once, at
+ * startup, and log the result. A malformed value throws here, so the server
+ * does not start, instead of every deep sleep failing later.
+ */
+export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.env): SupersessionSettings {
+  const settings = supersessionSettingsFromEnv(env)
+  console.error(`[engram-mcp] fact supersession: mode=${settings.mode} minCosine=${settings.minCosine}`)
+  return settings
+}
+
 async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyAtStartup()
+  const supersession = supersessionSettingsAtStartup()
   const recallLog = recallLogFromEnv()
   if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
 
@@ -399,6 +413,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
     storage,
     intelligence,
     autoConsolidate: true,
+    supersession,
     // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true enables Anthropic-style
     // Contextual Retrieval. Memory.ingest will call
     // intelligence.contextualizeChunk to generate a short preamble per
@@ -416,6 +431,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   const worker = startConsolidationWorker(storage, intelligence, graph, {
     cycles: [...CONSOLIDATION_WORKER_CYCLES],
     intervalMs: 60_000,
+    supersession,
   })
   // Best-effort graceful shutdown — stops the interval so the process can exit
   // cleanly when systemd / docker / a test harness sends SIGTERM.
