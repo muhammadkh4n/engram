@@ -410,11 +410,16 @@ describe('Memory — recall()', () => {
       { role: 'assistant', content: 'Set strict: true in tsconfig.json to turn on strict mode', sessionId: 's1' },
     ])
 
-    const result = await memory.recall('What is TypeScript strict mode?', { tokenBudget: 1 })
+    const unbounded = await memory.recall('What is TypeScript strict mode?')
+    const budget = unbounded.estimatedTokens - 10
+
+    const result = await memory.recall('What is TypeScript strict mode?', { tokenBudget: budget })
 
     expect(result.memories.length).toBeGreaterThan(1)
-    expect(result.payload?.emittedMemories).toBe(1)
+    expect(result.payload?.emittedMemories).toBeGreaterThan(0)
+    expect(result.payload?.items.length).toBeLessThan(unbounded.payload?.items.length ?? 0)
     expect(result.payload?.truncated).toBe(true)
+    expect(result.estimatedTokens).toBeLessThanOrEqual(budget)
     const first = result.payload?.items[0]
     expect(first?.id).toBe(result.memories[0]?.id)
     expect(result.formatted.slice(first?.start, first?.end)).toContain(result.memories[0]?.content)

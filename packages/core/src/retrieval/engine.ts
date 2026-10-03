@@ -10,6 +10,7 @@ import {
   emptyRecallPayload,
   resolveRecallOutputPolicy,
   degradedRecallNotice,
+  MAX_TAG_DEVICE_CHARS,
   type RecallPayload,
   type RenderedItem,
   type RenderedPayload,
@@ -197,9 +198,10 @@ function extractAttribution(m: RetrievedMemory): string {
 
   const parts: string[] = []
 
-  // Device: "Node: DeviceName (...)"
+  // Device: "Node: DeviceName (...)". Clipped so every tag stays within
+  // MAX_TAG_CHARS, which the item-cap floor is computed from.
   const deviceMatch = rawText.match(/Node:\s+(\w+)/)
-  if (deviceMatch) parts.push(deviceMatch[1])
+  if (deviceMatch) parts.push(deviceMatch[1].slice(0, MAX_TAG_DEVICE_CHARS))
 
   // Channel: "WhatsApp gateway" or "Telegram gateway"
   if (/whatsapp/i.test(rawText)) parts.push('WhatsApp')
@@ -867,7 +869,11 @@ export async function recall(
   // edges when graph is non-null. Only what the payload emitted was shown:
   // recording exposure or co-recall on memories the caller never saw would
   // misstate what was displayed. Emission is a prefix of each ranked list,
-  // so the emitted items are the first N of each.
+  // also when a token budget splits its room between Recalled and Related,
+  // so the emitted items are the first N of each. An item counts as shown
+  // only when content chars were emitted: a cut item keeps its tag and at
+  // least the minimum content, and one whose room cannot hold that is not
+  // emitted, ends its section's prefix and stays out of these counts.
   if (opts.reconsolidate !== false) {
     const manager = new AssociationManager(storage.associations)
     stageReconsolidate(

@@ -28,6 +28,7 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isEntryPoint } from './ingest/entry-point.js'
 import { ensurePrivateDir } from './ingest/private-files.js'
 
 // ---------------------------------------------------------------------------
@@ -62,7 +63,7 @@ const LOG_FILE = join(ENGRAM_DIR, 'git-hook.log')
  * hook survive both published installs and in-workspace builds without
  * a reinstall.
  */
-function buildPostCommitScript(ingestCli: string, envFile: string, logFile: string): string {
+export function buildPostCommitScript(ingestCli: string, envFile: string, logFile: string): string {
   return `#!/bin/sh
 # Engram global git post-commit hook
 # Installed by engram-git-setup. Never let this hook fail the commit —
@@ -107,8 +108,13 @@ HASH=\$(git rev-parse --short HEAD 2>/dev/null || echo "")
 SUBJECT=\$(git log -1 --format='%s' 2>/dev/null || echo "")
 BODY=\$(git log -1 --format='%b' 2>/dev/null || echo "")
 BRANCH=\$(git branch --show-current 2>/dev/null || echo detached)
-REPO_ROOT=\$(git rev-parse --show-toplevel 2>/dev/null || echo "")
-REPO=\$(basename "\$REPO_ROOT" 2>/dev/null || echo unknown)
+# The common git dir is shared by every linked worktree, so the directory
+# holding it names the main repository rather than the worktree checkout.
+COMMON_DIR=\$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")
+REPO=\$(basename "\$(dirname "\$COMMON_DIR")" 2>/dev/null || echo unknown)
+if [ -z "\$COMMON_DIR" ] || [ -z "\$REPO" ]; then
+  REPO=unknown
+fi
 FILES_COUNT=\$(git log -1 --format='' --name-only 2>/dev/null | grep -c . || echo 0)
 TOP_FILES=\$(git log -1 --format='' --name-only 2>/dev/null | head -5 | tr '\\n' ' ' || echo "")
 
@@ -137,7 +143,7 @@ if [ -n "\$INGEST_BIN" ]; then
       --content "\$CONTENT" \\
       --turn system \\
       --source git-commit \\
-      --project "\$REPO" \\
+      --project auto \\
       --session-id "git-\$REPO" \\
       --verbose \\
       >> "${logFile}" 2>&1 &
@@ -148,7 +154,7 @@ else
       --content "\$CONTENT" \\
       --turn system \\
       --source git-commit \\
-      --project "\$REPO" \\
+      --project auto \\
       --session-id "git-\$REPO" \\
       --verbose \\
       >> "${logFile}" 2>&1 &
@@ -303,22 +309,27 @@ function shellEscape(s: string): string {
 // Entry
 // ---------------------------------------------------------------------------
 
-const argv = process.argv.slice(2)
-const dryRun = argv.includes('--dry-run')
-const cmd = argv.find((a) => !a.startsWith('--')) ?? 'status'
+function main(argv: string[]): void {
+  const dryRun = argv.includes('--dry-run')
+  const cmd = argv.find((a) => !a.startsWith('--')) ?? 'status'
 
-switch (cmd) {
-  case 'install':
-    cmdInstall(dryRun)
-    break
-  case 'uninstall':
-    cmdUninstall()
-    break
-  case 'status':
-    cmdStatus()
-    break
-  default:
-    process.stderr.write(`unknown command: ${cmd}\n`)
-    process.stderr.write('usage: engram-git-setup [install|uninstall|status] [--dry-run]\n')
-    process.exit(1)
+  switch (cmd) {
+    case 'install':
+      cmdInstall(dryRun)
+      break
+    case 'uninstall':
+      cmdUninstall()
+      break
+    case 'status':
+      cmdStatus()
+      break
+    default:
+      process.stderr.write(`unknown command: ${cmd}\n`)
+      process.stderr.write('usage: engram-git-setup [install|uninstall|status] [--dry-run]\n')
+      process.exit(1)
+  }
+}
+
+if (isEntryPoint(import.meta.url)) {
+  main(process.argv.slice(2))
 }

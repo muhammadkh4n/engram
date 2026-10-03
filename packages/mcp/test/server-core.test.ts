@@ -27,6 +27,7 @@ import {
   supersessionSettingsAtStartup,
   runMemoryForget,
   runMemoryRecall,
+  RECALL_BUDGET_TOO_SMALL,
   parseSalienceThresholdEnv,
   captureModelFromEnv,
   sharedInit,
@@ -245,7 +246,8 @@ describe('recallOutputPolicyAtStartup', () => {
 
     expect(recallOutputPolicyAtStartup({})).toEqual({ faint: true })
     expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=unbounded faint=on',
+      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=unbounded faint=on ' +
+        'relatedShare=0.3 itemMaxTokens=unbounded',
     )
   })
 
@@ -254,7 +256,46 @@ describe('recallOutputPolicyAtStartup', () => {
     const env = { ENGRAM_RECALL_EMIT_K: '12', ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_FAINT: 'off' }
 
     expect(recallOutputPolicyAtStartup(env)).toEqual({ emitK: 12, tokenBudget: 4000, faint: false })
-    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall output policy: emitK=12 tokenBudget=4000 faint=off')
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[engram-mcp] recall output policy: emitK=12 tokenBudget=4000 faint=off relatedShare=0.3 itemMaxTokens=1000',
+    )
+  })
+
+  it('logs a configured Related share and item cap', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = {
+      ENGRAM_RECALL_TOKEN_BUDGET: '4000',
+      ENGRAM_RECALL_RELATED_SHARE: '0.45',
+      ENGRAM_RECALL_ITEM_MAX_TOKENS: '700',
+    }
+
+    expect(recallOutputPolicyAtStartup(env)).toEqual({
+      tokenBudget: 4000,
+      relatedShare: 0.45,
+      itemMaxTokens: 700,
+      faint: true,
+    })
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=4000 faint=on relatedShare=0.45 itemMaxTokens=700',
+    )
+  })
+
+  it.each([
+    ['ENGRAM_RECALL_RELATED_SHARE', '0.95'],
+    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', 'lots'],
+  ])('throws at startup naming %s for %j', (name, value) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => recallOutputPolicyAtStartup({ [name]: value })).toThrow(name)
+  })
+
+  it('fails startup when the item cap is larger than the token budget', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '1000', ENGRAM_RECALL_ITEM_MAX_TOKENS: '1200' }
+
+    expect(() => recallOutputPolicyAtStartup(env)).toThrow(
+      'ENGRAM_RECALL_ITEM_MAX_TOKENS (1200) must not exceed ENGRAM_RECALL_TOKEN_BUDGET (1000)',
+    )
+    expect(() => recallOutputPolicyAtStartup({ ...env, ENGRAM_RECALL_ITEM_MAX_TOKENS: '1000' })).not.toThrow()
   })
 
   it('fails startup on a malformed budget before any backend is contacted', async () => {
@@ -265,6 +306,16 @@ describe('recallOutputPolicyAtStartup', () => {
     } finally {
       if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
       else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
+    }
+  })
+  it('fails startup on a malformed item cap before any backend is contacted', async () => {
+    const saved = process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
+    process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = '-5'
+    try {
+      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_ITEM_MAX_TOKENS must be a positive integer, got "-5"/)
+    } finally {
+      if (saved === undefined) delete process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
+      else process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = saved
     }
   })
 })
@@ -469,6 +520,22 @@ describe('runMemoryRecall', () => {
     const res = await runMemoryRecall(stubMemory(result({})), { query: 'deploy window' })
 
     expect(res).toEqual({ content: [{ type: 'text', text: 'No relevant memories found.' }] })
+  })
+
+  it('says the budget is too small, not that nothing matched, when memories matched but none fit', async () => {
+    const res = await runMemoryRecall(stubMemory(result({ memories: [MEMORY], formatted: '' })), { query: 'deploy window' })
+
+    expect(res).toEqual({ content: [{ type: 'text', text: RECALL_BUDGET_TOO_SMALL }] })
+    expect(RECALL_BUDGET_TOO_SMALL).toContain('token budget is too small')
+  })
+
+  it('keeps the degraded notice ahead of the budget-too-small answer', async () => {
+    const res = await runMemoryRecall(
+      stubMemory(result({ memories: [MEMORY], formatted: '', degraded: { vector: REASON } })),
+      { query: 'deploy window' },
+    )
+
+    expect(res.content[0]?.text).toBe(`${NOTICE}\n${RECALL_BUDGET_TOO_SMALL}`)
   })
 
   it('returns a healthy payload unchanged', async () => {

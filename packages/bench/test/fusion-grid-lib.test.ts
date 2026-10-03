@@ -147,14 +147,14 @@ describe('gridRunIdentity', () => {
     '--data', '/data/lme.json', '--question-ids', 'ids.json', '--grid', 'grid.json', '--output-dir', 'out',
     '--context-mode', 'formatted', '--reranker', 'onnx', '--no-graph',
   ])
-  const policy = { emit_k: null, token_budget: null, faint: true }
+  const policy = { emit_k: null, token_budget: null, faint: true, related_share: null, item_max_tokens: null }
 
   it('records the embedder backend, model and the width the vectors are built at', () => {
     expect(gridRunIdentity(args, 'abc', policy, 1536)).toEqual({
       data: '/data/lme.json', context_mode: 'formatted', reranker_backend: 'onnx',
       reranker_model: 'mixedbread-ai/mxbai-rerank-large-v1', graph: false, consolidate: true, vector_mode: 'full',
       max_results: 30, synthesize: false, question_selection: 'ids:abc', output_emit_k: null,
-      output_token_budget: null, output_faint: true,
+      output_token_budget: null, output_faint: true, output_related_share: null, output_item_max_tokens: null,
       embed_backend: 'openai', embed_model: 'text-embedding-3-small', embed_dims: 1536,
     })
     expect(gridRunIdentity({ ...args, embedBackend: 'onnx' }, 'abc', policy, 1024)).toMatchObject({
@@ -373,6 +373,7 @@ describe('openGridCheckpoints', () => {
     data: '/data/lme.json', context_mode: 'formatted', reranker_backend: 'onnx', reranker_model: 'm',
     graph: false, consolidate: true, vector_mode: 'full', max_results: 30, synthesize: false,
     question_selection: 'ids:abc', output_emit_k: null, output_token_budget: null, output_faint: true,
+    output_related_share: null, output_item_max_tokens: null,
     embed_backend: 'openai', embed_model: 'text-embedding-3-small', embed_dims: 1536,
   }
   const identityFor = (cell: GridCell) => gridIdentity(identity, 'gridsha', cell)
