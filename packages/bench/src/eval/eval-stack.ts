@@ -73,11 +73,18 @@ export interface EvalPayloadItem {
   end: number
 }
 
+/** An entry of RecallResult.associations: the memories behind the Related section. */
+export interface EvalAssociation {
+  id: string
+  metadata?: Record<string, unknown>
+}
+
 /** The parts of the build's RecallResult the evaluation reads. */
 export interface EvalRecallResult {
   formatted: string
   estimatedTokens: number
   payload?: { items: EvalPayloadItem[] }
+  associations?: EvalAssociation[]
   degraded?: { vector: string; lexical?: string }
   timings?: Record<string, number>
 }
@@ -250,6 +257,25 @@ async function buildIntelligence(
   return { ...base, rerank: (query, documents) => onnx.rerank(query, documents) }
 }
 
+/**
+ * Related items that Neo4j produced. The engine fills Related from one of two
+ * sources: spreading activation over the graph, or the SQL association walk it
+ * falls back to when the graph has no node for any seed. Only the former tags
+ * its associations with `metadata.activationSource = 'spreading_activation'`,
+ * so that engine provenance field decides, matched to the Related payload
+ * items by id.
+ */
+export function neo4jRelatedIds(result: EvalRecallResult): string[] {
+  const fromGraph = new Set(
+    (result.associations ?? [])
+      .filter((a) => a.metadata?.['activationSource'] === 'spreading_activation')
+      .map((a) => a.id),
+  )
+  return (result.payload?.items ?? [])
+    .filter((it) => it.section === 'related' && it.id !== undefined && fromGraph.has(it.id))
+    .map((it) => it.id!)
+}
+
 function buildGraph(mods: EvalModules, env: NodeJS.ProcessEnv, guards: GuardStats): EvalGraph | null {
   const neo4jUri = env['NEO4J_URI']
   if (!neo4jUri) return null
@@ -266,7 +292,7 @@ function buildGraph(mods: EvalModules, env: NodeJS.ProcessEnv, guards: GuardStat
 /**
  * Builds the stack from modules and an env that already carries the service
  * settings, then recalls `calibrationQuery` and fails when Neo4j is configured
- * but the Related section is empty: a run without graph associations would
+ * but no Related item came from it: a run without graph associations would
  * measure a different recall than the server's.
  */
 export async function buildEvalStack(
@@ -329,27 +355,32 @@ async function assembleEvalStack(
   assertNoBlockedCalls(guards)
   const resetSensory = sensoryResetter(memory, 'recall-eval')
 
+  async function recallOnce(query: string, args: Record<string, unknown>, now: Date) {
+    const argOpts = sc.recallOptionsFromArgs({ ...args, query })
+    if ('error' in argOpts) throw new Error(argOpts.error)
+    const recallOpts: EvalRecallOptions = { ...argOpts, reconsolidate: false, now }
+    resetSensory()
+    const result = await memory.recall(query.trim(), recallOpts)
+    assertNoBlockedCalls(guards)
+    if (pins) assertPinsClean(pins)
+    const recall: EvalRecall = {
+      query,
+      recallOpts,
+      formatted: result.formatted,
+      items: payloadItems(result),
+      estimatedTokens: result.estimatedTokens,
+      degraded: result.degraded ?? null,
+      timings: result.timings ?? null,
+    }
+    return { result, recall }
+  }
+
   const stack: EvalStack = {
     graph: graph !== null,
     guards,
     pins: pins ?? null,
     async recall(query, args, now) {
-      const argOpts = sc.recallOptionsFromArgs({ ...args, query })
-      if ('error' in argOpts) throw new Error(argOpts.error)
-      const recallOpts: EvalRecallOptions = { ...argOpts, reconsolidate: false, now }
-      resetSensory()
-      const result = await memory.recall(query.trim(), recallOpts)
-      assertNoBlockedCalls(guards)
-      if (pins) assertPinsClean(pins)
-      return {
-        query,
-        recallOpts,
-        formatted: result.formatted,
-        items: payloadItems(result),
-        estimatedTokens: result.estimatedTokens,
-        degraded: result.degraded ?? null,
-        timings: result.timings ?? null,
-      }
+      return (await recallOnce(query, args, now)).recall
     },
     async close() {
       try {
@@ -361,11 +392,13 @@ async function assembleEvalStack(
   }
 
   if (graph) {
-    const calibration = await stack.recall(opts.calibrationQuery, {}, opts.now)
-    if (!calibration.items.some((it) => it.section === 'related')) {
+    const { result } = await recallOnce(opts.calibrationQuery, {}, opts.now)
+    if (neo4jRelatedIds(result).length === 0) {
       await stack.close()
+      const related = payloadItems(result).filter((it) => it.section === 'related').length
       throw new GraphCheckError(
-        `calibration query ${JSON.stringify(opts.calibrationQuery)} returned no Related memories while Neo4j is configured`,
+        `calibration query ${JSON.stringify(opts.calibrationQuery)} returned no Related memories from Neo4j ` +
+          `(${related} Related from the SQL association walk) while Neo4j is configured`,
       )
     }
   }

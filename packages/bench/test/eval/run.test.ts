@@ -8,8 +8,11 @@ import {
   SECRET_NAME,
   buildRunMeta,
   envModelIds,
+  FailedLegError,
+  failedLegs,
   formatRunSummary,
   goldRecallArgs,
+  isRunStop,
   parseRunArgs,
   runGold,
   type RunArgs,
@@ -136,6 +139,41 @@ describe('runGold', () => {
       recall: async (entry) => recall(entry.query, ['a-gold'], { degraded: { vector: 'embed timeout' } }),
     })
     await expect(run).rejects.toBeInstanceOf(DegradedRecallError)
+  })
+})
+
+describe('failed retrieval legs', () => {
+  it('stops the run with exit 4 on a recall whose lexical leg failed, naming the leg', async () => {
+    const run = runGold({
+      gold: [gold('a')],
+      runs: 2,
+      recall: async (entry) => recall(entry.query, ['a-gold'], { timings: { search: 12, lexicalError: 1, total: 40 } }),
+    })
+    const err = await run.catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(FailedLegError)
+    expect((err as FailedLegError).legs).toEqual(['lexical'])
+    expect((err as Error).message).toContain('failed lexical leg')
+    expect(isRunStop(err)).toBe(true)
+  })
+
+  it('reads every <leg>Error flag the engine sets and ignores stage times and unset flags', () => {
+    expect(failedLegs({ vectorError: 1, lexicalError: 1, 'graph.activate': 3, total: 9 })).toEqual(['lexical', 'vector'])
+    expect(failedLegs({ lexicalError: 0, search: 4 })).toEqual([])
+    expect(failedLegs(null)).toEqual([])
+  })
+
+  it('scores a recall whose timings flag no failed leg', async () => {
+    const body = await runGold({
+      gold: [gold('a')],
+      runs: 2,
+      recall: async (entry) => recall(entry.query, ['a-gold'], { timings: { search: 12, total: 40 } }),
+    })
+    expect(body.queries[0]!.runs.map((r) => r.score.firstGoldRank)).toEqual([1, 1])
+  })
+
+  it('treats a degraded recall as a stop and an unrelated error as not one', () => {
+    expect(isRunStop(new DegradedRecallError('q', 'embed timeout'))).toBe(true)
+    expect(isRunStop(new Error('boom'))).toBe(false)
   })
 })
 

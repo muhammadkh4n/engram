@@ -14,8 +14,10 @@ import { BlockedWriteError } from '../../src/eval/write-guards.js'
 const NOW = new Date('2026-09-15T10:00:00Z')
 const HEADER = '## Engram\n\n### Recalled Memories\n'
 
-/** A payload with one Recalled item and, optionally, one Related item. */
-function result(withRelated: boolean): EvalRecallResult {
+type RelatedSource = 'graph' | 'walk'
+
+/** A payload with one Recalled item and, optionally, one Related item from Neo4j or the SQL association walk. */
+function result(withRelated: boolean, source: RelatedSource = 'graph'): EvalRecallResult {
   const recalled = '- [episode · user · 2026-09-01] the deploy script reads the service env file'
   const related = '- [semantic · 2026-08-20] the service env file lives under /etc'
   let formatted = `${HEADER}${recalled}`
@@ -25,7 +27,12 @@ function result(withRelated: boolean): EvalRecallResult {
     formatted = `${formatted}\n\n### Related Memories\n${related}`
     items.items.push({ section: 'related', id: 'sem-7', start, end: formatted.length })
   }
-  return { formatted, estimatedTokens: 40, payload: items }
+  // The engine tags spreading-activation associations; walk associations carry pathStrength/depth instead.
+  const metadata = source === 'graph'
+    ? { graphActivation: 0.4, activationSource: 'spreading_activation' }
+    : { pathStrength: 0.6, depth: 1 }
+  const associations = withRelated ? [{ id: 'sem-7', metadata }] : []
+  return { formatted, estimatedTokens: 40, payload: items, associations }
 }
 
 /** Stands in for the server's recallOptionsFromArgs with a shape the test can recognise. */
@@ -51,6 +58,7 @@ interface Harness {
 
 function harness(opts: {
   related?: boolean
+  relatedSource?: RelatedSource
   graphUnavailable?: boolean
   onRecall?: (h: Harness) => void
 } = {}): Harness {
@@ -107,7 +115,7 @@ function harness(opts: {
           h.events.push(`recall:${query}`)
           h.recalls.push({ query, opts: recallOpts })
           opts.onRecall?.(h)
-          return result(opts.related ?? true)
+          return result(opts.related ?? true, opts.relatedSource)
         },
       }
       return memory
@@ -229,8 +237,15 @@ describe('buildEvalStack', () => {
     expect(h.recalls.map((r) => r.query)).toEqual(['what links engram and neo4j'])
   })
 
-  it('passes the graph check when the calibration query returns a Related memory', async () => {
-    const h = harness({ related: true })
+  it('refuses a calibration recall whose only Related memories came from the SQL association walk', async () => {
+    const h = harness({ related: true, relatedSource: 'walk' })
+    await expect(
+      buildEvalStack(h.mods, { calibrationQuery: 'cal', now: NOW, env: { ...GRAPH_ENV } }),
+    ).rejects.toThrow(/no Related memories from Neo4j \(1 Related from the SQL association walk\)/)
+  })
+
+  it('passes the graph check when the calibration query returns a Neo4j-sourced Related memory', async () => {
+    const h = harness({ related: true, relatedSource: 'graph' })
     await expect(buildEvalStack(h.mods, { calibrationQuery: 'cal', now: NOW, env: { ...GRAPH_ENV } })).resolves.toBeDefined()
     expect(h.recalls[0]!.opts).toEqual({ reconsolidate: false, now: NOW })
   })

@@ -289,13 +289,19 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
   Neo4j sessions are forced to READ mode and write transactions reject; `ENGRAM_RECALL_LOG` is removed and graph
   reinforcement and co-recall are switched off. Every blocked call is counted, the first one stops the run, and
   the meta records the counters (`guards`, `blocked_calls`), so a finished run is proof it wrote nothing.
-- **Graph check:** with `NEO4J_URI` set, the stack recalls `--calibration-query` first and refuses to run when
-  its Related section is empty, because a recall without graph associations is not the server's recall.
+- **Graph check:** with `NEO4J_URI` set, the stack recalls `--calibration-query` first and refuses to run unless
+  at least one Related item came from Neo4j, because a recall without graph associations is not the server's
+  recall. The engine also fills Related from the SQL association walk when the graph has no node for any seed;
+  only spreading activation tags its associations `metadata.activationSource = "spreading_activation"`, and that
+  engine provenance field, matched to the Related items by id, is what the check counts.
 - **Pins:** every model call recall makes (query embedding, expansion, HyDE, the remote reranker, evidence
   selection) is answered from `--pins`, keyed by method and the exact input. `fill` calls the model on a miss and
   records the reply; `strict` throws on a miss without calling anything, and blocks any fetch outside the storage
   origin and the reranker's model host. Expansion is keyed by its reference date, so runs that share a strict
   pins file pass the same `--now` (the run's start when absent). A degraded recall (no query vector) stops the run.
+- **Failed legs:** the stack sets `ENGRAM_RECALL_TIMING=1`, so the engine reports a retrieval leg that failed while
+  the others answered as a `<leg>Error` timing flag (`lexicalError`, `vectorError`). A recall with any such flag
+  stops the run (exit 4), with a message naming the query and the leg; it would otherwise score as a full recall.
 - **Gold:** JSONL, one line per query: `{ id, class: "identifier"|"current"|"recall"|"project", query,
   project_id?, gold_ids, gold_phrases, stale_ids, stale_phrases, current_phrases, note }`. A phrase group is
   all-of; a list of groups is any-of. Text is matched after NFKC, lowercasing and whitespace collapsing. Gold wins
@@ -315,7 +321,8 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
   rank counts as below every rank), hit@10 and gold-in-payload gains and losses, stale-before-current changes and
   payload deltas. Totals, overall and per class: wins, losses, ties, an exact two-sided sign test over the
   non-ties, MRR@30 of each side and the delta. Numbers only; what counts as a change is decided before the run.
-- Exit 2: usage error or existing outputs. Exit 4: a guard, pin, graph or degraded-recall check stopped the run.
+- Exit 2: usage error or existing outputs. Exit 4: a guard, pin, graph, degraded-recall or failed-leg check stopped
+  the run; a stopped run writes no outputs.
 
 ## Example Runs
 

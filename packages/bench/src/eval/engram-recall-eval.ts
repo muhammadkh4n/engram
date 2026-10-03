@@ -14,32 +14,30 @@
  *
  * `run` writes `<out>/<label>.json` and `<out>/<label>.md`.
  * Exit 2: usage error, or output files that already exist. Exit 4: a guard,
- * pin, graph or degraded-recall check stopped the run. Exit 1: any other error.
+ * pin, graph, degraded-recall or failed-leg check stopped the run; the message
+ * names what failed (for a failed leg, the leg). Exit 1: any other error.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { sha256 } from '../replay/replay-lib.js'
 import { writeAtomic } from '../replay/replay-stack.js'
-import { DegradedRecallError } from '../refuse-degraded.js'
 import { compareRuns, formatComparison, parseRunResult } from './compare.js'
-import { GraphCheckError, openEvalStack, parseSystemdEnvFile, type EvalStack } from './eval-stack.js'
+import { openEvalStack, parseSystemdEnvFile, type EvalStack } from './eval-stack.js'
 import { parseGold } from './gold.js'
-import { PinMissError, PinsViolationError, openPins } from './pins.js'
+import { openPins } from './pins.js'
 import {
   buildRunMeta,
   distGitSha,
   formatRunSummary,
   goldRecallArgs,
+  isRunStop,
   parseRunArgs,
   runGold,
   type RunArgs,
   type RunResult,
 } from './run.js'
-import { BlockedWriteError } from './write-guards.js'
 
 class UsageError extends Error {}
-
-const STOPS = [BlockedWriteError, PinsViolationError, PinMissError, GraphCheckError, DegradedRecallError]
 
 async function run(args: RunArgs): Promise<void> {
   const goldText = fs.readFileSync(args.gold, 'utf8')
@@ -131,6 +129,6 @@ main(process.argv.slice(2)).then(
   (code) => process.exit(code),
   (err: unknown) => {
     console.error(`[recall-eval] ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(STOPS.some((cls) => err instanceof cls) ? 4 : err instanceof UsageError ? 2 : 1)
+    process.exit(isRunStop(err) ? 4 : err instanceof UsageError ? 2 : 1)
   },
 )

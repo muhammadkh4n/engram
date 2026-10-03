@@ -147,7 +147,10 @@ export function guardNeo4jDriver(driver: GuardableDriver, stats: GuardStats): vo
  * The service env with every recall-time write switched off: no recall log
  * file, no graph reinforcement and no co-recall edges. With the RAM recall
  * engine on, its on-disk snapshot cache is disabled too, so the evaluation
- * cannot overwrite the service's cache. Returns a new record.
+ * cannot overwrite the service's cache. Stage timing is forced on: it only
+ * accumulates numbers in memory, and it is where the engine flags a failed
+ * retrieval leg (`lexicalError`), which a run must see to refuse that recall.
+ * Returns a new record.
  */
 export function guardRecallEnv(vars: Readonly<Record<string, string>>): Record<string, string> {
   const { ENGRAM_RECALL_LOG: _recallLog, ...rest } = vars
@@ -155,6 +158,7 @@ export function guardRecallEnv(vars: Readonly<Record<string, string>>): Record<s
     ...rest,
     ENGRAM_RECALL_GRAPH_REINFORCE: 'off',
     ENGRAM_RECALL_CORECALL: 'off',
+    ENGRAM_RECALL_TIMING: '1',
     ...(rest['ENGRAM_RECALL_ENGINE'] === 'true' ? { ENGRAM_ENGINE_SNAPSHOT_DIR: '' } : {}),
   }
 }

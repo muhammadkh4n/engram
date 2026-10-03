@@ -13,12 +13,12 @@
 import { execFileSync } from 'node:child_process'
 import { parsePinsMode, type PinsMode } from '../replay/replay-lib.js'
 import { parseReferenceDate } from '../replay/probe-lib.js'
-import { assertRecallNotDegraded } from '../refuse-degraded.js'
-import type { EvalRecall } from './eval-stack.js'
+import { assertRecallNotDegraded, DegradedRecallError } from '../refuse-degraded.js'
+import { GraphCheckError, type EvalRecall } from './eval-stack.js'
 import type { GoldClass, GoldEntry } from './gold.js'
-import type { PinStats } from './pins.js'
+import { PinMissError, PinsViolationError, type PinStats } from './pins.js'
 import { aggregateScores, scoreQuery, type QueryScore, type ScoreAggregate, type ScoreAggregates } from './score.js'
-import { blockedCallCount, type GuardStats } from './write-guards.js'
+import { BlockedWriteError, blockedCallCount, type GuardStats } from './write-guards.js'
 
 // --- arguments ------------------------------------------------------------
 
@@ -138,9 +138,47 @@ function scorable(recall: EvalRecall) {
 }
 
 /**
+ * A recall in which one retrieval leg failed while the others answered. The
+ * engine records the failure as a `<leg>Error` timing flag and still returns a
+ * full-looking result, so scoring it would credit the whole pipeline with what
+ * the surviving legs found.
+ */
+export class FailedLegError extends Error {
+  constructor(readonly question: string, readonly legs: readonly string[]) {
+    super(`recall for question "${question}" ran with a failed ${legs.join(' and ')} leg; refusing to score it`)
+    this.name = 'FailedLegError'
+  }
+}
+
+const LEG_ERROR_FLAG = /^([A-Za-z]+)Error$/
+
+/** The legs the engine flagged as failed in a recall's timings, sorted. */
+export function failedLegs(timings: Readonly<Record<string, number>> | null): string[] {
+  if (timings === null) return []
+  return Object.entries(timings)
+    .flatMap(([key, value]) => {
+      const leg = LEG_ERROR_FLAG.exec(key)?.[1]
+      return leg !== undefined && value > 0 ? [leg] : []
+    })
+    .sort()
+}
+
+export function assertNoFailedLeg(recall: Pick<EvalRecall, 'timings'>, question: string): void {
+  const legs = failedLegs(recall.timings)
+  if (legs.length > 0) throw new FailedLegError(question, legs)
+}
+
+/** Checks that stop a run with exit 4: what they caught makes the run's numbers describe a different recall. */
+const RUN_STOPS = [BlockedWriteError, PinsViolationError, PinMissError, GraphCheckError, DegradedRecallError, FailedLegError]
+
+export function isRunStop(err: unknown): boolean {
+  return RUN_STOPS.some((cls) => err instanceof cls)
+}
+
+/**
  * Recalls every gold query once per run, in gold order, and scores each
- * recall. A degraded recall (no query vector) stops the run: its numbers
- * would describe the lexical leg alone.
+ * recall. A degraded recall (no query vector) or one with a failed retrieval
+ * leg stops the run: its numbers would describe the surviving legs alone.
  */
 export async function runGold(deps: {
   gold: readonly GoldEntry[]
@@ -155,6 +193,7 @@ export async function runGold(deps: {
     for (const [index, entry] of deps.gold.entries()) {
       const recall = await deps.recall(entry)
       if (recall.degraded) assertRecallNotDegraded({ degraded: recall.degraded }, entry.id)
+      assertNoFailedLeg(recall, entry.id)
       const score = scoreQuery(entry, scorable(recall))
       const slot = perQuery[index]!
       slot.runs.push({ score, estimatedTokens: recall.estimatedTokens, timings: recall.timings })

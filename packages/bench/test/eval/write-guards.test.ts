@@ -133,7 +133,7 @@ describe('blocked-call accounting', () => {
 })
 
 describe('recall env guard', () => {
-  it('drops the recall log and switches graph reinforcement and co-recall off', () => {
+  it('drops the recall log, switches graph reinforcement and co-recall off, and turns stage timing on', () => {
     const vars = {
       ENGRAM_RECALL_LOG: '/var/log/engram/recall.jsonl',
       ENGRAM_RECALL_GRAPH_REINFORCE: 'on',
@@ -143,6 +143,7 @@ describe('recall env guard', () => {
     expect(guardRecallEnv(vars)).toEqual({
       ENGRAM_RECALL_GRAPH_REINFORCE: 'off',
       ENGRAM_RECALL_CORECALL: 'off',
+      ENGRAM_RECALL_TIMING: '1',
       SUPABASE_URL: 'http://127.0.0.1:3000',
     })
     expect(vars.ENGRAM_RECALL_LOG).toBe('/var/log/engram/recall.jsonl')
