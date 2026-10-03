@@ -137,9 +137,13 @@ describe('CodeStore: growth beyond initial capacity', () => {
     const store = new CodeStore(codec, { initialCapacity: 4 })
     const rng = splitmix64(6n)
     const N = 5000
+    // Encoding a 1536-d vector is the expensive step and growth does not depend on distinct codes,
+    // so a small pool of encoded vectors is reused; add() copies the planes into the store.
+    const POOL = 64
+    const pool = Array.from({ length: POOL }, () => codec.encode(randUnit(rng, DIMS)))
 
     for (let i = 0; i < N; i++) {
-      store.add(`id-${i}`, meta({ createdAt: i }), codec.encode(randUnit(rng, DIMS)))
+      store.add(`id-${i}`, meta({ createdAt: i }), pool[i % POOL])
     }
 
     expect(store.size).toBe(N)
@@ -147,6 +151,15 @@ describe('CodeStore: growth beyond initial capacity', () => {
       expect(store.has(`id-${i}`)).toBe(true)
     }
     expect(store.watermark()).toBe(N - 1)
+
+    // Every growth step copied the earlier slots bit-exactly: a late slot scores the same as the
+    // early slot holding the same pooled code (sequential adds, so slot === insertion index).
+    const q = codec.rotateQuery(randUnit(rng, DIMS))
+    for (let i = POOL; i < N; i += 137) {
+      const [late] = store.rescoreTier2(q, new Uint32Array([i]), 1)
+      const [early] = store.rescoreTier2(q, new Uint32Array([i % POOL]), 1)
+      expect(late.est).toBe(early.est)
+    }
   }, 30000)
 })
 
