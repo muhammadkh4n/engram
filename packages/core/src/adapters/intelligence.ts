@@ -11,12 +11,33 @@ export interface SummaryResult {
   decisions: string[]
 }
 
-export interface KnowledgeCandidate {
-  topic: string
+/** One source episode handed to the fact extractor. */
+export interface FactSourceEpisode {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  createdAt: Date
   content: string
+}
+
+export interface ExtractFactsInput {
+  /** Whole episodes, in statement-time order. */
+  episodes: ReadonlyArray<FactSourceEpisode>
+  /** The project the episodes belong to, null when none. */
+  projectId: string | null
+}
+
+/**
+ * A fact that stands alone: its statement names its subject, resolves its
+ * references and dates a state or an event, so it reads correctly without the
+ * conversation. `episodeIds` are the ids of the episodes it rests on, never
+ * empty.
+ */
+export interface ExtractedFact {
+  topic: string
+  statement: string
+  /** 0..1: how clearly the episodes state the claim. */
   confidence: number
-  sourceDigestIds: string[]
-  sourceEpisodeIds: string[]
+  episodeIds: string[]
 }
 
 /**
@@ -229,7 +250,18 @@ export interface IntelligenceAdapter {
   embedQuery?(text: string): Promise<number[]>
   dimensions?(): number
   summarize?(content: string, opts: SummarizeOptions): Promise<SummaryResult>
-  extractKnowledge?(content: string): Promise<KnowledgeCandidate[]>
+  /**
+   * Extract standalone facts from source episodes, each citing the episodes
+   * it rests on. Episodes are never cut; a large batch may take several
+   * model calls. Resolves `[]` when the episodes hold no fact. Rejects with a
+   * FactExtractionError when a reply holding text is cut off at its token
+   * cap or cannot be read as a fact list, and with an EmptyFactReplyError
+   * when the reply holds no text, cut off or not; a failed call (API,
+   * network, auth, rate limit) rejects with its own error, unchanged.
+   * classifyExtractionError decides which of these may say something about
+   * the batch itself.
+   */
+  extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
   /**
    * Extract typed named entities from episode content for graph decomposition.
    * Returns real people, tools, projects, organizations, and concepts — NOT
@@ -388,4 +420,158 @@ export class EmptyClassifierReplyError extends Error {
 /** Matched by name as well as by class, like isUnclassifiableReply. */
 export function isEmptyClassifierReply(err: unknown): err is EmptyClassifierReplyError {
   return err instanceof EmptyClassifierReplyError || (err instanceof Error && err.name === 'EmptyClassifierReplyError')
+}
+
+/** Why a fact-extraction reply could not be used: cut off at max_tokens
+ *  (`length`) or not the expected JSON (`parse`). */
+export type FactExtractionErrorKind = 'length' | 'parse'
+
+/**
+ * The fact extractor answered with text, but its reply cannot be stored: it
+ * was cut off at max_tokens or does not parse. Either may be the batch's own
+ * (its budget is computed from the batch's text) or hit every batch alike (a
+ * model that rambles or ignores the JSON format), so classifyExtractionError
+ * holds it until another batch shows the same step working. A failed call
+ * (API, network, auth, rate limit) is not this error.
+ */
+export class FactExtractionError extends Error {
+  readonly kind: FactExtractionErrorKind
+
+  constructor(kind: FactExtractionErrorKind, message: string) {
+    super(message)
+    this.name = 'FactExtractionError'
+    this.kind = kind
+  }
+}
+
+/** Matched by name as well as by class, like isUnclassifiableReply. */
+export function isFactExtractionError(err: unknown): err is FactExtractionError {
+  return err instanceof FactExtractionError || (err instanceof Error && err.name === 'FactExtractionError')
+}
+
+/**
+ * The fact extractor answered 200 with no usable reply: no choice, or null,
+ * empty or whitespace content, whether or not it was cut off at max_tokens
+ * (a reply that spent its whole budget before writing anything). That is a
+ * provider glitch, not something the episodes caused, so resending the same
+ * episodes later can succeed and callers do not count it against the batch.
+ */
+export class EmptyFactReplyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EmptyFactReplyError'
+  }
+}
+
+/** Matched by name as well as by class, like isUnclassifiableReply. */
+export function isEmptyFactReply(err: unknown): err is EmptyFactReplyError {
+  return err instanceof EmptyFactReplyError || (err instanceof Error && err.name === 'EmptyFactReplyError')
+}
+
+/**
+ * What a failed fact extraction says about the digest it was run for:
+ * - `transient`: the provider, the network or the account failed, the
+ *   request reached a missing model or endpoint, or the reply came back
+ *   empty; a later call can succeed with the same digest, and the failure
+ *   says nothing about it;
+ * - `held`: it may be the digest's own or may hit every digest alike (a
+ *   rejected request such as 400, 413 or 422, a reply cut off or not
+ *   parseable, a storage error, anything unclassified). Only the rest of the
+ *   run can tell: the failure counts against the digest when another digest
+ *   in the same run got through the same step.
+ */
+export type ExtractionErrorClass = 'transient' | 'held'
+
+/** Not found (a missing or retired model, a wrong endpoint) and conflict
+ *  (the SDK retries it itself): neither depends on the digest. */
+const UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([404, 409])
+
+/** Key, billing and permission rejections. They never depend on the batch. */
+const CREDENTIAL_STATUSES: ReadonlySet<number> = new Set([401, 402, 403])
+
+/** Request timeout and rate limit; every 5xx is transient too. */
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([408, 429])
+
+/** Socket and DNS failures (Node `code`) and undici's connect/read timeouts. */
+const NETWORK_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+])
+
+/** Error names (or class names, since the openai SDK leaves `name` as
+ *  'Error') of aborted, timed-out or unconnected requests. */
+const NETWORK_NAMES: ReadonlySet<string> = new Set([
+  'AbortError',
+  'TimeoutError',
+  'APIConnectionError',
+  'APIConnectionTimeoutError',
+  'APIUserAbortError',
+])
+
+/** Deep enough for an SDK error wrapping fetch's TypeError wrapping the
+ *  socket error; bounded so a cyclic `cause` cannot loop. */
+const MAX_CAUSE_DEPTH = 5
+
+function httpStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown } | null)?.status
+  return typeof status === 'number' && Number.isInteger(status) ? status : undefined
+}
+
+function isNetworkFailure(err: unknown): boolean {
+  let current: unknown = err
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current != null && typeof current === 'object'; depth++) {
+    const fields = current as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown }
+    if (typeof fields.code === 'string' && NETWORK_CODES.has(fields.code)) return true
+    if (typeof fields.name === 'string' && NETWORK_NAMES.has(fields.name)) return true
+    const className = (current as { constructor?: { name?: unknown } }).constructor?.name
+    if (typeof className === 'string' && NETWORK_NAMES.has(className)) return true
+    // undici's exact rejection for a request that never got a response.
+    if (current instanceof TypeError && fields.message === 'fetch failed') return true
+    current = fields.cause
+  }
+  return false
+}
+
+function hasName(err: unknown, name: string): boolean {
+  return err instanceof Error && err.name === name
+}
+
+/**
+ * The one place the fact-extraction retry policy lives. A status is read only
+ * from a numeric `err.status` (the openai SDK's APIError carries it), never
+ * from message text. Named errors are matched by name as well as by class, so
+ * the check holds across separate copies of this package.
+ */
+export function classifyExtractionError(err: unknown): ExtractionErrorClass {
+  if (isFactExtractionError(err)) return 'held'
+  if (isEmptyFactReply(err) || hasName(err, 'CircuitOpenError')) return 'transient'
+  const status = httpStatus(err)
+  if (
+    status !== undefined && (
+      UNAVAILABLE_STATUSES.has(status) ||
+      CREDENTIAL_STATUSES.has(status) ||
+      RETRYABLE_STATUSES.has(status) ||
+      status >= 500
+    )
+  ) return 'transient'
+  if (isNetworkFailure(err)) return 'transient'
+  return 'held'
+}
+
+/** A key, billing or permission rejection (401, 402, 403): transient for the
+ *  batch, but it needs an operator, so callers log it at error level. */
+export function isCredentialError(err: unknown): boolean {
+  const status = httpStatus(err)
+  return status !== undefined && CREDENTIAL_STATUSES.has(status)
 }

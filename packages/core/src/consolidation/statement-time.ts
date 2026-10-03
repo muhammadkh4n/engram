@@ -10,9 +10,10 @@ import type { Digest, Episode } from '../types.js'
  * when none of those episodes can be read. A fact's statement time is the
  * latest over its source digests.
  *
- * Insert time cannot order facts: deep sleep re-reads every digest of the
- * last week on each run, so a fact extracted later can come from an older
- * conversation than a fact already stored.
+ * Insert time cannot order facts: a digest whose extraction failed is
+ * retried on a later run and a rederive pass re-reads old digests, so a fact
+ * extracted later can come from an older conversation than a fact already
+ * stored.
  */
 export type StatementClock = (sourceDigestIds: ReadonlyArray<string>) => Promise<number | null>
 
@@ -85,4 +86,61 @@ export function statementClock(
     await loadDigestTimes(ids)
     return latest(ids.map(id => digestTimes.get(id) ?? null))
   }
+}
+
+/** The episodes and digests a fact rests on. */
+export interface FactSources {
+  sourceEpisodeIds: ReadonlyArray<string>
+  sourceDigestIds: ReadonlyArray<string>
+}
+
+/**
+ * When a fact was stated, in epoch milliseconds, or null when none of its
+ * sources can be read: the latest `createdAt` of the episodes it cites, or,
+ * for a fact that cites none (or none readable), the digest statement time
+ * of `StatementClock`. A digest summarises many turns, so a cited fact is
+ * dated by the turns that state it, not by the digest's last turn.
+ */
+export type FactClock = (sources: FactSources) => Promise<number | null>
+
+/**
+ * One fact clock per consolidation run, over a `statementClock` for the
+ * uncited case. Episode times are cached; tombstoned episodes still count.
+ */
+export function factStatementClock(
+  storage: StorageAdapter,
+  knownDigests: ReadonlyArray<Digest> = [],
+): FactClock {
+  const byDigests = statementClock(storage, knownDigests)
+  const episodeTimes = new Map<string, number | null>()
+
+  async function loadEpisodeTimes(ids: string[]): Promise<void> {
+    const missing = ids.filter(id => !episodeTimes.has(id))
+    if (missing.length === 0) return
+    const found = await storage.getByIds(
+      missing.map(id => ({ id, type: 'episode' as const })),
+      { includeInactive: true },
+    )
+    for (const m of found) {
+      if (m.type === 'episode') episodeTimes.set(m.data.id, epochMs(m.data.createdAt))
+    }
+    for (const id of missing) {
+      if (!episodeTimes.has(id)) episodeTimes.set(id, null)
+    }
+  }
+
+  return async ({ sourceEpisodeIds, sourceDigestIds }) => {
+    const ids = [...new Set(sourceEpisodeIds)]
+    if (ids.length > 0) {
+      await loadEpisodeTimes(ids)
+      const cited = latest(ids.map(id => episodeTimes.get(id) ?? null))
+      if (cited !== null) return cited
+    }
+    return byDigests(sourceDigestIds)
+  }
+}
+
+/** Latest `createdAt` of the given episodes, in epoch milliseconds; null when none parses. */
+export function latestEpisodeTime(episodes: ReadonlyArray<Pick<Episode, 'createdAt'>>): number | null {
+  return latest(episodes.map(e => epochMs(e.createdAt)))
 }

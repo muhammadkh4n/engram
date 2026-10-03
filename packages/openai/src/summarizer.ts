@@ -2,7 +2,9 @@ import OpenAI from 'openai'
 import type {
   SummarizeOptions,
   SummaryResult,
-  KnowledgeCandidate,
+  ExtractFactsInput,
+  ExtractedFact,
+  FactSourceEpisode,
   ExtractedEntity,
   ExtractedEntityType,
   SalienceClassification,
@@ -18,6 +20,8 @@ import type {
 } from '@engram-mem/core'
 import {
   EmptyClassifierReplyError,
+  EmptyFactReplyError,
+  FactExtractionError,
   SUPERSESSION_NEW_FACT_KEY,
   UnclassifiableReplyError,
   isSupersessionFactKind,
@@ -71,20 +75,42 @@ Respond in JSON with exactly this shape:
 
 Be concise. Extract only the most important information. If no decisions were made, use an empty array.`
 
-const KNOWLEDGE_SYSTEM_PROMPT = `You are a knowledge extractor for an AI assistant's memory system. Given content, extract structured knowledge facts.
+const FACTS_SYSTEM_PROMPT = `You extract facts for a long-term memory from conversation episodes between a user and an AI assistant. The episodes are numbered E1, E2, and so on; each shows the date and time it was said and who said it (user, assistant or system). The project the conversation belongs to, if any, is named before them.
 
-Respond in JSON with exactly this shape (an array):
-[
-  {
-    "topic": "the subject this knowledge is about",
-    "content": "the actual knowledge or fact",
-    "confidence": 0.9,
-    "sourceDigestIds": [],
-    "sourceEpisodeIds": []
-  }
-]
+Write every statement so that a reader who never saw the conversation understands it on its own:
+- Name the subject: the person, project or repository, ticket, or system the claim is about.
+- Resolve every pronoun and every reference such as "the PR", "this task" or "the bug" to what it names.
+- When the claim is a state (what is true, chosen or in use) or an event (something released, merged, fixed, decided or found), give its date, taken from the episode it rests on.
 
-Extract facts, preferences, decisions, and important patterns. Assign confidence (0-1) based on how clearly stated the knowledge is. Return an empty array if no knowledge can be extracted.`
+Rules:
+- One claim per statement.
+- State only what the episodes state: no inference, no guesses, no hedging ("may", "possibly", "seems").
+- Skip meta and summary-speak that carries no specific claim, such as "several PRs were merged" or "issues were discussed".
+- Skip anything the episodes do not fully state. Never write "not specified", "unknown" or "incomplete".
+- Every fact cites the numbers of the episodes it rests on.
+- When the episodes hold no such fact, return an empty list.
+
+Reply with only a JSON object of exactly this shape:
+{"facts":[{"topic":"short subject label","statement":"the standalone fact","confidence":0.9,"episodes":["E1"]}]}
+
+confidence (0 to 1) is how clearly the episodes state the claim.`
+
+/** Episode text per extraction call. Episodes are never cut, so a single
+ *  episode above this goes alone in its own call. */
+const FACTS_CHUNK_MAX_CHARS = 24_000
+/** Reply budget: a base plus tokens per 1,000 chars of episode text. Facts
+ *  scale with the text they are drawn from, not with how many turns carry it;
+ *  a per-episode budget starves a few long turns, and their call then fails on
+ *  every run. */
+const FACTS_REPLY_BASE_TOKENS = 300
+const FACTS_REPLY_TOKENS_PER_1K_CHARS = 110
+const FACTS_REPLY_MAX_TOKENS = 3_000
+
+interface FactEpisodeChunk {
+  episodes: FactSourceEpisode[]
+  /** Summed `content.length` of the chunk's episodes. */
+  chars: number
+}
 
 const ENTITY_SYSTEM_PROMPT = `You are a named-entity extractor for a cognitive memory graph. Given text from a conversation episode, identify REAL entities worth storing as graph nodes for retrieval.
 
@@ -397,8 +423,13 @@ export class OpenAISummarizer {
       temperature: 0.3,
     })
 
-    const raw = resp.choices[0]?.message?.content ?? '{}'
-    return this.parseSummaryResult(raw, content)
+    const choice = resp.choices[0]
+    // A reply cut at max_tokens can still close its JSON by chance; its text is
+    // then a fragment, so it is never parsed (chatCreate has already logged it).
+    if (choice?.finish_reason === 'length') {
+      throw new Error('summarize: reply cut off at max_tokens')
+    }
+    return this.parseSummaryResult(choice?.message?.content ?? '')
   }
 
   async digestTranscript(
@@ -597,19 +628,56 @@ export class OpenAISummarizer {
     }
   }
 
-  async extractKnowledge(content: string): Promise<KnowledgeCandidate[]> {
-    const resp = await this.chatCreate('extractKnowledge', {
+  /**
+   * Standalone facts from source episodes (see IntelligenceAdapter.extractFacts).
+   * Chunks run one after another; any failed chunk rejects the whole batch, so
+   * the caller never stores a partial extraction as complete.
+   */
+  async extractFacts(input: ExtractFactsInput): Promise<ExtractedFact[]> {
+    const facts: ExtractedFact[] = []
+    for (const chunk of chunkFactEpisodes(input.episodes)) {
+      facts.push(...(await this.extractFactsChunk(chunk, input.projectId)))
+    }
+    return facts
+  }
+
+  private async extractFactsChunk(chunk: FactEpisodeChunk, projectId: string | null): Promise<ExtractedFact[]> {
+    const { episodes, chars } = chunk
+    const resp = await this.chatCreate('extractFacts', {
       model: this.model,
       messages: [
-        { role: 'system', content: KNOWLEDGE_SYSTEM_PROMPT },
-        { role: 'user', content: content },
+        { role: 'system', content: FACTS_SYSTEM_PROMPT },
+        { role: 'user', content: buildFactsUserMessage(episodes, projectId) },
       ],
-      max_tokens: 1000,
-      temperature: 0.2,
+      max_tokens: Math.min(
+        FACTS_REPLY_BASE_TOKENS + Math.ceil((chars * FACTS_REPLY_TOKENS_PER_1K_CHARS) / 1000),
+        FACTS_REPLY_MAX_TOKENS,
+      ),
+      temperature: 0,
+      response_format: { type: 'json_object' },
     })
-
-    const raw = resp.choices[0]?.message?.content ?? '[]'
-    return this.parseKnowledgeCandidates(raw)
+    const choice = resp.choices?.[0]
+    const raw = choice?.message?.content ?? ''
+    // A 200 with nothing in it, cut off at max_tokens or not, is a provider
+    // glitch, not a reply the episodes produced: resending them later can
+    // succeed, so it is transient and is never counted against the batch.
+    if (raw.trim() === '') {
+      throw new EmptyFactReplyError(
+        `extractFacts: empty reply (finish_reason=${choice?.finish_reason ?? 'none'}, ${episodes.length} episodes)`,
+      )
+    }
+    // A cut reply can still close its JSON after dropping later facts, so it is
+    // never parsed (chatCreate has already logged it).
+    if (choice?.finish_reason === 'length') {
+      throw new FactExtractionError('length', `extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
+    }
+    let reply: Record<string, unknown>
+    try {
+      reply = extractJsonReply(raw, isFactsReply) as Record<string, unknown>
+    } catch {
+      throw new FactExtractionError('parse', `extractFacts: reply holds no {"facts": [...]} object (chars=${raw.length})`)
+    }
+    return parseExtractedFacts(reply['facts'] as unknown[], episodes)
   }
 
   /**
@@ -955,62 +1023,30 @@ Be discriminating — most documents should score below 5. Only score 8+ when th
     }
   }
 
-  private parseSummaryResult(raw: string, originalContent: string): SummaryResult {
+  /** Throws rather than guessing: the caller stores `text` as the digest, so a
+   *  raw reply or a cut of the source content must never stand in for it. */
+  private parseSummaryResult(raw: string): SummaryResult {
+    let obj: Record<string, unknown>
     try {
-      const obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
-
-      return {
-        text: typeof obj['text'] === 'string' ? obj['text'] : originalContent.slice(0, 500),
-        topics: Array.isArray(obj['topics'])
-          ? (obj['topics'] as unknown[]).filter((t): t is string => typeof t === 'string')
-          : [],
-        entities: Array.isArray(obj['entities'])
-          ? (obj['entities'] as unknown[]).filter((e): e is string => typeof e === 'string')
-          : [],
-        decisions: Array.isArray(obj['decisions'])
-          ? (obj['decisions'] as unknown[]).filter((d): d is string => typeof d === 'string')
-          : [],
-      }
+      obj = extractJsonReply(raw, isPlainObject) as Record<string, unknown>
     } catch {
-      // Graceful fallback to raw text
-      return {
-        text: raw.slice(0, 500),
-        topics: [],
-        entities: [],
-        decisions: [],
-      }
+      throw new Error(`summarize: reply holds no JSON object (chars=${raw.length})`)
+    }
+    const text = obj['text']
+    if (typeof text !== 'string' || text.trim() === '') {
+      throw new Error('summarize: reply has no text')
+    }
+    return {
+      text,
+      topics: stringsOf(obj['topics']),
+      entities: stringsOf(obj['entities']),
+      decisions: stringsOf(obj['decisions']),
     }
   }
+}
 
-  private parseKnowledgeCandidates(raw: string): KnowledgeCandidate[] {
-    try {
-      const parsed = extractJsonReply(raw, isCandidateList) as unknown[]
-
-      return parsed
-        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-        .map((item) => ({
-          topic: typeof item['topic'] === 'string' ? item['topic'] : '',
-          content: typeof item['content'] === 'string' ? item['content'] : '',
-          confidence:
-            typeof item['confidence'] === 'number'
-              ? Math.min(1, Math.max(0, item['confidence']))
-              : 0.5,
-          sourceDigestIds: Array.isArray(item['sourceDigestIds'])
-            ? (item['sourceDigestIds'] as unknown[]).filter(
-                (id): id is string => typeof id === 'string'
-              )
-            : [],
-          sourceEpisodeIds: Array.isArray(item['sourceEpisodeIds'])
-            ? (item['sourceEpisodeIds'] as unknown[]).filter(
-                (id): id is string => typeof id === 'string'
-              )
-            : [],
-        }))
-        .filter((c) => c.topic.length > 0 && c.content.length > 0)
-    } catch {
-      return []
-    }
-  }
+function stringsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1019,11 +1055,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function isSalienceVerdict(value: unknown): boolean {
   return isPlainObject(value) && typeof value['store'] === 'boolean'
-}
-
-/** A list holding at least one object; `[]` and `[1]` in prose are not candidates. */
-function isCandidateList(value: unknown): boolean {
-  return Array.isArray(value) && value.some(isPlainObject)
 }
 
 function emptyVerdict(): SupersessionVerdict {
@@ -1075,6 +1106,81 @@ function pickKinds(raw: unknown, keys: ReadonlyArray<string>): SupersessionVerdi
     if (isSupersessionFactKind(kind)) kinds[key] = kind
   }
   return kinds
+}
+
+function isFactsReply(value: unknown): boolean {
+  return isPlainObject(value) && Array.isArray(value['facts'])
+}
+
+/** Whole-episode chunks of at most FACTS_CHUNK_MAX_CHARS episode text each,
+ *  in input order; an episode longer than that is a chunk of its own. */
+function chunkFactEpisodes(episodes: ReadonlyArray<FactSourceEpisode>): FactEpisodeChunk[] {
+  const chunks: FactEpisodeChunk[] = []
+  let current: FactSourceEpisode[] = []
+  let chars = 0
+  for (const ep of episodes) {
+    if (current.length > 0 && chars + ep.content.length > FACTS_CHUNK_MAX_CHARS) {
+      chunks.push({ episodes: current, chars })
+      current = []
+      chars = 0
+    }
+    current.push(ep)
+    chars += ep.content.length
+  }
+  if (current.length > 0) chunks.push({ episodes: current, chars })
+  return chunks
+}
+
+function buildFactsUserMessage(episodes: ReadonlyArray<FactSourceEpisode>, projectId: string | null): string {
+  const header = projectId ? `Project: ${projectId}` : 'Project: none (not tied to one project)'
+  const blocks = episodes.map(
+    (ep, i) => `--- E${i + 1} · ${formatStatedAt(ep.createdAt)} · ${ep.role}\n${ep.content}`,
+  )
+  return [header, '', ...blocks].join('\n')
+}
+
+/** Index into the call's episodes for a citation such as "E3" (also "3" or 3),
+ *  or -1 when it names no episode of the call. */
+function citedEpisodeIndex(citation: unknown, count: number): number {
+  let n: number
+  if (typeof citation === 'number') {
+    n = citation
+  } else if (typeof citation === 'string') {
+    const m = /^\s*E?(\d+)\s*$/i.exec(citation)
+    if (!m) return -1
+    n = Number(m[1])
+  } else {
+    return -1
+  }
+  return Number.isInteger(n) && n >= 1 && n <= count ? n - 1 : -1
+}
+
+/** Keeps facts with a topic, a statement and at least one citation of an
+ *  episode in the call; citations become episode ids, deduplicated in order. */
+function parseExtractedFacts(items: unknown[], episodes: ReadonlyArray<FactSourceEpisode>): ExtractedFact[] {
+  const facts: ExtractedFact[] = []
+  for (const item of items) {
+    if (!isPlainObject(item)) continue
+    const topic = typeof item['topic'] === 'string' ? item['topic'].trim() : ''
+    const statement = typeof item['statement'] === 'string' ? item['statement'].trim() : ''
+    if (topic === '' || statement === '') continue
+    const cited = Array.isArray(item['episodes']) ? item['episodes'] : []
+    const episodeIds: string[] = []
+    for (const citation of cited) {
+      const index = citedEpisodeIndex(citation, episodes.length)
+      if (index === -1) continue
+      const id = episodes[index]!.id
+      if (!episodeIds.includes(id)) episodeIds.push(id)
+    }
+    if (episodeIds.length === 0) continue
+    const rawConfidence = item['confidence']
+    const confidence =
+      typeof rawConfidence === 'number' && Number.isFinite(rawConfidence)
+        ? Math.min(1, Math.max(0, rawConfidence))
+        : 0.5
+    facts.push({ topic, statement, confidence, episodeIds })
+  }
+  return facts
 }
 
 /** ISO timestamp of a statement time, or `unknown date` when absent or unparseable. */

@@ -102,6 +102,28 @@ export interface Digest {
   metadata: Record<string, unknown>
   createdAt: Date
   projectId: string | null  // Wave 5
+  /**
+   * When deep sleep extracted this digest's facts from its source episodes.
+   * Null or absent: extraction is still pending, so a failed run retries it.
+   */
+  factsExtractedAt?: Date | null
+  /**
+   * Fact-extraction failures counted against this digest: failures the same
+   * run proved were the digest's own, because another digest got through the
+   * same step. Deep sleep stops retrying a digest once this reaches its
+   * attempt cap; the digest stays unextracted. Absent counts as 0.
+   */
+  factExtractionAttempts?: number
+  /**
+   * Every failed fact-extraction unit on this digest, counted or not. It sets
+   * the backoff before the next try. Absent counts as 0.
+   */
+  factExtractionFailures?: number
+  /**
+   * Earliest time deep sleep tries this digest's extraction again after a
+   * failure. Null or absent: due now.
+   */
+  factsNextAttemptAt?: Date | null
 }
 
 export interface SemanticMemory {
@@ -443,6 +465,9 @@ export interface ConsolidateResult {
   cycle: string
   digestsCreated?: number
   episodesProcessed?: number
+  /** Light-sleep batches summarized by the heuristic because the
+   *  intelligence summarizer failed or returned an over-budget summary. */
+  summaryFallbacks?: number
   promoted?: number
   procedural?: number
   deduplicated?: number
@@ -461,6 +486,25 @@ export interface ConsolidateResult {
   /** Judged conflicts that changed nothing because the judge gave no valid
    *  kind for one of the two facts. */
   kindMissing?: number
+  /** Deep-sleep extraction failures counted against their digest: classed
+   *  `held` by classifyExtractionError, and another digest in the same run
+   *  got through the step that failed. Each gained a failed attempt and
+   *  stays pending below the cap. */
+  extractionFailed?: number
+  /** Deep-sleep digests stamped with no fact read because none of their
+   *  source episodes is live. */
+  noEpisodes?: number
+  /** Deep-sleep digests whose failure this run reached the attempt cap; no
+   *  later run retries them. */
+  extractionExhausted?: number
+  /** Deep-sleep digests left unextracted because a transient failure ended
+   *  the run's loop: the digest that hit it and every later one in the
+   *  batch. None gains an attempt; the later ones stay due. */
+  extractionDeferred?: number
+  /** Deep-sleep digests whose unit failed this run, counted or not. Each
+   *  waits out a backoff that doubles with its failures before it is due
+   *  again. */
+  extractionBackedOff?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number
@@ -492,12 +536,6 @@ export interface ConsolidateResult {
   /** Total episode count snapshotted at the end of this run. Used by the
    *  delta gate in isDreamCycleDue() to skip runs when ingest has been quiet. */
   episodeCount?: number
-  /** Total digest count snapshotted at the end of this run. Used by the
-   *  delta gate in isDeepSleepDue() (v0.3.14) to skip runs when no new
-   *  digests have accumulated since the last completed deep sleep —
-   *  prevents the runaway-loop pattern where deep sleep re-processes the
-   *  same 7-day digest window every 60s. */
-  digestCount?: number
   /** Number of LLM summary calls actually issued during this run. */
   llmCallsCount?: number
   /** Best-effort USD estimate of LLM cost (input + output tokens × per-call pricing). */

@@ -6,15 +6,17 @@ import {
 } from '../../src/consolidation/deep-sleep.js'
 import type { SupersessionSettings } from '../../src/consolidation/deep-sleep.js'
 import type {
+  ExtractFactsInput,
   IntelligenceAdapter,
   SupersessionCandidate,
   SupersessionFact,
   SupersessionVerdict,
 } from '../../src/adapters/intelligence.js'
-import { supersessionRuleOutcome } from '../../src/adapters/intelligence.js'
+import { FactExtractionError, supersessionRuleOutcome } from '../../src/adapters/intelligence.js'
 import type { GraphPort } from '../../src/adapters/graph.js'
 import type { Digest, SearchResult, SemanticMemory } from '../../src/types.js'
-import { makeDigest, makeEpisode, makeMockStorage, resetIdCounter } from './mock-storage.js'
+import { makeDigest, makeEpisode, makeMockStorage, resetIdCounter, withSourceTurns } from './mock-storage.js'
+import type { MockStorageOptions } from './mock-storage.js'
 import { createMemory } from '../../src/create-memory.js'
 
 const STORED_AT = new Date('2026-09-01T10:00:00Z')
@@ -55,8 +57,14 @@ function neighbour(
   }
 }
 
+/** Mock storage in which every digest without source episodes has one live
+ *  user turn saying its summary. */
+function turnStorage(opts: MockStorageOptions): ReturnType<typeof makeMockStorage> {
+  return makeMockStorage(withSourceTurns(opts))
+}
+
 /** Three digests whose text matches no extraction pattern, so the only
- *  semantic candidate is the one the stub extractKnowledge returns. */
+ *  semantic candidate is the one the stub extractFacts returns. */
 function plainDigests(projectId: string | null = null): Digest[] {
   return [
     makeDigest({ summary: 'Session notes one.', projectId, createdAt: DIGEST_AT }),
@@ -70,17 +78,24 @@ function allState(...ids: string[]): SupersessionVerdict['kinds'] {
   return Object.fromEntries(['new', ...ids].map(id => [id, 'state' as const]))
 }
 
+/** An extractFacts stub that returns one reranker fact, citing the first
+ *  episode it is given, on its first call and nothing after. */
+function factOnce(statement: string): NonNullable<IntelligenceAdapter['extractFacts']> {
+  return vi.fn<NonNullable<IntelligenceAdapter['extractFacts']>>()
+    .mockImplementationOnce(async ({ episodes }) => [
+      { topic: 'reranker', statement, confidence: 0.8, episodeIds: [episodes[0]!.id] },
+    ])
+    .mockResolvedValue([])
+}
+
 type Judge = (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => Promise<SupersessionVerdict>
 
 function intelligenceWith(content: string, judge?: Judge): IntelligenceAdapter & {
   judgeSupersession: ReturnType<typeof vi.fn>
 } {
-  const extractKnowledge = vi.fn()
-    .mockResolvedValueOnce([{ topic: 'reranker', content, confidence: 0.8, sourceDigestIds: [], sourceEpisodeIds: [] }])
-    .mockResolvedValue([])
   return {
     embed: vi.fn(async () => VECTOR),
-    extractKnowledge,
+    extractFacts: factOnce(content),
     judgeSupersession: vi.fn(judge ?? (async () => ({ same: [], conflicts: [], kinds: {} }))),
   }
 }
@@ -104,7 +119,7 @@ describe('deep sleep fact supersession', () => {
 
   describe('llm mode', () => {
     it('retires a stored fact that a one-word update replaces at cosine 0.95 instead of dropping the update', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
       })
@@ -124,7 +139,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('passes the new fact and each neighbour with its statement date to the judge', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
       })
@@ -139,7 +154,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('still deduplicates a true duplicate the judge calls the same claim', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'We rerank with gte.', 0.97)],
       })
@@ -154,7 +169,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('deduplicates on a neighbour above 0.88 when the judge lists it in neither list', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is gte!', 0.93)],
       })
@@ -168,7 +183,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('inserts as new when the judge finds neither a replacement nor a duplicate', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker runs on CPU.', 0.7)],
       })
@@ -183,7 +198,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('retires every replaced neighbour, records the first as supersedes and ignores ids outside the pool', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [
           neighbour('old-1', 'The reranker is bge.', 0.9),
@@ -210,7 +225,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('stamps forgottenAt on exactly the retired facts\' graph nodes, in the statement that sets validUntil', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [
           neighbour('old-1', 'The reranker is bge.', 0.9),
@@ -240,7 +255,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('ignores a neighbour from a different project', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests('engram'),
         semanticNearestResults: [neighbour('other-1', 'The reranker is bge.', 0.95, { projectId: 'ouija' })],
       })
@@ -256,7 +271,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('pairs a shared fact only with shared neighbours', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(null),
         semanticNearestResults: [
           neighbour('tagged-1', 'The reranker is bge.', 0.95, { projectId: 'engram' }),
@@ -277,7 +292,7 @@ describe('deep sleep fact supersession', () => {
         neighbour('retired', 'The reranker was bge.', 0.99, { supersededBy: 'x' }),
         ...[0.61, 0.9, 0.7, 0.8, 0.65, 0.75].map((s, i) => neighbour(`n${i}`, `Reranker fact ${i}.`, s)),
       ]
-      const storage = makeMockStorage({ initialDigests: plainDigests(), semanticNearestResults: nearest })
+      const storage = turnStorage({ initialDigests: plainDigests(), semanticNearestResults: nearest })
       const intelligence = intelligenceWith('The reranker is gte.')
 
       await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
@@ -288,7 +303,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('makes no judge call when no neighbour qualifies', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('low', 'Unrelated fact.', 0.3)],
       })
@@ -307,7 +322,7 @@ describe('deep sleep fact supersession', () => {
         makeDigest({ summary: 'Filler content.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: digests,
         semanticSearchResults: [neighbour('existing-1', 'I like JavaScript.', 0.5)],
         semanticNearestResults: [neighbour('existing-1', 'I like JavaScript.', 0.7)],
@@ -335,7 +350,7 @@ describe('deep sleep fact supersession', () => {
 
   describe('regex mode', () => {
     it('does not deduplicate against a neighbour from a different project', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests('engram'),
         semanticNearestResults: [neighbour('other-1', 'The reranker is gte.', 0.97, { projectId: 'ouija' })],
       })
@@ -349,14 +364,12 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('does not deduplicate on equal text from a different project', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests('engram'),
         semanticSearchResults: [neighbour('other-1', 'The reranker is gte.', 0.5, { projectId: 'ouija' })],
       })
       const intelligence: IntelligenceAdapter = {
-        extractKnowledge: vi.fn()
-          .mockResolvedValueOnce([{ topic: 'reranker', content: 'The reranker is gte.', confidence: 0.8, sourceDigestIds: [], sourceEpisodeIds: [] }])
-          .mockResolvedValue([]),
+        extractFacts: factOnce('The reranker is gte.'),
       }
 
       const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: REGEX })
@@ -366,7 +379,7 @@ describe('deep sleep fact supersession', () => {
     })
 
     it('never calls the judge', async () => {
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: plainDigests(),
         semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
       })
@@ -387,7 +400,7 @@ describe('deep sleep fact supersession', () => {
         makeDigest({ summary: 'Filler content.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: digests,
         semanticSearchResults: [neighbour('existing-1', 'I like JavaScript.', 0.5)],
         semanticNearestResults: [neighbour('existing-1', 'I like JavaScript.', 0.7)],
@@ -433,7 +446,7 @@ describe('deep sleep fact supersession', () => {
         makeDigest({ summary: 'Filler content.' }),
         makeDigest({ summary: 'More filler.' }),
       ]
-      const storage = makeMockStorage({
+      const storage = turnStorage({
         initialDigests: digests,
         semanticSearchResults: [neighbour('existing-1', 'I like JavaScript.', 0.5)],
         semanticNearestResults: [neighbour('existing-1', 'I like JavaScript.', 0.7)],
@@ -453,7 +466,7 @@ describe('deep sleep fact supersession', () => {
       async (mode) => {
         vi.stubEnv('ENGRAM_SUPERSESSION', mode)
         vi.stubEnv('ENGRAM_SUPERSESSION_MIN_COSINE', 'high')
-        const storage = makeMockStorage({
+        const storage = turnStorage({
           initialDigests: plainDigests(),
           semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
         })
@@ -482,14 +495,17 @@ describe('deep sleep supersession direction from statement time', () => {
   const BGE = 'The reranker is bge.'
   const GTE = 'The reranker is gte.'
 
-  /** Extracts one reranker fact from each digest that names a model. */
-  function extractingIntelligence(): IntelligenceAdapter & { judgeSupersession: ReturnType<typeof vi.fn> } {
+  /** Extracts one reranker fact from each turn that names a model, citing that turn. */
+  function extractingIntelligence(): IntelligenceAdapter & {
+    judgeSupersession: ReturnType<typeof vi.fn>
+    extractFacts: ReturnType<typeof vi.fn>
+  } {
     return {
       embed: vi.fn(async () => VECTOR),
-      extractKnowledge: vi.fn(async (summary: string) => {
-        const content = summary.includes('bge') ? BGE : summary.includes('gte') ? GTE : null
-        return content ? [{ topic: 'reranker', content, confidence: 0.8, sourceDigestIds: [], sourceEpisodeIds: [] }] : []
-      }),
+      extractFacts: vi.fn(async ({ episodes }: ExtractFactsInput) => episodes.flatMap(e => {
+        const statement = e.content.includes('bge') ? BGE : e.content.includes('gte') ? GTE : null
+        return statement ? [{ topic: 'reranker', statement, confidence: 0.8, episodeIds: [e.id] }] : []
+      })),
       // Relation only: equal text is the same claim, any other reranker
       // value conflicts. The stub knows nothing about dates.
       judgeSupersession: vi.fn(async (fact: SupersessionFact, candidates: ReadonlyArray<SupersessionCandidate>) => ({
@@ -516,16 +532,15 @@ describe('deep sleep supersession direction from statement time', () => {
     return storage.semantic._memories.filter(m => m.supersededBy == null).map(m => m.content)
   }
 
-  it('keeps the Wednesday value live over three runs on the same window that still holds the Monday digest', async () => {
-    const monEp = makeEpisode({ sessionId: 'mon', createdAt: MONDAY })
-    const wedEp = makeEpisode({ sessionId: 'wed', createdAt: WEDNESDAY })
-    // getRecent returns newest first, as the stores do.
+  it('extracts each digest once: later runs over the same digests read, store and judge nothing', async () => {
+    const monEp = makeEpisode({ sessionId: 'mon', content: 'Monday: the reranker is bge.', createdAt: MONDAY })
+    const wedEp = makeEpisode({ sessionId: 'wed', content: 'Wednesday: moved the reranker to gte.', createdAt: WEDNESDAY })
     const digests = [
       makeDigest({ sessionId: 'wed', summary: 'Wednesday: moved the reranker to gte.', sourceEpisodeIds: [wedEp.id], createdAt: new Date('2026-09-30T23:00:00Z') }),
       makeDigest({ sessionId: 'x', summary: 'Unrelated notes.', createdAt: new Date('2026-09-29T23:00:00Z') }),
       makeDigest({ sessionId: 'mon', summary: 'Monday: the reranker is bge.', sourceEpisodeIds: [monEp.id], createdAt: new Date('2026-09-28T23:00:00Z') }),
     ]
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: digests,
       episodesPerSession: new Map([['mon', [monEp]], ['wed', [wedEp]]]),
     })
@@ -535,21 +550,90 @@ describe('deep sleep supersession direction from statement time', () => {
     const first = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
     expect(liveContents(storage)).toEqual([GTE])
     expect(first).toEqual(expect.objectContaining({ promoted: 2, superseded: 1, stale: 0 }))
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(3)
+    const judgeCalls = intelligence.judgeSupersession.mock.calls.length
 
     for (let run = 0; run < 2; run++) {
-      const again = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
-      expect(liveContents(storage)).toEqual([GTE])
-      expect(again).toEqual(expect.objectContaining({ promoted: 0, superseded: 0, stale: 1, deduplicated: 1 }))
+      const again = await deepSleep(storage, intelligence, { minDigests: 0, supersession: LLM })
+      expect(again).toEqual(expect.objectContaining({ promoted: 0, superseded: 0, stale: 0, deduplicated: 0 }))
     }
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(3)
+    expect(intelligence.judgeSupersession).toHaveBeenCalledTimes(judgeCalls)
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+    expect(liveContents(storage)).toEqual([GTE])
     expect(storage.semantic._memories).toHaveLength(2)
   })
 
+  it('judges a digest retried after a failed extraction by when its turns were said', async () => {
+    const monEp = makeEpisode({ sessionId: 'mon', content: 'Monday: the reranker is bge.', createdAt: MONDAY })
+    const wedEp = makeEpisode({ sessionId: 'wed', content: 'Wednesday: moved the reranker to gte.', createdAt: WEDNESDAY })
+    const storage = turnStorage({
+      initialDigests: [
+        makeDigest({ sessionId: 'mon', summary: 'Monday digest.', sourceEpisodeIds: [monEp.id], createdAt: new Date('2026-09-28T23:00:00Z') }),
+        makeDigest({ sessionId: 'wed', summary: 'Wednesday digest.', sourceEpisodeIds: [wedEp.id], createdAt: new Date('2026-09-30T23:00:00Z') }),
+      ],
+      episodesPerSession: new Map([['mon', [monEp]], ['wed', [wedEp]]]),
+    })
+    statefulSemantic(storage)
+    const intelligence = extractingIntelligence()
+    const extract = intelligence.extractFacts.getMockImplementation()!
+    intelligence.extractFacts.mockRejectedValueOnce(new FactExtractionError('parse', 'reply holds no facts object'))
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T12:00:00Z'))
+    try {
+      const first = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
+      expect(first).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 1 }))
+      expect(liveContents(storage)).toEqual([GTE])
+
+      // The failed digest is backed off; it is due again a minute later.
+      vi.setSystemTime(new Date('2026-10-01T12:01:00Z'))
+      intelligence.extractFacts.mockImplementation(extract)
+      const retry = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
+
+      expect(retry).toEqual(expect.objectContaining({ promoted: 0, stale: 1, extractionFailed: 0 }))
+      expect(liveContents(storage)).toEqual([GTE])
+      expect(await storage.digests.getPendingFactExtraction(10, 3, new Date('2026-10-02T12:00:00Z'))).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('dates a stored fact by the turns it cites, not by its digest\'s last turn', async () => {
+    const tuesday = new Date('2026-09-29T09:00:00Z')
+    const citedEp = makeEpisode({ sessionId: 'old', createdAt: MONDAY })
+    const lastEp = makeEpisode({ sessionId: 'old', createdAt: new Date('2026-10-01T09:00:00Z') })
+    const oldDigest = makeDigest({
+      sessionId: 'old',
+      sourceEpisodeIds: [citedEp.id, lastEp.id],
+      createdAt: new Date('2026-10-01T10:00:00Z'),
+      factsExtractedAt: new Date('2026-10-01T11:00:00Z'),
+    })
+    const stored = neighbour('old-1', BGE, 0.95, { sourceDigestIds: [oldDigest.id], sourceEpisodeIds: [citedEp.id] }).item
+    const storage = turnStorage({
+      initialDigests: [oldDigest, makeDigest({ summary: 'Tuesday turn.', createdAt: tuesday })],
+      episodesPerSession: new Map([['old', [citedEp, lastEp]]]),
+      initialSemanticMemories: [stored],
+      semanticNearestResults: [{ item: stored, similarity: 0.95 }],
+    })
+    const intelligence = intelligenceWith(GTE, async () => ({ same: [], conflicts: ['old-1'], kinds: allState('old-1') }))
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
+
+    expect(intelligence.judgeSupersession).toHaveBeenCalledWith(
+      { topic: 'reranker', content: GTE, statedAt: tuesday },
+      [{ id: 'old-1', topic: 'reranker', content: BGE, statedAt: MONDAY }],
+    )
+    expect(storage.semantic.markSuperseded).toHaveBeenCalledWith('old-1', expect.any(String))
+    expect(result).toEqual(expect.objectContaining({ promoted: 1, superseded: 1, stale: 0 }))
+  })
+
   it('takes the statement time from the source episodes, not from when the digest was written', async () => {
-    const monEp = makeEpisode({ sessionId: 'mon', createdAt: MONDAY })
-    const wedEp = makeEpisode({ sessionId: 'wed', createdAt: WEDNESDAY })
+    const monEp = makeEpisode({ sessionId: 'mon', content: 'Monday: the reranker is bge.', createdAt: MONDAY })
+    const wedEp = makeEpisode({ sessionId: 'wed', content: 'Wednesday: moved the reranker to gte.', createdAt: WEDNESDAY })
     // Both digests written by one light sleep: their own times cannot order them.
     const writtenAt = new Date('2026-10-01T02:00:00Z')
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: [
         makeDigest({ sessionId: 'wed', summary: 'Wednesday: moved the reranker to gte.', sourceEpisodeIds: [wedEp.id], createdAt: writtenAt }),
         makeDigest({ sessionId: 'mon', summary: 'Monday: the reranker is bge.', sourceEpisodeIds: [monEp.id], createdAt: writtenAt }),
@@ -566,7 +650,7 @@ describe('deep sleep supersession direction from statement time', () => {
   })
 
   it('does not insert a candidate that conflicts with a stored fact stated later', async () => {
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('newer-1', 'The reranker is bge.', 0.95, { createdAt: new Date('2026-09-25T10:00:00Z') })],
     })
@@ -581,7 +665,7 @@ describe('deep sleep supersession direction from statement time', () => {
   })
 
   it('does nothing when the conflicting facts were stated at the same time', async () => {
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('same-time', 'The reranker is bge.', 0.95, { createdAt: DIGEST_AT })],
     })
@@ -597,18 +681,19 @@ describe('deep sleep supersession direction from statement time', () => {
 
   it('re-reads pool rows so the judge sees their topics and the statement time of their digests', async () => {
     const oldEp = makeEpisode({ sessionId: 'old', createdAt: new Date('2026-08-10T08:00:00Z') })
-    const oldDigest = makeDigest({ sessionId: 'old', sourceEpisodeIds: [oldEp.id], createdAt: new Date('2026-08-11T00:00:00Z') })
+    const oldDigest = makeDigest({
+      sessionId: 'old', sourceEpisodeIds: [oldEp.id], createdAt: new Date('2026-08-11T00:00:00Z'), factsExtractedAt: new Date('2026-08-12T00:00:00Z'),
+    })
     const current = plainDigests()
     // A vector-recall row as PostgREST maps it: no topic, no source digests.
     const partial = neighbour('old-1', 'The reranker is bge.', 0.95, { topic: '', sourceDigestIds: [] })
     const stored = { ...partial.item, topic: 'reranker', sourceDigestIds: [oldDigest.id], createdAt: new Date('2026-09-02T00:00:00Z') }
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: [...current, oldDigest],
       episodesPerSession: new Map([['old', [oldEp]]]),
       initialSemanticMemories: [stored],
       semanticNearestResults: [partial],
     })
-    vi.mocked(storage.digests.getRecent).mockResolvedValue(current)
     const intelligence = intelligenceWith('The reranker is gte.')
 
     await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
@@ -621,7 +706,7 @@ describe('deep sleep supersession direction from statement time', () => {
 
   it('makes no judge call for a pool row retired since the nearest-neighbour read', async () => {
     const partial = neighbour('old-1', 'The reranker is bge.', 0.95)
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: plainDigests(),
       initialSemanticMemories: [{ ...partial.item, supersededBy: 'someone-else' }],
       semanticNearestResults: [partial],
@@ -635,7 +720,7 @@ describe('deep sleep supersession direction from statement time', () => {
   })
 
   it('applies the settings passed to Memory to consolidate()', async () => {
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('old-1', 'The reranker is bge.', 0.95)],
     })
@@ -666,7 +751,7 @@ describe('deep sleep supersession retires only current-state facts', () => {
     neighbours: SearchResult<SemanticMemory>[],
     verdict: Partial<SupersessionVerdict>,
   ): Promise<{ storage: ReturnType<typeof makeMockStorage>; result: Awaited<ReturnType<typeof deepSleep>> }> {
-    const storage = makeMockStorage({ initialDigests: plainDigests(), semanticNearestResults: neighbours })
+    const storage = turnStorage({ initialDigests: plainDigests(), semanticNearestResults: neighbours })
     const intelligence = intelligenceWith('The reranker is gte.', async () => verdict as SupersessionVerdict)
     const result = await deepSleep(storage, intelligence, { minDigests: 3, supersession: LLM })
     return { storage, result }
@@ -818,7 +903,7 @@ describe('deep sleep supersession retires only current-state facts', () => {
   })
 
   it('reports keptNotState from consolidate()', async () => {
-    const storage = makeMockStorage({
+    const storage = turnStorage({
       initialDigests: plainDigests(),
       semanticNearestResults: [neighbour('old-1', 'Stage one of the rollout completed.', 0.95)],
     })

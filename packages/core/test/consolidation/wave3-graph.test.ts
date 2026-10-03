@@ -5,6 +5,7 @@ import { dreamCycle } from '../../src/consolidation/dream-cycle.js'
 import { decayPass } from '../../src/consolidation/decay-pass.js'
 import { makeMockStorage, makeEpisode } from './mock-storage.js'
 import type { GraphPort, GraphQueryResult } from '../../src/adapters/graph.js'
+import type { Digest } from '../../src/types.js'
 
 // ---------------------------------------------------------------------------
 // Mock graph that records all Cypher calls
@@ -220,6 +221,14 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
   // -----------------------------------------------------------------------
 
   describe('deepSleep', () => {
+    /** Digests awaiting fact extraction, each over one live user turn that
+     *  says its summary. */
+    function givePendingDigests(digests: Array<Omit<Digest, 'projectId'>>): void {
+      const turns = digests.map(d => makeEpisode({ id: d.sourceEpisodeIds[0]!, role: 'user', content: d.summary }))
+      storage.digests.getPendingFactExtraction = vi.fn(async () => digests.map(d => ({ ...d, projectId: null })))
+      storage.episodes.getByIds = vi.fn(async (ids: string[]) => turns.filter(t => ids.includes(t.id)))
+    }
+
     it('creates semantic Memory node with validFrom and CONTRADICTS on supersession', async () => {
       // Set up digests with content that triggers semantic extraction
       const digests = Array.from({ length: 3 }, (_, i) => ({
@@ -235,7 +244,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         createdAt: new Date(),
       }))
 
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
 
       // Mock findEarliestInDigests
       storage.episodes.findEarliestInDigests = vi.fn(async () => ({
@@ -263,7 +272,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
       expect(result.graphNodesCreated).toBeDefined()
     })
 
-    it('links each fact only to digest context its own topic and content name', async () => {
+    it('links each fact only to context of its cited episodes that its own text names', async () => {
       const digests = Array.from({ length: 3 }, (_, i) => ({
         id: `digest-${i}`,
         sessionId: 'session-1',
@@ -276,19 +285,24 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         metadata: {},
         createdAt: new Date(),
       }))
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
+      // Each fact cites one turn; the turn links all three nodes.
+      const citedGraph = createMockGraph(DEFAULT_CONTEXT.map(row => ({ ...row, frequency: 1 })))
 
-      const result = await deepSleep(storage, undefined, { minDigests: 3 }, graph)
+      const result = await deepSleep(storage, undefined, { minDigests: 3 }, citedGraph)
 
       expect(result.promoted).toBeGreaterThan(0)
-      const reads = graph._readCalls.filter(c => c.query.includes('elementId(ctx) AS nodeId'))
+      const reads = citedGraph._readCalls.filter(c => c.query.includes('elementId(ctx) AS nodeId'))
       expect(reads).toHaveLength(result.promoted!)
-      expect(reads[0].query).toContain('max(r.weight)')
-      const writes = graph._calls.filter(c => c.query.includes('UNWIND $links'))
+      for (const read of reads) {
+        expect(read.query).toContain('count(DISTINCT ep)')
+        expect(read.params?.sourceEpisodeIds).toHaveLength(1)
+      }
+      const writes = citedGraph._calls.filter(c => c.query.includes('UNWIND $links'))
       expect(writes).toHaveLength(result.promoted!)
       for (const write of writes) {
         expect(write.query).toContain('inheritedWeight')
-        expect(write.params?.links).toEqual([{ nodeId: 'el:typescript', weight: 0.5 }])
+        expect(write.params?.links).toEqual([{ nodeId: 'el:typescript', weight: 1 }])
         expect(write.params?.inheritance).toBe(0.7)
       }
       expect(result.graphContextKept).toBe(result.promoted)
@@ -309,7 +323,7 @@ describe('Wave 3: Graph-Aware Consolidation', () => {
         createdAt: new Date(),
       }))
 
-      storage.digests.getRecent = vi.fn(async () => digests)
+      givePendingDigests(digests)
 
       const result = await deepSleep(storage, undefined, { minDigests: 3 }, null)
 

@@ -1,7 +1,7 @@
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { DigestStorage } from '@engram-mem/core'
+import type { DigestStorage, FactExtractionFailure } from '@engram-mem/core'
 import { projectScopeFilter, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 
@@ -140,12 +140,41 @@ export class PostgRestDigestStorage implements DigestStorage {
     return counts
   }
 
+  async getPendingFactExtraction(limit: number, maxAttempts: number, now: Date): Promise<Digest[]> {
+    const { data, error } = await this.client
+      .from('memory_digests')
+      .select('*')
+      .is('facts_extracted_at', null)
+      .lt('fact_extraction_attempts', maxAttempts)
+      .or(`facts_next_attempt_at.is.null,facts_next_attempt_at.lte.${now.toISOString()}`)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(limit)
+    if (error) throw new Error(`Digest getPendingFactExtraction failed: ${error.message}`)
+    return ((data ?? []) as DigestRow[]).map(rowToDigest)
+  }
+
+  async markFactsExtracted(id: string, at: Date): Promise<void> {
+    const { error } = await this.client
+      .from('memory_digests')
+      .update({ facts_extracted_at: at.toISOString() })
+      .eq('id', id)
+    if (error) throw new Error(`Digest markFactsExtracted failed: ${error.message}`)
+  }
+
+  async recordFactExtractionFailure(id: string, failure: FactExtractionFailure): Promise<number> {
+    const { data, error } = await this.client.rpc('engram_digest_fact_failure', {
+      p_id: id,
+      p_counted: failure.counted,
+      p_next: failure.nextAttemptAt.toISOString(),
+    })
+    if (error) throw new Error(`Digest recordFactExtractionFailure failed: ${error.message}`)
+    return typeof data === 'number' ? data : 0
+  }
+
   /**
-   * Total digest count. Optional in DigestStorage; implementing here so the
-   * v0.3.14 deep-sleep delta gate (isDeepSleepDue) can skip no-op runs by
-   * comparing count() against the snapshot stored at the previous run.
-   * Without this, deep sleep keeps re-processing the same 7-day digest
-   * window every 60s — the production IO bug from v0.3.13.
+   * Total digest count, one COUNT(*) query, for stats(). Optional in
+   * DigestStorage; without it stats() sums getCountBySession().
    */
   async count(): Promise<number> {
     const { count, error } = await this.client
@@ -172,6 +201,10 @@ interface DigestRow {
   metadata: Record<string, unknown>
   created_at: string
   project_id?: string | null
+  facts_extracted_at?: string | null
+  fact_extraction_attempts?: number | null
+  fact_extraction_failures?: number | null
+  facts_next_attempt_at?: string | null
 }
 
 interface RecallRow {
@@ -200,6 +233,10 @@ function rowToDigest(row: DigestRow): Digest {
     metadata: row.metadata ?? {},
     createdAt: new Date(row.created_at),
     projectId: row.project_id ?? null,
+    factsExtractedAt: row.facts_extracted_at ? new Date(row.facts_extracted_at) : null,
+    factExtractionAttempts: row.fact_extraction_attempts ?? 0,
+    factExtractionFailures: row.fact_extraction_failures ?? 0,
+    factsNextAttemptAt: row.facts_next_attempt_at ? new Date(row.facts_next_attempt_at) : null,
   }
 }
 

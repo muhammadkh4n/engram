@@ -3,6 +3,7 @@ import type {
   StorageAdapter,
   EpisodeStorage,
   DigestStorage,
+  FactExtractionFailure,
   SemanticStorage,
   ProceduralStorage,
   AssociationStorage,
@@ -128,6 +129,33 @@ export function makeMockDigestStorage(initialDigests: Digest[] = []): MockDigest
         counts[d.sessionId] = (counts[d.sessionId] ?? 0) + 1
       }
       return counts
+    }),
+
+    getPendingFactExtraction: vi.fn(async (limit: number, maxAttempts: number, now: Date) => {
+      return digests
+        .filter(d => !d.factsExtractedAt && (d.factExtractionAttempts ?? 0) < maxAttempts)
+        .filter(d => !d.factsNextAttemptAt || d.factsNextAttemptAt.getTime() <= now.getTime())
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .slice(0, limit)
+    }),
+
+    recordFactExtractionFailure: vi.fn(async (id: string, failure: FactExtractionFailure) => {
+      const index = digests.findIndex(d => d.id === id)
+      if (index < 0) return 0
+      const current = digests[index]!
+      const attempts = (current.factExtractionAttempts ?? 0) + (failure.counted ? 1 : 0)
+      digests[index] = {
+        ...current,
+        factExtractionAttempts: attempts,
+        factExtractionFailures: (current.factExtractionFailures ?? 0) + 1,
+        factsNextAttemptAt: failure.nextAttemptAt,
+      }
+      return attempts
+    }),
+
+    markFactsExtracted: vi.fn(async (id: string, at: Date) => {
+      const index = digests.findIndex(d => d.id === id)
+      if (index >= 0) digests[index] = { ...digests[index]!, factsExtractedAt: at }
     }),
   }
 }
@@ -293,6 +321,7 @@ function mockGetByIds(
   digests: MockDigestStorage,
   semantic: MockSemanticStorage,
   nearestResults: SearchResult<SemanticMemory>[],
+  procedural?: MockProceduralStorage,
 ) {
   return async (
     ids: Array<{ id: string; type: MemoryType }>,
@@ -311,6 +340,9 @@ function mockGetByIds(
       } else if (type === 'semantic') {
         const m = semanticRows.get(id)
         if (m && (lookup?.includeInactive || m.supersededBy == null)) found.push({ type, data: m })
+      } else if (type === 'procedural') {
+        const p = procedural?._memories.find(x => x.id === id)
+        if (p) found.push({ type, data: p })
       }
     }
     return found
@@ -327,6 +359,11 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
     opts.semanticSearchResults,
     opts.semanticNearestResults,
   )
+  const procedural = makeMockProceduralStorage(
+    opts.initialProceduralMemories,
+    opts.proceduralSearchResults,
+    opts.proceduralNearestResults,
+  )
 
   return {
     initialize: vi.fn(async () => {}),
@@ -335,16 +372,12 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
     episodes,
     digests,
     semantic,
-    procedural: makeMockProceduralStorage(
-      opts.initialProceduralMemories,
-      opts.proceduralSearchResults,
-      opts.proceduralNearestResults,
-    ),
+    procedural,
     associations: makeMockAssociationStorage(opts.discoveredEdges),
 
     getById: vi.fn(async (_id: string, _type: MemoryType): Promise<TypedMemory | null> => null),
 
-    getByIds: vi.fn(mockGetByIds(episodes, digests, semantic, opts.semanticNearestResults ?? [])),
+    getByIds: vi.fn(mockGetByIds(episodes, digests, semantic, opts.semanticNearestResults ?? [], procedural)),
 
     saveSensorySnapshot: vi.fn(async (_sessionId: string, _snapshot: SensorySnapshot): Promise<void> => {}),
 
@@ -390,4 +423,27 @@ export function makeDigest(overrides: Partial<Digest> = {}): Digest {
     projectId: null,
     ...overrides,
   }
+}
+
+/**
+ * Gives every digest that lists no source episodes one live user turn whose
+ * content is the digest's summary, stated at the digest's `createdAt`, so a
+ * test written against a summary reaches the episode-reading fact paths
+ * with the same text.
+ */
+export function withSourceTurns(opts: MockStorageOptions = {}): MockStorageOptions {
+  const episodesPerSession = new Map(opts.episodesPerSession ?? [])
+  const initialDigests = (opts.initialDigests ?? []).map(digest => {
+    if (digest.sourceEpisodeIds.length > 0) return digest
+    const turn = makeEpisode({
+      sessionId: digest.sessionId,
+      role: 'user',
+      content: digest.summary,
+      createdAt: digest.createdAt,
+      projectId: digest.projectId,
+    })
+    episodesPerSession.set(digest.sessionId, [...(episodesPerSession.get(digest.sessionId) ?? []), turn])
+    return { ...digest, sourceEpisodeIds: [turn.id] }
+  })
+  return { ...opts, initialDigests, episodesPerSession }
 }

@@ -89,18 +89,44 @@ describe('OpenAISummarizer', () => {
       expect(call.model).toBe('gpt-4o')
     })
 
-    it('handles malformed JSON gracefully by returning raw text as summary', async () => {
-      const rawText = 'This is not JSON at all, just plain text from the model.'
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(rawText))
+    it('throws when the reply holds no JSON object, never storing the raw reply', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('This is not JSON at all, just plain text from the model.'))
 
       const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.summarize('content', defaultOpts)
 
-      // Should not throw; text should contain the raw fallback
-      expect(result.text).toBe(rawText)
-      expect(result.topics).toEqual([])
-      expect(result.entities).toEqual([])
-      expect(result.decisions).toEqual([])
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/summarize/)
+    })
+
+    it('throws when the JSON reply has no text field', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse('{}'))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/text/)
+    })
+
+    it('throws when the JSON reply has a blank text field', async () => {
+      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify({ text: '   ', topics: ['a'] })))
+
+      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+
+      await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/text/)
+    })
+
+    it('throws on a reply cut off at max_tokens, after reporting it, without parsing it', async () => {
+      const complete = JSON.stringify({ text: 'Looks complete but was cut.', topics: [], entities: [], decisions: [] })
+      mockChatCreate.mockResolvedValueOnce({
+        choices: [{ message: { content: complete }, finish_reason: 'length' }],
+      })
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+      try {
+        const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
+        await expect(summarizer.summarize('content', defaultOpts)).rejects.toThrow(/max_tokens/)
+        expect(stderr.mock.calls.some(([line]) => String(line).includes('summarize output hit max_tokens'))).toBe(true)
+      } finally {
+        stderr.mockRestore()
+      }
     })
 
     it('handles JSON wrapped in markdown code fences', async () => {
@@ -170,115 +196,6 @@ describe('OpenAISummarizer', () => {
       expect(result.topics).toEqual([])
       expect(result.entities).toEqual([])
       expect(result.decisions).toEqual([])
-    })
-  })
-
-  describe('extractKnowledge()', () => {
-    it('returns an array of KnowledgeCandidates', async () => {
-      const candidates = [
-        {
-          topic: 'TypeScript preference',
-          content: 'User prefers TypeScript over JavaScript.',
-          confidence: 0.95,
-          sourceDigestIds: [],
-          sourceEpisodeIds: [],
-        },
-        {
-          topic: 'Testing framework',
-          content: 'User uses vitest for unit testing.',
-          confidence: 0.85,
-          sourceDigestIds: ['d1'],
-          sourceEpisodeIds: ['e1'],
-        },
-      ]
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify(candidates)))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('some conversation content')
-
-      expect(result).toHaveLength(2)
-      expect(result[0].topic).toBe('TypeScript preference')
-      expect(result[0].confidence).toBe(0.95)
-      expect(result[1].sourceDigestIds).toEqual(['d1'])
-    })
-
-    it('returns an empty array when the model returns an empty array', async () => {
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse('[]'))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('minimal content')
-
-      expect(result).toEqual([])
-    })
-
-    it('handles malformed JSON gracefully by returning empty array', async () => {
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse('not json { broken'))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('content')
-
-      expect(result).toEqual([])
-    })
-
-    it('filters out candidates missing required topic or content', async () => {
-      const mixed = [
-        { topic: 'valid', content: 'valid content', confidence: 0.9, sourceDigestIds: [], sourceEpisodeIds: [] },
-        { topic: '', content: 'no topic', confidence: 0.8, sourceDigestIds: [], sourceEpisodeIds: [] },
-        { topic: 'no content', content: '', confidence: 0.7, sourceDigestIds: [], sourceEpisodeIds: [] },
-      ]
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify(mixed)))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('content')
-
-      expect(result).toHaveLength(1)
-      expect(result[0].topic).toBe('valid')
-    })
-
-    it('clamps confidence to [0, 1]', async () => {
-      const candidates = [
-        {
-          topic: 'out of range high',
-          content: 'some content',
-          confidence: 1.5,
-          sourceDigestIds: [],
-          sourceEpisodeIds: [],
-        },
-        {
-          topic: 'out of range low',
-          content: 'other content',
-          confidence: -0.5,
-          sourceDigestIds: [],
-          sourceEpisodeIds: [],
-        },
-      ]
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(JSON.stringify(candidates)))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('content')
-
-      expect(result[0].confidence).toBe(1)
-      expect(result[1].confidence).toBe(0)
-    })
-
-    it('handles JSON wrapped in markdown code fences', async () => {
-      const candidates = [
-        {
-          topic: 'fenced',
-          content: 'inside code fence',
-          confidence: 0.8,
-          sourceDigestIds: [],
-          sourceEpisodeIds: [],
-        },
-      ]
-      const fenced = `\`\`\`json\n${JSON.stringify(candidates)}\n\`\`\``
-      mockChatCreate.mockResolvedValueOnce(makeChatResponse(fenced))
-
-      const summarizer = new OpenAISummarizer({ apiKey: 'test-key' })
-      const result = await summarizer.extractKnowledge('content')
-
-      expect(result).toHaveLength(1)
-      expect(result[0].topic).toBe('fenced')
     })
   })
 

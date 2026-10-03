@@ -587,6 +587,38 @@ describe('Memory — consolidate()', () => {
     expect(result).toHaveProperty('proceduralDecayed')
   })
 
+  it('consolidate(all) carries every light- and deep-sleep counter, the extraction counters among them', async () => {
+    const result = await memory.consolidate('all')
+
+    const defined = Object.entries(result)
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => key)
+      .sort()
+    expect(defined).toEqual([
+      'associationsCreated',
+      'cycle',
+      'deduplicated',
+      'digestsCreated',
+      'episodesProcessed',
+      'extractionBackedOff',
+      'extractionDeferred',
+      'extractionExhausted',
+      'extractionFailed',
+      'keptNotState',
+      'kindMissing',
+      'noEpisodes',
+      'procedural',
+      'promoted',
+      'proceduralDecayed',
+      'semanticDecayed',
+      'stale',
+      'summaryFallbacks',
+      'superseded',
+      'supersessionJudged',
+      'tie',
+    ].sort())
+  })
+
   it('consolidate() with no argument defaults to all', async () => {
     const result = await memory.consolidate()
     expect(result.cycle).toBe('all')

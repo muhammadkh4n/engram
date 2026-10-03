@@ -374,4 +374,54 @@ export function runMigrations(db: Database.Database): void {
     `)
     db.pragma('user_version = 6')
   }
+
+  if (currentVersion < 7) {
+    // V7: fact-extraction watermark on digests. Deep sleep extracts facts from
+    // the digests where it is NULL and stamps them. Rows that exist before this
+    // version had their facts extracted by the older rolling-window pass, so
+    // they are stamped with their own created_at; a migration runs once, so
+    // digests written later stay pending.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'facts_extracted_at')) {
+      db.exec('ALTER TABLE digests ADD COLUMN facts_extracted_at REAL')
+    }
+    db.exec('UPDATE digests SET facts_extracted_at = created_at WHERE facts_extracted_at IS NULL')
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_digests_facts_pending
+      ON digests(created_at) WHERE facts_extracted_at IS NULL
+    `)
+    db.pragma('user_version = 7')
+  }
+
+  if (currentVersion < 8) {
+    // V8: failed fact-extraction calls per digest. Deep sleep reads only
+    // digests below its attempt cap, so one that fails every time cannot hold
+    // its place at the head of the oldest-first pending batch.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'fact_extraction_attempts')) {
+      db.exec('ALTER TABLE digests ADD COLUMN fact_extraction_attempts INTEGER NOT NULL DEFAULT 0')
+    }
+    db.pragma('user_version = 8')
+  }
+
+  if (currentVersion < 9) {
+    // V9: fact-extraction backoff. Every failed unit, counted or not, adds to
+    // fact_extraction_failures and sets facts_next_attempt_at; deep sleep
+    // reads a digest again only once that time has passed (NULL: due now),
+    // so a digest that keeps failing cannot hold the head of the oldest-first
+    // pending batch. The pending index leads with the next attempt time.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'facts_next_attempt_at')) {
+      db.exec('ALTER TABLE digests ADD COLUMN facts_next_attempt_at REAL')
+    }
+    if (!cols.some(c => c.name === 'fact_extraction_failures')) {
+      db.exec('ALTER TABLE digests ADD COLUMN fact_extraction_failures INTEGER NOT NULL DEFAULT 0')
+    }
+    db.exec(`
+      DROP INDEX IF EXISTS idx_digests_facts_pending;
+      CREATE INDEX IF NOT EXISTS idx_digests_facts_due
+      ON digests(facts_next_attempt_at, created_at, id) WHERE facts_extracted_at IS NULL
+    `)
+    db.pragma('user_version = 9')
+  }
 }
