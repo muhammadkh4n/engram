@@ -192,6 +192,61 @@ describe('Neo4j guard', () => {
   })
 })
 
+/** A session whose every call fails the way a lost connection does: native promises, and a Result for run. */
+function failingDriver() {
+  const down = () => new Error('ServiceUnavailable: connection refused')
+  return {
+    session: () => ({
+      run: () => fakeResult(down()),
+      executeRead: async () => {
+        throw down()
+      },
+      readTransaction: async () => {
+        throw down()
+      },
+      beginTransaction: () => ({
+        run: () => fakeResult(down()),
+        commit: async () => {
+          throw down()
+        },
+      }),
+    }),
+  }
+}
+
+type FailingSession = {
+  run: () => PromiseLike<unknown>
+  executeRead: () => Promise<unknown>
+  readTransaction: () => Promise<unknown>
+  beginTransaction: () => { run: () => PromiseLike<unknown>; commit: () => Promise<unknown> }
+}
+
+describe('Neo4j guard under await, as the engine calls it', () => {
+  const calls: Array<[string, (s: FailingSession) => PromiseLike<unknown>]> = [
+    ['executeRead', (s) => s.executeRead()],
+    ['readTransaction', (s) => s.readTransaction()],
+    ['run', (s) => s.run()],
+    ['beginTransaction.run', (s) => s.beginTransaction().run()],
+    ['beginTransaction.commit', (s) => s.beginTransaction().commit()],
+  ]
+
+  it.each(calls)('counts a failed %s exactly once when awaited inside try/catch', async (call, invoke) => {
+    const stats = createGuardStats()
+    const driver = failingDriver()
+    guardNeo4jDriver(driver, stats)
+    const session = driver.session() as unknown as FailingSession
+    let caught: unknown
+    try {
+      await invoke(session)
+    } catch (err) {
+      caught = err
+    }
+    expect((caught as Error).message).toBe('ServiceUnavailable: connection refused')
+    expect(stats.graphErrors).toEqual({ [call]: 1 })
+    expect(() => assertNoGraphErrors(stats)).toThrow(GraphCallError)
+  })
+})
+
 describe('blocked-call accounting', () => {
   it('passes with no blocked calls and fails once any guard counted one', () => {
     const stats = createGuardStats()

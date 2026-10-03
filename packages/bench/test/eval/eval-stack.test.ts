@@ -100,13 +100,21 @@ function harness(opts: {
     driver = {
       session: (cfg: Record<string, unknown> = {}) => {
         h.sessionConfigs.push(cfg)
+        const read = async () => {
+          if (h.readFails) throw new Error('ServiceUnavailable: connection refused')
+          return 'read'
+        }
+        // A neo4j Result is a thenable, not a native Promise; its query outcome arrives when it is awaited.
+        const result = () => ({
+          then: (ok?: (v: unknown) => unknown, fail?: (e: unknown) => unknown) => read().then(ok, fail),
+        })
         return {
           executeWrite: async () => 'written',
-          executeRead: async () => {
-            if (h.readFails) throw new Error('ServiceUnavailable: connection refused')
-            return 'read'
-          },
-        } as Record<string, () => Promise<unknown>>
+          executeRead: read,
+          readTransaction: read,
+          run: result,
+          beginTransaction: () => ({ run: result, commit: read }),
+        } as unknown as Record<string, () => Promise<unknown>>
       },
     }
     constructor() {
@@ -336,20 +344,35 @@ describe('buildEvalStack', () => {
     ).rejects.toThrow(/SUPABASE_KEY/)
   })
 
-  it('stops a gold recall on a Neo4j error the engine swallowed, naming the call', async () => {
+  type GraphSession = Record<string, (() => PromiseLike<unknown>) | undefined> & {
+    beginTransaction: () => Record<string, () => PromiseLike<unknown>>
+  }
+  const swallowedGraphCalls: Array<[string, (s: GraphSession) => PromiseLike<unknown>]> = [
+    ['executeRead', (s) => s['executeRead']!()],
+    ['readTransaction', (s) => s['readTransaction']!()],
+    ['run', (s) => s['run']!()],
+    ['beginTransaction.run', (s) => s.beginTransaction()['run']!()],
+    ['beginTransaction.commit', (s) => s.beginTransaction()['commit']!()],
+  ]
+
+  it.each(swallowedGraphCalls)('stops a gold recall on a failed %s the engine awaited and swallowed', async (call, invoke) => {
     const h = harness({
       onRecall: async (self) => {
-        // spreading activation catches graph failures and falls back to the SQL walk
-        await self.driver.session()['executeRead']!().catch(() => null)
+        // spreading activation awaits graph calls in try/catch and falls back to the SQL walk
+        try {
+          await invoke(self.driver.session() as unknown as GraphSession)
+        } catch {
+          // swallowed, as the engine does
+        }
       },
     })
     const stack = await buildEvalStack(h.mods, { calibrationQuery: 'cal', now: NOW, env: { ...GRAPH_ENV } })
     h.readFails = true
     const err = await stack.recall('gold query', {}, NOW).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(GraphCallError)
-    expect((err as Error).message).toContain('executeRead')
+    expect((err as Error).message).toContain(call)
     expect(isRunStop(err)).toBe(true)
-    expect(stack.guards.graphErrors).toEqual({ executeRead: 1 })
+    expect(stack.guards.graphErrors).toEqual({ [call]: 1 })
   })
 
   it('stops when the recall engine is on but failed to import, leaving storage unwrapped', async () => {

@@ -157,11 +157,27 @@ export function graphDriver(graph: object): GuardableDriver {
 type Recorder = (call: string, err: unknown) => void
 
 /**
- * Makes a neo4j Result (a thenable whose query fails when it is awaited)
- * report its rejection once, however many times it is awaited. The query is
- * already sent by run(), so settling lazily changes nothing about it.
+ * Records a failed call's rejection once, however many times the caller
+ * awaits it.
+ *
+ * A native Promise (executeRead, readTransaction, commit) is replaced by a
+ * new promise from `catch` that records and rethrows: `await` on a native
+ * Promise uses its internal resolution and ignores any own `then`, so
+ * patching the object would never see the engine's `await` inside try/catch.
+ *
+ * A neo4j Result (from run) is a thenable but not a native Promise, and the
+ * engine also reads its records and summary, so it is kept and its
+ * `then`/`catch`/`finally` are made to settle through one lazy promise;
+ * `await` on a non-native thenable calls its `then`. The query is already
+ * sent by run(), so settling lazily changes nothing about it.
  */
 function countRejection<T>(result: T, call: string, record: Recorder): T {
+  if (result instanceof Promise) {
+    return result.catch((err: unknown) => {
+      record(call, err)
+      throw err
+    }) as T
+  }
   if (result === null || typeof result !== 'object') return result
   const r = result as Record<string, unknown>
   if (typeof r['then'] !== 'function') return result
