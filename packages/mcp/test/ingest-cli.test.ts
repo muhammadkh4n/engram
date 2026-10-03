@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { parseCaptureRequest } from '../src/capture-route.js'
 
 // The rejection log resolves ~/.engram when it is first imported, so HOME
 // must point at a scratch directory before any module under test loads.
@@ -181,6 +182,23 @@ describe('engram-ingest server mode', () => {
     expect(cut).not.toHaveProperty('key')
     expect(short).not.toHaveProperty('session_id')
     expect(short).not.toHaveProperty('key')
+  })
+
+  it('sends a capture from a cwd over the meta limit without the cwd, so the route accepts it', async () => {
+    const longCwd = '/' + Array.from({ length: 12 }, (_, i) => `workspace-segment-${i}-`.padEnd(49, 'x')).join('/')
+    expect(longCwd.length).toBe(600)
+    vi.spyOn(process, 'cwd').mockReturnValue(longCwd)
+
+    expect(await ingest(['--content', ASSISTANT_TURN, '--source', 'cli'])).toBe(0)
+
+    expect(stub.received).toHaveLength(1)
+    const body = stub.received[0]!
+    expect(body['project_id']).toBe('engram')
+    expect(body['meta']).toEqual({ capturedAt: expect.stringMatching(/^\d{4}-/) })
+    expect(parseCaptureRequest(body)).not.toHaveProperty('error')
+    const log = stderr.join('')
+    expect(log.match(/cwd is 600 characters/g)).toHaveLength(1)
+    expect(log).toMatch(/outcome=stored/)
   })
 
   it('keys inline content by its text when a session id is given', async () => {

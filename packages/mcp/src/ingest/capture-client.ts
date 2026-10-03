@@ -29,6 +29,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { CAPTURE_META_VALUE_MAX_CHARS } from '../capture-route.js'
 import type { CaptureOutcome } from './capture.js'
 import { ensurePrivateDir, openPrivateHandle } from './private-files.js'
 
@@ -50,6 +51,22 @@ export interface CapturePayload {
 }
 
 export type CaptureEnv = Readonly<Record<string, string | undefined>>
+
+/**
+ * `{ cwd }` for a capture's meta, or nothing when the path is longer than the
+ * route accepts: the route refuses such a capture without a retry, and a cut
+ * path would match a shorter configured root by prefix and name the wrong
+ * project. The capture's project is resolved from the full path before the
+ * send either way.
+ */
+export function cwdMeta(cwd: string, logPrefix: string): { cwd?: string } {
+  if (cwd.length <= CAPTURE_META_VALUE_MAX_CHARS) return { cwd }
+  process.stderr.write(
+    `${logPrefix} cwd is ${cwd.length} characters, over the ${CAPTURE_META_VALUE_MAX_CHARS}-character meta limit; ` +
+      'sending the capture without it\n',
+  )
+  return {}
+}
 
 export type PostResult =
   | { ok: true; status: number; outcome: CaptureOutcome }

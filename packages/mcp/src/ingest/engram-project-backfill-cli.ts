@@ -12,7 +12,8 @@
  *     map; summaries by the session in `metadata.transcriptPath`), else of
  *     the longest configured root containing `metadata.cwd`. Cross-cutting
  *     categories stay shared.
- *   - retag (`--retag FROM=TO`): episodes and digests tagged FROM move to TO.
+ *   - retag (`--retag FROM=TO`): episodes, digests, semantic facts and
+ *     procedures tagged FROM move to TO.
  *     `--fold-worktrees` prints the pairs the worktree folding proposes and
  *     applies nothing.
  *   - rollback (`--rollback CSV`): restores the values a previous apply
@@ -104,7 +105,7 @@ function requireValue(raw: string | undefined, flag: string): string {
 }
 
 const HELP =
-  'engram-project-backfill — set project_id on episodes and digests (dry run by default)\n' +
+  'engram-project-backfill — set project_id on stored memories (dry run by default)\n' +
   '  One mode per run:\n' +
   '  (no mode flag)     from metadata.project; a tag <repo>-<suffix> folds into <repo>\n' +
   '                     when <repo> is also a tag. Two real repositories sharing a prefix\n' +
@@ -114,7 +115,8 @@ const HELP =
   '  --roots FILE       project-groups file; metadata.cwd resolved by its roots only\n' +
   '                     (may be combined with --sessions, which is tried first)\n' +
   '  --since ISO        with --sessions/--roots: only episodes created at or after ISO\n' +
-  '  --retag FROM=TO    move project FROM to TO on episodes and digests (repeatable)\n' +
+  '  --retag FROM=TO    move project FROM to TO on episodes, digests, facts and procedures\n' +
+  '                     (repeatable)\n' +
   '  --fold-worktrees   print the FROM=TO pairs the worktree folding proposes; applies nothing\n' +
   '  --rollback FILE    restore the rows a previous apply recorded\n' +
   '  Common:\n' +

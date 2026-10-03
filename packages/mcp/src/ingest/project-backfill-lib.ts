@@ -26,7 +26,8 @@
  * Captures stored with no tag at all are resolved from other evidence
  * (runEvidenceBackfill): their Claude session's project, else a configured
  * root containing their recorded cwd. Rows already tagged with a worktree's
- * name move to the repository with runRetag. Every apply records each batch
+ * name move to the repository with runRetag, on episodes, digests and facts
+ * alike. Every apply records each batch
  * in a rollback CSV before writing it; runRollback restores it.
  */
 
@@ -278,9 +279,19 @@ async function scanAll<T extends { id: string; created_at: string }>(
 // that stops half-way can still be undone exactly.
 // ---------------------------------------------------------------------------
 
-/** Tables whose `project_id` this tool writes. */
-export type ProjectTable = 'memory_episodes' | 'memory_digests'
-export const PROJECT_TABLES: readonly ProjectTable[] = ['memory_episodes', 'memory_digests']
+/**
+ * Tables whose `project_id` this tool writes. The evidence and tag modes
+ * read episode-level evidence and write episodes only; a retag renames a
+ * project on every table that carries one, so facts and procedures do not
+ * keep a worktree's name after their episodes move.
+ */
+export type ProjectTable = 'memory_episodes' | 'memory_digests' | 'memory_semantic' | 'memory_procedural'
+export const PROJECT_TABLES: readonly ProjectTable[] = [
+  'memory_episodes',
+  'memory_digests',
+  'memory_semantic',
+  'memory_procedural',
+]
 
 /** One `project_id` write: `old` and `new` are null for the shared bucket. */
 export interface ProjectChange {
@@ -667,18 +678,28 @@ export function formatRetagReport(report: RetagReport, apply: boolean): string {
   return lines.join('\n')
 }
 
-/** Rows per non-null project across episodes and digests. */
-export async function collectProjectCounts(store: ProjectRetagStore, pageSize: number): Promise<Map<string, number>> {
-  const counts = new Map<string, number>()
+export type ProjectTableCounts = Partial<Record<ProjectTable, number>>
+
+/** Rows per non-null project, per table, across every project-tagged table. */
+export async function collectProjectCounts(
+  store: ProjectRetagStore,
+  pageSize: number,
+): Promise<Map<string, ProjectTableCounts>> {
+  const counts = new Map<string, ProjectTableCounts>()
   for (const table of PROJECT_TABLES) {
     const rows = await scanAll((cursor) => store.fetchTagged(table, null, cursor, pageSize))
-    for (const row of rows) increment(counts, row.project_id)
+    for (const row of rows) {
+      const perTable = counts.get(row.project_id) ?? {}
+      counts.set(row.project_id, { ...perTable, [table]: (perTable[table] ?? 0) + 1 })
+    }
   }
   return counts
 }
 
 export interface RetagProposal extends RetagPair {
+  /** rows across all tables */
   rows: number
+  tables: ProjectTableCounts
 }
 
 /**
@@ -687,22 +708,28 @@ export interface RetagProposal extends RetagPair {
  * shared bucket are not proposed: a retag only renames.
  */
 export function proposeWorktreeRetags(
-  counts: ReadonlyMap<string, number>,
+  counts: ReadonlyMap<string, ProjectTableCounts>,
   rules: BackfillRules = EMPTY_RULES,
 ): RetagProposal[] {
   const known = knownRepositories(counts.keys(), rules)
   const proposals: RetagProposal[] = []
-  for (const [tag, rows] of counts) {
+  for (const [tag, tables] of counts) {
     const { target, reason } = resolveTag(tag, null, known, rules)
     if (target === null || target === tag || (reason !== 'worktree' && reason !== 'alias')) continue
-    proposals.push({ from: tag, to: target, rows })
+    const rows = Object.values(tables).reduce((a, b) => a + b, 0)
+    proposals.push({ from: tag, to: target, rows, tables })
   }
   return proposals.sort((a, b) => a.from.localeCompare(b.from))
 }
 
 export function formatRetagProposals(proposals: readonly RetagProposal[]): string {
   const lines = [`proposed retags: ${proposals.length} (not applied; pass each as --retag)`]
-  for (const p of proposals) lines.push(`  --retag ${p.from}=${p.to}   # ${p.rows} rows`)
+  for (const p of proposals) {
+    const perTable = PROJECT_TABLES.filter((t) => p.tables[t])
+      .map((t) => `${t} ${p.tables[t]}`)
+      .join(', ')
+    lines.push(`  --retag ${p.from}=${p.to}   # ${p.rows} rows (${perTable})`)
+  }
   return lines.join('\n')
 }
 

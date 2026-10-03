@@ -14,6 +14,8 @@ import {
   ROLLBACK_CSV_HEADER,
   collectProjectCounts,
   formatEvidenceReport,
+  formatRetagProposals,
+  PROJECT_TABLES,
   openRollbackCsv,
   parseRollbackCsv,
   parseRootsFile,
@@ -49,11 +51,14 @@ function keysetAfter(cursor: PageCursor | null) {
     !cursor || r.created_at > cursor.createdAt || (r.created_at === cursor.createdAt && r.id > cursor.id)
 }
 
-/** In-memory memory_episodes + memory_digests with the PostgREST store's filter and keyset semantics. */
+/** In-memory project-tagged tables with the PostgREST store's filter and keyset semantics. */
 class StubStore implements ProjectRetagStore {
   readonly writes: Array<{ table: ProjectTable; ids: string[]; from: string | null; to: string | null }> = []
   failWrites = false
-  constructor(readonly tables: Record<ProjectTable, Row[]>) {}
+  readonly tables: Record<ProjectTable, Row[]>
+  constructor(tables: Partial<Record<ProjectTable, Row[]>>) {
+    this.tables = { memory_episodes: [], memory_digests: [], memory_semantic: [], memory_procedural: [], ...tables }
+  }
 
   private sorted(table: ProjectTable): Row[] {
     return [...this.tables[table]].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
@@ -292,33 +297,40 @@ describe('runRetag', () => {
         row({ project_id: null }),
       ],
       memory_digests: [row({ project_id: 'engram-project-roots' }), row({ project_id: 'aithentic-sam-mfe-2857' })],
+      memory_semantic: [row({ project_id: 'engram-project-roots' }), row({ project_id: 'aithentic-sam-mfe-2857' })],
+      memory_procedural: [row({ project_id: 'engram-project-roots' }), row({ project_id: null })],
     })
   }
   const pairs = [{ from: 'engram-project-roots', to: 'engram' }]
 
-  it('dry run counts both tables and writes nothing', async () => {
+  it('dry run counts every project-tagged table and writes nothing', async () => {
     const store = fixture()
     const report = await runRetag(store, pairs, { apply: false, pageSize: 1, batchSize: 10 })
     expect(store.writes).toEqual([])
     expect(Object.fromEntries(report.pairs[0]!.tables)).toEqual({
       memory_episodes: { planned: 2, updated: 0 },
       memory_digests: { planned: 1, updated: 0 },
+      memory_semantic: { planned: 1, updated: 0 },
+      memory_procedural: { planned: 1, updated: 0 },
     })
   })
 
-  it('apply moves episodes and digests, and rollback puts the worktree name back', async () => {
+  it('apply moves episodes, digests and facts, and rollback puts the worktree name back on all four', async () => {
     const store = fixture()
-    const episodesBefore = store.projects('memory_episodes')
-    const digestsBefore = store.projects('memory_digests')
+    const before = Object.fromEntries(PROJECT_TABLES.map((t) => [t, store.projects(t)]))
     const rollback = sink()
-    await runRetag(store, pairs, { apply: true, pageSize: 1, batchSize: 1, rollback })
+    const report = await runRetag(store, pairs, { apply: true, pageSize: 1, batchSize: 1, rollback })
+    expect([...report.pairs[0]!.tables.values()].map((t) => t.updated)).toEqual([2, 1, 1, 1])
     expect(Object.values(store.projects('memory_episodes'))).toEqual(['engram', 'engram', 'engram', null])
-    expect(store.projects('memory_digests')['row-0005']).toBe('engram')
+    expect(Object.values(store.projects('memory_digests'))).toEqual(['engram', 'aithentic-sam-mfe-2857'])
+    expect(Object.values(store.projects('memory_semantic'))).toEqual(['engram', 'aithentic-sam-mfe-2857'])
+    expect(Object.values(store.projects('memory_procedural'))).toEqual(['engram', null])
     expect(rollback.changes.every((c) => c.old === 'engram-project-roots' && c.new === 'engram')).toBe(true)
+    expect(new Set(rollback.changes.map((c) => c.table))).toEqual(new Set(PROJECT_TABLES))
 
-    await runRollback(store, rollback.changes, { apply: true, batchSize: 10 })
-    expect(store.projects('memory_episodes')).toEqual(episodesBefore)
-    expect(store.projects('memory_digests')).toEqual(digestsBefore)
+    const restored = await runRollback(store, rollback.changes, { apply: true, batchSize: 10 })
+    expect([...restored.tables.values()].map((t) => t.restored)).toEqual([2, 1, 1, 1])
+    expect(Object.fromEntries(PROJECT_TABLES.map((t) => [t, store.projects(t)]))).toEqual(before)
   })
 
   it('rejects chained or repeated pairs, which would make the dry run differ from the apply', async () => {
@@ -333,10 +345,24 @@ describe('runRetag', () => {
     const store = fixture()
     store.tables.memory_digests.push(row({ project_id: 'aithentic-sam-mfe' }))
     const counts = await collectProjectCounts(store, 2)
-    expect(proposeWorktreeRetags(counts, EMPTY_RULES)).toEqual([
-      { from: 'aithentic-sam-mfe-2857', to: 'aithentic-sam-mfe', rows: 1 },
-      { from: 'engram-project-roots', to: 'engram', rows: 3 },
+    const proposals = proposeWorktreeRetags(counts, EMPTY_RULES)
+    expect(proposals).toEqual([
+      {
+        from: 'aithentic-sam-mfe-2857',
+        to: 'aithentic-sam-mfe',
+        rows: 2,
+        tables: { memory_digests: 1, memory_semantic: 1 },
+      },
+      {
+        from: 'engram-project-roots',
+        to: 'engram',
+        rows: 5,
+        tables: { memory_episodes: 2, memory_digests: 1, memory_semantic: 1, memory_procedural: 1 },
+      },
     ])
+    expect(formatRetagProposals(proposals)).toContain(
+      '--retag engram-project-roots=engram   # 5 rows (memory_episodes 2, memory_digests 1, memory_semantic 1, memory_procedural 1)',
+    )
     const kept = { ...EMPTY_RULES, keep: new Set(['engram-project-roots']) }
     expect(proposeWorktreeRetags(counts, kept).map((p) => p.from)).toEqual(['aithentic-sam-mfe-2857'])
   })
@@ -378,6 +404,8 @@ describe('rollback CSV', () => {
     const changes: ProjectChange[] = [
       { table: 'memory_episodes', id: 'a1', old: null, new: 'engram' },
       { table: 'memory_digests', id: 'd1', old: 'odd,"name"', new: 'engram' },
+      { table: 'memory_semantic', id: 's1', old: 'engram-project-roots', new: 'engram' },
+      { table: 'memory_procedural', id: 'p1', old: 'engram-project-roots', new: 'engram' },
     ]
     csv.write(changes)
     csv.close()
@@ -386,9 +414,9 @@ describe('rollback CSV', () => {
     expect(() => openRollbackCsv(path)).toThrow(/EEXIST/)
   })
 
-  it('rejects a foreign header or a table outside episodes and digests', () => {
+  it('rejects a foreign header or a table the tool does not write', () => {
     expect(() => parseRollbackCsv('tier,id,project_id\n')).toThrow(/must start with/)
-    expect(() => parseRollbackCsv(`${ROLLBACK_CSV_HEADER}\nmemory_semantic,s1,,engram\n`)).toThrow(/line 2/)
+    expect(() => parseRollbackCsv(`${ROLLBACK_CSV_HEADER}\nmemory_entities,e1,,engram\n`)).toThrow(/line 2/)
   })
 })
 

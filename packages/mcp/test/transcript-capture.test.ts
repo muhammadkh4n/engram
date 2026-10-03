@@ -256,6 +256,20 @@ describe('session-summary in server mode', () => {
     expect(stub.received[0]!['meta']).toMatchObject({ transcriptPath: transcript, cwd: '/work/workspace' })
   })
 
+  it('leaves out a hook cwd over the meta limit instead of cutting it', async () => {
+    const transcript = conversationFixture()
+    const longCwd = '/work/' + 'deep-folder/'.repeat(50)
+    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
+
+    await runSessionSummaryWorker(JSON.stringify({ transcript_path: transcript, cwd: longCwd }), serverEnv())
+
+    expect(stub.received).toHaveLength(1)
+    const meta = stub.received[0]!['meta'] as Record<string, string>
+    expect(meta).not.toHaveProperty('cwd')
+    expect(meta['transcriptPath']).toBe(transcript)
+    expect(stderr.join('')).toContain(`cwd is ${longCwd.length} characters`)
+  })
+
   it('scrubs credentials out of the excerpt before posting', async () => {
     const transcript = writeLines('secret.jsonl', [
       { type: 'user', uuid: 'u-1', message: { content: 'The staging database is postgres://admin:Tr1cky-Pa55w0rd@db.staging.internal:5432/app' } },
