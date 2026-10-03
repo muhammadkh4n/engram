@@ -237,13 +237,37 @@ describe('session-summary in server mode', () => {
       derive: 'session-summary',
       session_id: 'claude-code-summaries',
       project_id: 'engram',
-      meta: { transcriptPath: transcript },
+      meta: { transcriptPath: transcript, cwd: process.cwd() },
     })
     expect(body['content']).toContain(`User: ${USER_ASK}`)
-    expect(Object.keys(body['meta'] as object).sort()).toEqual(['capturedAt', 'transcriptPath'])
+    expect(Object.keys(body['meta'] as object).sort()).toEqual(['capturedAt', 'cwd', 'transcriptPath'])
     expect(body['key']).toMatch(/^[0-9a-f]{64}$/)
     expect(stub.received[1]!['key']).toBe(body['key'])
     expect(stderr.join('')).toContain('[engram-summary] mode=server source=claude-code outcome=stored')
+  })
+
+  it('records the hook cwd in the capture meta', async () => {
+    const transcript = conversationFixture()
+    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
+
+    await runSessionSummaryWorker(JSON.stringify({ transcript_path: transcript, cwd: '/work/workspace' }), serverEnv())
+
+    expect(stub.received).toHaveLength(1)
+    expect(stub.received[0]!['meta']).toMatchObject({ transcriptPath: transcript, cwd: '/work/workspace' })
+  })
+
+  it('leaves out a hook cwd over the meta limit instead of cutting it', async () => {
+    const transcript = conversationFixture()
+    const longCwd = '/work/' + 'deep-folder/'.repeat(50)
+    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
+
+    await runSessionSummaryWorker(JSON.stringify({ transcript_path: transcript, cwd: longCwd }), serverEnv())
+
+    expect(stub.received).toHaveLength(1)
+    const meta = stub.received[0]!['meta'] as Record<string, string>
+    expect(meta).not.toHaveProperty('cwd')
+    expect(meta['transcriptPath']).toBe(transcript)
+    expect(stderr.join('')).toContain(`cwd is ${longCwd.length} characters`)
   })
 
   it('scrubs credentials out of the excerpt before posting', async () => {

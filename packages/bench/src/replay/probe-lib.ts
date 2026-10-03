@@ -150,7 +150,7 @@ const PROBE_FLAGS = new Set([
   '--queries', '--target', '--key-env', '--engram-dist', '--arm', '--env', '--pins', '--pins-mode', '--out', '--now',
 ])
 
-function parseReferenceDate(raw: string | undefined): Date | undefined {
+export function parseReferenceDate(raw: string | undefined): Date | undefined {
   if (raw === undefined) return undefined
   const date = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(raw) ? new Date(raw) : null
   if (date === null || Number.isNaN(date.getTime())) {

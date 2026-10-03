@@ -15,6 +15,7 @@ import { CAPTURE_CONTENT_MAX_CHARS, CAPTURE_META_VALUE_MAX_CHARS } from '../capt
 import type { CaptureDeriveKind, CaptureOutcome } from './capture.js'
 import {
   captureKey,
+  cwdMeta,
   engramDir,
   sendCapture,
   type CaptureEnv,
@@ -61,11 +62,16 @@ export function transcriptCaptureKey(request: TranscriptCaptureRequest): string 
   return captureKey(TRANSCRIPT_CAPTURE_SOURCE, request.sessionId, `${request.derive}:${request.transcriptPath}:${reach}`)
 }
 
-/** The route refuses a meta value above its cap, which would dead-letter the capture. */
-function clipMeta(meta: TranscriptCaptureRequest['meta']): Record<string, string> {
+/**
+ * The route refuses a meta value above its cap, which would dead-letter the
+ * capture, so long values are cut; a long cwd is left out instead (cwdMeta).
+ */
+function clipMeta(meta: TranscriptCaptureRequest['meta'], logPrefix: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(meta)) {
-    if (typeof v === 'string' && v) out[k] = v.slice(0, CAPTURE_META_VALUE_MAX_CHARS)
+    if (typeof v !== 'string' || !v) continue
+    if (k === 'cwd') Object.assign(out, cwdMeta(v, logPrefix))
+    else out[k] = v.slice(0, CAPTURE_META_VALUE_MAX_CHARS)
   }
   return out
 }
@@ -80,7 +86,7 @@ async function sendToServer(request: TranscriptCaptureRequest, env: CaptureEnv):
     session_id: request.sessionId,
     project_id: request.project,
     key: transcriptCaptureKey(request),
-    meta: { ...clipMeta(request.meta), capturedAt: new Date().toISOString() },
+    meta: { ...clipMeta(request.meta, request.logPrefix), capturedAt: new Date().toISOString() },
   }
   const sent = await sendCapture(payload, env, {
     label: request.logPrefix.replace(/^\[|\]$/g, ''),
@@ -106,7 +112,7 @@ async function runLocally(request: TranscriptCaptureRequest, env: CaptureEnv): P
       project: request.project,
       source: TRANSCRIPT_CAPTURE_SOURCE,
       dryRun: false,
-      meta: clipMeta(request.meta),
+      meta: clipMeta(request.meta, request.logPrefix),
     },
     { env, logPrefix: request.logPrefix },
   )

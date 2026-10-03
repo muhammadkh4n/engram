@@ -260,6 +260,82 @@ npx tsx packages/bench/src/replay/exposure.ts \
 - With two arms: the per-step Jaccard of their top 10, aligned by `query_id`, with mean, median and min, and
   the query ids only one arm logged.
 
+## Recall eval
+
+LongMemEval runs on SQLite with no graph and saturates at R@10 1.000, so it cannot see a ranking change or the
+Related section, and judge-scored screens inherit the judge's own disagreement. `src/eval/engram-recall-eval.ts`
+scores real queries against gold labels on the server's own recall path, with no model judging anything:
+
+```bash
+npx tsx packages/bench/src/eval/engram-recall-eval.ts run \
+  --gold ./gold.jsonl \
+  --dist /path/to/engram-checkout --env /path/to/engram.env \
+  --pins ./pins.json [--pins-mode fill|strict] [--runs 3] \
+  --calibration-query "<a query whose answer has graph associations>" \
+  --label control [--now 2026-10-02T09:00:00Z] \
+  --out ./eval
+
+npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.json ./eval/candidate.json [--json]
+```
+
+- **Stack:** built from a built engram checkout (`--dist`) and the service's systemd env file (`--env`) exactly
+  as the MCP server builds its memory stack: PostgREST storage (behind the RAM recall engine when it is on), the
+  `ENGRAM_CHAT_*` chat intelligence, the local ONNX reranker (a load failure stops the run instead of falling
+  back to the remote reranker) and Neo4j. `autoConsolidate` is off and `graph.initialize()` is never called.
+  Every recall uses the options `memory_recall` builds from its arguments (`project_id` from the gold line), plus
+  `reconsolidate: false` and `now`. The sensory buffer is restored before every query, so query order cannot
+  change results.
+- **Env:** before the build loads, every inherited `ENGRAM_*`, `OPENAI_*`, `SUPABASE_*` and `NEO4J_*` variable is
+  removed, then the env file is applied, so a switch exported in the shell cannot change the measured recall. The
+  meta's `engram_env` lists every `ENGRAM_*` variable in effect with its value; a name containing KEY, SECRET,
+  TOKEN or PASSWORD is listed with `null`.
+- **Recall engine:** with `ENGRAM_RECALL_ENGINE=true`, the server falls back to bare storage when the engine fails
+  to import. The eval instead stops (exit 4) when storage is left unwrapped, the engine module cannot be loaded,
+  or the engine does not warm to `ready` (the stack awaits the warm-up). The meta records `recall_engine: on|off`.
+- **Write guards:** PostgREST `rpc` accepts only read functions; `insert`, `upsert`, `update` and `delete` throw;
+  Neo4j sessions are forced to READ mode and write transactions reject; `ENGRAM_RECALL_LOG` is removed and graph
+  reinforcement and co-recall are switched off. Every blocked call is counted, the first one stops the run, and
+  the meta records the counters (`guards`, `blocked_calls`), so a finished run is proof it wrote nothing.
+- **Graph errors:** the engine catches Neo4j failures and falls back to the SQL association walk without recording
+  it. The guarded driver therefore counts every error raised by a session call it lets through (`run`,
+  `executeRead`, `readTransaction`, an explicit transaction's `run`/`commit`/`rollback`), including write Cypher
+  the READ session rejects, in `guards.graphErrors`. Any error during a recall stops the run (exit 4) with a message
+  naming the call.
+- **Graph check:** with `NEO4J_URI` set, the stack recalls `--calibration-query` first and refuses to run unless
+  at least one Related item came from Neo4j, because a recall without graph associations is not the server's
+  recall. The engine also fills Related from the SQL association walk when the graph has no node for any seed;
+  only spreading activation tags its associations `metadata.activationSource = "spreading_activation"`, and that
+  engine provenance field, matched to the Related items by id, is what the check counts.
+- **Pins:** every model call recall makes (query embedding, expansion, HyDE, the remote reranker, evidence
+  selection) is answered from `--pins`, keyed by method and the exact input. `fill` calls the model on a miss and
+  records the reply; `strict` throws on a miss without calling anything, and blocks any fetch outside the storage
+  origin and the reranker's model host. Expansion is keyed by its reference date, so runs that share a strict
+  pins file pass the same `--now` (the run's start when absent). A degraded recall (no query vector) stops the run.
+- **Failed legs:** the stack sets `ENGRAM_RECALL_TIMING=1`, so the engine reports a retrieval leg that failed while
+  the others answered as a `<leg>Error` timing flag (`lexicalError`, `vectorError`). A recall with any such flag
+  stops the run (exit 4), with a message naming the query and the leg; it would otherwise score as a full recall.
+- **Gold:** JSONL, one line per query: `{ id, class: "identifier"|"current"|"recall"|"project", query,
+  project_id?, gold_ids, gold_phrases, stale_ids, stale_phrases, current_phrases, note }`. A phrase group is
+  all-of; a list of groups is any-of. Text is matched after NFKC, lowercasing and whitespace collapsing. Gold wins
+  over stale; a stale phrase match is cancelled by a current phrase match.
+- **Scores:** per query, the rank of the first gold item in the Recalled section, hit@5/10/30, gold anywhere in
+  the payload and the first section holding it, stale before current, stale in the top 10, per-section chars,
+  approximate tokens and item counts, and `sha256(formatted)`. Per class and overall: MRR@30, hit rates,
+  gold-in-payload rate, stale-before-current rate over the queries with stale labels, payload chars p50/p90/max.
+- **Runs:** `--runs` (at least 2, default 3) recalls the whole gold set that many times. A query whose
+  `formatted` text differs between runs is marked `stable: false`; every run's scores are kept.
+- **Outputs:** `<out>/<label>.json` (`meta`, `queries`, per-run `aggregates`, `unstable`) and `<out>/<label>.md`.
+  The meta records the dist git sha, the env's model ids (only names containing `MODEL`, plus
+  `ENGRAM_RERANK_LOCAL`; never a name containing KEY, SECRET, TOKEN or PASSWORD), the gold and pins sha256, the
+  label, the reference date, the guard counters and pin stats, and the run count. Existing output files are refused.
+- **Compare:** pairs A and B by gold id over queries stable in both; unstable ones are listed apart, and a gold id
+  whose query differs between the files is refused. Per query: better / worse / tie on the first gold rank (no
+  rank counts as below every rank), hit@10 and gold-in-payload gains and losses, stale-before-current changes and
+  payload deltas. Totals, overall and per class: wins, losses, ties, an exact two-sided sign test over the
+  non-ties, MRR@30 of each side and the delta. Numbers only; what counts as a change is decided before the run.
+- Exit 2: usage error or existing outputs. Exit 4: a guard, pin, graph, degraded-recall or failed-leg check stopped
+  the run; a stopped run writes no outputs.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)
