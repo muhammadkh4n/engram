@@ -82,6 +82,14 @@ export const MAX_RELATED_SHARE = 0.9
 /** Appended to an item cut at the item cap. */
 export const ITEM_CUT_MARKER = ' …'
 
+/** Smallest pass-1 room, in chars, that Recalled or Related reserves under a
+ *  budget. Below it the first item would keep about 60 chars after the
+ *  section heading, the cut marker and its `- [episode · user · date]` tag:
+ *  a tag and a few words, which tells the reader nothing and costs room the
+ *  other section can use. A section with less room reserves nothing and its
+ *  room goes to the other section. */
+export const MIN_SECTION_ROOM_CHARS = 120
+
 /** `estimateTokens` counts ceil(chars / 4), so a text fits a budget of B
  *  tokens exactly when it has at most 4·B chars. Assembly under a budget
  *  works in chars, where section costs add up exactly. */
@@ -158,12 +166,11 @@ function writePayload(header: string, sections: SectionItems): AssembledPayload 
 }
 
 /**
- * Cut `text` to at most `maxTokens` tokens, ending at a word boundary followed
+ * Cut `text` to at most `maxChars` chars, ending at a word boundary followed
  * by `ITEM_CUT_MARKER`. Text with no word boundary in range is cut hard,
  * never inside a surrogate pair. Text that fits is returned unchanged.
  */
-export function capItemText(text: string, maxTokens: number): string {
-  const maxChars = maxTokens * CHARS_PER_TOKEN
+export function capItemChars(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   const room = Math.max(0, maxChars - ITEM_CUT_MARKER.length)
   for (let end = room; end > 0; end--) {
@@ -172,6 +179,11 @@ export function capItemText(text: string, maxTokens: number): string {
   const code = text.charCodeAt(room - 1)
   const end = code >= 0xd800 && code <= 0xdbff ? room - 1 : room
   return `${text.slice(0, end)}${ITEM_CUT_MARKER}`
+}
+
+/** `capItemChars` with the limit in tokens. */
+export function capItemText(text: string, maxTokens: number): string {
+  return capItemChars(text, maxTokens * CHARS_PER_TOKEN)
 }
 
 function checkBudgetFields(policy: RecallOutputPolicy): void {
@@ -198,13 +210,43 @@ function extendPrefix(costs: readonly number[], from: number, room: number): { c
   return { count, used }
 }
 
+interface PassOneRooms {
+  recalled: number
+  related: number
+}
+
+/**
+ * Pass-1 room of Recalled and Related, in chars: Related holds
+ * `room · share` and Recalled the rest. A section with no candidates reserves
+ * nothing, and neither does one whose room is below `MIN_SECTION_ROOM_CHARS`;
+ * the other section then holds the whole room.
+ */
+function passOneRooms(room: number, share: number, hasRecalled: boolean, hasRelated: boolean): PassOneRooms {
+  const atLeastFloor = (chars: number) => (chars >= MIN_SECTION_ROOM_CHARS ? chars : 0)
+  if (!hasRelated) return { recalled: hasRecalled ? atLeastFloor(room) : 0, related: 0 }
+  if (!hasRecalled) return { recalled: 0, related: atLeastFloor(room) }
+  const related = Math.floor(room * share)
+  if (related < MIN_SECTION_ROOM_CHARS) return { recalled: atLeastFloor(room), related: 0 }
+  if (room - related < MIN_SECTION_ROOM_CHARS) return { recalled: 0, related: room }
+  return { recalled: room - related, related }
+}
+
+/** Longest first item, in chars, that fits a section with `sectionRoom`
+ *  chars: the room minus the heading and the two joining newlines, and never
+ *  more than the item cap. */
+function firstItemChars(section: PayloadSection, sectionRoom: number, itemMaxTokens: number): number {
+  return Math.min(itemMaxTokens * CHARS_PER_TOKEN, sectionRoom - PAYLOAD_SECTION_HEADERS[section].length - 2)
+}
+
 /**
  * Budgeted assembly, all in chars. The room R is the budget minus the header
- * and notice. Pass 1: the Recalled section takes the prefix that fits in its
- * part of R and Related the prefix that fits in R·relatedShare. Pass 2: room
- * either one left unused goes to the other, Recalled first. Domain, Context
- * and Faint then fill what is left in order; the first of their items that
- * does not fit ends assembly. Every item is first cut to the item cap.
+ * and notice. Every item is first cut to the item cap, which never exceeds
+ * the budget. Pass 1: Recalled and Related each take the prefix that fits in
+ * their room (see `passOneRooms`), and the first item of a section with room
+ * is cut to fit it, so every section that holds room shows its first memory
+ * whatever the item cap and the share. Pass 2: room either one left unused
+ * goes to the other, Recalled first. Domain, Context and Faint then fill what
+ * is left in order; the first of their items that does not fit ends assembly.
  */
 function assembleWithinBudget(
   rendered: RenderedPayload,
@@ -213,23 +255,36 @@ function assembleWithinBudget(
   notice: string | undefined,
 ): AssembledPayload {
   checkBudgetFields(policy)
-  const itemMaxTokens = policy.itemMaxTokens ?? Math.max(1, Math.floor(tokenBudget / 4))
+  const itemMaxTokens = Math.min(policy.itemMaxTokens ?? Math.max(1, Math.floor(tokenBudget / 4)), tokenBudget)
   const header = headerText(notice)
   const room = Math.max(0, tokenBudget * CHARS_PER_TOKEN - header.length)
+
+  const originals = {} as Record<PayloadSection, readonly RenderedItem[]>
+  for (const section of PAYLOAD_SECTION_ORDER) originals[section] = candidatesFor(rendered, section, policy)
+  const rooms = passOneRooms(
+    room,
+    policy.relatedShare ?? DEFAULT_RELATED_SHARE,
+    originals.recalled.length > 0,
+    originals.related.length > 0,
+  )
 
   const candidates = {} as Record<PayloadSection, RenderedItem[]>
   const wasCut = {} as Record<PayloadSection, boolean[]>
   const costs = {} as Record<PayloadSection, number[]>
   for (const section of PAYLOAD_SECTION_ORDER) {
-    const original = candidatesFor(rendered, section, policy)
-    candidates[section] = original.map((item) => ({ ...item, text: capItemText(item.text, itemMaxTokens) }))
-    wasCut[section] = original.map((item, i) => candidates[section][i]?.text !== item.text)
+    const sectionRoom = section === 'recalled' || section === 'related' ? rooms[section] : 0
+    candidates[section] = originals[section].map((item, i) => ({
+      ...item,
+      text: i === 0 && sectionRoom > 0
+        ? capItemChars(item.text, firstItemChars(section, sectionRoom, itemMaxTokens))
+        : capItemText(item.text, itemMaxTokens),
+    }))
+    wasCut[section] = originals[section].map((item, i) => candidates[section][i]?.text !== item.text)
     costs[section] = itemCosts(section, candidates[section])
   }
 
-  const relatedRoom = Math.floor(room * (policy.relatedShare ?? DEFAULT_RELATED_SHARE))
-  const recalled1 = extendPrefix(costs.recalled, 0, room - relatedRoom)
-  const related1 = extendPrefix(costs.related, 0, relatedRoom)
+  const recalled1 = extendPrefix(costs.recalled, 0, rooms.recalled)
+  const related1 = extendPrefix(costs.related, 0, rooms.related)
   let left = room - recalled1.used - related1.used
   const recalled2 = extendPrefix(costs.recalled, recalled1.count, left)
   left -= recalled2.used
@@ -267,8 +322,9 @@ function assembleWithinBudget(
  * No emitted item yields ''.
  *
  * With a token budget the text never exceeds it: no item is longer than the
- * item cap, and Related Memories holds its share of the room even when the
- * Recalled section could fill it all (see `assembleWithinBudget`). A budget
+ * item cap, Related Memories holds its share of the room even when the
+ * Recalled section could fill it all, and the first item of each of the two
+ * is cut to its section's room (see `assembleWithinBudget`). A budget
  * smaller than the header emits nothing. Without one the whole payload is
  * emitted, after `emitK` and the faint switch.
  *
@@ -330,13 +386,20 @@ function faintFromEnv(env: NodeJS.ProcessEnv): boolean {
  * ENGRAM_RECALL_ITEM_MAX_TOKENS (positive integers),
  * ENGRAM_RECALL_RELATED_SHARE (decimal, 0 to MAX_RELATED_SHARE) and
  * ENGRAM_RECALL_FAINT (on|off, default on). Unset or empty means no limit or
- * the default; any other value throws, naming the variable.
+ * the default; any other value throws, naming the variable, and so does an
+ * item cap larger than the token budget when both are set.
  */
 export function recallOutputPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
   const emitK = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_EMIT_K')
   const tokenBudget = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_TOKEN_BUDGET')
   const relatedShare = relatedShareFromEnv(env)
   const itemMaxTokens = positiveIntegerFromEnv(env, 'ENGRAM_RECALL_ITEM_MAX_TOKENS')
+  if (itemMaxTokens !== undefined && tokenBudget !== undefined && itemMaxTokens > tokenBudget) {
+    throw new Error(
+      `ENGRAM_RECALL_ITEM_MAX_TOKENS (${itemMaxTokens}) must not exceed ENGRAM_RECALL_TOKEN_BUDGET (${tokenBudget}): ` +
+        'an item larger than the whole budget can never be shown',
+    )
+  }
   return {
     ...(emitK !== undefined ? { emitK } : {}),
     ...(tokenBudget !== undefined ? { tokenBudget } : {}),

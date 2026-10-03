@@ -27,6 +27,7 @@ import {
   supersessionSettingsAtStartup,
   runMemoryForget,
   runMemoryRecall,
+  RECALL_BUDGET_TOO_SMALL,
   parseSalienceThresholdEnv,
   captureModelFromEnv,
   sharedInit,
@@ -287,6 +288,16 @@ describe('recallOutputPolicyAtStartup', () => {
     expect(() => recallOutputPolicyAtStartup({ [name]: value })).toThrow(name)
   })
 
+  it('fails startup when the item cap is larger than the token budget', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '1000', ENGRAM_RECALL_ITEM_MAX_TOKENS: '1200' }
+
+    expect(() => recallOutputPolicyAtStartup(env)).toThrow(
+      'ENGRAM_RECALL_ITEM_MAX_TOKENS (1200) must not exceed ENGRAM_RECALL_TOKEN_BUDGET (1000)',
+    )
+    expect(() => recallOutputPolicyAtStartup({ ...env, ENGRAM_RECALL_ITEM_MAX_TOKENS: '1000' })).not.toThrow()
+  })
+
   it('fails startup on a malformed budget before any backend is contacted', async () => {
     const saved = process.env['ENGRAM_RECALL_TOKEN_BUDGET']
     process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = 'abc'
@@ -509,6 +520,22 @@ describe('runMemoryRecall', () => {
     const res = await runMemoryRecall(stubMemory(result({})), { query: 'deploy window' })
 
     expect(res).toEqual({ content: [{ type: 'text', text: 'No relevant memories found.' }] })
+  })
+
+  it('says the budget is too small, not that nothing matched, when memories matched but none fit', async () => {
+    const res = await runMemoryRecall(stubMemory(result({ memories: [MEMORY], formatted: '' })), { query: 'deploy window' })
+
+    expect(res).toEqual({ content: [{ type: 'text', text: RECALL_BUDGET_TOO_SMALL }] })
+    expect(RECALL_BUDGET_TOO_SMALL).toContain('token budget is too small')
+  })
+
+  it('keeps the degraded notice ahead of the budget-too-small answer', async () => {
+    const res = await runMemoryRecall(
+      stubMemory(result({ memories: [MEMORY], formatted: '', degraded: { vector: REASON } })),
+      { query: 'deploy window' },
+    )
+
+    expect(res.content[0]?.text).toBe(`${NOTICE}\n${RECALL_BUDGET_TOO_SMALL}`)
   })
 
   it('returns a healthy payload unchanged', async () => {

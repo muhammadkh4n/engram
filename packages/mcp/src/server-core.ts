@@ -759,6 +759,9 @@ function toolError(message: string): ToolTextResult {
   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
 }
 
+export const RECALL_BUDGET_TOO_SMALL =
+  'Memories matched, but the token budget is too small to show one. Raise token_budget or ENGRAM_RECALL_TOKEN_BUDGET.'
+
 /** A degraded recall is still an answer: the reader gets the reason and the
  *  keyword results, never a tool error that hides both. */
 export async function runMemoryRecall(
@@ -788,6 +791,13 @@ export async function runMemoryRecall(
         truncated: result.payload?.truncated === true,
       }),
     )
+  }
+
+  if (!result.formatted && result.memories.length > 0) {
+    // Only a budget smaller than the header and notice emits nothing while
+    // memories matched; saying none matched would be false.
+    const notice = result.degraded ? `${degradedRecallNotice(result.degraded)}\n` : ''
+    return toolText(`${notice}${RECALL_BUDGET_TOO_SMALL}`)
   }
 
   if (!result.formatted || result.memories.length === 0) {
