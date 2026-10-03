@@ -303,10 +303,18 @@ async function isLightSleepDue(storage: StorageAdapter, threshold: number): Prom
   } catch { return false }
 }
 
+/** A failing deep-sleep gate logs its first failure and then every this-many
+ *  consecutive failures; the worker checks it every tick. */
+const DEEP_GATE_FAILURE_LOG_EVERY = 60
+/** Consecutive failed gate reads per store; reset by a successful read. */
+const deepGateFailures = new WeakMap<StorageAdapter, number>()
+
 /**
  * Due when at least `threshold` digests await fact extraction. Deep sleep
  * stamps each digest it extracts and a digest leaves the pending set at the
- * attempt cap, so a quiet store stops being due on its own.
+ * attempt cap, so a quiet store stops being due on its own. A failed read is
+ * not due, and is logged (first failure, then every 60th in a row) so a store
+ * missing the watermark columns does not silently never run deep sleep.
  */
 async function isDeepSleepDue(
   storage: StorageAdapter,
@@ -317,8 +325,19 @@ async function isDeepSleepDue(
       threshold,
       DEFAULT_MAX_EXTRACTION_ATTEMPTS,
     )
+    deepGateFailures.delete(storage)
     return pending.length >= threshold
-  } catch { return false }
+  } catch (err) {
+    const failures = (deepGateFailures.get(storage) ?? 0) + 1
+    deepGateFailures.set(storage, failures)
+    if (failures === 1 || failures % DEEP_GATE_FAILURE_LOG_EVERY === 0) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.warn(
+        `[engram] auto-consolidation: deep-sleep gate cannot read pending digests (${failures} consecutive failure(s)); deep sleep stays off until it can: ${msg}`,
+      )
+    }
+    return false
+  }
 }
 
 async function isDreamCycleDue(

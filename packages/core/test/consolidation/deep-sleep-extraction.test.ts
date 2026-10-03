@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { deepSleep, DEFAULT_MAX_DIGESTS } from '../../src/consolidation/deep-sleep.js'
 import { extractDigestFacts } from '../../src/consolidation/fact-candidates.js'
+import { FactExtractionError } from '../../src/adapters/intelligence.js'
 import type { ExtractFactsInput, ExtractedFact, IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type { Episode } from '../../src/types.js'
 import { CircuitOpenError } from '../../src/resilience/circuit-breaker.js'
@@ -58,7 +59,7 @@ describe('deep sleep reads each digest once, from its episodes', () => {
     const [failing, working] = eps.map((e, i) => digestOver([e], { createdAt: at(`2026-09-0${i + 1}T00:00:00Z`) }))
     const storage = storageWith(eps, [failing!, working!])
     const intelligence = extractor()
-    intelligence.extractFacts.mockRejectedValueOnce(new Error('reply cut off at max_tokens'))
+    intelligence.extractFacts.mockRejectedValueOnce(new FactExtractionError('length', 'reply cut off at max_tokens'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const first = await deepSleep(storage, intelligence, { minDigests: 1 })
@@ -208,7 +209,7 @@ describe('a digest that keeps failing cannot jam the pending queue', () => {
   })
 
   /** Rejects for any call whose episodes include `content`, extracts the rest. */
-  function failingOn(content: string, error: () => Error = () => new Error('reply cut off at max_tokens')) {
+  function failingOn(content: string, error: () => Error = () => new FactExtractionError('length', 'reply cut off at max_tokens')) {
     return extractor(async (input) => {
       if (input.episodes.some(e => e.content === content)) throw error()
       return factPerEpisode(input)
@@ -266,7 +267,9 @@ describe('a digest that keeps failing cannot jam the pending queue', () => {
 
     const result = await deepSleep(storage, intelligence, { minDigests: 1 })
 
-    expect(result).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 0, extractionExhausted: 0 }))
+    expect(result).toEqual(expect.objectContaining({
+      promoted: 1, extractionFailed: 0, extractionExhausted: 0, extractionDeferred: 2,
+    }))
     expect(intelligence.extractFacts).toHaveBeenCalledTimes(2)
     expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
     expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual([digests[0]!.id])
@@ -281,8 +284,165 @@ describe('a digest that keeps failing cannot jam the pending queue', () => {
 
     const result = await deepSleep(storage, intelligence, { minDigests: 1 })
 
-    expect(result).toEqual(expect.objectContaining({ extractionFailed: 0 }))
+    expect(result).toEqual(expect.objectContaining({ extractionFailed: 0, extractionDeferred: 1 }))
     expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+  })
+})
+
+describe('only an unusable reply counts against a digest', () => {
+  let warn: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    resetIdCounter()
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Shaped like the openai SDK's APIError for a 503 from the provider. */
+  function serviceUnavailable(): Error {
+    return Object.assign(new Error('503 upstream connect error'), { name: 'InternalServerError', status: 503 })
+  }
+
+  function threeDigests() {
+    const eps = [makeEpisode({ content: 'first' }), makeEpisode({ content: 'second' }), makeEpisode({ content: 'third' })]
+    const digests = eps.map((e, i) => digestOver([e], { createdAt: at(`2026-09-0${i + 1}T00:00:00Z`) }))
+    return { eps, digests, storage: storageWith(eps, digests) }
+  }
+
+  async function attemptsOf(storage: ReturnType<typeof storageWith>, id: string): Promise<number | undefined> {
+    return (await storage.digests.getRecent(3650)).find(d => d.id === id)?.factExtractionAttempts
+  }
+
+  it('an API error ends the run at its digest, counts no attempt and leaves it and the rest pending', async () => {
+    const { digests, storage } = threeDigests()
+    const intelligence = extractor()
+    intelligence.extractFacts.mockRejectedValueOnce(serviceUnavailable())
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({
+      promoted: 0, extractionFailed: 0, extractionExhausted: 0, extractionDeferred: 3,
+    }))
+    expect(intelligence.extractFacts).toHaveBeenCalledTimes(1)
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(storage.digests.markFactsExtracted).not.toHaveBeenCalled()
+    expect(await attemptsOf(storage, digests[0]!.id) ?? 0).toBe(0)
+    expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual(digests.map(d => d.id))
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]![0])).toContain('InternalServerError: 503 upstream connect error')
+  })
+
+  it('a FactExtractionError counts an attempt and the run moves on to the next digest', async () => {
+    const { digests, storage } = threeDigests()
+    const intelligence = extractor()
+    intelligence.extractFacts.mockRejectedValueOnce(new FactExtractionError('parse', 'reply holds no facts object'))
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ promoted: 2, extractionFailed: 1, extractionDeferred: 0 }))
+    expect(storage.digests.recordFactExtractionFailure).toHaveBeenCalledWith(digests[0]!.id)
+    expect(await attemptsOf(storage, digests[0]!.id)).toBe(1)
+    expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual([digests[0]!.id])
+  })
+
+  it('counts a FactExtractionError thrown by another copy of the class', async () => {
+    const { digests, storage } = threeDigests()
+    const foreign = Object.assign(new Error('reply cut off at max_tokens'), { name: 'FactExtractionError', kind: 'length' })
+    const intelligence = extractor()
+    intelligence.extractFacts.mockRejectedValueOnce(foreign)
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ extractionFailed: 1, extractionDeferred: 0 }))
+    expect(await attemptsOf(storage, digests[0]!.id)).toBe(1)
+  })
+
+  it('three runs that hit an API error never exhaust a digest, and it is extracted once the API is back', async () => {
+    const { digests, storage } = threeDigests()
+    const intelligence = extractor()
+    for (let i = 0; i < 3; i++) intelligence.extractFacts.mockRejectedValueOnce(serviceUnavailable())
+
+    const runs = []
+    for (let i = 0; i < 3; i++) runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+
+    expect(runs.map(r => r.extractionExhausted)).toEqual([0, 0, 0])
+    expect(runs.map(r => r.extractionDeferred)).toEqual([3, 3, 3])
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(await attemptsOf(storage, digests[0]!.id) ?? 0).toBe(0)
+
+    const recovered = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(recovered).toEqual(expect.objectContaining({ promoted: 3, extractionDeferred: 0 }))
+    expect(await storage.digests.getPendingFactExtraction(10, 3)).toEqual([])
+  })
+
+  it('a failed episode read defers the run without counting an attempt', async () => {
+    const { storage } = threeDigests()
+    vi.mocked(storage.episodes.getByIds).mockRejectedValueOnce(new Error('Episode getByIds failed: fetch failed'))
+
+    const result = await deepSleep(storage, extractor(), { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ extractionFailed: 0, extractionDeferred: 3 }))
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+  })
+})
+
+describe('retrying a digest after a partial promote', () => {
+  beforeEach(() => {
+    resetIdCounter()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  /** Search returns every stored fact, so an equal statement is found as a duplicate. */
+  function searchStored(storage: ReturnType<typeof storageWith>): void {
+    vi.mocked(storage.semantic.search).mockImplementation(async () =>
+      storage.semantic._memories.map(item => ({ item, similarity: 1 })),
+    )
+  }
+
+  it('neither inserts nor boosts the facts the failed run already stored, and stores the rest', async () => {
+    const eps = [makeEpisode({ content: 'alpha' }), makeEpisode({ content: 'beta' })]
+    const digest = digestOver(eps)
+    const storage = storageWith(eps, [digest])
+    searchStored(storage)
+    const insert = vi.mocked(storage.semantic.insert)
+    const realInsert = insert.getMockImplementation()!
+    insert.mockImplementationOnce(realInsert).mockImplementationOnce(async () => {
+      throw new Error('semantic insert failed: connection reset')
+    })
+
+    await expect(deepSleep(storage, extractor(), { minDigests: 1 })).rejects.toThrow('connection reset')
+    expect(storage.semantic._memories.map(m => m.content)).toEqual(['Stated: alpha'])
+    expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual([digest.id])
+
+    const retry = await deepSleep(storage, extractor(), { minDigests: 1 })
+
+    expect(retry).toEqual(expect.objectContaining({ promoted: 1, deduplicated: 0 }))
+    expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
+    expect(storage.semantic._memories.map(m => m.content)).toEqual(['Stated: alpha', 'Stated: beta'])
+    expect(await storage.digests.getPendingFactExtraction(10, 3)).toEqual([])
+  })
+
+  it('still boosts a duplicate stored from a different digest', async () => {
+    const first = [makeEpisode({ content: 'alpha' })]
+    const second = [makeEpisode({ content: 'alpha' })]
+    const digests = [
+      digestOver(first, { createdAt: at('2026-09-01T00:00:00Z') }),
+      digestOver(second, { createdAt: at('2026-09-02T00:00:00Z') }),
+    ]
+    const storage = storageWith([...first, ...second], digests)
+    searchStored(storage)
+
+    const result = await deepSleep(storage, extractor(), { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ promoted: 1, deduplicated: 1 }))
+    expect(storage.semantic.recordAccessAndBoost).toHaveBeenCalledTimes(1)
   })
 })
 

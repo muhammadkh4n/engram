@@ -12,7 +12,7 @@ import type {
   SupersessionFact,
   SupersessionVerdict,
 } from '../../src/adapters/intelligence.js'
-import { supersessionRuleOutcome } from '../../src/adapters/intelligence.js'
+import { FactExtractionError, supersessionRuleOutcome } from '../../src/adapters/intelligence.js'
 import type { GraphPort } from '../../src/adapters/graph.js'
 import type { Digest, SearchResult, SemanticMemory } from '../../src/types.js'
 import { makeDigest, makeEpisode, makeMockStorage, resetIdCounter, withSourceTurns } from './mock-storage.js'
@@ -577,7 +577,7 @@ describe('deep sleep supersession direction from statement time', () => {
     statefulSemantic(storage)
     const intelligence = extractingIntelligence()
     const extract = intelligence.extractFacts.getMockImplementation()!
-    intelligence.extractFacts.mockRejectedValueOnce(new Error('upstream 502'))
+    intelligence.extractFacts.mockRejectedValueOnce(new FactExtractionError('parse', 'reply holds no facts object'))
     vi.spyOn(console, 'warn').mockImplementation(() => {})
 
     const first = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })

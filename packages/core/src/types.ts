@@ -475,8 +475,9 @@ export interface ConsolidateResult {
   /** Judged conflicts that changed nothing because the judge gave no valid
    *  kind for one of the two facts. */
   kindMissing?: number
-  /** Deep-sleep digests whose fact extraction failed; they stay pending for
-   *  the next run. */
+  /** Deep-sleep digests whose extraction reply was unusable (cut off or
+   *  unparseable); each gained a failed attempt and stays pending below the
+   *  cap. */
   extractionFailed?: number
   /** Deep-sleep digests stamped with no fact read because none of their
    *  source episodes is live. */
@@ -484,6 +485,11 @@ export interface ConsolidateResult {
   /** Deep-sleep digests whose failure this run reached the attempt cap; no
    *  later run retries them. */
   extractionExhausted?: number
+  /** Deep-sleep digests left unextracted because an extraction error a retry
+   *  can fix (API, network, auth, rate limit, open circuit, storage read)
+   *  ended the run's loop: the digest that hit it and every later one in the
+   *  batch. No attempt is counted; all stay pending for the next run. */
+  extractionDeferred?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { FactSourceEpisode } from '@engram-mem/core'
+import { FactExtractionError, isFactExtractionError } from '@engram-mem/core'
 
 const mockChatCreate = vi.fn()
 
@@ -222,7 +223,9 @@ describe('OpenAISummarizer.extractFacts', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     try {
       const s = new OpenAISummarizer({ apiKey: 'k' })
-      await expect(s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null })).rejects.toThrow(/max_tokens/)
+      const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(FactExtractionError)
+      expect(err).toMatchObject({ name: 'FactExtractionError', kind: 'length', message: expect.stringMatching(/max_tokens/) })
     } finally {
       stderr.mockRestore()
     }
@@ -236,14 +239,19 @@ describe('OpenAISummarizer.extractFacts', () => {
     mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content }, finish_reason: 'stop' }] })
     const s = new OpenAISummarizer({ apiKey: 'k' })
 
-    await expect(s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null })).rejects.toThrow(/extractFacts/)
+    const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(FactExtractionError)
+    expect(err).toMatchObject({ kind: 'parse', message: expect.stringMatching(/extractFacts/) })
   })
 
-  it('rejects with the API error', async () => {
-    mockChatCreate.mockRejectedValueOnce(new Error('503 upstream'))
+  it('rejects with the API error unchanged, not as a FactExtractionError', async () => {
+    const apiError = Object.assign(new Error('503 upstream'), { name: 'InternalServerError', status: 503 })
+    mockChatCreate.mockRejectedValueOnce(apiError)
     const s = new OpenAISummarizer({ apiKey: 'k' })
 
-    await expect(s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null })).rejects.toThrow('503 upstream')
+    const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
+    expect(err).toBe(apiError)
+    expect(isFactExtractionError(err)).toBe(false)
   })
 
   it('rejects the whole batch when a later chunk fails', async () => {

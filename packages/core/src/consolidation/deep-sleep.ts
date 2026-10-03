@@ -1,6 +1,11 @@
 import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter, SupersessionCandidate, SupersessionVerdict } from '../adapters/intelligence.js'
-import { SUPERSESSION_NEW_FACT_KEY, isSupersessionFactKind, supersessionRuleOutcome } from '../adapters/intelligence.js'
+import {
+  SUPERSESSION_NEW_FACT_KEY,
+  isFactExtractionError,
+  isSupersessionFactKind,
+  supersessionRuleOutcome,
+} from '../adapters/intelligence.js'
 import type { GraphPort } from '../adapters/graph.js'
 import type { ConsolidateResult, SearchResult, SemanticMemory } from '../types.js'
 import { extractCounters } from './graph-counters.js'
@@ -8,7 +13,6 @@ import { linkFactContext } from './own-text-links.js'
 import { epochMs, factStatementClock } from './statement-time.js'
 import type { FactClock } from './statement-time.js'
 import { extractDigestFacts } from './fact-candidates.js'
-import { CircuitOpenError } from '../resilience/circuit-breaker.js'
 import type { FactCandidate } from './fact-candidates.js'
 
 export interface DeepSleepOptions {
@@ -16,8 +20,8 @@ export interface DeepSleepOptions {
   minDigests?: number
   /** Most pending digests one run extracts, oldest first. Default 50. */
   maxDigests?: number
-  /** Failed extraction calls after which a digest is no longer retried.
-   *  Default 3. */
+  /** Unusable extraction replies (FactExtractionError) after which a digest
+   *  is no longer retried. Default 3. */
   maxExtractionAttempts?: number
   /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
    *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
@@ -52,7 +56,7 @@ const NEIGHBOUR_POOL_MAX = 5
 
 /** Pending digests one run extracts when DeepSleepOptions.maxDigests is unset. */
 export const DEFAULT_MAX_DIGESTS = 50
-/** Failed extraction calls per digest when DeepSleepOptions.maxExtractionAttempts
+/** Unusable extraction replies per digest when DeepSleepOptions.maxExtractionAttempts
  *  is unset. A digest that fails for its own reasons (an oversized reply, a
  *  reply that never parses) fails the same way every run; without a cap such
  *  digests stay oldest-first in the pending set and fill every batch. */
@@ -584,6 +588,19 @@ async function writeSemanticGraph(
   }
 }
 
+/** Whether the stored fact lists any of `digestIds` among its sources. Read
+ *  by id because search and nearest-neighbour rows can omit source digests. */
+async function derivesFromAny(
+  storage: StorageAdapter,
+  semanticId: string,
+  digestIds: ReadonlyArray<string>,
+): Promise<boolean> {
+  if (digestIds.length === 0) return false
+  const [stored] = await storage.getByIds([{ id: semanticId, type: 'semantic' }])
+  if (stored?.type !== 'semantic') return false
+  return stored.data.sourceDigestIds.some(id => digestIds.includes(id))
+}
+
 async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandidate, counts: PromotionCounts): Promise<void> {
   const { storage } = ctx
   // Embed the same topic+content text that the semantic FTS column and the
@@ -604,6 +621,10 @@ async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandi
     return
   }
   if (decision.kind === 'duplicate') {
+    // A duplicate already derived from this candidate's digest is the same
+    // statement read again (a retry after a partial promote, or a restatement
+    // within the digest), not a recurrence: it changes nothing.
+    if (await derivesFromAny(storage, decision.id, candidate.sourceDigestIds)) return
     // Re-extracting a known fact is a recurrence: it raises the access
     // count and the fact's confidence.
     await storage.semantic.recordAccessAndBoost(decision.id, 0.1)
@@ -761,12 +782,14 @@ export async function promoteFactCandidates(
  * digests not yet extracted, oldest first, reads each one's live episodes
  * (extractDigestFacts), stores the facts (promoteFactCandidates) and stamps
  * the digest. Oldest first means a fact is stored before the facts stated
- * after it are judged against it. A digest whose extraction fails stays
- * pending and gains one failed attempt; at `maxExtractionAttempts` it leaves
- * the pending set unstamped, so newer digests are not starved behind it. An
- * open circuit is an outage, not the digest's fault: it is not counted and
- * ends the run's loop, so an outage cannot exhaust every pending digest. A
- * digest with no live episode is stamped with nothing stored.
+ * after it are judged against it. A digest whose reply is unusable (cut off
+ * or unparseable, a FactExtractionError) stays pending and gains one failed
+ * attempt; at `maxExtractionAttempts` it leaves the pending set unstamped, so
+ * newer digests are not starved behind it. Any other extraction error (API,
+ * network, auth, rate limit, open circuit, storage read) says nothing about
+ * the digest: it is not counted, the digest and every later one stay pending,
+ * and the run's loop ends, so an outage cannot exhaust any digest. A digest
+ * with no live episode is stamped with nothing stored.
  *
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
@@ -778,12 +801,6 @@ export async function promoteFactCandidates(
  * - CONTRADICTS relationships on supersession
  * - Temporal validity (validFrom from earliest source episode)
  */
-/** By name as well as class: an adapter bundled with its own copy of core
- *  throws a CircuitOpenError this module's class does not match. */
-function isCircuitOpen(err: unknown): boolean {
-  return err instanceof CircuitOpenError || (err instanceof Error && err.name === 'CircuitOpenError')
-}
-
 export async function deepSleep(
   storage: StorageAdapter,
   intelligence: IntelligenceAdapter | undefined,
@@ -799,7 +816,7 @@ export async function deepSleep(
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
       supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
-      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0,
+      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0, extractionDeferred: 0,
     }
   }
 
@@ -814,15 +831,20 @@ export async function deepSleep(
   let totals = zeroCounts()
   let extractionFailed = 0
   let extractionExhausted = 0
+  let extractionDeferred = 0
   let noEpisodes = 0
-  for (const digest of pending) {
+  for (const [index, digest] of pending.entries()) {
     let extraction: Awaited<ReturnType<typeof extractDigestFacts>>
     try {
       extraction = await extractDigestFacts(storage, intelligence, digest)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      if (isCircuitOpen(err)) {
-        console.warn(`[deep-sleep] circuit open at digest ${digest.id}; ending this run's extraction: ${msg}`)
+      if (!isFactExtractionError(err)) {
+        extractionDeferred = pending.length - index
+        const errorClass = err instanceof Error ? err.name : typeof err
+        console.warn(
+          `[deep-sleep] fact extraction deferred at digest ${digest.id}; ${extractionDeferred} digest(s) stay pending for the next run, no attempt counted: ${errorClass}: ${msg}`,
+        )
         break
       }
       const attempts = await storage.digests.recordFactExtractionFailure(digest.id)
@@ -860,6 +882,7 @@ export async function deepSleep(
     ...tierCounts,
     extractionFailed,
     extractionExhausted,
+    extractionDeferred,
     noEpisodes,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,

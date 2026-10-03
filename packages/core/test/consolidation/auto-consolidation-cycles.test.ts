@@ -311,4 +311,34 @@ describe('Auto-consolidation deep-sleep gate', () => {
     expect(results.map((r) => r.cycle)).toEqual(['deep'])
     expect(storage.digests.markFactsExtracted).toHaveBeenCalledTimes(2)
   })
+
+  it('logs a failing gate read once, then every 60th consecutive failure, and starts over after a success', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const storage = makeMockStorage({ initialDigests: pendingDigests(1) })
+    const pending = vi.mocked(storage.digests.getPendingFactExtraction)
+    const realPending = pending.getMockImplementation()!
+    const missingColumn = new Error('column memory_digests.fact_extraction_attempts does not exist')
+    pending.mockRejectedValue(missingColumn)
+    const gateWarnings = () =>
+      warn.mock.calls.filter((c) => String(c[0]).includes('deep-sleep gate')).length
+    const tick = () => runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })
+
+    expect(await tick()).toEqual([])
+    expect(gateWarnings()).toBe(1)
+    expect(String(warn.mock.calls[0]![0])).toContain('fact_extraction_attempts does not exist')
+
+    for (let i = 2; i < 60; i++) await tick()
+    expect(gateWarnings()).toBe(1)
+    await tick()
+    expect(gateWarnings()).toBe(2)
+    expect(String(warn.mock.calls.at(-1)![0])).toContain('60 consecutive')
+
+    pending.mockImplementation(realPending)
+    expect(await tick()).toEqual([])
+    pending.mockRejectedValue(missingColumn)
+    await tick()
+    expect(gateWarnings()).toBe(3)
+    expect(String(warn.mock.calls.at(-1)![0])).toContain('(1 consecutive')
+    warn.mockRestore()
+  })
 })

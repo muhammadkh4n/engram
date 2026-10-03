@@ -82,12 +82,15 @@ export type {
   SupersessionStatedAt,
   SupersessionFactKind,
   SupersessionRuleOutcome,
+  FactExtractionErrorKind,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,
   isUnclassifiableReply,
   EmptyClassifierReplyError,
   isEmptyClassifierReply,
+  FactExtractionError,
+  isFactExtractionError,
   SUPERSESSION_NEW_FACT_KEY,
   supersessionRuleOutcome,
   isSupersessionFactKind,

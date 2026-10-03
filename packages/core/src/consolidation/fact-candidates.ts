@@ -143,8 +143,9 @@ async function modelFacts(
  * Forgotten episodes are never read, so a forgotten turn yields no fact; a
  * digest with no live episode yields nothing at all. With `extractFacts`
  * the model reads the live episodes in statement-time order; without it the
- * first-person patterns run on the user turns. Rejects when the extractor
- * does, so the caller can leave the digest for a later run.
+ * first-person patterns run on the user turns. Rejects with the extractor's
+ * or the episode read's error unchanged, so the caller can tell an unusable
+ * reply (FactExtractionError) from a failure a retry can fix.
  */
 export async function extractDigestFacts(
   storage: StorageAdapter,

@@ -20,6 +20,7 @@ import type {
 } from '@engram-mem/core'
 import {
   EmptyClassifierReplyError,
+  FactExtractionError,
   SUPERSESSION_NEW_FACT_KEY,
   UnclassifiableReplyError,
   isSupersessionFactKind,
@@ -658,14 +659,14 @@ export class OpenAISummarizer {
     // A cut reply can still close its JSON after dropping later facts, so it is
     // never parsed (chatCreate has already logged it).
     if (choice?.finish_reason === 'length') {
-      throw new Error(`extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
+      throw new FactExtractionError('length', `extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
     }
     const raw = choice?.message?.content ?? ''
     let reply: Record<string, unknown>
     try {
       reply = extractJsonReply(raw, isFactsReply) as Record<string, unknown>
     } catch {
-      throw new Error(`extractFacts: reply holds no {"facts": [...]} object (chars=${raw.length})`)
+      throw new FactExtractionError('parse', `extractFacts: reply holds no {"facts": [...]} object (chars=${raw.length})`)
     }
     return parseExtractedFacts(reply['facts'] as unknown[], episodes)
   }

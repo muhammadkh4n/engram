@@ -253,9 +253,11 @@ export interface IntelligenceAdapter {
   /**
    * Extract standalone facts from source episodes, each citing the episodes
    * it rests on. Episodes are never cut; a large batch may take several
-   * model calls. Resolves `[]` when the episodes hold no fact. Rejects when
-   * any call fails, is cut off at its token cap, or replies with something
-   * that cannot be read as a fact list, so the caller can retry the batch.
+   * model calls. Resolves `[]` when the episodes hold no fact. Rejects with a
+   * FactExtractionError when a reply is cut off at its token cap or cannot be
+   * read as a fact list; a failed call (API, network, auth, rate limit)
+   * rejects with its own error, unchanged. Either way the caller can retry
+   * the batch; only the first says something about the batch itself.
    */
   extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
   /**
@@ -416,4 +418,30 @@ export class EmptyClassifierReplyError extends Error {
 /** Matched by name as well as by class, like isUnclassifiableReply. */
 export function isEmptyClassifierReply(err: unknown): err is EmptyClassifierReplyError {
   return err instanceof EmptyClassifierReplyError || (err instanceof Error && err.name === 'EmptyClassifierReplyError')
+}
+
+/** Why a fact-extraction reply could not be used: cut off at max_tokens
+ *  (`length`) or not the expected JSON (`parse`). */
+export type FactExtractionErrorKind = 'length' | 'parse'
+
+/**
+ * The fact extractor answered, but its reply cannot be stored: it was cut off
+ * at max_tokens or does not parse. Resending the same episodes tends to fail
+ * the same way, so callers count it against the batch. A failed call (API,
+ * network, auth, rate limit) is not this error: it says nothing about the
+ * batch and can succeed later.
+ */
+export class FactExtractionError extends Error {
+  readonly kind: FactExtractionErrorKind
+
+  constructor(kind: FactExtractionErrorKind, message: string) {
+    super(message)
+    this.name = 'FactExtractionError'
+    this.kind = kind
+  }
+}
+
+/** Matched by name as well as by class, like isUnclassifiableReply. */
+export function isFactExtractionError(err: unknown): err is FactExtractionError {
+  return err instanceof FactExtractionError || (err instanceof Error && err.name === 'FactExtractionError')
 }
