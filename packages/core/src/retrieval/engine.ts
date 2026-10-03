@@ -10,6 +10,7 @@ import {
   emptyRecallPayload,
   resolveRecallOutputPolicy,
   degradedRecallNotice,
+  MAX_TAG_DEVICE_CHARS,
   type RecallPayload,
   type RenderedItem,
   type RenderedPayload,
@@ -197,9 +198,10 @@ function extractAttribution(m: RetrievedMemory): string {
 
   const parts: string[] = []
 
-  // Device: "Node: DeviceName (...)"
+  // Device: "Node: DeviceName (...)". Clipped so every tag stays within
+  // MAX_TAG_CHARS, which the item-cap floor is computed from.
   const deviceMatch = rawText.match(/Node:\s+(\w+)/)
-  if (deviceMatch) parts.push(deviceMatch[1])
+  if (deviceMatch) parts.push(deviceMatch[1].slice(0, MAX_TAG_DEVICE_CHARS))
 
   // Channel: "WhatsApp gateway" or "Telegram gateway"
   if (/whatsapp/i.test(rawText)) parts.push('WhatsApp')

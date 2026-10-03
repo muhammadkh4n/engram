@@ -12,7 +12,11 @@ import {
   CUT_BOUNDARY_WINDOW,
   DEFAULT_RECALL_OUTPUT_POLICY,
   MIN_CUT_CONTENT_CHARS,
+  MIN_ITEM_MAX_TOKENS,
   MIN_RECALL_TOKEN_BUDGET,
+  MAX_TAG_CHARS,
+  MAX_TAG_DEVICE_CHARS,
+  minItemChars,
   MIN_SECTION_ROOM_CHARS,
   DEFAULT_RELATED_SHARE,
   ITEM_CUT_MARKER,
@@ -519,6 +523,19 @@ describe('capItemChars — a cut item shows content', () => {
     expect(capItemChars(`${TAG}short content that does not fit`, 50)).toBeUndefined()
   })
 
+  it('names the shortest showable cut, one char longer when it would end inside a surrogate pair', () => {
+    const plain = `${TAG}${'x'.repeat(500)}`
+    const emoji = `${TAG}${'x'.repeat(MIN_CUT_CONTENT_CHARS - 1)}\u{1F600}${'x'.repeat(100)}`
+
+    expect(minItemChars(plain)).toBe(TAG.length + MIN_CUT_CONTENT_CHARS + ITEM_CUT_MARKER.length)
+    expect(minItemChars(emoji)).toBe(TAG.length + MIN_CUT_CONTENT_CHARS + 1 + ITEM_CUT_MARKER.length)
+    expect(minItemChars(`${TAG}short`)).toBe(TAG.length + 5)
+    for (const text of [plain, emoji]) {
+      expect(capItemChars(text, minItemChars(text))).toBeDefined()
+      expect(capItemChars(text, minItemChars(text) - 1)).toBeUndefined()
+    }
+  })
+
   it('leaves out an item no cut can show content for, and ends its section there', () => {
     const source = rendered({ recalled: [{ id: 'r1', text: `${TAG}${'x'.repeat(5000)}` }, item('r2', 10)] })
 
@@ -747,18 +764,69 @@ describe('assemble — first item of each budgeted section', () => {
     expect(estimateTokens(result.text)).toBeLessThanOrEqual(policy.tokenBudget)
   })
 
+  describe('a long-tag first Recalled memory', () => {
+    // Share 0.9 at budget 400 leaves Recalled 122 pass-1 chars: above the room
+    // floor, below its heading plus the longest tag and 40 content chars.
+    const policy: BudgetPolicy = { tokenBudget: 400, relatedShare: 0.9, faint: true }
+    const room = policy.tokenBudget * 4 - HEADER.length
+    const passOneRoom = room - Math.floor(room * 0.9)
+    const longTagged = renderRecallPayload([
+      mem('r0', 'procedural', words(400, 'r'), {
+        role: 'assistant',
+        createdAt: '2026-10-01T09:00:00Z',
+        rawContent: [{ type: 'text', text: `Node: ${'D'.repeat(MAX_TAG_DEVICE_CHARS + 8)} via WhatsApp gateway` }],
+      }),
+    ], []).recalled[0]!
+
+    it('renders the longest tag the formatter can produce', () => {
+      expect(itemContentStart(longTagged.text)).toBe(MAX_TAG_CHARS)
+      expect(passOneRoom).toBeGreaterThanOrEqual(MIN_SECTION_ROOM_CHARS)
+      expect(passOneRoom).toBeLessThan(2 + PAYLOAD_SECTION_HEADERS.recalled.length + MAX_TAG_CHARS + MIN_CUT_CONTENT_CHARS + ITEM_CUT_MARKER.length)
+    })
+
+    it('is re-cut to the room Related leaves unused, not dropped for associations', () => {
+      const source = rendered({ recalled: [longTagged, line('r1', 80)], related: lines('a', 2, 80) })
+
+      const result = assemble(source, policy)
+
+      const first = result.payload.items[0]!
+      const emitted = result.text.slice(first.start, first.end)
+      expect(first.id).toBe('r0')
+      expect(result.payload.emittedMemories).toBeGreaterThanOrEqual(1)
+      expect(result.payload.emittedAssociations).toBeGreaterThanOrEqual(1)
+      expect(emitted.length).toBeGreaterThan(passOneRoom)
+      expect(estimateTokens(result.text)).toBeLessThanOrEqual(policy.tokenBudget)
+      expectExactCappedPrefixes(result, source, policy)
+    })
+
+    it('keeps the room it needs when the associations would fill their whole share', () => {
+      const source = rendered({ recalled: [longTagged], related: longItems('a', 10, 3000) })
+
+      const result = assemble(source, policy)
+
+      expect(result.payload.items[0]!.id).toBe('r0')
+      expect(result.payload.emittedMemories).toBe(1)
+      expect(result.payload.emittedAssociations).toBeGreaterThanOrEqual(1)
+      expect(estimateTokens(result.text)).toBeLessThanOrEqual(policy.tokenBudget)
+      expectExactCappedPrefixes(result, source, policy)
+    })
+  })
+
   describe('randomized', () => {
     const rand = mulberry32(0xf1257)
     const int = (lo: number, hi: number) => lo + Math.floor(rand() * (hi - lo + 1))
     const SECTIONS = ['recalled', 'related', 'domain', 'context', 'faint'] as const
     const RUN_TAG = '- [episode · user · 2026-10-01] '
+    const LONG_TAG = `- [procedural · assistant · ${'D'.repeat(MAX_TAG_DEVICE_CHARS)}/WhatsApp · 2026-10-01] `
 
     /** Words, or (three times in ten) a tagged unbroken run like minified
-     *  JSON, base64 or a hash, where the only space is inside the tag. */
+     *  JSON, base64 or a hash, where the only spaces are inside the tag; half
+     *  of the runs carry the longest tag the formatter renders. */
     function randomText(length: number): string {
       if (rand() < 0.3) {
-        let run = RUN_TAG
-        while (run.length < Math.max(length, RUN_TAG.length + 1)) run += String.fromCharCode(48 + int(0, 74))
+        const tag = rand() < 0.5 ? RUN_TAG : LONG_TAG
+        let run = tag
+        while (run.length < Math.max(length, tag.length + 1)) run += String.fromCharCode(48 + int(0, 74))
         return run
       }
       let text = '- [episode] '
@@ -774,6 +842,12 @@ describe('assemble — first item of each budgeted section', () => {
       if (text.length <= limit) return true
       const start = itemContentStart(text)
       return limit - ITEM_CUT_MARKER.length >= start + Math.min(text.length - start, MIN_CUT_CONTENT_CHARS)
+    }
+
+    /** Shortest showable cut of an item with no surrogate pairs. */
+    function shortestCut(text: string): number {
+      const start = itemContentStart(text)
+      return Math.min(text.length, start + Math.min(text.length - start, MIN_CUT_CONTENT_CHARS) + ITEM_CUT_MARKER.length)
     }
 
     const cases = Array.from({ length: 300 }, (_, n) => {
@@ -805,9 +879,14 @@ describe('assemble — first item of each budgeted section', () => {
       const room = policy.tokenBudget * 4 - header.length
       const hasRecalled = source.recalled.length > 0
       const hasRelated = source.related.length > 0
-      const relatedRoom = hasRecalled ? Math.floor(room * policy.relatedShare!) : room
-      const recalledRoom = hasRelated ? room - Math.floor(room * policy.relatedShare!) : room
       const cap = effectiveCap(policy)
+      // Related never takes the room the first Recalled memory needs.
+      const recalledNeed = hasRecalled && shortestCut(source.recalled[0]!.text) <= cap * 4
+        ? 2 + PAYLOAD_SECTION_HEADERS.recalled.length + shortestCut(source.recalled[0]!.text)
+        : Number.POSITIVE_INFINITY
+      const shareRoom = Math.floor(room * policy.relatedShare!)
+      const relatedRoom = hasRecalled ? Math.min(shareRoom, recalledNeed <= room ? room - recalledNeed : shareRoom) : room
+      const recalledRoom = hasRelated ? room - shareRoom : room
       if (hasRecalled && recalledRoom >= MIN_SECTION_ROOM_CHARS &&
         firstItemShowable('recalled', source.recalled[0]!.text, recalledRoom, cap)) {
         expect(result.payload.emittedMemories).toBeGreaterThanOrEqual(1)
@@ -815,6 +894,10 @@ describe('assemble — first item of each budgeted section', () => {
       if (hasRelated && relatedRoom >= MIN_SECTION_ROOM_CHARS &&
         firstItemShowable('related', source.related[0]!.text, relatedRoom, cap)) {
         expect(result.payload.emittedAssociations).toBeGreaterThanOrEqual(1)
+      }
+      if (hasRecalled && result.payload.emittedAssociations > 0 &&
+        firstItemShowable('recalled', source.recalled[0]!.text, room, cap)) {
+        expect(result.payload.emittedMemories).toBeGreaterThanOrEqual(1)
       }
     })
 
@@ -830,13 +913,17 @@ describe('assemble — first item of each budgeted section', () => {
       const runShown = results.filter((r, n) => r.payload.items.some((it) => {
         if (it.id === undefined) return false
         const original = cases[n]![1][it.section].find((o) => o.id === it.id)?.text ?? ''
-        return original.startsWith(RUN_TAG) && r.text.slice(it.start, it.end) !== original
+        return (original.startsWith(RUN_TAG) || original.startsWith(LONG_TAG)) && r.text.slice(it.start, it.end) !== original
       }))
+
+      const longTagShown = results.filter((r, n) => r.payload.items.some((it) => it.section === 'recalled' &&
+        (cases[n]![1].recalled.find((o) => o.id === it.id)?.text ?? '').startsWith(LONG_TAG)))
 
       expect(bothShown.length).toBeGreaterThan(150)
       expect(capAboveBudget.length).toBeGreaterThan(30)
-      expect(firstCut.length).toBeGreaterThan(150)
+      expect(firstCut.length).toBeGreaterThan(100)
       expect(runShown.length).toBeGreaterThan(50)
+      expect(longTagShown.length).toBeGreaterThan(20)
     })
   })
 })
@@ -926,6 +1013,25 @@ describe('recallOutputPolicyFromEnv', () => {
     [' 0.30 ', 0.3],
   ])('accepts a Related share of %j', (raw, share) => {
     expect(recallOutputPolicyFromEnv({ ENGRAM_RECALL_RELATED_SHARE: raw })).toEqual({ relatedShare: share, faint: true })
+  })
+
+  it('accepts an item cap at the floor and rejects one below it', () => {
+    expect(MIN_ITEM_MAX_TOKENS).toBe(Math.ceil((MAX_TAG_CHARS + MIN_CUT_CONTENT_CHARS + ITEM_CUT_MARKER.length) / 4))
+    expect(recallOutputPolicyFromEnv({ ENGRAM_RECALL_ITEM_MAX_TOKENS: String(MIN_ITEM_MAX_TOKENS) }))
+      .toEqual({ itemMaxTokens: MIN_ITEM_MAX_TOKENS, faint: true })
+    expect(() => recallOutputPolicyFromEnv({ ENGRAM_RECALL_ITEM_MAX_TOKENS: String(MIN_ITEM_MAX_TOKENS - 1) }))
+      .toThrow(`ENGRAM_RECALL_ITEM_MAX_TOKENS must be at least ${MIN_ITEM_MAX_TOKENS}`)
+  })
+
+  it('shows a longest-tag memory at the floor item cap', () => {
+    const tag = `- [procedural · assistant · ${'D'.repeat(MAX_TAG_DEVICE_CHARS)}/WhatsApp · 2026-10-01] `
+    const source = rendered({ recalled: [{ id: 'r1', text: `${tag}${'y'.repeat(2000)}` }], related: [line('a1', 80)] })
+
+    const result = assemble(source, { tokenBudget: 1000, itemMaxTokens: MIN_ITEM_MAX_TOKENS, faint: true })
+
+    expect(tag.length).toBe(MAX_TAG_CHARS)
+    expect(result.payload.emittedMemories).toBe(1)
+    expect(result.payload.emittedAssociations).toBe(1)
   })
 
   it('rejects an item cap larger than the token budget when both are set', () => {
