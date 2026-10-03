@@ -909,7 +909,7 @@ export class Memory {
       noEpisodes: deepResult.noEpisodes ?? 0,
       extractionExhausted: deepResult.extractionExhausted ?? 0,
       extractionDeferred: deepResult.extractionDeferred ?? 0,
-      extractionProbed: deepResult.extractionProbed ?? 0,
+      extractionBackedOff: deepResult.extractionBackedOff ?? 0,
       associationsCreated: dreamResult.associationsCreated ?? 0,
       semanticDecayed: decayResult.semanticDecayed ?? 0,
       proceduralDecayed: decayResult.proceduralDecayed ?? 0,

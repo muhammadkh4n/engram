@@ -1,7 +1,7 @@
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { DigestStorage } from '@engram-mem/core'
+import type { DigestStorage, FactExtractionFailure } from '@engram-mem/core'
 import { projectScopeFilter, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
 
@@ -140,12 +140,13 @@ export class PostgRestDigestStorage implements DigestStorage {
     return counts
   }
 
-  async getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]> {
+  async getPendingFactExtraction(limit: number, maxAttempts: number, now: Date): Promise<Digest[]> {
     const { data, error } = await this.client
       .from('memory_digests')
       .select('*')
       .is('facts_extracted_at', null)
       .lt('fact_extraction_attempts', maxAttempts)
+      .or(`facts_next_attempt_at.is.null,facts_next_attempt_at.lte.${now.toISOString()}`)
       .order('created_at', { ascending: true })
       .order('id', { ascending: true })
       .limit(limit)
@@ -161,8 +162,12 @@ export class PostgRestDigestStorage implements DigestStorage {
     if (error) throw new Error(`Digest markFactsExtracted failed: ${error.message}`)
   }
 
-  async recordFactExtractionFailure(id: string): Promise<number> {
-    const { data, error } = await this.client.rpc('engram_digest_fact_attempt', { p_id: id })
+  async recordFactExtractionFailure(id: string, failure: FactExtractionFailure): Promise<number> {
+    const { data, error } = await this.client.rpc('engram_digest_fact_failure', {
+      p_id: id,
+      p_counted: failure.counted,
+      p_next: failure.nextAttemptAt.toISOString(),
+    })
     if (error) throw new Error(`Digest recordFactExtractionFailure failed: ${error.message}`)
     return typeof data === 'number' ? data : 0
   }
@@ -198,6 +203,8 @@ interface DigestRow {
   project_id?: string | null
   facts_extracted_at?: string | null
   fact_extraction_attempts?: number | null
+  fact_extraction_failures?: number | null
+  facts_next_attempt_at?: string | null
 }
 
 interface RecallRow {
@@ -228,6 +235,8 @@ function rowToDigest(row: DigestRow): Digest {
     projectId: row.project_id ?? null,
     factsExtractedAt: row.facts_extracted_at ? new Date(row.facts_extracted_at) : null,
     factExtractionAttempts: row.fact_extraction_attempts ?? 0,
+    factExtractionFailures: row.fact_extraction_failures ?? 0,
+    factsNextAttemptAt: row.facts_next_attempt_at ? new Date(row.facts_next_attempt_at) : null,
   }
 }
 

@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { Digest, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
-import type { DigestStorage } from '@engram-mem/core'
+import type { DigestStorage, FactExtractionFailure } from '@engram-mem/core'
 import { sanitizeFtsQuery, julianToDate } from './search.js'
 import { hybridSearch } from './vector-search.js'
 
@@ -136,14 +136,15 @@ export class SqliteDigestStorage implements DigestStorage {
     return result
   }
 
-  async getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]> {
+  async getPendingFactExtraction(limit: number, maxAttempts: number, now: Date): Promise<Digest[]> {
     const rows = this.db
       .prepare(
         `SELECT * FROM digests
          WHERE facts_extracted_at IS NULL AND fact_extraction_attempts < ?
+           AND (facts_next_attempt_at IS NULL OR facts_next_attempt_at <= julianday(?))
          ORDER BY created_at ASC, rowid ASC LIMIT ?`
       )
-      .all(maxAttempts, limit) as DigestRow[]
+      .all(maxAttempts, now.toISOString(), limit) as DigestRow[]
     return rows.map((r) => this.rowToDigest(r))
   }
 
@@ -153,13 +154,18 @@ export class SqliteDigestStorage implements DigestStorage {
       .run(at.toISOString(), id)
   }
 
-  async recordFactExtractionFailure(id: string): Promise<number> {
+  async recordFactExtractionFailure(id: string, failure: FactExtractionFailure): Promise<number> {
     const row = this.db
       .prepare(
-        `UPDATE digests SET fact_extraction_attempts = fact_extraction_attempts + 1
+        `UPDATE digests
+         SET fact_extraction_failures = fact_extraction_failures + 1,
+             facts_next_attempt_at = julianday(?),
+             fact_extraction_attempts = fact_extraction_attempts + ?
          WHERE id = ? RETURNING fact_extraction_attempts`
       )
-      .get(id) as { fact_extraction_attempts: number } | undefined
+      .get(failure.nextAttemptAt.toISOString(), failure.counted ? 1 : 0, id) as
+      | { fact_extraction_attempts: number }
+      | undefined
     return row?.fact_extraction_attempts ?? 0
   }
 
@@ -182,6 +188,8 @@ export class SqliteDigestStorage implements DigestStorage {
       projectId: row.project_id ?? null,
       factsExtractedAt: julianToDate(row.facts_extracted_at),
       factExtractionAttempts: row.fact_extraction_attempts ?? 0,
+      factExtractionFailures: row.fact_extraction_failures ?? 0,
+      factsNextAttemptAt: julianToDate(row.facts_next_attempt_at),
     }
   }
 
@@ -205,4 +213,6 @@ interface DigestRow {
   project_id: string | null
   facts_extracted_at: number | null
   fact_extraction_attempts: number
+  fact_extraction_failures: number
+  facts_next_attempt_at: number | null
 }

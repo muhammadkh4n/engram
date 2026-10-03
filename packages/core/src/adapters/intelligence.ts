@@ -254,11 +254,12 @@ export interface IntelligenceAdapter {
    * Extract standalone facts from source episodes, each citing the episodes
    * it rests on. Episodes are never cut; a large batch may take several
    * model calls. Resolves `[]` when the episodes hold no fact. Rejects with a
-   * FactExtractionError when a reply is cut off at its token cap or cannot be
-   * read as a fact list, and with an EmptyFactReplyError when the reply is
-   * empty without being cut off; a failed call (API, network, auth, rate
-   * limit) rejects with its own error, unchanged. classifyExtractionError
-   * decides which of these say something about the batch itself.
+   * FactExtractionError when a reply holding text is cut off at its token
+   * cap or cannot be read as a fact list, and with an EmptyFactReplyError
+   * when the reply holds no text, cut off or not; a failed call (API,
+   * network, auth, rate limit) rejects with its own error, unchanged.
+   * classifyExtractionError decides which of these may say something about
+   * the batch itself.
    */
   extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
   /**
@@ -426,11 +427,11 @@ export function isEmptyClassifierReply(err: unknown): err is EmptyClassifierRepl
 export type FactExtractionErrorKind = 'length' | 'parse'
 
 /**
- * The fact extractor answered, but its reply cannot be stored: it was cut off
- * at max_tokens or does not parse. A `length` reply fails the same way when
- * the same episodes are resent, since its budget is computed from them; a
- * `parse` failure may be the batch's or the model's, so classifyExtractionError
- * has callers probe another batch before blaming this one. A failed call
+ * The fact extractor answered with text, but its reply cannot be stored: it
+ * was cut off at max_tokens or does not parse. Either may be the batch's own
+ * (its budget is computed from the batch's text) or hit every batch alike (a
+ * model that rambles or ignores the JSON format), so classifyExtractionError
+ * holds it until another batch shows the same step working. A failed call
  * (API, network, auth, rate limit) is not this error.
  */
 export class FactExtractionError extends Error {
@@ -450,7 +451,8 @@ export function isFactExtractionError(err: unknown): err is FactExtractionError 
 
 /**
  * The fact extractor answered 200 with no usable reply: no choice, or null,
- * empty or whitespace content without being cut off at max_tokens. That is a
+ * empty or whitespace content, whether or not it was cut off at max_tokens
+ * (a reply that spent its whole budget before writing anything). That is a
  * provider glitch, not something the episodes caused, so resending the same
  * episodes later can succeed and callers do not count it against the batch.
  */
@@ -468,22 +470,17 @@ export function isEmptyFactReply(err: unknown): err is EmptyFactReplyError {
 
 /**
  * What a failed fact extraction says about the digest it was run for:
- * - `digest`: the digest's own text makes it fail, with no doubt: a reply cut
- *   off at max_tokens, whose budget is computed from that text;
- * - `transient`: the provider, the network or the account failed, or the
- *   request reached a missing model or endpoint; a later call can succeed
- *   with the same digest;
- * - `probe`: it may be the digest's own or may hit every digest alike (a
- *   rejected request, an unparseable reply, a storage error); only another
- *   digest's outcome can tell.
+ * - `transient`: the provider, the network or the account failed, the
+ *   request reached a missing model or endpoint, or the reply came back
+ *   empty; a later call can succeed with the same digest, and the failure
+ *   says nothing about it;
+ * - `held`: it may be the digest's own or may hit every digest alike (a
+ *   rejected request such as 400, 413 or 422, a reply cut off or not
+ *   parseable, a storage error, anything unclassified). Only the rest of the
+ *   run can tell: the failure counts against the digest when another digest
+ *   in the same run got through the same step.
  */
-export type ExtractionErrorClass = 'digest' | 'transient' | 'probe'
-
-/** Rejections that may come from the digest's content (an episode over the
- *  context window, a content filter) or from the request every digest sends
- *  (a parameter the model rejects): bad request, payload too large,
- *  unprocessable content. */
-const PROBE_STATUSES: ReadonlySet<number> = new Set([400, 413, 422])
+export type ExtractionErrorClass = 'transient' | 'held'
 
 /** Not found (a missing or retired model, a wrong endpoint) and conflict
  *  (the SDK retries it itself): neither depends on the digest. */
@@ -557,20 +554,19 @@ function hasName(err: unknown, name: string): boolean {
  * the check holds across separate copies of this package.
  */
 export function classifyExtractionError(err: unknown): ExtractionErrorClass {
-  if (isFactExtractionError(err)) return err.kind === 'length' ? 'digest' : 'probe'
+  if (isFactExtractionError(err)) return 'held'
   if (isEmptyFactReply(err) || hasName(err, 'CircuitOpenError')) return 'transient'
   const status = httpStatus(err)
-  if (status !== undefined) {
-    if (PROBE_STATUSES.has(status)) return 'probe'
-    if (
+  if (
+    status !== undefined && (
       UNAVAILABLE_STATUSES.has(status) ||
       CREDENTIAL_STATUSES.has(status) ||
       RETRYABLE_STATUSES.has(status) ||
       status >= 500
-    ) return 'transient'
-  }
+    )
+  ) return 'transient'
   if (isNetworkFailure(err)) return 'transient'
-  return 'probe'
+  return 'held'
 }
 
 /** A key, billing or permission rejection (401, 402, 403): transient for the

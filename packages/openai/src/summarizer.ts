@@ -657,19 +657,19 @@ export class OpenAISummarizer {
       response_format: { type: 'json_object' },
     })
     const choice = resp.choices?.[0]
-    // A cut reply can still close its JSON after dropping later facts, so it is
-    // never parsed (chatCreate has already logged it).
-    if (choice?.finish_reason === 'length') {
-      throw new FactExtractionError('length', `extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
-    }
     const raw = choice?.message?.content ?? ''
-    // A 200 with nothing in it is a provider glitch, not a reply the episodes
-    // produced: resending them later can succeed, so it is transient and is
-    // never counted against the batch.
+    // A 200 with nothing in it, cut off at max_tokens or not, is a provider
+    // glitch, not a reply the episodes produced: resending them later can
+    // succeed, so it is transient and is never counted against the batch.
     if (raw.trim() === '') {
       throw new EmptyFactReplyError(
         `extractFacts: empty reply (finish_reason=${choice?.finish_reason ?? 'none'}, ${episodes.length} episodes)`,
       )
+    }
+    // A cut reply can still close its JSON after dropping later facts, so it is
+    // never parsed (chatCreate has already logged it).
+    if (choice?.finish_reason === 'length') {
+      throw new FactExtractionError('length', `extractFacts: reply cut off at max_tokens (${episodes.length} episodes, ${chars} chars)`)
     }
     let reply: Record<string, unknown>
     try {

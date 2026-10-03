@@ -273,8 +273,23 @@ describe('Auto-consolidation deep-sleep gate', () => {
     const results = await runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })
 
     expect(results.map((r) => r.cycle)).toEqual(['deep'])
-    expect(storage.digests.getPendingFactExtraction).toHaveBeenCalledWith(5, 3)
+    expect(storage.digests.getPendingFactExtraction).toHaveBeenCalledWith(5, 3, expect.any(Date))
     expect(storage.digests.markFactsExtracted).toHaveBeenCalledTimes(5)
+  })
+
+  it('counts only digests due now: pending digests still backing off do not make deep sleep due', async () => {
+    const later = new Date(Date.now() + 60 * 60 * 1000)
+    const digests = pendingDigests(5).map((d, i) => (i < 2 ? { ...d, factsNextAttemptAt: later } : d))
+    const storage = makeMockStorage({ initialDigests: digests })
+
+    expect(await runAutoConsolidation(storage, undefined, null, { cycles: ['deep'] })).toEqual([])
+    expect(storage.digests.markFactsExtracted).not.toHaveBeenCalled()
+
+    const elapsed = digests.map((d) => (d.factsNextAttemptAt ? { ...d, factsNextAttemptAt: new Date(Date.now() - 1000) } : d))
+    const due = makeMockStorage({ initialDigests: elapsed })
+
+    expect((await runAutoConsolidation(due, undefined, null, { cycles: ['deep'] })).map((r) => r.cycle)).toEqual(['deep'])
+    expect(due.digests.markFactsExtracted).toHaveBeenCalledTimes(5)
   })
 
   it('skips deep sleep while fewer digests than the threshold are pending', async () => {

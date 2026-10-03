@@ -3,6 +3,7 @@ import type {
   StorageAdapter,
   EpisodeStorage,
   DigestStorage,
+  FactExtractionFailure,
   SemanticStorage,
   ProceduralStorage,
   AssociationStorage,
@@ -130,18 +131,25 @@ export function makeMockDigestStorage(initialDigests: Digest[] = []): MockDigest
       return counts
     }),
 
-    getPendingFactExtraction: vi.fn(async (limit: number, maxAttempts: number) => {
+    getPendingFactExtraction: vi.fn(async (limit: number, maxAttempts: number, now: Date) => {
       return digests
         .filter(d => !d.factsExtractedAt && (d.factExtractionAttempts ?? 0) < maxAttempts)
+        .filter(d => !d.factsNextAttemptAt || d.factsNextAttemptAt.getTime() <= now.getTime())
         .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
         .slice(0, limit)
     }),
 
-    recordFactExtractionFailure: vi.fn(async (id: string) => {
+    recordFactExtractionFailure: vi.fn(async (id: string, failure: FactExtractionFailure) => {
       const index = digests.findIndex(d => d.id === id)
       if (index < 0) return 0
-      const attempts = (digests[index]!.factExtractionAttempts ?? 0) + 1
-      digests[index] = { ...digests[index]!, factExtractionAttempts: attempts }
+      const current = digests[index]!
+      const attempts = (current.factExtractionAttempts ?? 0) + (failure.counted ? 1 : 0)
+      digests[index] = {
+        ...current,
+        factExtractionAttempts: attempts,
+        factExtractionFailures: (current.factExtractionFailures ?? 0) + 1,
+        factsNextAttemptAt: failure.nextAttemptAt,
+      }
       return attempts
     }),
 

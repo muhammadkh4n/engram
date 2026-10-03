@@ -101,6 +101,14 @@ export interface EpisodeStorage {
   count?(): Promise<number>
 }
 
+/** One failed fact-extraction unit, as DigestStorage.recordFactExtractionFailure stores it. */
+export interface FactExtractionFailure {
+  /** Whether the failure counts against the digest's attempt cap. */
+  counted: boolean
+  /** When the digest is due again. */
+  nextAttemptAt: Date
+}
+
 export interface DigestStorage {
   insert(digest: Omit<Digest, 'id' | 'createdAt'>): Promise<Digest>
   search(query: string, opts?: SearchOptions): Promise<SearchResult<Digest>[]>
@@ -110,16 +118,19 @@ export interface DigestStorage {
   /** Fast COUNT(*) for stats(). Falls back to getCountBySession sum when not implemented. */
   count?(): Promise<number>
   /**
-   * Up to `limit` digests whose facts have not been extracted yet
-   * (`factsExtractedAt` unset) and whose failed attempts are below
-   * `maxAttempts`, oldest `createdAt` first.
+   * Up to `limit` digests due for fact extraction at `now`, oldest
+   * `createdAt` first: not extracted yet (`factsExtractedAt` unset), counted
+   * attempts below `maxAttempts`, and no backoff running
+   * (`factsNextAttemptAt` unset or not after `now`).
    */
-  getPendingFactExtraction(limit: number, maxAttempts: number): Promise<Digest[]>
+  getPendingFactExtraction(limit: number, maxAttempts: number, now: Date): Promise<Digest[]>
   /**
-   * Add one failed fact-extraction attempt to a digest, atomically, and
-   * return its attempt count after the increment (0 when no such digest).
+   * Record one failed fact-extraction unit on a digest, atomically: add one
+   * failure, set `factsNextAttemptAt` to `failure.nextAttemptAt`, and add one
+   * attempt only when `failure.counted`. Returns the attempt count after the
+   * update (0 when no such digest).
    */
-  recordFactExtractionFailure(id: string): Promise<number>
+  recordFactExtractionFailure(id: string, failure: FactExtractionFailure): Promise<number>
   /** Stamp one digest's `factsExtractedAt`, removing it from the pending set. */
   markFactsExtracted(id: string, at: Date): Promise<void>
 }

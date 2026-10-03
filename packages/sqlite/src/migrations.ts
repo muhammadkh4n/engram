@@ -403,4 +403,25 @@ export function runMigrations(db: Database.Database): void {
     }
     db.pragma('user_version = 8')
   }
+
+  if (currentVersion < 9) {
+    // V9: fact-extraction backoff. Every failed unit, counted or not, adds to
+    // fact_extraction_failures and sets facts_next_attempt_at; deep sleep
+    // reads a digest again only once that time has passed (NULL: due now),
+    // so a digest that keeps failing cannot hold the head of the oldest-first
+    // pending batch. The pending index leads with the next attempt time.
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string }>
+    if (!cols.some(c => c.name === 'facts_next_attempt_at')) {
+      db.exec('ALTER TABLE digests ADD COLUMN facts_next_attempt_at REAL')
+    }
+    if (!cols.some(c => c.name === 'fact_extraction_failures')) {
+      db.exec('ALTER TABLE digests ADD COLUMN fact_extraction_failures INTEGER NOT NULL DEFAULT 0')
+    }
+    db.exec(`
+      DROP INDEX IF EXISTS idx_digests_facts_pending;
+      CREATE INDEX IF NOT EXISTS idx_digests_facts_due
+      ON digests(facts_next_attempt_at, created_at, id) WHERE facts_extracted_at IS NULL
+    `)
+    db.pragma('user_version = 9')
+  }
 }

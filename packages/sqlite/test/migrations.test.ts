@@ -42,9 +42,9 @@ describe('SQLite migrations', () => {
     expect(tables).toContain('procedural_fts')
   })
 
-  it('sets schema version to 8 after all migrations', () => {
+  it('sets schema version to 9 after all migrations', () => {
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(8)
+    expect(getSchemaVersion(db)).toBe(9)
   })
 
   it('v5 adds forgotten_at to the recallable memory tables', () => {
@@ -68,7 +68,7 @@ describe('SQLite migrations', () => {
 
   it('v7 stamps the digests that already exist and leaves later ones pending', () => {
     runMigrations(db)
-    db.exec('DROP INDEX idx_digests_facts_pending')
+    db.exec('DROP INDEX idx_digests_facts_due')
     db.exec('ALTER TABLE digests DROP COLUMN facts_extracted_at')
     db.pragma('user_version = 6')
 
@@ -84,7 +84,7 @@ describe('SQLite migrations', () => {
     insertDigest('old-2', 2461001.5)
 
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(8)
+    expect(getSchemaVersion(db)).toBe(9)
 
     insertDigest('new-1', 2461002.75)
     const rows = db
@@ -115,7 +115,7 @@ describe('SQLite migrations', () => {
     runMigrations(db)
     insertDigest('after')
 
-    expect(getSchemaVersion(db)).toBe(8)
+    expect(getSchemaVersion(db)).toBe(9)
     const col = (db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string; notnull: number; dflt_value: string | null }>)
       .find((c) => c.name === 'fact_extraction_attempts')
     expect(col).toEqual(expect.objectContaining({ notnull: 1, dflt_value: '0' }))
@@ -125,10 +125,39 @@ describe('SQLite migrations', () => {
     ])
   })
 
+  it('v9 adds a null next attempt and a zero failure count, and indexes pending digests by next attempt', () => {
+    runMigrations(db)
+    db.exec('DROP INDEX idx_digests_facts_due')
+    db.exec('ALTER TABLE digests DROP COLUMN facts_next_attempt_at')
+    db.exec('ALTER TABLE digests DROP COLUMN fact_extraction_failures')
+    db.exec('CREATE INDEX idx_digests_facts_pending ON digests(created_at) WHERE facts_extracted_at IS NULL')
+    db.pragma('user_version = 8')
+    db.prepare('INSERT INTO memories (id, type) VALUES (?, ?)').run('before', 'digest')
+    db.prepare(
+      `INSERT INTO digests (id, session_id, summary, key_topics, source_episode_ids,
+       source_digest_ids, level, metadata, created_at)
+       VALUES ('before', 's1', 'summary', '[]', '[]', '[]', 0, '{}', 2461000.5)`,
+    ).run()
+
+    runMigrations(db)
+
+    expect(getSchemaVersion(db)).toBe(9)
+    const cols = db.prepare('PRAGMA table_info(digests)').all() as Array<{ name: string; notnull: number; dflt_value: string | null }>
+    expect(cols.find((c) => c.name === 'fact_extraction_failures')).toEqual(expect.objectContaining({ notnull: 1, dflt_value: '0' }))
+    expect(cols.find((c) => c.name === 'facts_next_attempt_at')).toEqual(expect.objectContaining({ notnull: 0, dflt_value: null }))
+    expect(db.prepare('SELECT facts_next_attempt_at AS next, fact_extraction_failures AS failures FROM digests').get())
+      .toEqual({ next: null, failures: 0 })
+    const indexes = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'digests'`)
+      .all() as Array<{ name: string; sql: string | null }>
+    expect(indexes.map((i) => i.name)).not.toContain('idx_digests_facts_pending')
+    const due = indexes.find((i) => i.name === 'idx_digests_facts_due')
+    expect(due?.sql?.replace(/\s+/g, ' ')).toContain('ON digests(facts_next_attempt_at, created_at, id) WHERE facts_extracted_at IS NULL')
+  })
+
   it('is idempotent (running twice does not error)', () => {
     runMigrations(db)
     runMigrations(db)
-    expect(getSchemaVersion(db)).toBe(8)
+    expect(getSchemaVersion(db)).toBe(9)
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE name = 'episode_parts'").pluck().all(),
     ).toEqual([])

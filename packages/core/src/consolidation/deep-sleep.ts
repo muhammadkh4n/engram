@@ -17,11 +17,11 @@ import { runExtraction } from './extraction-run.js'
 export interface DeepSleepOptions {
   /** A run does nothing while fewer digests than this await fact extraction. Default 3. */
   minDigests?: number
-  /** Most pending digests one run extracts, oldest first. Default 50. */
+  /** Most due digests one run extracts, oldest first. Default 50. */
   maxDigests?: number
-  /** Extraction failures counted against a digest (classed `digest` by
-   *  classifyExtractionError, or proven its own by a probe) after which it
-   *  is no longer retried. Default 3. */
+  /** Extraction failures counted against a digest (classed `held` by
+   *  classifyExtractionError while another digest in the same run got
+   *  through the failed step) after which it is no longer retried. Default 3. */
   maxExtractionAttempts?: number
   /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
    *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
@@ -59,8 +59,8 @@ export const DEFAULT_MAX_DIGESTS = 50
 /** Counted failures per digest when DeepSleepOptions.maxExtractionAttempts
  *  is unset. A digest that fails for its own reasons (an oversized reply, a
  *  reply that never parses, a request the provider rejects) fails the same
- *  way every run; without a cap such
- *  digests stay oldest-first in the pending set and fill every batch. */
+ *  way every time it is due; the cap ends its retries instead of spending a
+ *  call on it every backoff period forever. */
 export const DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
 
 const SUPERSESSION_MODES: ReadonlySet<string> = new Set(['regex', 'llm', 'off'])
@@ -407,13 +407,17 @@ export interface PromotionCounts {
   graphEdgesCreated: number
   graphContextKept: number
   graphContextDropped: number
+  /** Memory-store rows inserted or updated: facts and procedures stored,
+   *  boosted, observed again or superseded, and derives_from links. Graph
+   *  writes are not rows. */
+  rowsWritten: number
 }
 
 function zeroCounts(): PromotionCounts {
   return {
     promoted: 0, procedural: 0, deduplicated: 0, superseded: 0, supersessionJudged: 0, stale: 0, tie: 0,
     keptNotState: 0, kindMissing: 0, graphNodesCreated: 0, graphEdgesCreated: 0, graphContextKept: 0,
-    graphContextDropped: 0,
+    graphContextDropped: 0, rowsWritten: 0,
   }
 }
 
@@ -640,6 +644,7 @@ async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandi
     // Re-extracting a known fact is a recurrence: it raises the access
     // count and the fact's confidence.
     await storage.semantic.recordAccessAndBoost(decision.id, 0.1)
+    counts.rowsWritten++
     counts.deduplicated++
     return
   }
@@ -661,9 +666,11 @@ async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandi
     metadata: {},
     projectId: candidate.projectId,
   })
+  counts.rowsWritten++
 
   for (const supersededId of supersededIds) {
     await storage.semantic.markSuperseded(supersededId, knowledge.id)
+    counts.rowsWritten++
     counts.superseded++
   }
 
@@ -678,6 +685,7 @@ async function promoteSemantic(ctx: ResolvedPromoteContext, candidate: FactCandi
       lastActivated: null,
       metadata: {},
     })
+    counts.rowsWritten++
   }
 
   if (ctx.graphAvailable && ctx.graph) {
@@ -713,6 +721,7 @@ async function promoteProcedural(ctx: ResolvedPromoteContext, candidate: FactCan
     // read again (a retry after a failed stamp), not a recurrence.
     if (await derivesFromAny(storage, { id: match.item.id, type: 'procedural' }, candidate.sourceDigestIds)) return
     await storage.procedural.incrementObservation(match.item.id)
+    counts.rowsWritten++
     return
   }
 
@@ -733,6 +742,7 @@ async function promoteProcedural(ctx: ResolvedPromoteContext, candidate: FactCan
     metadata: { [PROCEDURE_SOURCE_DIGESTS]: candidate.sourceDigestIds },
     projectId: null,
   })
+  counts.rowsWritten++
 
   if (ctx.graphAvailable && graph?.runCypherWrite) {
     try {
@@ -794,26 +804,26 @@ export async function promoteFactCandidates(
  * extracting facts, patterns, and procedural rules.
  *
  * Each digest's facts are extracted once: a run takes up to `maxDigests`
- * digests not yet extracted, oldest first, reads each one's live episodes
+ * due digests, oldest first, reads each one's live episodes
  * (extractDigestFacts), stores the facts (promoteFactCandidates) and stamps
  * the digest. Oldest first means a fact is stored before the facts stated
- * after it are judged against it. Each digest is one unit: extract, promote,
- * stamp. classifyExtractionError sorts a failure anywhere in the unit:
- * - `digest` (a reply cut off at its token cap, whose budget comes from the
- *   digest's own text): the digest stays pending and gains one failed
- *   attempt, and the run moves on; at `maxExtractionAttempts` it leaves the
- *   pending set unstamped, so newer digests are not starved behind it;
+ * after it are judged against it. A digest is due while it is unstamped,
+ * below `maxExtractionAttempts` counted failures, and past its backoff.
+ * Each digest is one unit: extract, promote, stamp. Every failed unit backs
+ * its digest off (60 s doubled per failure, at most 6 h), so no failing
+ * digest holds the head of the queue. classifyExtractionError sorts the
+ * failure:
  * - `transient` (5xx, 429, 408, 404, 409, key or billing, network, open
- *   circuit, empty reply): nothing is counted, the digest and every later
- *   one stay pending, and the run's loop ends, so an outage or a missing
- *   model cannot exhaust any digest;
- * - `probe` (400, 413, 422, an unparseable reply, anything unclassified,
- *   promote and stamp failures among them): the next pending digest's unit
- *   runs as a probe. If it goes through, the failure was the first digest's
- *   own: it is counted and the run goes on. If the probe fails as `digest`,
- *   the probe is counted and the run ends with the first uncounted; any
- *   other probe failure, or no digest to probe with, ends the run with
- *   nothing counted.
+ *   circuit, an empty reply even when cut off): the digest is backed off
+ *   uncounted and the run's loop ends, so an outage or a missing model
+ *   cannot exhaust any digest;
+ * - `held` (anything else: 400, 413, 422, a reply cut off or not
+ *   parseable, a promote or stamp error, anything unclassified): the digest
+ *   is backed off and the run goes on. At the end of the run the failure
+ *   counts against the digest only when another unit got through the same
+ *   step (an extract over live episodes, a promote that wrote a row, a
+ *   stamp); otherwise it may be systemic and nothing is counted. At the cap
+ *   a digest leaves the pending set unstamped.
  * A retried digest neither re-inserts nor re-boosts the facts and procedures
  * an earlier partial run of it already stored.
  * A digest with no live episode is stamped with nothing stored.
@@ -837,13 +847,13 @@ export async function deepSleep(
   const minDigests = opts?.minDigests ?? 3
   const maxDigests = opts?.maxDigests ?? DEFAULT_MAX_DIGESTS
   const maxAttempts = opts?.maxExtractionAttempts ?? DEFAULT_MAX_EXTRACTION_ATTEMPTS
-  const pending = await storage.digests.getPendingFactExtraction(maxDigests, maxAttempts)
+  const pending = await storage.digests.getPendingFactExtraction(maxDigests, maxAttempts, new Date())
 
   if (pending.length < minDigests) {
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
       supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
-      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0, extractionDeferred: 0, extractionProbed: 0,
+      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0, extractionDeferred: 0, extractionBackedOff: 0,
     }
   }
 
@@ -861,7 +871,9 @@ export async function deepSleep(
     intelligence,
     maxAttempts,
     promote: async (candidates) => {
-      totals = addCounts(totals, await promoteFactCandidates(candidates, ctx))
+      const unit = await promoteFactCandidates(candidates, ctx)
+      totals = addCounts(totals, unit)
+      return unit.rowsWritten
     },
   }, pending)
 
@@ -871,7 +883,7 @@ export async function deepSleep(
     )
   }
 
-  const { graphNodesCreated, graphEdgesCreated, graphContextKept, graphContextDropped, ...tierCounts } = totals
+  const { graphNodesCreated, graphEdgesCreated, graphContextKept, graphContextDropped, rowsWritten: _rows, ...tierCounts } = totals
   const graphAvailable = ctx.graphAvailable
   return {
     cycle: 'deep',

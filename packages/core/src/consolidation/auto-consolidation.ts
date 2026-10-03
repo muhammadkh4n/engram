@@ -40,8 +40,9 @@ export type ConsolidationCycle = 'light' | 'deep' | 'dream' | 'decay'
 export interface AutoConsolidationOpts {
   lightSleepThreshold?: number
   /**
-   * Deep sleep is due once this many digests await fact extraction (not yet
-   * extracted, under the attempt cap). Also passed to deep sleep as its
+   * Deep sleep is due once this many digests are due for fact extraction
+   * (not yet extracted, under the attempt cap, past any backoff). Also passed
+   * to deep sleep as its
    * minDigests, so the gate and the run agree. Default 5.
    */
   deepSleepThreshold?: number
@@ -310,11 +311,13 @@ const DEEP_GATE_FAILURE_LOG_EVERY = 60
 const deepGateFailures = new WeakMap<StorageAdapter, number>()
 
 /**
- * Due when at least `threshold` digests await fact extraction. Deep sleep
- * stamps each digest it extracts and a digest leaves the pending set at the
- * attempt cap, so a quiet store stops being due on its own. A failed read is
- * not due, and is logged (first failure, then every 60th in a row) so a store
- * missing the watermark columns does not silently never run deep sleep.
+ * Due when at least `threshold` digests are due for fact extraction now, the
+ * same selection deep sleep extracts from. Deep sleep stamps each digest it
+ * extracts, a failed digest waits out its backoff, and a digest leaves the
+ * pending set at the attempt cap, so a quiet store stops being due on its
+ * own. A failed read is not due, and is logged (first failure, then every
+ * 60th in a row) so a store missing the watermark columns does not silently
+ * never run deep sleep.
  */
 async function isDeepSleepDue(
   storage: StorageAdapter,
@@ -324,6 +327,7 @@ async function isDeepSleepDue(
     const pending = await storage.digests.getPendingFactExtraction(
       threshold,
       DEFAULT_MAX_EXTRACTION_ATTEMPTS,
+      new Date(),
     )
     deepGateFailures.delete(storage)
     return pending.length >= threshold

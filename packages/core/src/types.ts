@@ -108,11 +108,22 @@ export interface Digest {
    */
   factsExtractedAt?: Date | null
   /**
-   * Failed fact-extraction calls on this digest. Deep sleep stops retrying a
-   * digest once this reaches its attempt cap; the digest stays unextracted.
-   * Absent counts as 0.
+   * Fact-extraction failures counted against this digest: failures the same
+   * run proved were the digest's own, because another digest got through the
+   * same step. Deep sleep stops retrying a digest once this reaches its
+   * attempt cap; the digest stays unextracted. Absent counts as 0.
    */
   factExtractionAttempts?: number
+  /**
+   * Every failed fact-extraction unit on this digest, counted or not. It sets
+   * the backoff before the next try. Absent counts as 0.
+   */
+  factExtractionFailures?: number
+  /**
+   * Earliest time deep sleep tries this digest's extraction again after a
+   * failure. Null or absent: due now.
+   */
+  factsNextAttemptAt?: Date | null
 }
 
 export interface SemanticMemory {
@@ -475,9 +486,10 @@ export interface ConsolidateResult {
   /** Judged conflicts that changed nothing because the judge gave no valid
    *  kind for one of the two facts. */
   kindMissing?: number
-  /** Deep-sleep extraction failures counted against their digest (classed
-   *  `digest` by classifyExtractionError, directly or after a probe); each
-   *  gained a failed attempt and stays pending below the cap. */
+  /** Deep-sleep extraction failures counted against their digest: classed
+   *  `held` by classifyExtractionError, and another digest in the same run
+   *  got through the step that failed. Each gained a failed attempt and
+   *  stays pending below the cap. */
   extractionFailed?: number
   /** Deep-sleep digests stamped with no fact read because none of their
    *  source episodes is live. */
@@ -485,14 +497,14 @@ export interface ConsolidateResult {
   /** Deep-sleep digests whose failure this run reached the attempt cap; no
    *  later run retries them. */
   extractionExhausted?: number
-  /** Deep-sleep digests left unextracted because a failure a retry can fix
-   *  ended the run's loop: the digest that hit it and every later one in the
-   *  batch except a probe already counted. They stay pending for the next
-   *  run with no attempt counted. */
+  /** Deep-sleep digests left unextracted because a transient failure ended
+   *  the run's loop: the digest that hit it and every later one in the
+   *  batch. None gains an attempt; the later ones stay due. */
   extractionDeferred?: number
-  /** Deep-sleep probes: next-digest units run to decide whether a failure
-   *  classed `probe` was the failing digest's own. */
-  extractionProbed?: number
+  /** Deep-sleep digests whose unit failed this run, counted or not. Each
+   *  waits out a backoff that doubles with its failures before it is due
+   *  again. */
+  extractionBackedOff?: number
   associationsCreated?: number
   semanticDecayed?: number
   proceduralDecayed?: number

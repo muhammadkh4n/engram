@@ -12,6 +12,11 @@ export {
 } from './consolidation/deep-sleep.js'
 export { extractDigestFacts } from './consolidation/fact-candidates.js'
 export type { FactCandidate, DigestFactExtraction } from './consolidation/fact-candidates.js'
+export {
+  factExtractionBackoffMs,
+  FACT_EXTRACTION_BACKOFF_BASE_MS,
+  FACT_EXTRACTION_BACKOFF_MAX_MS,
+} from './consolidation/extraction-run.js'
 export { statementClock, factStatementClock, epochMs } from './consolidation/statement-time.js'
 export type { StatementClock, FactClock, FactSources } from './consolidation/statement-time.js'
 export type {
@@ -53,6 +58,7 @@ export type {
   StorageAdapter,
   EpisodeStorage,
   DigestStorage,
+  FactExtractionFailure,
   SemanticStorage,
   ProceduralStorage,
   AssociationStorage,

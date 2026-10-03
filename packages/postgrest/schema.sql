@@ -196,18 +196,27 @@ END; $$;
 
 
 --
--- Name: engram_digest_fact_attempt(uuid); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_digest_fact_failure(uuid, boolean, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- Records one failed fact-extraction call on a digest and returns its attempt
--- count after the increment, in one statement, so two concurrent failures
--- both count. Deep sleep stops retrying a digest at its attempt cap. An
--- unknown id updates nothing and returns NULL.
-CREATE OR REPLACE FUNCTION public.engram_digest_fact_attempt(p_id uuid) RETURNS integer
+-- engram_digest_fact_failure replaces this function, which counted every
+-- failure it was called for.
+DROP FUNCTION IF EXISTS public.engram_digest_fact_attempt(uuid);
+
+-- Records one failed fact-extraction unit on a digest in one statement, so
+-- concurrent failures all land: every failure is added and sets the next
+-- attempt time (deep sleep backs off by the failure count), and the attempt
+-- count grows only when the run proved the failure is the digest's own.
+-- Returns the attempt count after the update; deep sleep stops retrying a
+-- digest at its attempt cap. An unknown id updates nothing and returns NULL.
+CREATE OR REPLACE FUNCTION public.engram_digest_fact_failure(p_id uuid, p_counted boolean, p_next timestamp with time zone) RETURNS integer
     LANGUAGE sql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
-  UPDATE memory_digests SET fact_extraction_attempts = fact_extraction_attempts + 1
+  UPDATE memory_digests
+    SET fact_extraction_failures = fact_extraction_failures + 1,
+        facts_next_attempt_at = p_next,
+        fact_extraction_attempts = fact_extraction_attempts + CASE WHEN p_counted THEN 1 ELSE 0 END
     WHERE id = p_id
     RETURNING fact_extraction_attempts;
 $$;
@@ -1023,11 +1032,20 @@ ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS last_shown timesta
 ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_extracted_at timestamp with time zone;
 
 --
--- Failed fact-extraction calls per digest. Deep sleep reads only digests below
--- its attempt cap, so a digest that fails every time cannot hold its place at
--- the head of the oldest-first pending batch. A rederive resets it to 0.
+-- Fact-extraction failures counted against a digest: those its run proved
+-- were the digest's own. Deep sleep reads only digests below its attempt cap.
+-- A rederive resets it to 0.
 --
 ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS fact_extraction_attempts integer DEFAULT 0 NOT NULL;
+
+--
+-- Fact-extraction backoff: every failed unit, counted or not, adds to
+-- fact_extraction_failures and sets facts_next_attempt_at; deep sleep reads a
+-- digest again only once that time has passed (NULL: due now), so a digest
+-- that keeps failing cannot hold the head of the oldest-first pending batch.
+--
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_next_attempt_at timestamp with time zone;
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS fact_extraction_failures integer DEFAULT 0 NOT NULL;
 
 
 --
@@ -1204,10 +1222,14 @@ CREATE INDEX IF NOT EXISTS idx_digests_created ON public.memory_digests USING bt
 
 
 --
--- Name: idx_digests_facts_pending; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_digests_facts_due; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX IF NOT EXISTS idx_digests_facts_pending ON public.memory_digests USING btree (created_at) WHERE (facts_extracted_at IS NULL);
+-- Pending digests by next attempt time, then oldest first. It replaces the
+-- created_at-only index; CREATE INDEX IF NOT EXISTS never changes an existing
+-- index, so the new definition takes a new name.
+DROP INDEX IF EXISTS public.idx_digests_facts_pending;
+CREATE INDEX IF NOT EXISTS idx_digests_facts_due ON public.memory_digests USING btree (facts_next_attempt_at, created_at, id) WHERE (facts_extracted_at IS NULL);
 
 
 --
@@ -1579,7 +1601,7 @@ $smoke$;
 REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -1605,7 +1627,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -1626,7 +1648,7 @@ $$;
 GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double precision, integer, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;

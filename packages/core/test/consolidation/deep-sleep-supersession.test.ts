@@ -579,17 +579,24 @@ describe('deep sleep supersession direction from statement time', () => {
     const extract = intelligence.extractFacts.getMockImplementation()!
     intelligence.extractFacts.mockRejectedValueOnce(new FactExtractionError('parse', 'reply holds no facts object'))
     vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-01T12:00:00Z'))
+    try {
+      const first = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
+      expect(first).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 1 }))
+      expect(liveContents(storage)).toEqual([GTE])
 
-    const first = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
-    expect(first).toEqual(expect.objectContaining({ promoted: 1, extractionFailed: 1 }))
-    expect(liveContents(storage)).toEqual([GTE])
+      // The failed digest is backed off; it is due again a minute later.
+      vi.setSystemTime(new Date('2026-10-01T12:01:00Z'))
+      intelligence.extractFacts.mockImplementation(extract)
+      const retry = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
 
-    intelligence.extractFacts.mockImplementation(extract)
-    const retry = await deepSleep(storage, intelligence, { minDigests: 1, supersession: LLM })
-
-    expect(retry).toEqual(expect.objectContaining({ promoted: 0, stale: 1, extractionFailed: 0 }))
-    expect(liveContents(storage)).toEqual([GTE])
-    expect(await storage.digests.getPendingFactExtraction(10)).toEqual([])
+      expect(retry).toEqual(expect.objectContaining({ promoted: 0, stale: 1, extractionFailed: 0 }))
+      expect(liveContents(storage)).toEqual([GTE])
+      expect(await storage.digests.getPendingFactExtraction(10, 3, new Date('2026-10-02T12:00:00Z'))).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('dates a stored fact by the turns it cites, not by its digest\'s last turn', async () => {

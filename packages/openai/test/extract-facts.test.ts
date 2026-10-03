@@ -260,13 +260,15 @@ describe('OpenAISummarizer.extractFacts', () => {
     expect(classifyExtractionError(err)).toBe('transient')
   })
 
-  it('keeps an empty reply cut off at max_tokens a length failure', async () => {
+  it('rejects an empty reply cut off at max_tokens as an EmptyFactReplyError, which deep sleep does not count', async () => {
     mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: '' }, finish_reason: 'length' }] })
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
     try {
       const s = new OpenAISummarizer({ apiKey: 'k' })
       const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
-      expect(err).toMatchObject({ name: 'FactExtractionError', kind: 'length' })
+      expect(err).toBeInstanceOf(EmptyFactReplyError)
+      expect(err).toMatchObject({ message: expect.stringMatching(/finish_reason=length/) })
+      expect(classifyExtractionError(err)).toBe('transient')
     } finally {
       stderr.mockRestore()
     }

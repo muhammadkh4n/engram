@@ -88,6 +88,7 @@ describe('SqliteDigestStorage', () => {
   })
 
   describe('fact-extraction watermark', () => {
+    const NOW = new Date('2026-10-03T12:00:00.000Z')
     const insertAt = async (summary: string, createdAt: number) => {
       const digest = await store.insert({
         sessionId: 's1', summary, keyTopics: [],
@@ -101,7 +102,7 @@ describe('SqliteDigestStorage', () => {
     it('a new digest is pending', async () => {
       const digest = await insertAt('fresh', 2461000.5)
 
-      const pending = await store.getPendingFactExtraction(10, 3)
+      const pending = await store.getPendingFactExtraction(10, 3, NOW)
 
       expect(pending.map((d) => d.id)).toEqual([digest.id])
       expect(pending[0].factsExtractedAt).toBeNull()
@@ -112,10 +113,10 @@ describe('SqliteDigestStorage', () => {
       const newest = await insertAt('newest', 2461002.5)
       const oldest = await insertAt('oldest', 2461000.5)
 
-      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([
+      expect((await store.getPendingFactExtraction(10, 3, NOW)).map((d) => d.id)).toEqual([
         oldest.id, middle.id, newest.id,
       ])
-      expect((await store.getPendingFactExtraction(2, 3)).map((d) => d.id)).toEqual([
+      expect((await store.getPendingFactExtraction(2, 3, NOW)).map((d) => d.id)).toEqual([
         oldest.id, middle.id,
       ])
     })
@@ -127,7 +128,7 @@ describe('SqliteDigestStorage', () => {
 
       await store.markFactsExtracted(done.id, at)
 
-      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([open.id])
+      expect((await store.getPendingFactExtraction(10, 3, NOW)).map((d) => d.id)).toEqual([open.id])
       const [stamped] = await store.getBySession('s1')
       expect(stamped.id).toBe(done.id)
       expect(Math.abs(stamped.factsExtractedAt!.getTime() - at.getTime())).toBeLessThan(5)
@@ -136,32 +137,70 @@ describe('SqliteDigestStorage', () => {
     it('a new digest has no failed attempts', async () => {
       await insertAt('fresh', 2461000.5)
 
-      const [digest] = await store.getPendingFactExtraction(10, 3)
+      const [digest] = await store.getPendingFactExtraction(10, 3, NOW)
 
       expect(digest.factExtractionAttempts).toBe(0)
     })
 
-    it('recordFactExtractionFailure adds one attempt and returns the new count', async () => {
+    it('recordFactExtractionFailure adds a failure every time, an attempt only when counted, and returns the attempts', async () => {
       const digest = await insertAt('flaky', 2461000.5)
+      const later = new Date(NOW.getTime() + 120_000)
 
-      expect(await store.recordFactExtractionFailure(digest.id)).toBe(1)
-      expect(await store.recordFactExtractionFailure(digest.id)).toBe(2)
+      expect(await store.recordFactExtractionFailure(digest.id, { counted: false, nextAttemptAt: NOW })).toBe(0)
+      expect(await store.recordFactExtractionFailure(digest.id, { counted: true, nextAttemptAt: NOW })).toBe(1)
+      expect(await store.recordFactExtractionFailure(digest.id, { counted: true, nextAttemptAt: later })).toBe(2)
 
       const [read] = await store.getBySession('s1')
       expect(read.factExtractionAttempts).toBe(2)
+      expect(read.factExtractionFailures).toBe(3)
+      expect(Math.abs(read.factsNextAttemptAt!.getTime() - later.getTime())).toBeLessThan(5)
+    })
+
+    it('a new digest has no failures and no next attempt time', async () => {
+      await insertAt('fresh', 2461000.5)
+
+      const [digest] = await store.getPendingFactExtraction(10, 3, NOW)
+
+      expect(digest.factExtractionFailures).toBe(0)
+      expect(digest.factsNextAttemptAt).toBeNull()
     })
 
     it('recordFactExtractionFailure returns 0 for an unknown digest', async () => {
-      expect(await store.recordFactExtractionFailure('no-such-digest')).toBe(0)
+      expect(await store.recordFactExtractionFailure('no-such-digest', { counted: true, nextAttemptAt: NOW })).toBe(0)
+    })
+
+    it.each<[string, number, boolean]>([
+      ['a minute before its next attempt', -60_000, false],
+      ['a millisecond before its next attempt', -1, false],
+      ['at its next attempt', 0, true],
+      ['an hour after its next attempt', 3_600_000, true],
+    ])('a backed-off digest queried %s is due: %s', async (_label, offsetMs, due) => {
+      const backedOff = await insertAt('backed off', 2461000.5)
+      const fresh = await insertAt('fresh', 2461001.5)
+      await store.recordFactExtractionFailure(backedOff.id, { counted: false, nextAttemptAt: NOW })
+
+      const pending = await store.getPendingFactExtraction(10, 3, new Date(NOW.getTime() + offsetMs))
+
+      expect(pending.map((d) => d.id)).toEqual(due ? [backedOff.id, fresh.id] : [fresh.id])
+    })
+
+    it('a due digest past its backoff keeps its oldest-first place', async () => {
+      const oldest = await insertAt('oldest', 2461000.5)
+      const middle = await insertAt('middle', 2461001.5)
+      const newest = await insertAt('newest', 2461002.5)
+      await store.recordFactExtractionFailure(oldest.id, { counted: true, nextAttemptAt: new Date(NOW.getTime() - 1000) })
+      await store.recordFactExtractionFailure(middle.id, { counted: false, nextAttemptAt: new Date(NOW.getTime() + 1000) })
+
+      expect((await store.getPendingFactExtraction(10, 3, NOW)).map((d) => d.id)).toEqual([oldest.id, newest.id])
     })
 
     it('leaves a digest at the attempt cap out of the pending set, still unstamped', async () => {
       const stuck = await insertAt('stuck', 2461000.5)
       const newer = await insertAt('newer', 2461001.5)
-      for (let i = 0; i < 3; i++) await store.recordFactExtractionFailure(stuck.id)
+      for (let i = 0; i < 3; i++) await store.recordFactExtractionFailure(stuck.id, { counted: true, nextAttemptAt: NOW })
 
-      expect((await store.getPendingFactExtraction(10, 3)).map((d) => d.id)).toEqual([newer.id])
-      expect((await store.getPendingFactExtraction(10, 4)).map((d) => d.id)).toEqual([stuck.id, newer.id])
+      expect((await store.getPendingFactExtraction(10, 3, NOW)).map((d) => d.id)).toEqual([newer.id])
+      expect((await store.getPendingFactExtraction(10, 4, NOW)).map((d) => d.id)).toEqual([stuck.id, newer.id])
       const [read] = await store.getBySession('s1')
       expect(read.factsExtractedAt).toBeNull()
     })

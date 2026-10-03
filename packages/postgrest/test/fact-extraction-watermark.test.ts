@@ -12,7 +12,7 @@ type Call = { method: string; args: unknown[] }
 
 const schema = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8')
 
-function digestRow(id: string, createdAt: string, factsExtractedAt: string | null, attempts = 0) {
+function digestRow(id: string, createdAt: string, factsExtractedAt: string | null, attempts = 0, failures = 0, next: string | null = null) {
   return {
     id,
     session_id: 's1',
@@ -27,6 +27,8 @@ function digestRow(id: string, createdAt: string, factsExtractedAt: string | nul
     project_id: null,
     facts_extracted_at: factsExtractedAt,
     fact_extraction_attempts: attempts,
+    fact_extraction_failures: failures,
+    facts_next_attempt_at: next,
   }
 }
 
@@ -41,7 +43,7 @@ function recordingClient(data: unknown) {
   const from = (table: string) => {
     tables.push(table)
     const query: Record<string, unknown> = {}
-    for (const method of ['select', 'is', 'lt', 'order', 'limit', 'update', 'eq']) {
+    for (const method of ['select', 'is', 'lt', 'or', 'order', 'limit', 'update', 'eq']) {
       query[method] = (...args: unknown[]) => {
         calls.push({ method, args })
         return query
@@ -54,17 +56,19 @@ function recordingClient(data: unknown) {
 }
 
 describe('PostgRestDigestStorage fact-extraction watermark', () => {
-  it('getPendingFactExtraction asks for unstamped digests below the attempt cap, oldest first, up to the limit', async () => {
-    const rows = [digestRow('d-1', '2026-10-01T00:00:00Z', null, 2)]
+  it('getPendingFactExtraction asks for unstamped digests below the attempt cap and past their backoff, oldest first, up to the limit', async () => {
+    const rows = [digestRow('d-1', '2026-10-01T00:00:00Z', null, 2, 4, '2026-10-03T11:00:00Z')]
     const { client, tables, calls } = recordingClient(rows)
+    const now = new Date('2026-10-03T12:00:00.000Z')
 
-    const pending = await new PostgRestDigestStorage(client).getPendingFactExtraction(25, 3)
+    const pending = await new PostgRestDigestStorage(client).getPendingFactExtraction(25, 3, now)
 
     expect(tables).toEqual(['memory_digests'])
     expect(calls).toEqual([
       { method: 'select', args: ['*'] },
       { method: 'is', args: ['facts_extracted_at', null] },
       { method: 'lt', args: ['fact_extraction_attempts', 3] },
+      { method: 'or', args: ['facts_next_attempt_at.is.null,facts_next_attempt_at.lte.2026-10-03T12:00:00.000Z'] },
       { method: 'order', args: ['created_at', { ascending: true }] },
       { method: 'order', args: ['id', { ascending: true }] },
       { method: 'limit', args: [25] },
@@ -72,31 +76,47 @@ describe('PostgRestDigestStorage fact-extraction watermark', () => {
     expect(pending.map((d) => d.id)).toEqual(['d-1'])
     expect(pending[0]!.factsExtractedAt).toBeNull()
     expect(pending[0]!.factExtractionAttempts).toBe(2)
+    expect(pending[0]!.factExtractionFailures).toBe(4)
+    expect(pending[0]!.factsNextAttemptAt).toEqual(new Date('2026-10-03T11:00:00Z'))
   })
 
-  it('recordFactExtractionFailure increments through the RPC and returns the new count', async () => {
+  it.each([true, false])('recordFactExtractionFailure (counted: %s) passes the count decision and next attempt to the RPC and returns the attempts', async (counted) => {
     const { client, tables, rpcs } = recordingClient(3)
+    const nextAttemptAt = new Date('2026-10-03T12:01:00.000Z')
 
-    const attempts = await new PostgRestDigestStorage(client).recordFactExtractionFailure('d-9')
+    const attempts = await new PostgRestDigestStorage(client).recordFactExtractionFailure('d-9', { counted, nextAttemptAt })
 
     expect(tables).toEqual([])
-    expect(rpcs).toEqual([{ method: 'rpc', args: ['engram_digest_fact_attempt', { p_id: 'd-9' }] }])
+    expect(rpcs).toEqual([{
+      method: 'rpc',
+      args: ['engram_digest_fact_failure', { p_id: 'd-9', p_counted: counted, p_next: '2026-10-03T12:01:00.000Z' }],
+    }])
     expect(attempts).toBe(3)
   })
 
   it('recordFactExtractionFailure returns 0 for an unknown digest', async () => {
     const { client } = recordingClient(null)
 
-    expect(await new PostgRestDigestStorage(client).recordFactExtractionFailure('gone')).toBe(0)
+    expect(await new PostgRestDigestStorage(client).recordFactExtractionFailure('gone', {
+      counted: true,
+      nextAttemptAt: new Date('2026-10-03T12:01:00.000Z'),
+    })).toBe(0)
   })
 
-  it('reads a missing attempts column as 0', async () => {
-    const { fact_extraction_attempts: _drop, ...row } = digestRow('d-3', '2026-10-01T00:00:00Z', null)
+  it('reads missing attempts, failures and next-attempt columns as 0, 0 and null', async () => {
+    const {
+      fact_extraction_attempts: _attempts,
+      fact_extraction_failures: _failures,
+      facts_next_attempt_at: _next,
+      ...row
+    } = digestRow('d-3', '2026-10-01T00:00:00Z', null)
     const { client } = recordingClient([row])
 
     const [digest] = await new PostgRestDigestStorage(client).getBySession('s1')
 
     expect(digest!.factExtractionAttempts).toBe(0)
+    expect(digest!.factExtractionFailures).toBe(0)
+    expect(digest!.factsNextAttemptAt).toBeNull()
   })
 
   it('markFactsExtracted stamps exactly the one digest', async () => {
@@ -123,12 +143,28 @@ describe('PostgRestDigestStorage fact-extraction watermark', () => {
 })
 
 describe('schema.sql fact-extraction watermark', () => {
-  it('adds the column idempotently with a partial index on pending digests', () => {
+  it('adds the column idempotently with a partial index on pending digests by next attempt, then age', () => {
     expect(schema).toContain(
       'ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_extracted_at timestamp with time zone;',
     )
-    expect(schema).toMatch(
-      /CREATE INDEX IF NOT EXISTS idx_digests_facts_pending ON public\.memory_digests USING btree \(created_at\) WHERE \(facts_extracted_at IS NULL\);/,
+    expect(schema).toContain(
+      'CREATE INDEX IF NOT EXISTS idx_digests_facts_due ON public.memory_digests USING btree (facts_next_attempt_at, created_at, id) WHERE (facts_extracted_at IS NULL);',
+    )
+  })
+
+  it('drops the created_at-only pending index before creating its replacement', () => {
+    const drop = schema.indexOf('DROP INDEX IF EXISTS public.idx_digests_facts_pending;')
+    expect(drop).toBeGreaterThan(-1)
+    expect(drop).toBeLessThan(schema.indexOf('CREATE INDEX IF NOT EXISTS idx_digests_facts_due'))
+    expect(schema).not.toMatch(/CREATE INDEX IF NOT EXISTS idx_digests_facts_pending/)
+  })
+
+  it('adds the backoff columns idempotently: a nullable next attempt and a failure count NOT NULL with default 0', () => {
+    expect(schema).toContain(
+      'ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS facts_next_attempt_at timestamp with time zone;',
+    )
+    expect(schema).toContain(
+      'ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS fact_extraction_failures integer DEFAULT 0 NOT NULL;',
     )
   })
 
@@ -147,17 +183,28 @@ describe('schema.sql fact-extraction watermark', () => {
     )
   })
 
-  it('increments attempts in one statement, granted to service_role only', () => {
+  it('records a failure in one statement: always a failure and the next attempt, an attempt only when counted', () => {
     const fn = schema.match(
-      /CREATE OR REPLACE FUNCTION public\.engram_digest_fact_attempt\(p_id uuid\) RETURNS integer[\s\S]*?AS \$\$([\s\S]*?)\$\$;/,
+      /CREATE OR REPLACE FUNCTION public\.engram_digest_fact_failure\(p_id uuid, p_counted boolean, p_next timestamp with time zone\) RETURNS integer[\s\S]*?AS \$\$([\s\S]*?)\$\$;/,
     )
     expect(fn).not.toBeNull()
     expect(fn![0]).toContain('SECURITY DEFINER')
     expect(fn![1]!.replace(/\s+/g, ' ').trim()).toBe(
-      'UPDATE memory_digests SET fact_extraction_attempts = fact_extraction_attempts + 1 WHERE id = p_id RETURNING fact_extraction_attempts;',
+      'UPDATE memory_digests SET fact_extraction_failures = fact_extraction_failures + 1, ' +
+        'facts_next_attempt_at = p_next, ' +
+        'fact_extraction_attempts = fact_extraction_attempts + CASE WHEN p_counted THEN 1 ELSE 0 END ' +
+        'WHERE id = p_id RETURNING fact_extraction_attempts;',
     )
-    expect(schema).toContain('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) FROM PUBLIC;')
-    expect(schema).toContain('GRANT EXECUTE ON FUNCTION public.engram_digest_fact_attempt(uuid) TO service_role;')
-    expect(schema).not.toMatch(/GRANT EXECUTE ON FUNCTION public\.engram_digest_fact_attempt\(uuid\) TO (anon|authenticated|PUBLIC)/)
+  })
+
+  it('grants the failure RPC to service_role only and drops the attempt-only RPC it replaces', () => {
+    const signature = 'public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone)'
+    expect(schema).toContain(`REVOKE EXECUTE ON FUNCTION ${signature} FROM PUBLIC;`)
+    expect(schema).toContain(`EXECUTE format('REVOKE EXECUTE ON FUNCTION ${signature} FROM %I', role_name);`)
+    expect(schema).toContain(`GRANT EXECUTE ON FUNCTION ${signature} TO service_role;`)
+    const grants = [...schema.matchAll(/GRANT EXECUTE ON FUNCTION public\.engram_digest_fact_failure\([^)]*\) TO (\w+)/g)]
+    expect(grants.map((m) => m[1])).toEqual(['service_role'])
+    expect(schema).toContain('DROP FUNCTION IF EXISTS public.engram_digest_fact_attempt(uuid);')
+    expect(schema.replace(/--[^\n]*/g, '')).not.toMatch(/(CREATE OR REPLACE FUNCTION|GRANT EXECUTE ON FUNCTION) public\.engram_digest_fact_attempt/)
   })
 })

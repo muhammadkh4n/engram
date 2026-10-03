@@ -5,11 +5,27 @@ import type { Digest } from '../types.js'
 import { extractDigestFacts } from './fact-candidates.js'
 import type { FactCandidate } from './fact-candidates.js'
 
+/** Backoff after a digest's first failed unit. */
+export const FACT_EXTRACTION_BACKOFF_BASE_MS = 60_000
+/** Longest backoff: a digest failing for hours is still tried four times a day. */
+export const FACT_EXTRACTION_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000
+
+/**
+ * How long a digest waits before its next extraction after its `failures`-th
+ * failed unit: 60 s doubled per earlier failure, capped at 6 h. Counted or
+ * not, every failure lengthens it, so a digest that keeps failing yields the
+ * head of the oldest-first queue to the digests behind it.
+ */
+export function factExtractionBackoffMs(failures: number): number {
+  const exponent = Math.max(0, Math.floor(failures) - 1)
+  return Math.min(FACT_EXTRACTION_BACKOFF_BASE_MS * 2 ** exponent, FACT_EXTRACTION_BACKOFF_MAX_MS)
+}
+
 export interface ExtractionCounts {
   extractionFailed: number
   extractionExhausted: number
   extractionDeferred: number
-  extractionProbed: number
+  extractionBackedOff: number
   noEpisodes: number
 }
 
@@ -18,39 +34,57 @@ export interface ExtractionRunOptions {
   intelligence: IntelligenceAdapter | undefined
   /** Counted failures after which a digest leaves the pending set. */
   maxAttempts: number
-  /** Stores one digest's candidates (dedup, supersession, graph writes). */
-  promote: (candidates: FactCandidate[]) => Promise<void>
+  /** Stores one digest's candidates (dedup, supersession, graph writes) and
+   *  resolves to the number of rows it inserted or updated. */
+  promote: (candidates: FactCandidate[]) => Promise<number>
+}
+
+/** The steps of one digest's unit, in order. */
+export type ExtractionStep = 'extract' | 'promote' | 'stamp'
+
+/** A failure whose count waits for the end of the run. */
+interface HeldFailure {
+  digest: Digest
+  step: ExtractionStep
+  err: unknown
 }
 
 /** One run's extraction state. Local to the run and mutated only by the
  *  helpers below. */
 interface ExtractionLoop extends ExtractionRunOptions {
   counts: ExtractionCounts
+  /** Steps some unit of this run got through. An extract proves the step
+   *  only when the extractor ran over live episodes; a promote only when it
+   *  wrote a row. */
+  proven: Set<ExtractionStep>
 }
 
-/** How one digest's unit (extract, promote, stamp) ended. `noEpisodes`
- *  marks a digest stamped without an extractor call or a write. */
-type UnitOutcome =
-  | { ok: true; noEpisodes: boolean }
-  | { ok: false; err: unknown }
+type UnitOutcome = { ok: true } | { ok: false; step: ExtractionStep; err: unknown }
 
 /**
  * Runs one digest's whole unit: extract its facts, store them, stamp it. A
- * failure at any step is returned, not thrown, so the caller classifies an
- * extractor, promote or stamp failure the same way. The digest stays pending
- * until the stamp succeeds; promote skips facts an earlier partial run of the
- * same digest already stored.
+ * failure is returned with the step it happened at, not thrown. The digest
+ * stays pending until the stamp succeeds; promote skips facts an earlier
+ * partial run of the same digest already stored.
  */
 async function runUnit(loop: ExtractionLoop, digest: Digest): Promise<UnitOutcome> {
+  let step: ExtractionStep = 'extract'
   try {
     const extraction = await extractDigestFacts(loop.storage, loop.intelligence, digest)
     const noEpisodes = extraction.status === 'no-episodes'
-    if (!noEpisodes) await loop.promote(extraction.candidates)
+    if (!noEpisodes) {
+      loop.proven.add('extract')
+      step = 'promote'
+      const written = await loop.promote(extraction.candidates)
+      if (written > 0) loop.proven.add('promote')
+    }
+    step = 'stamp'
     await loop.storage.digests.markFactsExtracted(digest.id, new Date())
+    loop.proven.add('stamp')
     if (noEpisodes) loop.counts.noEpisodes++
-    return { ok: true, noEpisodes }
+    return { ok: true }
   } catch (err) {
-    return { ok: false, err }
+    return { ok: false, step, err }
   }
 }
 
@@ -60,96 +94,86 @@ function describeError(err: unknown): string {
   return `${name}: ${message}`
 }
 
-/** Counts one failed attempt against the digest; `reason` names the class
- *  and, after a probe, what the probe showed. */
-async function countAttempt(loop: ExtractionLoop, digest: Digest, err: unknown, reason: string): Promise<void> {
-  const attempts = await loop.storage.digests.recordFactExtractionFailure(digest.id)
+/**
+ * Records one failed unit: the digest gains a failure and waits out its
+ * backoff, and gains an attempt when `counted`. Returns the log line's
+ * outcome clause.
+ */
+async function backOff(loop: ExtractionLoop, digest: Digest, counted: boolean): Promise<string> {
+  const failures = (digest.factExtractionFailures ?? 0) + 1
+  const nextAttemptAt = new Date(Date.now() + factExtractionBackoffMs(failures))
+  const attempts = await loop.storage.digests.recordFactExtractionFailure(digest.id, { counted, nextAttemptAt })
+  loop.counts.extractionBackedOff++
+  const retry = `retried after ${nextAttemptAt.toISOString()}`
+  if (!counted) return `not counted; ${retry}`
   loop.counts.extractionFailed++
-  const exhausted = attempts >= loop.maxAttempts
-  if (exhausted) loop.counts.extractionExhausted++
-  console.warn(
-    `[deep-sleep] fact extraction failed for digest ${digest.id} (${reason}; attempt ${attempts} of ${loop.maxAttempts}); ${exhausted ? 'no longer retried' : 'it stays pending'}: ${describeError(err)}`,
-  )
+  if (attempts < loop.maxAttempts) return `attempt ${attempts} of ${loop.maxAttempts}; ${retry}`
+  loop.counts.extractionExhausted++
+  return `attempt ${attempts} of ${loop.maxAttempts}; no longer retried`
 }
 
-/** Ends the run's loop with no attempt counted. `remaining` is how many
- *  digests the stop leaves unextracted. */
-function deferRun(loop: ExtractionLoop, digest: Digest, err: unknown, reason: string, remaining: number): void {
+/**
+ * Settles the run's held failures. A failure counts against its digest only
+ * when another unit of the run got through the same step: then the step
+ * works and this digest is what fails it. Otherwise the failure may be
+ * systemic (a rejected parameter, a model that ignores the format, a storage
+ * outage) and nothing is counted.
+ */
+async function settleHeld(loop: ExtractionLoop, held: ReadonlyArray<HeldFailure>): Promise<void> {
+  for (const { digest, step, err } of held) {
+    const counted = loop.proven.has(step)
+    const why = counted
+      ? `another digest got through ${step} this run`
+      : `no digest got through ${step} this run`
+    const outcome = await backOff(loop, digest, counted)
+    console.warn(
+      `[deep-sleep] fact extraction failed for digest ${digest.id} at ${step} (held; ${why}; ${outcome}): ${describeError(err)}`,
+    )
+  }
+}
+
+/** Backs off the digest that hit a transient failure, uncounted, and records
+ *  how many digests the stop leaves unextracted (it and every later one). */
+async function deferRun(
+  loop: ExtractionLoop,
+  pending: ReadonlyArray<Digest>,
+  index: number,
+  failure: HeldFailure,
+): Promise<void> {
+  const remaining = pending.length - index
   loop.counts.extractionDeferred = remaining
-  const log = isCredentialError(err) ? console.error : console.warn
+  const outcome = await backOff(loop, failure.digest, false)
+  const log = isCredentialError(failure.err) ? console.error : console.warn
   log(
-    `[deep-sleep] fact extraction deferred at digest ${digest.id} (${reason}); ${remaining} digest(s) stay pending for the next run, no attempt counted: ${describeError(err)}`,
+    `[deep-sleep] fact extraction deferred at digest ${failure.digest.id} at ${failure.step} (transient; ${outcome}); ${remaining} digest(s) left unextracted this run: ${describeError(failure.err)}`,
   )
 }
 
 /**
- * Decides a `probe` failure at `pending[index]` by running the next pending
- * digest's unit. A digest with no live episode makes no extractor call and
- * stores nothing, so it proves nothing: it is stamped and the one after it
- * probes instead. Returns the index of the probe digest when the run
- * continues, undefined when it was deferred.
+ * Runs each due digest's unit in order. classifyExtractionError sorts a
+ * failure anywhere in the unit: `transient` backs the digest off uncounted
+ * and ends the run; `held` backs it off, the run goes on, and the count is
+ * decided once the run shows whether the failed step works for other
+ * digests.
  */
-async function probeAfter(
-  loop: ExtractionLoop,
-  pending: ReadonlyArray<Digest>,
-  index: number,
-  err: unknown,
-): Promise<number | undefined> {
-  const digest = pending[index]!
-  for (let next = index + 1; next < pending.length; next++) {
-    const probe = pending[next]!
-    const outcome = await runUnit(loop, probe)
-    if (outcome.ok && outcome.noEpisodes) continue
-    loop.counts.extractionProbed++
-    if (outcome.ok) {
-      await countAttempt(loop, digest, err, `probe; digest ${probe.id} went through, so the failure is this digest's own`)
-      return next
-    }
-    if (classifyExtractionError(outcome.err) === 'digest') {
-      await countAttempt(loop, probe, outcome.err, `digest, as the probe for digest ${digest.id}`)
-      deferRun(loop, digest, err, `probe; digest ${probe.id} failed on its own too, so this one is not counted`, pending.length - next)
-      return undefined
-    }
-    deferRun(
-      loop,
-      digest,
-      err,
-      `probe; digest ${probe.id} failed too (${describeError(outcome.err)}), so neither is counted`,
-      pending.length - next + 1,
-    )
-    return undefined
-  }
-  deferRun(loop, digest, err, 'probe; no pending digest left to probe with', 1)
-  return undefined
-}
-
-/** Runs each pending digest's unit in order; classifyExtractionError decides
- *  what each failure does to its digest and to the rest of the run. */
 export async function runExtraction(opts: ExtractionRunOptions, pending: ReadonlyArray<Digest>): Promise<ExtractionCounts> {
   const loop: ExtractionLoop = {
     ...opts,
-    counts: { extractionFailed: 0, extractionExhausted: 0, extractionDeferred: 0, extractionProbed: 0, noEpisodes: 0 },
+    counts: { extractionFailed: 0, extractionExhausted: 0, extractionDeferred: 0, extractionBackedOff: 0, noEpisodes: 0 },
+    proven: new Set(),
   }
-  await extractInOrder(loop, pending)
-  return { ...loop.counts }
-}
-
-async function extractInOrder(loop: ExtractionLoop, pending: ReadonlyArray<Digest>): Promise<void> {
+  const held: HeldFailure[] = []
   for (let index = 0; index < pending.length; index++) {
     const digest = pending[index]!
     const outcome = await runUnit(loop, digest)
     if (outcome.ok) continue
-    const errorClass = classifyExtractionError(outcome.err)
-    if (errorClass === 'digest') {
-      await countAttempt(loop, digest, outcome.err, 'digest')
-      continue
+    const failure: HeldFailure = { digest, step: outcome.step, err: outcome.err }
+    if (classifyExtractionError(outcome.err) === 'transient') {
+      await deferRun(loop, pending, index, failure)
+      break
     }
-    if (errorClass === 'transient') {
-      deferRun(loop, digest, outcome.err, 'transient', pending.length - index)
-      return
-    }
-    const probeIndex = await probeAfter(loop, pending, index, outcome.err)
-    if (probeIndex === undefined) return
-    index = probeIndex
+    held.push(failure)
   }
+  await settleHeld(loop, held)
+  return { ...loop.counts }
 }
