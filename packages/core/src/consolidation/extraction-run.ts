@@ -3,7 +3,7 @@ import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { classifyExtractionError, isCredentialError } from '../adapters/intelligence.js'
 import type { Digest } from '../types.js'
 import { extractDigestFacts } from './fact-candidates.js'
-import type { DigestFactExtraction, FactCandidate } from './fact-candidates.js'
+import type { FactCandidate } from './fact-candidates.js'
 
 export interface ExtractionCounts {
   extractionFailed: number
@@ -16,7 +16,7 @@ export interface ExtractionCounts {
 export interface ExtractionRunOptions {
   storage: StorageAdapter
   intelligence: IntelligenceAdapter | undefined
-  /** Failures classed `digest` after which a digest leaves the pending set. */
+  /** Counted failures after which a digest leaves the pending set. */
   maxAttempts: number
   /** Stores one digest's candidates (dedup, supersession, graph writes). */
   promote: (candidates: FactCandidate[]) => Promise<void>
@@ -28,13 +28,27 @@ interface ExtractionLoop extends ExtractionRunOptions {
   counts: ExtractionCounts
 }
 
-type ExtractionAttempt =
-  | { ok: true; extraction: DigestFactExtraction }
+/** How one digest's unit (extract, promote, stamp) ended. `noEpisodes`
+ *  marks a digest stamped without an extractor call or a write. */
+type UnitOutcome =
+  | { ok: true; noEpisodes: boolean }
   | { ok: false; err: unknown }
 
-async function attemptExtraction(loop: ExtractionLoop, digest: Digest): Promise<ExtractionAttempt> {
+/**
+ * Runs one digest's whole unit: extract its facts, store them, stamp it. A
+ * failure at any step is returned, not thrown, so the caller classifies an
+ * extractor, promote or stamp failure the same way. The digest stays pending
+ * until the stamp succeeds; promote skips facts an earlier partial run of the
+ * same digest already stored.
+ */
+async function runUnit(loop: ExtractionLoop, digest: Digest): Promise<UnitOutcome> {
   try {
-    return { ok: true, extraction: await extractDigestFacts(loop.storage, loop.intelligence, digest) }
+    const extraction = await extractDigestFacts(loop.storage, loop.intelligence, digest)
+    const noEpisodes = extraction.status === 'no-episodes'
+    if (!noEpisodes) await loop.promote(extraction.candidates)
+    await loop.storage.digests.markFactsExtracted(digest.id, new Date())
+    if (noEpisodes) loop.counts.noEpisodes++
+    return { ok: true, noEpisodes }
   } catch (err) {
     return { ok: false, err }
   }
@@ -44,15 +58,6 @@ function describeError(err: unknown): string {
   const name = err instanceof Error ? err.name : typeof err
   const message = err instanceof Error ? err.message : String(err)
   return `${name}: ${message}`
-}
-
-async function storeExtraction(loop: ExtractionLoop, digest: Digest, extraction: DigestFactExtraction): Promise<void> {
-  if (extraction.status === 'no-episodes') {
-    loop.counts.noEpisodes++
-  } else {
-    await loop.promote(extraction.candidates)
-  }
-  await loop.storage.digests.markFactsExtracted(digest.id, new Date())
 }
 
 /** Counts one failed attempt against the digest; `reason` names the class
@@ -78,11 +83,11 @@ function deferRun(loop: ExtractionLoop, digest: Digest, err: unknown, reason: st
 }
 
 /**
- * Decides an `unknown` error at `pending[index]` by extracting the next
- * pending digest. A digest with no live episode makes no extractor call, so
- * it proves nothing: it is stamped and the one after it probes instead.
- * Returns the index of the probe digest when the run continues, undefined
- * when it was deferred.
+ * Decides a `probe` failure at `pending[index]` by running the next pending
+ * digest's unit. A digest with no live episode makes no extractor call and
+ * stores nothing, so it proves nothing: it is stamped and the one after it
+ * probes instead. Returns the index of the probe digest when the run
+ * continues, undefined when it was deferred.
  */
 async function probeAfter(
   loop: ExtractionLoop,
@@ -93,36 +98,32 @@ async function probeAfter(
   const digest = pending[index]!
   for (let next = index + 1; next < pending.length; next++) {
     const probe = pending[next]!
-    const attempt = await attemptExtraction(loop, probe)
-    if (attempt.ok && attempt.extraction.status === 'no-episodes') {
-      await storeExtraction(loop, probe, attempt.extraction)
-      continue
-    }
+    const outcome = await runUnit(loop, probe)
+    if (outcome.ok && outcome.noEpisodes) continue
     loop.counts.extractionProbed++
-    if (attempt.ok) {
-      await countAttempt(loop, digest, err, `unknown; probe digest ${probe.id} extracted, so the failure is this digest's own`)
-      await storeExtraction(loop, probe, attempt.extraction)
+    if (outcome.ok) {
+      await countAttempt(loop, digest, err, `probe; digest ${probe.id} went through, so the failure is this digest's own`)
       return next
     }
-    if (classifyExtractionError(attempt.err) === 'digest') {
-      await countAttempt(loop, probe, attempt.err, `digest, as the probe for digest ${digest.id}`)
-      deferRun(loop, digest, err, `unknown; probe digest ${probe.id} failed on its own too, so this one is not counted`, pending.length - next)
+    if (classifyExtractionError(outcome.err) === 'digest') {
+      await countAttempt(loop, probe, outcome.err, `digest, as the probe for digest ${digest.id}`)
+      deferRun(loop, digest, err, `probe; digest ${probe.id} failed on its own too, so this one is not counted`, pending.length - next)
       return undefined
     }
     deferRun(
       loop,
       digest,
       err,
-      `unknown; probe digest ${probe.id} failed too (${describeError(attempt.err)}), so neither is counted`,
+      `probe; digest ${probe.id} failed too (${describeError(outcome.err)}), so neither is counted`,
       pending.length - next + 1,
     )
     return undefined
   }
-  deferRun(loop, digest, err, 'unknown; no pending digest left to probe with', 1)
+  deferRun(loop, digest, err, 'probe; no pending digest left to probe with', 1)
   return undefined
 }
 
-/** Extracts the pending digests in order; classifyExtractionError decides
+/** Runs each pending digest's unit in order; classifyExtractionError decides
  *  what each failure does to its digest and to the rest of the run. */
 export async function runExtraction(opts: ExtractionRunOptions, pending: ReadonlyArray<Digest>): Promise<ExtractionCounts> {
   const loop: ExtractionLoop = {
@@ -136,21 +137,18 @@ export async function runExtraction(opts: ExtractionRunOptions, pending: Readonl
 async function extractInOrder(loop: ExtractionLoop, pending: ReadonlyArray<Digest>): Promise<void> {
   for (let index = 0; index < pending.length; index++) {
     const digest = pending[index]!
-    const attempt = await attemptExtraction(loop, digest)
-    if (attempt.ok) {
-      await storeExtraction(loop, digest, attempt.extraction)
-      continue
-    }
-    const errorClass = classifyExtractionError(attempt.err)
+    const outcome = await runUnit(loop, digest)
+    if (outcome.ok) continue
+    const errorClass = classifyExtractionError(outcome.err)
     if (errorClass === 'digest') {
-      await countAttempt(loop, digest, attempt.err, 'digest')
+      await countAttempt(loop, digest, outcome.err, 'digest')
       continue
     }
     if (errorClass === 'transient') {
-      deferRun(loop, digest, attempt.err, 'transient', pending.length - index)
+      deferRun(loop, digest, outcome.err, 'transient', pending.length - index)
       return
     }
-    const probeIndex = await probeAfter(loop, pending, index, attempt.err)
+    const probeIndex = await probeAfter(loop, pending, index, outcome.err)
     if (probeIndex === undefined) return
     index = probeIndex
   }

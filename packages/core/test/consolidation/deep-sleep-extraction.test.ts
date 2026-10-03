@@ -418,7 +418,8 @@ describe('retrying a digest after a partial promote', () => {
       throw new Error('semantic insert failed: connection reset')
     })
 
-    await expect(deepSleep(storage, extractor(), { minDigests: 1 })).rejects.toThrow('connection reset')
+    const failed = await deepSleep(storage, extractor(), { minDigests: 1 })
+    expect(failed).toEqual(expect.objectContaining({ extractionFailed: 0, extractionDeferred: 1 }))
     expect(storage.semantic._memories.map(m => m.content)).toEqual(['Stated: alpha'])
     expect((await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)).toEqual([digest.id])
 
@@ -502,22 +503,23 @@ class APIConnectionError extends Error {}
 class APIConnectionTimeoutError extends APIConnectionError {}
 
 describe('classifyExtractionError', () => {
-  it.each([400, 404, 409, 413, 422])('status %i is the digest\'s own failure', (status) => {
-    expect(classifyExtractionError(apiError(status))).toBe('digest')
+  it.each([400, 413, 422])('status %i needs a probe', (status) => {
+    expect(classifyExtractionError(apiError(status))).toBe('probe')
   })
 
-  it.each([401, 402, 403, 408, 429, 500, 502, 503, 504, 529])('status %i is transient', (status) => {
+  it.each([401, 402, 403, 404, 408, 409, 429, 500, 502, 503, 504, 529])('status %i is transient', (status) => {
     expect(classifyExtractionError(apiError(status))).toBe('transient')
   })
 
-  it.each([405, 410, 418, 451])('status %i is unknown', (status) => {
-    expect(classifyExtractionError(apiError(status))).toBe('unknown')
+  it.each([405, 410, 418, 451])('unlisted status %i needs a probe', (status) => {
+    expect(classifyExtractionError(apiError(status))).toBe('probe')
   })
 
   it.each<[string, unknown, string]>([
     ['FactExtractionError length', new FactExtractionError('length', 'cut off'), 'digest'],
-    ['FactExtractionError parse', new FactExtractionError('parse', 'no object'), 'digest'],
-    ['FactExtractionError from another copy', Object.assign(new Error('x'), { name: 'FactExtractionError' }), 'digest'],
+    ['FactExtractionError parse', new FactExtractionError('parse', 'no object'), 'probe'],
+    ['FactExtractionError length from another copy', Object.assign(new Error('x'), { name: 'FactExtractionError', kind: 'length' }), 'digest'],
+    ['FactExtractionError parse from another copy', Object.assign(new Error('x'), { name: 'FactExtractionError', kind: 'parse' }), 'probe'],
     ['EmptyFactReplyError', new EmptyFactReplyError('empty reply'), 'transient'],
     ['EmptyFactReplyError from another copy', Object.assign(new Error('x'), { name: 'EmptyFactReplyError' }), 'transient'],
     ['CircuitOpenError', new CircuitOpenError('Circuit breaker is open'), 'transient'],
@@ -532,12 +534,12 @@ describe('classifyExtractionError', () => {
     ['a connection timeout', new APIConnectionTimeoutError('Request timed out.'), 'transient'],
     ['AbortError', Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }), 'transient'],
     ['TimeoutError', new TimeoutError(30_000), 'transient'],
-    ['a plain Error', new Error('something broke'), 'unknown'],
-    ['a status only in the message', new Error('503 Service Unavailable'), 'unknown'],
-    ['a string status', Object.assign(new Error('503'), { status: '503' }), 'unknown'],
-    ['a TypeError that is not fetch failed', new TypeError('x is not a function'), 'unknown'],
-    ['a thrown string', 'boom', 'unknown'],
-    ['undefined', undefined, 'unknown'],
+    ['a plain Error', new Error('something broke'), 'probe'],
+    ['a status only in the message', new Error('503 Service Unavailable'), 'probe'],
+    ['a string status', Object.assign(new Error('503'), { status: '503' }), 'probe'],
+    ['a TypeError that is not fetch failed', new TypeError('x is not a function'), 'probe'],
+    ['a thrown string', 'boom', 'probe'],
+    ['undefined', undefined, 'probe'],
   ])('%s', (_label, err, expected) => {
     expect(classifyExtractionError(err)).toBe(expected)
   })
@@ -546,7 +548,7 @@ describe('classifyExtractionError', () => {
     const a = new Error('a') as Error & { cause?: unknown }
     const b = new Error('b', { cause: a })
     a.cause = b
-    expect(classifyExtractionError(a)).toBe('unknown')
+    expect(classifyExtractionError(a)).toBe('probe')
   })
 })
 
@@ -600,24 +602,33 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(await pendingIds(storage)).toEqual(digests.map(d => d.id))
   })
 
-  it('counts a digest that always gets a 400 once per run and extracts the digests behind it in the first run', async () => {
-    const { digests, storage } = digestsOver(['too long', 'second', 'third'])
+  it('counts a digest that always gets a 400 once per run, after a probe, while the digests behind it extract', async () => {
+    const contents = ['too long', 'second', 'third', 'fourth']
+    const eps = contents.map(content => makeEpisode({ content }))
+    const digests = eps.map((e, i) => digestOver([e], { createdAt: at(`2026-09-0${i + 1}T00:00:00Z`) }))
+    const storage = storageWith(eps, digests.slice(0, 2))
     const intelligence = rejectingOn({ 'too long': () => apiError(400, '400 context length exceeded') })
 
     const runs = []
-    for (let i = 0; i < 3; i++) runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+    for (let i = 0; i < 3; i++) {
+      if (i > 0) await storage.digests.insert(digests[i + 1]!)
+      runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+    }
 
     expect(runs.map(r => r.extractionFailed)).toEqual([1, 1, 1])
+    expect(runs.map(r => r.extractionProbed)).toEqual([1, 1, 1])
     expect(runs.map(r => r.extractionExhausted)).toEqual([0, 0, 1])
     expect(runs.map(r => r.extractionDeferred)).toEqual([0, 0, 0])
-    expect(runs[0]!.promoted).toBe(2)
-    expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual([digests[1]!.id, digests[2]!.id])
+    expect(runs.map(r => r.promoted)).toEqual([1, 1, 1])
+    expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual(digests.slice(1).map(d => d.id))
     expect(await attemptsOf(storage, digests[0]!.id)).toBe(3)
     expect(await pendingIds(storage)).toEqual([])
-    expect(String(warn.mock.calls[0]![0])).toMatch(new RegExp(`digest ${digests[0]!.id} \\(digest; attempt 1 of 3\\)`))
+    expect(String(warn.mock.calls[0]![0])).toMatch(
+      new RegExp(`digest ${digests[0]!.id} \\(probe; digest ${digests[1]!.id} went through.*; attempt 1 of 3\\)`),
+    )
   })
 
-  it('an unknown error whose probe succeeds counts the first digest and the run goes on', async () => {
+  it('an unclassified error whose probe succeeds counts the first digest and the run goes on', async () => {
     const { digests, storage } = digestsOver(['odd', 'second', 'third'])
     const intelligence = rejectingOn({ odd: () => new Error('unexpected reply shape') })
 
@@ -632,12 +643,11 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(await pendingIds(storage)).toEqual([digests[0]!.id])
     const line = String(warn.mock.calls[0]![0])
     expect(line).toContain(digests[0]!.id)
-    expect(line).toContain('unknown')
-    expect(line).toContain(`probe digest ${digests[1]!.id} extracted`)
+    expect(line).toContain(`probe; digest ${digests[1]!.id} went through`)
     expect(line).toContain('Error: unexpected reply shape')
   })
 
-  it('an unknown error whose probe fails with a transient error counts nothing and defers', async () => {
+  it('an unclassified error whose probe fails with a transient error counts nothing and defers', async () => {
     const { digests, storage } = digestsOver(['odd', 'second', 'third'])
     const intelligence = rejectingOn({ odd: () => new Error('unexpected reply shape'), second: () => apiError(503) })
 
@@ -651,10 +661,10 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(storage.digests.markFactsExtracted).not.toHaveBeenCalled()
     expect(await pendingIds(storage)).toEqual(digests.map(d => d.id))
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(String(warn.mock.calls[0]![0])).toContain(`probe digest ${digests[1]!.id} failed too`)
+    expect(String(warn.mock.calls[0]![0])).toContain(`probe; digest ${digests[1]!.id} failed too`)
   })
 
-  it('an unknown error whose probe fails with an unknown error counts nothing and defers', async () => {
+  it('an unclassified error whose probe fails with an unknown error counts nothing and defers', async () => {
     const { storage } = digestsOver(['odd', 'second'])
     const intelligence = rejectingOn({ odd: () => new Error('one'), second: () => new Error('two') })
 
@@ -664,11 +674,11 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
   })
 
-  it('an unknown error whose probe fails on its own counts the probe, not the first, and defers', async () => {
+  it('an unclassified error whose probe fails on its own counts the probe, not the first, and defers', async () => {
     const { digests, storage } = digestsOver(['odd', 'second', 'third'])
     const intelligence = rejectingOn({
       odd: () => new Error('unexpected reply shape'),
-      second: () => new FactExtractionError('parse', 'reply holds no facts object'),
+      second: () => new FactExtractionError('length', 'reply cut off at max_tokens'),
     })
 
     const result = await deepSleep(storage, intelligence, { minDigests: 1 })
@@ -682,7 +692,7 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(warn).toHaveBeenCalledTimes(2)
   })
 
-  it('an unknown error with no digest left to probe defers', async () => {
+  it('an unclassified error with no digest left to probe defers', async () => {
     const { storage } = digestsOver(['odd'])
     const intelligence = rejectingOn({ odd: () => new Error('unexpected reply shape') })
 
@@ -737,5 +747,155 @@ describe('one error taxonomy decides what a failed extraction costs', () => {
     expect(warn).not.toHaveBeenCalled()
     expect(error).toHaveBeenCalledTimes(1)
     expect(String(error.mock.calls[0]![0])).toContain(`digest ${digests[0]!.id} (transient)`)
+  })
+})
+
+describe('a digest is blamed only for what a probe proves, across extract, promote and stamp', () => {
+  beforeEach(() => {
+    resetIdCounter()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function digestsOver(contents: string[], summaries: string[] = []) {
+    const eps = contents.map(content => makeEpisode({ content }))
+    const digests = eps.map((e, i) => digestOver([e], {
+      createdAt: at(`2026-09-0${i + 1}T00:00:00Z`),
+      ...(summaries[i] ? { summary: summaries[i] } : {}),
+    }))
+    return { eps, digests, storage: storageWith(eps, digests) }
+  }
+
+  function rejectingOn(failures: Record<string, () => unknown>) {
+    return extractor(async (input) => {
+      for (const e of input.episodes) {
+        const failure = failures[e.content]
+        if (failure) throw failure()
+      }
+      return factPerEpisode(input)
+    })
+  }
+
+  function rejectingAll(failure: () => unknown) {
+    return extractor(async () => {
+      throw failure()
+    })
+  }
+
+  async function attemptsOf(storage: ReturnType<typeof storageWith>, id: string): Promise<number> {
+    return (await storage.digests.getRecent(3650)).find(d => d.id === id)?.factExtractionAttempts ?? 0
+  }
+
+  async function pendingIds(storage: ReturnType<typeof storageWith>): Promise<string[]> {
+    return (await storage.digests.getPendingFactExtraction(10, 3)).map(d => d.id)
+  }
+
+  it('a 404 on every call (a missing model) counts no attempt after five runs', async () => {
+    const { digests, storage } = digestsOver(['first', 'second', 'third'])
+    const intelligence = rejectingAll(() => apiError(404, '404 model not found'))
+
+    const runs = []
+    for (let i = 0; i < 5; i++) runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+
+    expect(runs.map(r => r.extractionDeferred)).toEqual([3, 3, 3, 3, 3])
+    expect(runs.map(r => r.extractionProbed)).toEqual([0, 0, 0, 0, 0])
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(await pendingIds(storage)).toEqual(digests.map(d => d.id))
+  })
+
+  it('a 400 on every call (a parameter the model rejects) counts no attempt', async () => {
+    const { digests, storage } = digestsOver(['first', 'second', 'third'])
+    const intelligence = rejectingAll(() => apiError(400, '400 unsupported parameter'))
+
+    const runs = []
+    for (let i = 0; i < 3; i++) runs.push(await deepSleep(storage, intelligence, { minDigests: 1 }))
+
+    expect(runs.map(r => r.extractionProbed)).toEqual([1, 1, 1])
+    expect(runs.map(r => r.extractionDeferred)).toEqual([3, 3, 3])
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(await pendingIds(storage)).toEqual(digests.map(d => d.id))
+  })
+
+  it('an unparseable reply on one digest only is counted once a probe goes through', async () => {
+    const { digests, storage } = digestsOver(['garbled', 'second', 'third'])
+    const intelligence = rejectingOn({ garbled: () => new FactExtractionError('parse', 'reply holds no facts object') })
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({
+      promoted: 2, extractionFailed: 1, extractionProbed: 1, extractionDeferred: 0,
+    }))
+    expect(await attemptsOf(storage, digests[0]!.id)).toBe(1)
+    expect(await pendingIds(storage)).toEqual([digests[0]!.id])
+  })
+
+  it('an unparseable reply on every call counts nothing', async () => {
+    const { digests, storage } = digestsOver(['first', 'second', 'third'])
+    const intelligence = rejectingAll(() => new FactExtractionError('parse', 'reply holds no facts object'))
+
+    const result = await deepSleep(storage, intelligence, { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ extractionFailed: 0, extractionProbed: 1, extractionDeferred: 3 }))
+    expect(storage.digests.recordFactExtractionFailure).not.toHaveBeenCalled()
+    expect(await pendingIds(storage)).toEqual(digests.map(d => d.id))
+  })
+
+  it('a promote that throws for one digest only counts that digest, and the run goes on', async () => {
+    const { digests, storage } = digestsOver(['poison', 'second', 'third'])
+    const insert = vi.mocked(storage.semantic.insert)
+    const realInsert = insert.getMockImplementation()!
+    insert.mockImplementation(async (data) => {
+      if (data.content === 'Stated: poison') throw new Error('semantic insert failed: value too long for column')
+      return realInsert(data)
+    })
+
+    const result = await deepSleep(storage, extractor(), { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({
+      promoted: 2, extractionFailed: 1, extractionProbed: 1, extractionDeferred: 0,
+    }))
+    expect(await attemptsOf(storage, digests[0]!.id)).toBe(1)
+    expect(vi.mocked(storage.digests.markFactsExtracted).mock.calls.map(c => c[0])).toEqual([digests[1]!.id, digests[2]!.id])
+    expect(await pendingIds(storage)).toEqual([digests[0]!.id])
+  })
+
+  it('a stamp that fails leaves the digest pending, and its re-extraction does not re-boost its procedures', async () => {
+    const { digests, storage } = digestsOver(['plain turn'], ['My workflow is tests before code.'])
+    vi.mocked(storage.procedural.search).mockImplementation(async () =>
+      storage.procedural._memories.map(item => ({ item, similarity: 1 })),
+    )
+    vi.mocked(storage.digests.markFactsExtracted).mockRejectedValueOnce(new Error('digest update failed: connection reset'))
+
+    const failed = await deepSleep(storage, extractor(async () => []), { minDigests: 1 })
+
+    expect(failed).toEqual(expect.objectContaining({ procedural: 1, extractionFailed: 0, extractionDeferred: 1 }))
+    expect(await pendingIds(storage)).toEqual([digests[0]!.id])
+
+    const retry = await deepSleep(storage, extractor(async () => []), { minDigests: 1 })
+
+    expect(retry).toEqual(expect.objectContaining({ procedural: 0, extractionDeferred: 0 }))
+    expect(storage.procedural.insert).toHaveBeenCalledTimes(1)
+    expect(storage.procedural.incrementObservation).not.toHaveBeenCalled()
+    expect(storage.procedural._memories[0]!.metadata).toEqual({ sourceDigestIds: [digests[0]!.id] })
+    expect(await pendingIds(storage)).toEqual([])
+  })
+
+  it('a procedure read again from a different digest still counts as observed again', async () => {
+    const { storage } = digestsOver(
+      ['one', 'two'],
+      ['My workflow is tests before code.', 'My workflow is tests before code.'],
+    )
+    vi.mocked(storage.procedural.search).mockImplementation(async () =>
+      storage.procedural._memories.map(item => ({ item, similarity: 1 })),
+    )
+
+    const result = await deepSleep(storage, extractor(async () => []), { minDigests: 1 })
+
+    expect(result).toEqual(expect.objectContaining({ procedural: 1 }))
+    expect(storage.procedural.incrementObservation).toHaveBeenCalledTimes(1)
   })
 })

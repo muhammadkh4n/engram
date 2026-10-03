@@ -490,8 +490,8 @@ export interface ConsolidateResult {
    *  batch except a probe already counted. They stay pending for the next
    *  run with no attempt counted. */
   extractionDeferred?: number
-  /** Deep-sleep probes: next-digest extractions run to decide whether an
-   *  unclassified failure was the failing digest's own. */
+  /** Deep-sleep probes: next-digest units run to decide whether a failure
+   *  classed `probe` was the failing digest's own. */
   extractionProbed?: number
   associationsCreated?: number
   semanticDecayed?: number

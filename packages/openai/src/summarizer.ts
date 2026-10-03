@@ -664,8 +664,8 @@ export class OpenAISummarizer {
     }
     const raw = choice?.message?.content ?? ''
     // A 200 with nothing in it is a provider glitch, not a reply the episodes
-    // produced: resending them later can succeed, so it must not count
-    // against the batch the way an unparseable reply does.
+    // produced: resending them later can succeed, so it is transient and is
+    // never counted against the batch.
     if (raw.trim() === '') {
       throw new EmptyFactReplyError(
         `extractFacts: empty reply (finish_reason=${choice?.finish_reason ?? 'none'}, ${episodes.length} episodes)`,

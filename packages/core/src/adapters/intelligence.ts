@@ -427,10 +427,11 @@ export type FactExtractionErrorKind = 'length' | 'parse'
 
 /**
  * The fact extractor answered, but its reply cannot be stored: it was cut off
- * at max_tokens or does not parse. Resending the same episodes tends to fail
- * the same way, so callers count it against the batch. A failed call (API,
- * network, auth, rate limit) is not this error: it says nothing about the
- * batch and can succeed later.
+ * at max_tokens or does not parse. A `length` reply fails the same way when
+ * the same episodes are resent, since its budget is computed from them; a
+ * `parse` failure may be the batch's or the model's, so classifyExtractionError
+ * has callers probe another batch before blaming this one. A failed call
+ * (API, network, auth, rate limit) is not this error.
  */
 export class FactExtractionError extends Error {
   readonly kind: FactExtractionErrorKind
@@ -466,19 +467,27 @@ export function isEmptyFactReply(err: unknown): err is EmptyFactReplyError {
 }
 
 /**
- * What a failed fact extraction says about the batch it was given:
- * - `digest`: the batch itself makes the call fail, and resending it fails the
- *   same way (unusable reply; a request the provider rejects as malformed or
- *   too large);
- * - `transient`: the provider, the network or the account failed, and a later
- *   call can succeed with the same batch;
- * - `unknown`: neither can be told from the error.
+ * What a failed fact extraction says about the digest it was run for:
+ * - `digest`: the digest's own text makes it fail, with no doubt: a reply cut
+ *   off at max_tokens, whose budget is computed from that text;
+ * - `transient`: the provider, the network or the account failed, or the
+ *   request reached a missing model or endpoint; a later call can succeed
+ *   with the same digest;
+ * - `probe`: it may be the digest's own or may hit every digest alike (a
+ *   rejected request, an unparseable reply, a storage error); only another
+ *   digest's outcome can tell.
  */
-export type ExtractionErrorClass = 'digest' | 'transient' | 'unknown'
+export type ExtractionErrorClass = 'digest' | 'transient' | 'probe'
 
-/** Rejections of the request itself: bad request, not found, conflict,
- *  payload too large, unprocessable content. */
-const DIGEST_STATUSES: ReadonlySet<number> = new Set([400, 404, 409, 413, 422])
+/** Rejections that may come from the digest's content (an episode over the
+ *  context window, a content filter) or from the request every digest sends
+ *  (a parameter the model rejects): bad request, payload too large,
+ *  unprocessable content. */
+const PROBE_STATUSES: ReadonlySet<number> = new Set([400, 413, 422])
+
+/** Not found (a missing or retired model, a wrong endpoint) and conflict
+ *  (the SDK retries it itself): neither depends on the digest. */
+const UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([404, 409])
 
 /** Key, billing and permission rejections. They never depend on the batch. */
 const CREDENTIAL_STATUSES: ReadonlySet<number> = new Set([401, 402, 403])
@@ -548,15 +557,20 @@ function hasName(err: unknown, name: string): boolean {
  * the check holds across separate copies of this package.
  */
 export function classifyExtractionError(err: unknown): ExtractionErrorClass {
-  if (isFactExtractionError(err)) return 'digest'
+  if (isFactExtractionError(err)) return err.kind === 'length' ? 'digest' : 'probe'
   if (isEmptyFactReply(err) || hasName(err, 'CircuitOpenError')) return 'transient'
   const status = httpStatus(err)
   if (status !== undefined) {
-    if (DIGEST_STATUSES.has(status)) return 'digest'
-    if (CREDENTIAL_STATUSES.has(status) || RETRYABLE_STATUSES.has(status) || status >= 500) return 'transient'
+    if (PROBE_STATUSES.has(status)) return 'probe'
+    if (
+      UNAVAILABLE_STATUSES.has(status) ||
+      CREDENTIAL_STATUSES.has(status) ||
+      RETRYABLE_STATUSES.has(status) ||
+      status >= 500
+    ) return 'transient'
   }
   if (isNetworkFailure(err)) return 'transient'
-  return 'unknown'
+  return 'probe'
 }
 
 /** A key, billing or permission rejection (401, 402, 403): transient for the

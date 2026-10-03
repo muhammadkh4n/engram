@@ -313,6 +313,7 @@ function mockGetByIds(
   digests: MockDigestStorage,
   semantic: MockSemanticStorage,
   nearestResults: SearchResult<SemanticMemory>[],
+  procedural?: MockProceduralStorage,
 ) {
   return async (
     ids: Array<{ id: string; type: MemoryType }>,
@@ -331,6 +332,9 @@ function mockGetByIds(
       } else if (type === 'semantic') {
         const m = semanticRows.get(id)
         if (m && (lookup?.includeInactive || m.supersededBy == null)) found.push({ type, data: m })
+      } else if (type === 'procedural') {
+        const p = procedural?._memories.find(x => x.id === id)
+        if (p) found.push({ type, data: p })
       }
     }
     return found
@@ -347,6 +351,11 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
     opts.semanticSearchResults,
     opts.semanticNearestResults,
   )
+  const procedural = makeMockProceduralStorage(
+    opts.initialProceduralMemories,
+    opts.proceduralSearchResults,
+    opts.proceduralNearestResults,
+  )
 
   return {
     initialize: vi.fn(async () => {}),
@@ -355,16 +364,12 @@ export function makeMockStorage(opts: MockStorageOptions = {}): MockStorageAdapt
     episodes,
     digests,
     semantic,
-    procedural: makeMockProceduralStorage(
-      opts.initialProceduralMemories,
-      opts.proceduralSearchResults,
-      opts.proceduralNearestResults,
-    ),
+    procedural,
     associations: makeMockAssociationStorage(opts.discoveredEdges),
 
     getById: vi.fn(async (_id: string, _type: MemoryType): Promise<TypedMemory | null> => null),
 
-    getByIds: vi.fn(mockGetByIds(episodes, digests, semantic, opts.semanticNearestResults ?? [])),
+    getByIds: vi.fn(mockGetByIds(episodes, digests, semantic, opts.semanticNearestResults ?? [], procedural)),
 
     saveSensorySnapshot: vi.fn(async (_sessionId: string, _snapshot: SensorySnapshot): Promise<void> => {}),
 
