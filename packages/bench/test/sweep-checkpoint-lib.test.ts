@@ -34,15 +34,25 @@ const identity: RunIdentity = {
   output_emit_k: null,
   output_token_budget: null,
   output_faint: true,
+  output_related_share: null,
+  output_item_max_tokens: null,
   embed_backend: 'openai',
   embed_model: 'text-embedding-3-small',
   embed_dims: 1536,
 }
 
 // The identity fields a sweep derives from its ENGRAM_RECALL_* env.
-function policyFields(env: NodeJS.ProcessEnv): Pick<RunIdentity, 'output_emit_k' | 'output_token_budget' | 'output_faint'> {
+type PolicyField =
+  | 'output_emit_k' | 'output_token_budget' | 'output_faint' | 'output_related_share' | 'output_item_max_tokens'
+function policyFields(env: NodeJS.ProcessEnv): Pick<RunIdentity, PolicyField> {
   const p = outputPolicyRecord(recallOutputPolicyFromEnv(env))
-  return { output_emit_k: p.emit_k, output_token_budget: p.token_budget, output_faint: p.faint }
+  return {
+    output_emit_k: p.emit_k,
+    output_token_budget: p.token_budget,
+    output_faint: p.faint,
+    output_related_share: p.related_share,
+    output_item_max_tokens: p.item_max_tokens,
+  }
 }
 
 const qs = [
@@ -81,6 +91,24 @@ describe('run identity header', () => {
     expect(diffRunIdentity(identity, { ...identity, ...policyFields({ ENGRAM_RECALL_FAINT: 'off' }) })).toBe('output_faint')
   })
 
+  it('refuses a resume whose Related share or item cap differs', () => {
+    const budget = { ENGRAM_RECALL_TOKEN_BUDGET: '2000' }
+    const base = { ...identity, ...policyFields(budget) }
+    expect(diffRunIdentity(base, { ...identity, ...policyFields({ ...budget, ENGRAM_RECALL_RELATED_SHARE: '0.5' }) }))
+      .toBe('output_related_share')
+    expect(diffRunIdentity(
+      { ...identity, ...policyFields({ ...budget, ENGRAM_RECALL_RELATED_SHARE: '0.3' }) },
+      { ...identity, ...policyFields({ ...budget, ENGRAM_RECALL_RELATED_SHARE: '0.5' }) },
+    )).toBe('output_related_share')
+    expect(diffRunIdentity(base, { ...identity, ...policyFields({ ...budget, ENGRAM_RECALL_ITEM_MAX_TOKENS: '300' }) }))
+      .toBe('output_item_max_tokens')
+  })
+
+  it('refuses to resume a checkpoint written before the share and item cap were recorded', () => {
+    const { output_related_share: _s, output_item_max_tokens: _c, ...older } = identity
+    expect(diffRunIdentity(older as unknown as RunIdentity, identity)).toBe('output_related_share')
+  })
+
   it('treats a field missing from an older header as a difference', () => {
     const { synthesize: _s, ...older } = identity
     expect(diffRunIdentity(older as unknown as RunIdentity, identity)).toBe('synthesize')
@@ -98,7 +126,7 @@ describe('buildRunIdentity', () => {
     synthesize: false,
     contextMode: 'sessions',
   }
-  const policy = { emit_k: null, token_budget: null, faint: true }
+  const policy = { emit_k: null, token_budget: null, faint: true, related_share: null, item_max_tokens: null }
 
   it('keeps every existing field for a run without embed flags and records the openai default embedder', () => {
     expect(buildRunIdentity(plainArgs, undefined, policy, 1536)).toEqual({
@@ -115,6 +143,8 @@ describe('buildRunIdentity', () => {
       output_emit_k: null,
       output_token_budget: null,
       output_faint: true,
+      output_related_share: null,
+      output_item_max_tokens: null,
       embed_backend: 'openai',
       embed_model: 'text-embedding-3-small',
       embed_dims: 1536,
@@ -157,12 +187,21 @@ describe('buildRunIdentity', () => {
 
 describe('outputPolicyRecord', () => {
   it('records unset limits as null', () => {
-    expect(outputPolicyRecord(recallOutputPolicyFromEnv({}))).toEqual({ emit_k: null, token_budget: null, faint: true })
+    expect(outputPolicyRecord(recallOutputPolicyFromEnv({}))).toEqual({
+      emit_k: null, token_budget: null, faint: true, related_share: null, item_max_tokens: null,
+    })
   })
 
   it('records the resolved env policy', () => {
     const env = { ENGRAM_RECALL_EMIT_K: '8', ENGRAM_RECALL_TOKEN_BUDGET: '2000', ENGRAM_RECALL_FAINT: 'off' }
-    expect(outputPolicyRecord(recallOutputPolicyFromEnv(env))).toEqual({ emit_k: 8, token_budget: 2000, faint: false })
+    expect(outputPolicyRecord(recallOutputPolicyFromEnv(env))).toEqual({
+      emit_k: 8, token_budget: 2000, faint: false, related_share: null, item_max_tokens: null,
+    })
+  })
+
+  it('records the Related share and the item cap', () => {
+    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '2000', ENGRAM_RECALL_RELATED_SHARE: '0.4', ENGRAM_RECALL_ITEM_MAX_TOKENS: '300' }
+    expect(outputPolicyRecord(recallOutputPolicyFromEnv(env))).toMatchObject({ related_share: 0.4, item_max_tokens: 300 })
   })
 })
 

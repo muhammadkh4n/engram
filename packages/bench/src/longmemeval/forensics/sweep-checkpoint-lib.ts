@@ -26,6 +26,9 @@ export interface RunIdentity {
   output_emit_k: number | null
   output_token_budget: number | null
   output_faint: boolean
+  /** Related share and item cap: under a budget they decide how the room is split and where items are cut. */
+  output_related_share: number | null
+  output_item_max_tokens: number | null
   /** Embedder backend, resolved model id and the width the vectors are built at. */
   embed_backend: string
   embed_model: string
@@ -36,6 +39,8 @@ export interface RunIdentity {
 export interface OutputPolicyInput {
   emitK?: number
   tokenBudget?: number
+  relatedShare?: number
+  itemMaxTokens?: number
   faint: boolean
 }
 
@@ -43,6 +48,8 @@ export interface OutputPolicyRecord {
   emit_k: number | null
   token_budget: number | null
   faint: boolean
+  related_share: number | null
+  item_max_tokens: number | null
 }
 
 /** The resolved output policy as recorded in the run identity and meta; unset limits are null. */
@@ -51,6 +58,8 @@ export function outputPolicyRecord(policy: OutputPolicyInput): OutputPolicyRecor
     emit_k: policy.emitK ?? null,
     token_budget: policy.tokenBudget ?? null,
     faint: policy.faint,
+    related_share: policy.relatedShare ?? null,
+    item_max_tokens: policy.itemMaxTokens ?? null,
   }
 }
 
@@ -97,6 +106,8 @@ export function buildRunIdentity(
     output_emit_k: outputPolicy.emit_k,
     output_token_budget: outputPolicy.token_budget,
     output_faint: outputPolicy.faint,
+    output_related_share: outputPolicy.related_share,
+    output_item_max_tokens: outputPolicy.item_max_tokens,
     embed_backend: embed.backend,
     embed_model: embed.model,
     embed_dims: embed.dims,
@@ -117,6 +128,8 @@ const IDENTITY_FIELDS: readonly (keyof RunIdentity)[] = [
   'output_emit_k',
   'output_token_budget',
   'output_faint',
+  'output_related_share',
+  'output_item_max_tokens',
   'embed_backend',
   'embed_model',
   'embed_dims',

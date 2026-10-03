@@ -794,8 +794,10 @@ export async function runMemoryRecall(
   }
 
   if (!result.formatted && result.memories.length > 0) {
-    // Only a budget smaller than the header and notice emits nothing while
-    // memories matched; saying none matched would be false.
+    // Memories matched but none could be shown: the budget left no section
+    // the minimum room after the header and notice, or no first item fit its
+    // room with its tag and minimum content. Saying none matched would be
+    // false.
     const notice = result.degraded ? `${degradedRecallNotice(result.degraded)}\n` : ''
     return toolText(`${notice}${RECALL_BUDGET_TOO_SMALL}`)
   }

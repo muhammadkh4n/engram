@@ -332,7 +332,9 @@ describe('reformatSweep', () => {
     const bytes = Buffer.from(JSON.stringify(source, null, 2))
     const out = reformatSweep({ path: 'results/src.json', bytes }, { tokenBudget: 120, faint: true })
     expect(out.meta!['derived_from']).toEqual({ path: 'results/src.json', sha256: createHash('sha256').update(bytes).digest('hex') })
-    expect(out.meta!['output_policy']).toEqual({ emit_k: null, token_budget: 120, faint: true })
+    expect(out.meta!['output_policy']).toEqual({
+      emit_k: null, token_budget: 120, faint: true, related_share: null, item_max_tokens: null,
+    })
     expect(out.meta!['retrieval_rerun']).toBe(false)
     expect(out.meta!['source_meta']).toEqual(sourceMeta)
     expect(buildJudgeModelMeta(out.meta, 'gen-model')).toEqual(buildJudgeModelMeta(sourceMeta, 'gen-model'))

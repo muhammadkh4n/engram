@@ -868,8 +868,10 @@ export async function recall(
   // recording exposure or co-recall on memories the caller never saw would
   // misstate what was displayed. Emission is a prefix of each ranked list,
   // also when a token budget splits its room between Recalled and Related,
-  // so the emitted items are the first N of each. An item cut at the item
-  // cap was still shown.
+  // so the emitted items are the first N of each. An item counts as shown
+  // only when content chars were emitted: a cut item keeps its tag and at
+  // least the minimum content, and one whose room cannot hold that is not
+  // emitted, ends its section's prefix and stays out of these counts.
   if (opts.reconsolidate !== false) {
     const manager = new AssociationManager(storage.associations)
     stageReconsolidate(
