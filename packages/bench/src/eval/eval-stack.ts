@@ -16,6 +16,7 @@ import { parseEnvAssignment } from '../replay/replay-lib.js'
 import { sensoryResetter } from '../sensory-reset.js'
 import {
   assertNoBlockedCalls,
+  assertNoGraphErrors,
   createGuardStats,
   graphDriver,
   guardNeo4jDriver,
@@ -55,13 +56,31 @@ export function parseSystemdEnvFile(text: string): Record<string, string> {
 }
 
 /**
- * Puts the guarded service env into `env`. The recall log variable is
- * removed from `env` even when the file does not set it, so an inherited
- * value cannot turn the log on.
+ * Prefixes of the variables the engram stack reads its configuration from.
+ * Every inherited one is removed before the env file is applied, so a switch
+ * exported in the operator's shell cannot change the recall being measured
+ * (and the recall log cannot be turned on from outside the file).
  */
+export const STACK_ENV_PREFIXES = ['ENGRAM_', 'OPENAI_', 'SUPABASE_', 'NEO4J_'] as const
+
+function isStackEnvName(name: string): boolean {
+  return STACK_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))
+}
+
+/** Clears every inherited stack variable from `env`, then puts the guarded service env into it. */
 export function applyEvalEnv(vars: Readonly<Record<string, string>>, env: NodeJS.ProcessEnv = process.env): void {
-  delete env['ENGRAM_RECALL_LOG']
+  for (const name of Object.keys(env)) {
+    if (isStackEnvName(name)) delete env[name]
+  }
   for (const [key, value] of Object.entries(vars)) env[key] = value
+}
+
+/** The ENGRAM_* variables in effect in `env`, sorted by name. */
+export function engramEnvInEffect(env: NodeJS.ProcessEnv): Record<string, string> {
+  const picked = Object.entries(env)
+    .filter((entry): entry is [string, string] => entry[0].startsWith('ENGRAM_') && entry[1] !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+  return Object.fromEntries(picked)
 }
 
 // --- the engram build -----------------------------------------------------
@@ -119,6 +138,12 @@ export interface EvalServerCore {
   maybeWithRecallEngine(storage: StorageAdapter, supabaseUrl: string): Promise<StorageAdapter>
 }
 
+/** The parts of the RAM recall engine the stack checks before trusting a run. */
+export interface EvalRecallEngine {
+  warm(): Promise<void>
+  stats(): { state: string }
+}
+
 export interface EvalModules {
   createMemory(opts: Record<string, unknown>): EvalMemory
   PostgRestStorageAdapter: new (opts: { url: string; key: string }) => StorageAdapter
@@ -129,6 +154,36 @@ export interface EvalModules {
   }
   NeuralGraph: new (config: { neo4jUri: string; neo4jUser: string; neo4jPassword: string; enabled: boolean }) => EvalGraph
   serverCore: EvalServerCore
+  /** The recall engine's lookup from a wrapped storage to its engine; null unless ENGRAM_RECALL_ENGINE=true. */
+  recallEngineOf: ((storage: StorageAdapter) => EvalRecallEngine | undefined) | null
+}
+
+/**
+ * ENGRAM_RECALL_ENGINE=true, but the engine is not what answers recall. The
+ * server falls back to bare storage when the engine fails to import, and an
+ * engine that never warms passes every search through; either way the run
+ * would measure a different vector search than the env file selects.
+ */
+export class RecallEngineError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecallEngineError'
+  }
+}
+
+/**
+ * The recall engine module, imported from the build's real path: the server
+ * reaches the same file through the workspace symlink, and only one module
+ * instance holds the registry that maps a wrapped storage to its engine.
+ */
+async function loadRecallEngineOf(root: string): Promise<EvalModules['recallEngineOf']> {
+  const rel = 'packages/recall-engine/dist/index.js'
+  try {
+    const mod = await importFrom(fs.realpathSync(root), rel)
+    return requireExport(mod, 'recallEngineOf', rel) as NonNullable<EvalModules['recallEngineOf']>
+  } catch (err) {
+    throw new RecallEngineError(`ENGRAM_RECALL_ENGINE=true but ${rel} could not be loaded: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 const SERVER_CORE_EXPORTS = [
@@ -146,7 +201,7 @@ function requireExport(mod: Record<string, unknown>, name: string, rel: string):
 }
 
 /** Loads the modules the server's memory stack is built from, out of a built engram checkout. */
-export async function loadEvalModules(dist: string): Promise<EvalModules> {
+export async function loadEvalModules(dist: string, env: NodeJS.ProcessEnv = process.env): Promise<EvalModules> {
   const root = path.resolve(dist)
   const rels = {
     core: 'packages/core/dist/index.js',
@@ -170,6 +225,7 @@ export async function loadEvalModules(dist: string): Promise<EvalModules> {
     createOnnxReranker: requireExport(onnx, 'createOnnxReranker', rels.onnx) as EvalModules['createOnnxReranker'],
     NeuralGraph: requireExport(graph, 'NeuralGraph', rels.graph) as EvalModules['NeuralGraph'],
     serverCore: sc as unknown as EvalServerCore,
+    recallEngineOf: env['ENGRAM_RECALL_ENGINE'] === 'true' ? await loadRecallEngineOf(root) : null,
   }
 }
 
@@ -197,6 +253,10 @@ export interface EvalRecall {
 export interface EvalStack {
   /** Neo4j is configured (NEO4J_URI set) and reachable. */
   graph: boolean
+  /** ENGRAM_RECALL_ENGINE=true, and the warmed engine wraps storage. */
+  recallEngine: boolean
+  /** The ENGRAM_* variables the stack was built with. */
+  engramEnv: Record<string, string>
   /** Blocked write attempts so far; any count fails the run. */
   guards: GuardStats
   /** The recorded model replies recall is answered from, when the stack was built with them. */
@@ -205,7 +265,7 @@ export interface EvalStack {
    * One recall with the options memory_recall builds from `args`, plus
    * reconsolidate: false and `now` as the reference date. The memory's
    * per-conversation state is reset first, so query order cannot change
-   * results; a blocked write during the recall throws.
+   * results; a blocked write or a failed Neo4j call during the recall throws.
    */
   recall(query: string, args: Record<string, unknown>, now: Date): Promise<EvalRecall>
   close(): Promise<void>
@@ -276,6 +336,22 @@ export function neo4jRelatedIds(result: EvalRecallResult): string[] {
     .map((it) => it.id!)
 }
 
+/**
+ * With ENGRAM_RECALL_ENGINE=true, requires the storage to be wrapped and its
+ * engine warmed to `ready`. Warm-up is fire-and-forget in initialize(); this
+ * awaits the same promise.
+ */
+async function assertRecallEngineReady(mods: EvalModules, raw: StorageAdapter, storage: StorageAdapter): Promise<void> {
+  if (storage === raw) {
+    throw new RecallEngineError('ENGRAM_RECALL_ENGINE=true but storage was left unwrapped: the recall engine failed to import')
+  }
+  const engine = mods.recallEngineOf?.(storage)
+  if (!engine) throw new RecallEngineError('ENGRAM_RECALL_ENGINE=true but no recall engine is registered for the wrapped storage')
+  await engine.warm()
+  const { state } = engine.stats()
+  if (state !== 'ready') throw new RecallEngineError(`ENGRAM_RECALL_ENGINE=true but the recall engine warmed to "${state}", not "ready"`)
+}
+
 function buildGraph(mods: EvalModules, env: NodeJS.ProcessEnv, guards: GuardStats): EvalGraph | null {
   const neo4jUri = env['NEO4J_URI']
   if (!neo4jUri) return null
@@ -336,7 +412,9 @@ async function assembleEvalStack(
   const guards = createGuardStats()
   const rawStorage = new mods.PostgRestStorageAdapter({ url: supabaseUrl, key: supabaseKey })
   guardPostgrestClient(storageClient(rawStorage), guards)
+  const recallEngine = env['ENGRAM_RECALL_ENGINE'] === 'true'
   const storage = await sc.maybeWithRecallEngine(rawStorage, supabaseUrl)
+  if (recallEngine && storage === rawStorage) await assertRecallEngineReady(mods, rawStorage, storage)
   const intelligence = await buildIntelligence(mods, env, pins)
   const graph = buildGraph(mods, env, guards)
 
@@ -349,10 +427,12 @@ async function assembleEvalStack(
     ...(graph ? { graph } : {}),
   })
   await memory.initialize()
+  if (recallEngine) await assertRecallEngineReady(mods, rawStorage, storage)
   if (graph && (memory as unknown as { _graph?: unknown })._graph === null) {
     throw new GraphCheckError('NEO4J_URI is set but Neo4j is unavailable; the recall would run without its graph stage')
   }
   assertNoBlockedCalls(guards)
+  assertNoGraphErrors(guards)
   const resetSensory = sensoryResetter(memory, 'recall-eval')
 
   async function recallOnce(query: string, args: Record<string, unknown>, now: Date) {
@@ -362,6 +442,7 @@ async function assembleEvalStack(
     resetSensory()
     const result = await memory.recall(query.trim(), recallOpts)
     assertNoBlockedCalls(guards)
+    assertNoGraphErrors(guards)
     if (pins) assertPinsClean(pins)
     const recall: EvalRecall = {
       query,
@@ -377,6 +458,8 @@ async function assembleEvalStack(
 
   const stack: EvalStack = {
     graph: graph !== null,
+    recallEngine,
+    engramEnv: engramEnvInEffect(env),
     guards,
     pins: pins ?? null,
     async recall(query, args, now) {
@@ -407,8 +490,9 @@ async function assembleEvalStack(
 
 /**
  * Opens the stack from a built engram checkout and the service's env file.
- * The guarded env is applied to the process before the build is loaded,
- * because the engine reads its switches from process.env on every recall.
+ * Inherited stack variables are cleared and the guarded env is applied to
+ * the process before the build is loaded, because the engine reads its
+ * switches from process.env on every recall.
  */
 export async function openEvalStack(opts: {
   engramDist: string
@@ -419,7 +503,7 @@ export async function openEvalStack(opts: {
 }): Promise<EvalStack> {
   const vars = guardRecallEnv(parseSystemdEnvFile(fs.readFileSync(opts.envFile, 'utf8')))
   applyEvalEnv(vars)
-  const mods = await loadEvalModules(opts.engramDist)
+  const mods = await loadEvalModules(opts.engramDist, process.env)
   return buildEvalStack(mods, {
     calibrationQuery: opts.calibrationQuery,
     now: opts.now,

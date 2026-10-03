@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   READ_RPCS,
   BlockedWriteError,
+  GraphCallError,
   assertNoBlockedCalls,
+  assertNoGraphErrors,
   blockedCallCount,
   createGuardStats,
+  graphErrorCount,
   graphDriver,
   guardNeo4jDriver,
   guardPostgrestClient,
@@ -28,15 +31,40 @@ function fakeClient() {
   return { client, rpcCalls, builderCalls }
 }
 
-function fakeDriver() {
+/** Stands in for a neo4j Result: a thenable whose query outcome arrives when it is awaited. */
+function fakeResult(outcome: { records: unknown[] } | Error) {
+  return {
+    then(onOk?: (v: unknown) => unknown, onFail?: (e: unknown) => unknown) {
+      const p = outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome)
+      return p.then(onOk, onFail)
+    },
+  }
+}
+
+const WRITE_IN_READ = 'Writing in read access mode not allowed'
+
+function fakeDriver(opts: { readFails?: boolean } = {}) {
   const configs: Array<Record<string, unknown>> = []
   const driver = {
     session: (config: Record<string, unknown> = {}) => {
       configs.push(config)
+      const mode = config['defaultAccessMode']
       return {
-        executeRead: async () => 'read',
+        // The server rejects write Cypher inside a READ session.
+        run: (cypher: string) =>
+          fakeResult(mode === 'READ' && /\b(CREATE|MERGE|SET|DELETE)\b/.test(cypher) ? new Error(WRITE_IN_READ) : { records: [] }),
+        executeRead: async () => {
+          if (opts.readFails) throw new Error('ServiceUnavailable: connection refused')
+          return 'read'
+        },
         executeWrite: async () => 'written',
         writeTransaction: async () => 'written',
+        beginTransaction: () => ({
+          run: () => fakeResult({ records: [] }),
+          commit: async () => {
+            throw new Error('commit failed')
+          },
+        }),
       }
     },
   }
@@ -114,6 +142,49 @@ describe('Neo4j guard', () => {
     const session = driver.session() as unknown as { executeRead: () => Promise<unknown> }
     await expect(session.executeRead()).resolves.toBe('read')
     expect(blockedCallCount(stats)).toBe(0)
+  })
+
+  it('counts a write rejected through session.run, once however often the result is awaited', async () => {
+    const { driver } = fakeDriver()
+    const stats = createGuardStats()
+    guardNeo4jDriver(driver, stats)
+    const session = driver.session() as unknown as { run: (q: string) => PromiseLike<unknown> }
+    const result = session.run('MERGE (m:Memory {id: $id}) SET m.accessCount = 1')
+    await expect(result).rejects.toThrow(WRITE_IN_READ)
+    await expect(result).rejects.toThrow(WRITE_IN_READ)
+    expect(stats.graphErrors).toEqual({ run: 1 })
+    expect(stats.graphErrorSample).toBe(`run: ${WRITE_IN_READ}`)
+    expect(blockedCallCount(stats)).toBe(0)
+    expect(() => assertNoGraphErrors(stats)).toThrow(GraphCallError)
+  })
+
+  it('passes a read run through and counts nothing', async () => {
+    const { driver } = fakeDriver()
+    const stats = createGuardStats()
+    guardNeo4jDriver(driver, stats)
+    const session = driver.session() as unknown as { run: (q: string) => PromiseLike<unknown> }
+    await expect(session.run('MATCH (m:Memory) RETURN m LIMIT 1')).resolves.toEqual({ records: [] })
+    expect(graphErrorCount(stats)).toBe(0)
+    expect(() => assertNoGraphErrors(stats)).not.toThrow()
+  })
+
+  it('counts a failed read transaction even when the caller swallows it, naming the call', async () => {
+    const { driver } = fakeDriver({ readFails: true })
+    const stats = createGuardStats()
+    guardNeo4jDriver(driver, stats)
+    const session = driver.session() as unknown as { executeRead: () => Promise<unknown> }
+    await session.executeRead().catch(() => null)
+    expect(stats.graphErrors).toEqual({ executeRead: 1 })
+    expect(() => assertNoGraphErrors(stats)).toThrow(/executeRead: ServiceUnavailable/)
+  })
+
+  it('counts a failed explicit transaction call', async () => {
+    const { driver } = fakeDriver()
+    const stats = createGuardStats()
+    guardNeo4jDriver(driver, stats)
+    const session = driver.session() as unknown as { beginTransaction: () => { commit: () => Promise<unknown> } }
+    await expect(session.beginTransaction().commit()).rejects.toThrow('commit failed')
+    expect(stats.graphErrors).toEqual({ 'beginTransaction.commit': 1 })
   })
 
   it('refuses a graph whose driver is not reachable', () => {

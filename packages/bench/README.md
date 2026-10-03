@@ -285,10 +285,22 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
   Every recall uses the options `memory_recall` builds from its arguments (`project_id` from the gold line), plus
   `reconsolidate: false` and `now`. The sensory buffer is restored before every query, so query order cannot
   change results.
+- **Env:** before the build loads, every inherited `ENGRAM_*`, `OPENAI_*`, `SUPABASE_*` and `NEO4J_*` variable is
+  removed, then the env file is applied, so a switch exported in the shell cannot change the measured recall. The
+  meta's `engram_env` lists every `ENGRAM_*` variable in effect with its value; a name containing KEY, SECRET,
+  TOKEN or PASSWORD is listed with `null`.
+- **Recall engine:** with `ENGRAM_RECALL_ENGINE=true`, the server falls back to bare storage when the engine fails
+  to import. The eval instead stops (exit 4) when storage is left unwrapped, the engine module cannot be loaded,
+  or the engine does not warm to `ready` (the stack awaits the warm-up). The meta records `recall_engine: on|off`.
 - **Write guards:** PostgREST `rpc` accepts only read functions; `insert`, `upsert`, `update` and `delete` throw;
   Neo4j sessions are forced to READ mode and write transactions reject; `ENGRAM_RECALL_LOG` is removed and graph
   reinforcement and co-recall are switched off. Every blocked call is counted, the first one stops the run, and
   the meta records the counters (`guards`, `blocked_calls`), so a finished run is proof it wrote nothing.
+- **Graph errors:** the engine catches Neo4j failures and falls back to the SQL association walk without recording
+  it. The guarded driver therefore counts every error raised by a session call it lets through (`run`,
+  `executeRead`, `readTransaction`, an explicit transaction's `run`/`commit`/`rollback`), including write Cypher
+  the READ session rejects, in `guards.graphErrors`. Any error during a recall stops the run (exit 4) with a message
+  naming the call.
 - **Graph check:** with `NEO4J_URI` set, the stack recalls `--calibration-query` first and refuses to run unless
   at least one Related item came from Neo4j, because a recall without graph associations is not the server's
   recall. The engine also fills Related from the SQL association walk when the graph has no node for any seed;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   GraphCheckError,
+  RecallEngineError,
   applyEvalEnv,
   buildEvalStack,
   parseSystemdEnvFile,
@@ -9,7 +10,8 @@ import {
   type EvalRecallResult,
   type RecallArgOptions,
 } from '../../src/eval/eval-stack.js'
-import { BlockedWriteError } from '../../src/eval/write-guards.js'
+import { engramEnvForMeta, isRunStop } from '../../src/eval/run.js'
+import { BlockedWriteError, GraphCallError } from '../../src/eval/write-guards.js'
 
 const NOW = new Date('2026-09-15T10:00:00Z')
 const HEADER = '## Engram\n\n### Recalled Memories\n'
@@ -54,13 +56,17 @@ interface Harness {
   events: string[]
   client: { rpc(fn: string): unknown; from(rel: string): Record<string, unknown> }
   driver: { session(cfg?: Record<string, unknown>): Record<string, () => Promise<unknown>> }
+  readFails: boolean
+  engineWarms: number
 }
 
 function harness(opts: {
   related?: boolean
   relatedSource?: RelatedSource
   graphUnavailable?: boolean
-  onRecall?: (h: Harness) => void
+  onRecall?: (h: Harness) => void | Promise<void>
+  /** What the server's maybeWithRecallEngine does: wrap storage with an engine warming to `state`, or fail to import. */
+  engine?: { state: string } | 'import-failure'
 } = {}): Harness {
   const h = {
     recalls: [],
@@ -69,7 +75,16 @@ function harness(opts: {
     sessionConfigs: [],
     restores: 0,
     events: [],
+    readFails: false,
+    engineWarms: 0,
   } as unknown as Harness
+  const engine = {
+    warm: async () => {
+      h.engineWarms++
+    },
+    stats: () => ({ state: opts.engine !== undefined && opts.engine !== 'import-failure' ? opts.engine.state : 'cold' }),
+  }
+  const wrapped = new WeakSet<object>()
 
   class FakeStorage {
     client = {
@@ -85,7 +100,13 @@ function harness(opts: {
     driver = {
       session: (cfg: Record<string, unknown> = {}) => {
         h.sessionConfigs.push(cfg)
-        return { executeWrite: async () => 'written', executeRead: async () => 'read' } as Record<string, () => Promise<unknown>>
+        return {
+          executeWrite: async () => 'written',
+          executeRead: async () => {
+            if (h.readFails) throw new Error('ServiceUnavailable: connection refused')
+            return 'read'
+          },
+        } as Record<string, () => Promise<unknown>>
       },
     }
     constructor() {
@@ -114,7 +135,7 @@ function harness(opts: {
         async recall(query: string, recallOpts: EvalRecallOptions) {
           h.events.push(`recall:${query}`)
           h.recalls.push({ query, opts: recallOpts })
-          opts.onRecall?.(h)
+          await opts.onRecall?.(h)
           return result(opts.related ?? true, opts.relatedSource)
         },
       }
@@ -130,8 +151,14 @@ function harness(opts: {
       parseTimeZoneEnv: () => ({ timeZone: 'UTC' }),
       supersessionSettingsAtStartup: () => ({ mode: 'off' }),
       recallOutputPolicyAtStartup: () => ({ faint: true }),
-      maybeWithRecallEngine: async (storage) => storage,
+      maybeWithRecallEngine: async (storage) => {
+        if (opts.engine === undefined || opts.engine === 'import-failure') return storage
+        const decorated = Object.create(storage) as typeof storage
+        wrapped.add(decorated)
+        return decorated
+      },
     },
+    recallEngineOf: (storage) => (wrapped.has(storage) ? engine : undefined),
   }
   return h
 }
@@ -165,10 +192,25 @@ describe('parseSystemdEnvFile', () => {
 })
 
 describe('applyEvalEnv', () => {
-  it('removes an inherited recall log variable and sets the file values', () => {
-    const env: NodeJS.ProcessEnv = { ENGRAM_RECALL_LOG: '/tmp/recall.jsonl', KEEP: '1' }
-    applyEvalEnv({ ENGRAM_RECALL_CORECALL: 'off' }, env)
-    expect(env).toEqual({ KEEP: '1', ENGRAM_RECALL_CORECALL: 'off' })
+  it('removes every inherited stack variable and sets the file values', () => {
+    const env: NodeJS.ProcessEnv = {
+      ENGRAM_RECALL_LOG: '/tmp/recall.jsonl',
+      ENGRAM_RECALL_FUSION: 'rrf',
+      OPENAI_BASE_URL: 'http://127.0.0.1:9999',
+      SUPABASE_KEY: 'inherited',
+      NEO4J_URI: 'bolt://elsewhere:7687',
+      KEEP: '1',
+    }
+    applyEvalEnv({ ENGRAM_RECALL_CORECALL: 'off', SUPABASE_KEY: 'from-file' }, env)
+    expect(env).toEqual({ KEEP: '1', ENGRAM_RECALL_CORECALL: 'off', SUPABASE_KEY: 'from-file' })
+  })
+
+  it('keeps an inherited ENGRAM_RECALL_FUSION out of the effective config and the meta', async () => {
+    const env: NodeJS.ProcessEnv = { ENGRAM_RECALL_FUSION: 'rrf', PATH: '/usr/bin' }
+    applyEvalEnv({ ...BASE_ENV, ENGRAM_CHAT_MODEL: 'chat-model', ENGRAM_CHAT_API_KEY: 'synthetic-chat-value' }, env)
+    const stack = await buildEvalStack(harness().mods, { calibrationQuery: 'c', now: NOW, env })
+    expect(stack.engramEnv).toEqual({ ENGRAM_CHAT_API_KEY: 'synthetic-chat-value', ENGRAM_CHAT_MODEL: 'chat-model' })
+    expect(engramEnvForMeta(stack.engramEnv)).toEqual({ ENGRAM_CHAT_API_KEY: null, ENGRAM_CHAT_MODEL: 'chat-model' })
   })
 })
 
@@ -292,5 +334,54 @@ describe('buildEvalStack', () => {
     await expect(
       buildEvalStack(h.mods, { calibrationQuery: 'c', now: NOW, env: { SUPABASE_URL: 'http://127.0.0.1:3000' } }),
     ).rejects.toThrow(/SUPABASE_KEY/)
+  })
+
+  it('stops a gold recall on a Neo4j error the engine swallowed, naming the call', async () => {
+    const h = harness({
+      onRecall: async (self) => {
+        // spreading activation catches graph failures and falls back to the SQL walk
+        await self.driver.session()['executeRead']!().catch(() => null)
+      },
+    })
+    const stack = await buildEvalStack(h.mods, { calibrationQuery: 'cal', now: NOW, env: { ...GRAPH_ENV } })
+    h.readFails = true
+    const err = await stack.recall('gold query', {}, NOW).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(GraphCallError)
+    expect((err as Error).message).toContain('executeRead')
+    expect(isRunStop(err)).toBe(true)
+    expect(stack.guards.graphErrors).toEqual({ executeRead: 1 })
+  })
+
+  it('stops when the recall engine is on but failed to import, leaving storage unwrapped', async () => {
+    const h = harness({ engine: 'import-failure' })
+    const err = await buildEvalStack(h.mods, {
+      calibrationQuery: 'c',
+      now: NOW,
+      env: { ...BASE_ENV, ENGRAM_RECALL_ENGINE: 'true' },
+    }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(RecallEngineError)
+    expect((err as Error).message).toMatch(/failed to import/)
+    expect(isRunStop(err)).toBe(true)
+    expect(h.createOpts).toEqual([])
+  })
+
+  it('stops when the recall engine does not warm to ready', async () => {
+    const h = harness({ engine: { state: 'disabled' } })
+    await expect(
+      buildEvalStack(h.mods, { calibrationQuery: 'c', now: NOW, env: { ...BASE_ENV, ENGRAM_RECALL_ENGINE: 'true' } }),
+    ).rejects.toThrow(/warmed to "disabled"/)
+  })
+
+  it('awaits the engine warm-up and reports the engine on', async () => {
+    const h = harness({ engine: { state: 'ready' } })
+    const stack = await buildEvalStack(h.mods, {
+      calibrationQuery: 'c',
+      now: NOW,
+      env: { ...BASE_ENV, ENGRAM_RECALL_ENGINE: 'true' },
+    })
+    expect(stack.recallEngine).toBe(true)
+    expect(h.engineWarms).toBe(1)
+    const off = await buildEvalStack(harness().mods, { calibrationQuery: 'c', now: NOW, env: { ...BASE_ENV } })
+    expect(off.recallEngine).toBe(false)
   })
 })

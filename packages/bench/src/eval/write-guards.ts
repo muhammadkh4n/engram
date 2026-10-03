@@ -23,6 +23,7 @@ export const READ_RPCS: ReadonlySet<string> = new Set([
 
 const BUILDER_WRITES = ['insert', 'upsert', 'update', 'delete'] as const
 const SESSION_WRITES = ['executeWrite', 'writeTransaction'] as const
+const SESSION_READS = ['run', 'executeRead', 'readTransaction'] as const
 
 /** Blocked calls, by name. */
 export interface GuardStats {
@@ -32,10 +33,17 @@ export interface GuardStats {
   builder: Record<string, number>
   /** Blocked Neo4j write transactions, keyed by session method. */
   graph: Record<string, number>
+  /**
+   * Errors raised by Neo4j session calls that were let through, keyed by the
+   * call. Includes write Cypher the server rejected inside a READ session.
+   */
+  graphErrors: Record<string, number>
+  /** The first graph error, prefixed with its call; null while there is none. */
+  graphErrorSample: string | null
 }
 
 export function createGuardStats(): GuardStats {
-  return { rpc: {}, builder: {}, graph: {} }
+  return { rpc: {}, builder: {}, graph: {}, graphErrors: {}, graphErrorSample: null }
 }
 
 function bump(counts: Record<string, number>, key: string): void {
@@ -60,6 +68,27 @@ export class BlockedWriteError extends Error {
 /** Fails once any guard has blocked a call. */
 export function assertNoBlockedCalls(stats: GuardStats): void {
   if (blockedCallCount(stats) > 0) throw new BlockedWriteError(stats)
+}
+
+export function graphErrorCount(stats: GuardStats): number {
+  return total(stats.graphErrors)
+}
+
+/**
+ * A Neo4j call failed during a recall. The engine catches graph failures and
+ * falls back to the SQL association walk without recording it, so the recall
+ * would look complete while its graph stage never ran.
+ */
+export class GraphCallError extends Error {
+  constructor(readonly calls: Readonly<Record<string, number>>, sample: string | null) {
+    super(`recall hit ${total({ ...calls })} Neo4j error(s) in ${Object.keys(calls).sort().join(', ')}: ${sample ?? 'no message'}`)
+    this.name = 'GraphCallError'
+  }
+}
+
+/** Fails once any Neo4j session call has raised an error. */
+export function assertNoGraphErrors(stats: GuardStats): void {
+  if (graphErrorCount(stats) > 0) throw new GraphCallError({ ...stats.graphErrors }, stats.graphErrorSample)
 }
 
 export interface GuardablePostgrestClient {
@@ -125,18 +154,90 @@ export function graphDriver(graph: object): GuardableDriver {
   return driver
 }
 
+type Recorder = (call: string, err: unknown) => void
+
+/**
+ * Makes a neo4j Result (a thenable whose query fails when it is awaited)
+ * report its rejection once, however many times it is awaited. The query is
+ * already sent by run(), so settling lazily changes nothing about it.
+ */
+function countRejection<T>(result: T, call: string, record: Recorder): T {
+  if (result === null || typeof result !== 'object') return result
+  const r = result as Record<string, unknown>
+  if (typeof r['then'] !== 'function') return result
+  const then = (r['then'] as (ok: (v: unknown) => void, fail: (e: unknown) => void) => unknown).bind(result)
+  let settled: Promise<unknown> | null = null
+  const settle = (): Promise<unknown> =>
+    (settled ??= new Promise((resolve, reject) => {
+      then(resolve, (err) => {
+        record(call, err)
+        reject(err)
+      })
+    }))
+  r['then'] = (onOk?: (v: unknown) => unknown, onFail?: (e: unknown) => unknown) => settle().then(onOk, onFail)
+  r['catch'] = (onFail?: (e: unknown) => unknown) => settle().catch(onFail)
+  r['finally'] = (onDone?: () => void) => settle().finally(onDone)
+  return result
+}
+
+/** Wraps a method so a synchronous throw or a rejected return value is recorded under `call`. */
+function countMethod(target: Record<string, unknown>, method: string, call: string, record: Recorder): void {
+  const original = target[method]
+  if (typeof original !== 'function') return
+  target[method] = (...args: unknown[]) => {
+    let out: unknown
+    try {
+      out = (original as (...a: unknown[]) => unknown).apply(target, args)
+    } catch (err) {
+      record(call, err)
+      throw err
+    }
+    return countRejection(out, call, record)
+  }
+}
+
+/** An explicit transaction's run, commit and rollback, recorded as `beginTransaction.<method>`. */
+function countTransaction(tx: unknown, record: Recorder): unknown {
+  if (tx === null || typeof tx !== 'object') return tx
+  const t = tx as Record<string, unknown>
+  for (const method of ['run', 'commit', 'rollback']) countMethod(t, method, `beginTransaction.${method}`, record)
+  return tx
+}
+
 /**
  * Opens every session in READ access mode, so the server rejects a write
  * statement run inside it, and makes the write-transaction methods reject.
+ * Every other session call (run, executeRead, readTransaction, and an
+ * explicit transaction's run/commit/rollback) is counted in `graphErrors`
+ * when it fails, whatever the engine does with the error afterwards; a
+ * write rejected by the READ session is counted the same way. Errors a
+ * transaction function catches itself never leave executeRead and are not
+ * seen.
  */
 export function guardNeo4jDriver(driver: GuardableDriver, stats: GuardStats): void {
   const session = driver.session.bind(driver)
+  const record: Recorder = (call, err) => {
+    bump(stats.graphErrors, call)
+    stats.graphErrorSample ??= `${call}: ${err instanceof Error ? err.message : String(err)}`
+  }
   driver.session = (config: Record<string, unknown> = {}) => {
     const s = session({ ...config, defaultAccessMode: 'READ' }) as Record<string, unknown>
     for (const method of SESSION_WRITES) {
       s[method] = () => {
         bump(stats.graph, method)
         return Promise.reject(new Error(`graph ${method} blocked`))
+      }
+    }
+    for (const method of SESSION_READS) countMethod(s, method, method, record)
+    const begin = s['beginTransaction']
+    if (typeof begin === 'function') {
+      s['beginTransaction'] = (...args: unknown[]) => {
+        try {
+          return countTransaction((begin as (...a: unknown[]) => unknown).apply(s, args), record)
+        } catch (err) {
+          record('beginTransaction', err)
+          throw err
+        }
       }
     }
     return s

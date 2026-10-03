@@ -14,8 +14,9 @@
  *
  * `run` writes `<out>/<label>.json` and `<out>/<label>.md`.
  * Exit 2: usage error, or output files that already exist. Exit 4: a guard,
- * pin, graph, degraded-recall or failed-leg check stopped the run; the message
- * names what failed (for a failed leg, the leg). Exit 1: any other error.
+ * Neo4j error, pin, graph, recall-engine, degraded-recall or failed-leg check
+ * stopped the run; the message names what failed (the leg, the Neo4j call).
+ * Exit 1: any other error.
  */
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -75,6 +76,8 @@ async function run(args: RunArgs): Promise<void> {
     const meta = buildRunMeta({
       args,
       envVars,
+      engramEnv: open.engramEnv,
+      recallEngine: open.recallEngine,
       distSha: distGitSha(args.dist),
       goldSha: sha256(goldText),
       pinsShaAtStart,

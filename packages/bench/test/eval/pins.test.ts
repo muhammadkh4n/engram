@@ -95,6 +95,7 @@ function stubMods(opts: { swallowErrors?: boolean } = {}): EvalModules {
       recallOutputPolicyAtStartup: () => ({}),
       maybeWithRecallEngine: async (storage) => storage,
     },
+    recallEngineOf: null,
   }
 }
 

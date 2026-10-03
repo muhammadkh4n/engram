@@ -6,19 +6,20 @@
  * kept, so a comparison can leave it out instead of reading noise as a change.
  *
  * The meta block identifies what was measured (build sha, model ids, gold and
- * pins sha256, guard counters) and never carries a credential: only env names
- * that identify a model are copied, and any name that looks like a secret is
- * dropped even then.
+ * pins sha256, guard counters, the ENGRAM_* settings in effect, whether the
+ * recall engine ran) and never carries a credential: a name that looks like a
+ * secret is listed without its value, or dropped where only model ids are
+ * copied.
  */
 import { execFileSync } from 'node:child_process'
 import { parsePinsMode, type PinsMode } from '../replay/replay-lib.js'
 import { parseReferenceDate } from '../replay/probe-lib.js'
 import { assertRecallNotDegraded, DegradedRecallError } from '../refuse-degraded.js'
-import { GraphCheckError, type EvalRecall } from './eval-stack.js'
+import { GraphCheckError, RecallEngineError, type EvalRecall } from './eval-stack.js'
 import type { GoldClass, GoldEntry } from './gold.js'
 import { PinMissError, PinsViolationError, type PinStats } from './pins.js'
 import { aggregateScores, scoreQuery, type QueryScore, type ScoreAggregate, type ScoreAggregates } from './score.js'
-import { BlockedWriteError, blockedCallCount, type GuardStats } from './write-guards.js'
+import { BlockedWriteError, GraphCallError, blockedCallCount, type GuardStats } from './write-guards.js'
 
 // --- arguments ------------------------------------------------------------
 
@@ -169,7 +170,16 @@ export function assertNoFailedLeg(recall: Pick<EvalRecall, 'timings'>, question:
 }
 
 /** Checks that stop a run with exit 4: what they caught makes the run's numbers describe a different recall. */
-const RUN_STOPS = [BlockedWriteError, PinsViolationError, PinMissError, GraphCheckError, DegradedRecallError, FailedLegError]
+const RUN_STOPS = [
+  BlockedWriteError,
+  GraphCallError,
+  PinsViolationError,
+  PinMissError,
+  GraphCheckError,
+  RecallEngineError,
+  DegradedRecallError,
+  FailedLegError,
+]
 
 export function isRunStop(err: unknown): boolean {
   return RUN_STOPS.some((cls) => err instanceof cls)
@@ -235,6 +245,17 @@ export function envModelIds(vars: Readonly<Record<string, string>>): Record<stri
   return Object.fromEntries(picked)
 }
 
+/**
+ * The ENGRAM_* settings in effect, by name. A name that may hold a credential
+ * is listed with a null value, so the meta shows it was set without its value.
+ */
+export function engramEnvForMeta(engramEnv: Readonly<Record<string, string>>): Record<string, string | null> {
+  const listed = Object.entries(engramEnv)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, value]): [string, string | null] => [name, SECRET_NAME.test(name) ? null : value])
+  return Object.fromEntries(listed)
+}
+
 /** HEAD of the build's checkout, or null when the dist is not a git checkout. */
 export function distGitSha(dist: string): string | null {
   try {
@@ -253,6 +274,9 @@ export interface RunMeta {
   dist_git_sha: string | null
   env_file: string
   model_ids: Record<string, string>
+  /** Every ENGRAM_* variable the stack ran with; null where the name may hold a credential. */
+  engram_env: Record<string, string | null>
+  recall_engine: 'on' | 'off'
   gold_file: string
   gold_sha256: string
   queries: number
@@ -274,6 +298,9 @@ export interface RunMeta {
 export function buildRunMeta(input: {
   args: RunArgs
   envVars: Readonly<Record<string, string>>
+  /** The ENGRAM_* variables in effect, as the stack reports them. */
+  engramEnv: Readonly<Record<string, string>>
+  recallEngine: boolean
   distSha: string | null
   goldSha: string
   pinsShaAtStart: string
@@ -296,6 +323,8 @@ export function buildRunMeta(input: {
     dist_git_sha: input.distSha,
     env_file: args.envFile,
     model_ids: envModelIds(input.envVars),
+    engram_env: engramEnvForMeta(input.engramEnv),
+    recall_engine: input.recallEngine ? 'on' : 'off',
     gold_file: args.gold,
     gold_sha256: input.goldSha,
     queries: input.body.queries.length,
@@ -356,6 +385,7 @@ export function formatRunSummary(result: RunResult): string {
     `| runs | ${m.runs} |`,
     `| reference date | ${m.reference_date} |`,
     `| graph | ${m.graph ? 'Neo4j wired' : 'none'} |`,
+    `| recall engine | ${m.recall_engine} |`,
     `| blocked calls | ${m.blocked_calls} |`,
     ...Object.entries(m.model_ids).map(([name, value]) => `| ${name} | ${value} |`),
     '',

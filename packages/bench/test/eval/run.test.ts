@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DegradedRecallError } from '../../src/refuse-degraded.js'
-import type { EvalItem, EvalRecall } from '../../src/eval/eval-stack.js'
+import { RecallEngineError, type EvalItem, type EvalRecall } from '../../src/eval/eval-stack.js'
 import type { GoldEntry } from '../../src/eval/gold.js'
 import type { PinStats } from '../../src/eval/pins.js'
 import {
@@ -17,7 +17,7 @@ import {
   runGold,
   type RunArgs,
 } from '../../src/eval/run.js'
-import { createGuardStats } from '../../src/eval/write-guards.js'
+import { GraphCallError, createGuardStats } from '../../src/eval/write-guards.js'
 
 const NOW = new Date('2026-10-02T09:00:00Z')
 
@@ -173,6 +173,8 @@ describe('failed retrieval legs', () => {
 
   it('treats a degraded recall as a stop and an unrelated error as not one', () => {
     expect(isRunStop(new DegradedRecallError('q', 'embed timeout'))).toBe(true)
+    expect(isRunStop(new GraphCallError({ executeRead: 1 }, 'executeRead: ServiceUnavailable'))).toBe(true)
+    expect(isRunStop(new RecallEngineError('engine failed to import'))).toBe(true)
     expect(isRunStop(new Error('boom'))).toBe(false)
   })
 })
@@ -207,6 +209,8 @@ describe('run meta', () => {
     const meta = buildRunMeta({
       args,
       envVars,
+      engramEnv: Object.fromEntries(Object.entries(envVars).filter(([name]) => name.startsWith('ENGRAM_'))),
+      recallEngine: true,
       distSha: 'a'.repeat(40),
       goldSha: 'b'.repeat(64),
       pinsShaAtStart: 'c'.repeat(64),
@@ -223,9 +227,18 @@ describe('run meta', () => {
     for (const [name, value] of Object.entries(envVars)) {
       if (SECRET_NAME.test(name)) {
         expect(text).not.toContain(value)
-        expect(text).not.toContain(name)
+        // An ENGRAM_* secret is listed by name only; any other secret name is never copied.
+        if (!name.startsWith('ENGRAM_')) expect(text).not.toContain(name)
       }
     }
+    expect(meta.engram_env).toEqual({
+      ENGRAM_CHAT_API_KEY: null,
+      ENGRAM_CHAT_MODEL: 'deepseek/deepseek-v4-flash',
+      ENGRAM_MODEL_TOKEN: null,
+      ENGRAM_RERANK_LOCAL: 'true',
+      ENGRAM_RERANK_LOCAL_MODEL: 'mixedbread-ai/mxbai-rerank-large-v1',
+    })
+    expect(meta.recall_engine).toBe('on')
     expect(meta).toMatchObject({ label: 'control', runs: 2, dist_git_sha: 'a'.repeat(40), blocked_calls: 0, unstable: 0 })
     expect(meta.pin_stats).toEqual({ hits: 4, fills: 0, misses: 0, blocked: {}, fetch_blocked: {} })
     const summary = formatRunSummary({ meta, ...body })
