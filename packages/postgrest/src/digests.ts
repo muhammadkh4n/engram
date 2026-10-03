@@ -168,11 +168,8 @@ export class PostgRestDigestStorage implements DigestStorage {
   }
 
   /**
-   * Total digest count. Optional in DigestStorage; implementing here so the
-   * v0.3.14 deep-sleep delta gate (isDeepSleepDue) can skip no-op runs by
-   * comparing count() against the snapshot stored at the previous run.
-   * Without this, deep sleep keeps re-processing the same 7-day digest
-   * window every 60s — the production IO bug from v0.3.13.
+   * Total digest count, one COUNT(*) query, for stats(). Optional in
+   * DigestStorage; without it stats() sums getCountBySession().
    */
   async count(): Promise<number> {
     const { count, error } = await this.client

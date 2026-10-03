@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { FactSourceEpisode } from '@engram-mem/core'
-import { FactExtractionError, isFactExtractionError } from '@engram-mem/core'
+import { EmptyFactReplyError, FactExtractionError, classifyExtractionError, isFactExtractionError } from '@engram-mem/core'
 
 const mockChatCreate = vi.fn()
 
@@ -234,7 +234,6 @@ describe('OpenAISummarizer.extractFacts', () => {
   it.each([
     ['prose with no JSON', 'There are no facts here.'],
     ['an object with no facts array', '{"items": []}'],
-    ['an empty reply', ''],
   ])('throws on %s', async (_label, content) => {
     mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content }, finish_reason: 'stop' }] })
     const s = new OpenAISummarizer({ apiKey: 'k' })
@@ -242,6 +241,35 @@ describe('OpenAISummarizer.extractFacts', () => {
     const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(FactExtractionError)
     expect(err).toMatchObject({ kind: 'parse', message: expect.stringMatching(/extractFacts/) })
+  })
+
+  it.each<[string, unknown]>([
+    ['no choices', { choices: [] }],
+    ['no choices array', {}],
+    ['null content', { choices: [{ message: { content: null }, finish_reason: 'stop' }] }],
+    ['empty content', { choices: [{ message: { content: '' }, finish_reason: 'stop' }] }],
+    ['whitespace content', { choices: [{ message: { content: ' \n\t ' }, finish_reason: 'stop' }] }],
+  ])('rejects a reply with %s as an EmptyFactReplyError, which deep sleep does not count', async (_label, reply) => {
+    mockChatCreate.mockResolvedValueOnce(reply)
+    const s = new OpenAISummarizer({ apiKey: 'k' })
+
+    const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(EmptyFactReplyError)
+    expect(err).toMatchObject({ name: 'EmptyFactReplyError', message: expect.stringMatching(/extractFacts: empty reply/) })
+    expect(isFactExtractionError(err)).toBe(false)
+    expect(classifyExtractionError(err)).toBe('transient')
+  })
+
+  it('keeps an empty reply cut off at max_tokens a length failure', async () => {
+    mockChatCreate.mockResolvedValueOnce({ choices: [{ message: { content: '' }, finish_reason: 'length' }] })
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const s = new OpenAISummarizer({ apiKey: 'k' })
+      const err = await s.extractFacts({ episodes: [episode('ep-a', 'x')], projectId: null }).catch((e: unknown) => e)
+      expect(err).toMatchObject({ name: 'FactExtractionError', kind: 'length' })
+    } finally {
+      stderr.mockRestore()
+    }
   })
 
   it('rejects with the API error unchanged, not as a FactExtractionError', async () => {

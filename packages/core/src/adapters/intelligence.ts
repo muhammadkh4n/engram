@@ -255,9 +255,10 @@ export interface IntelligenceAdapter {
    * it rests on. Episodes are never cut; a large batch may take several
    * model calls. Resolves `[]` when the episodes hold no fact. Rejects with a
    * FactExtractionError when a reply is cut off at its token cap or cannot be
-   * read as a fact list; a failed call (API, network, auth, rate limit)
-   * rejects with its own error, unchanged. Either way the caller can retry
-   * the batch; only the first says something about the batch itself.
+   * read as a fact list, and with an EmptyFactReplyError when the reply is
+   * empty without being cut off; a failed call (API, network, auth, rate
+   * limit) rejects with its own error, unchanged. classifyExtractionError
+   * decides which of these say something about the batch itself.
    */
   extractFacts?(input: ExtractFactsInput): Promise<ExtractedFact[]>
   /**
@@ -444,4 +445,123 @@ export class FactExtractionError extends Error {
 /** Matched by name as well as by class, like isUnclassifiableReply. */
 export function isFactExtractionError(err: unknown): err is FactExtractionError {
   return err instanceof FactExtractionError || (err instanceof Error && err.name === 'FactExtractionError')
+}
+
+/**
+ * The fact extractor answered 200 with no usable reply: no choice, or null,
+ * empty or whitespace content without being cut off at max_tokens. That is a
+ * provider glitch, not something the episodes caused, so resending the same
+ * episodes later can succeed and callers do not count it against the batch.
+ */
+export class EmptyFactReplyError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EmptyFactReplyError'
+  }
+}
+
+/** Matched by name as well as by class, like isUnclassifiableReply. */
+export function isEmptyFactReply(err: unknown): err is EmptyFactReplyError {
+  return err instanceof EmptyFactReplyError || (err instanceof Error && err.name === 'EmptyFactReplyError')
+}
+
+/**
+ * What a failed fact extraction says about the batch it was given:
+ * - `digest`: the batch itself makes the call fail, and resending it fails the
+ *   same way (unusable reply; a request the provider rejects as malformed or
+ *   too large);
+ * - `transient`: the provider, the network or the account failed, and a later
+ *   call can succeed with the same batch;
+ * - `unknown`: neither can be told from the error.
+ */
+export type ExtractionErrorClass = 'digest' | 'transient' | 'unknown'
+
+/** Rejections of the request itself: bad request, not found, conflict,
+ *  payload too large, unprocessable content. */
+const DIGEST_STATUSES: ReadonlySet<number> = new Set([400, 404, 409, 413, 422])
+
+/** Key, billing and permission rejections. They never depend on the batch. */
+const CREDENTIAL_STATUSES: ReadonlySet<number> = new Set([401, 402, 403])
+
+/** Request timeout and rate limit; every 5xx is transient too. */
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([408, 429])
+
+/** Socket and DNS failures (Node `code`) and undici's connect/read timeouts. */
+const NETWORK_CODES: ReadonlySet<string> = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EPIPE',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+])
+
+/** Error names (or class names, since the openai SDK leaves `name` as
+ *  'Error') of aborted, timed-out or unconnected requests. */
+const NETWORK_NAMES: ReadonlySet<string> = new Set([
+  'AbortError',
+  'TimeoutError',
+  'APIConnectionError',
+  'APIConnectionTimeoutError',
+  'APIUserAbortError',
+])
+
+/** Deep enough for an SDK error wrapping fetch's TypeError wrapping the
+ *  socket error; bounded so a cyclic `cause` cannot loop. */
+const MAX_CAUSE_DEPTH = 5
+
+function httpStatus(err: unknown): number | undefined {
+  const status = (err as { status?: unknown } | null)?.status
+  return typeof status === 'number' && Number.isInteger(status) ? status : undefined
+}
+
+function isNetworkFailure(err: unknown): boolean {
+  let current: unknown = err
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current != null && typeof current === 'object'; depth++) {
+    const fields = current as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown }
+    if (typeof fields.code === 'string' && NETWORK_CODES.has(fields.code)) return true
+    if (typeof fields.name === 'string' && NETWORK_NAMES.has(fields.name)) return true
+    const className = (current as { constructor?: { name?: unknown } }).constructor?.name
+    if (typeof className === 'string' && NETWORK_NAMES.has(className)) return true
+    // undici's exact rejection for a request that never got a response.
+    if (current instanceof TypeError && fields.message === 'fetch failed') return true
+    current = fields.cause
+  }
+  return false
+}
+
+function hasName(err: unknown, name: string): boolean {
+  return err instanceof Error && err.name === name
+}
+
+/**
+ * The one place the fact-extraction retry policy lives. A status is read only
+ * from a numeric `err.status` (the openai SDK's APIError carries it), never
+ * from message text. Named errors are matched by name as well as by class, so
+ * the check holds across separate copies of this package.
+ */
+export function classifyExtractionError(err: unknown): ExtractionErrorClass {
+  if (isFactExtractionError(err)) return 'digest'
+  if (isEmptyFactReply(err) || hasName(err, 'CircuitOpenError')) return 'transient'
+  const status = httpStatus(err)
+  if (status !== undefined) {
+    if (DIGEST_STATUSES.has(status)) return 'digest'
+    if (CREDENTIAL_STATUSES.has(status) || RETRYABLE_STATUSES.has(status) || status >= 500) return 'transient'
+  }
+  if (isNetworkFailure(err)) return 'transient'
+  return 'unknown'
+}
+
+/** A key, billing or permission rejection (401, 402, 403): transient for the
+ *  batch, but it needs an operator, so callers log it at error level. */
+export function isCredentialError(err: unknown): boolean {
+  const status = httpStatus(err)
+  return status !== undefined && CREDENTIAL_STATUSES.has(status)
 }

@@ -2,7 +2,6 @@ import type { StorageAdapter } from '../adapters/storage.js'
 import type { IntelligenceAdapter, SupersessionCandidate, SupersessionVerdict } from '../adapters/intelligence.js'
 import {
   SUPERSESSION_NEW_FACT_KEY,
-  isFactExtractionError,
   isSupersessionFactKind,
   supersessionRuleOutcome,
 } from '../adapters/intelligence.js'
@@ -12,16 +11,16 @@ import { extractCounters } from './graph-counters.js'
 import { linkFactContext } from './own-text-links.js'
 import { epochMs, factStatementClock } from './statement-time.js'
 import type { FactClock } from './statement-time.js'
-import { extractDigestFacts } from './fact-candidates.js'
 import type { FactCandidate } from './fact-candidates.js'
+import { runExtraction } from './extraction-run.js'
 
 export interface DeepSleepOptions {
   /** A run does nothing while fewer digests than this await fact extraction. Default 3. */
   minDigests?: number
   /** Most pending digests one run extracts, oldest first. Default 50. */
   maxDigests?: number
-  /** Unusable extraction replies (FactExtractionError) after which a digest
-   *  is no longer retried. Default 3. */
+  /** Extraction failures classed `digest` (classifyExtractionError) after
+   *  which a digest is no longer retried. Default 3. */
   maxExtractionAttempts?: number
   /** Defaults to DEFAULT_SUPERSESSION. Deep sleep reads no environment
    *  variable: a server parses ENGRAM_SUPERSESSION* once at startup with
@@ -56,9 +55,10 @@ const NEIGHBOUR_POOL_MAX = 5
 
 /** Pending digests one run extracts when DeepSleepOptions.maxDigests is unset. */
 export const DEFAULT_MAX_DIGESTS = 50
-/** Unusable extraction replies per digest when DeepSleepOptions.maxExtractionAttempts
+/** Failures classed `digest` per digest when DeepSleepOptions.maxExtractionAttempts
  *  is unset. A digest that fails for its own reasons (an oversized reply, a
- *  reply that never parses) fails the same way every run; without a cap such
+ *  reply that never parses, a request the provider rejects) fails the same
+ *  way every run; without a cap such
  *  digests stay oldest-first in the pending set and fill every batch. */
 export const DEFAULT_MAX_EXTRACTION_ATTEMPTS = 3
 
@@ -782,14 +782,21 @@ export async function promoteFactCandidates(
  * digests not yet extracted, oldest first, reads each one's live episodes
  * (extractDigestFacts), stores the facts (promoteFactCandidates) and stamps
  * the digest. Oldest first means a fact is stored before the facts stated
- * after it are judged against it. A digest whose reply is unusable (cut off
- * or unparseable, a FactExtractionError) stays pending and gains one failed
- * attempt; at `maxExtractionAttempts` it leaves the pending set unstamped, so
- * newer digests are not starved behind it. Any other extraction error (API,
- * network, auth, rate limit, open circuit, storage read) says nothing about
- * the digest: it is not counted, the digest and every later one stay pending,
- * and the run's loop ends, so an outage cannot exhaust any digest. A digest
- * with no live episode is stamped with nothing stored.
+ * after it are judged against it. classifyExtractionError sorts a failed
+ * extraction:
+ * - `digest` (an unusable reply, or a request the provider rejects as
+ *   malformed or too large): the digest stays pending and gains one failed
+ *   attempt, and the run moves on; at `maxExtractionAttempts` it leaves the
+ *   pending set unstamped, so newer digests are not starved behind it;
+ * - `transient` (5xx, 429, 408, key or billing, network, open circuit, empty
+ *   reply): nothing is counted, the digest and every later one stay pending,
+ *   and the run's loop ends, so an outage cannot exhaust any digest;
+ * - `unknown`: the next pending digest is extracted as a probe. If it works,
+ *   the failure was the first digest's own: it is counted and the run goes
+ *   on. If the probe fails on its own (`digest`), the probe is counted and
+ *   the run ends with the first uncounted; any other probe failure, or no
+ *   digest to probe with, ends the run with nothing counted.
+ * A digest with no live episode is stamped with nothing stored.
  *
  * Neo4j operations (when graph is available):
  * - Creates Semantic/Procedural Memory nodes
@@ -816,7 +823,7 @@ export async function deepSleep(
     return {
       cycle: 'deep', promoted: 0, procedural: 0, deduplicated: 0, superseded: 0,
       supersessionJudged: 0, stale: 0, tie: 0, keptNotState: 0, kindMissing: 0,
-      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0, extractionDeferred: 0,
+      extractionFailed: 0, noEpisodes: 0, extractionExhausted: 0, extractionDeferred: 0, extractionProbed: 0,
     }
   }
 
@@ -829,45 +836,14 @@ export async function deepSleep(
   })
 
   let totals = zeroCounts()
-  let extractionFailed = 0
-  let extractionExhausted = 0
-  let extractionDeferred = 0
-  let noEpisodes = 0
-  for (const [index, digest] of pending.entries()) {
-    let extraction: Awaited<ReturnType<typeof extractDigestFacts>>
-    try {
-      extraction = await extractDigestFacts(storage, intelligence, digest)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isFactExtractionError(err)) {
-        extractionDeferred = pending.length - index
-        const errorClass = err instanceof Error ? err.name : typeof err
-        console.warn(
-          `[deep-sleep] fact extraction deferred at digest ${digest.id}; ${extractionDeferred} digest(s) stay pending for the next run, no attempt counted: ${errorClass}: ${msg}`,
-        )
-        break
-      }
-      const attempts = await storage.digests.recordFactExtractionFailure(digest.id)
-      extractionFailed++
-      if (attempts >= maxAttempts) {
-        extractionExhausted++
-        console.warn(
-          `[deep-sleep] fact extraction failed for digest ${digest.id} (attempt ${attempts} of ${maxAttempts}); no longer retried: ${msg}`,
-        )
-      } else {
-        console.warn(
-          `[deep-sleep] fact extraction failed for digest ${digest.id} (attempt ${attempts} of ${maxAttempts}); it stays pending: ${msg}`,
-        )
-      }
-      continue
-    }
-    if (extraction.status === 'no-episodes') {
-      noEpisodes++
-    } else {
-      totals = addCounts(totals, await promoteFactCandidates(extraction.candidates, ctx))
-    }
-    await storage.digests.markFactsExtracted(digest.id, new Date())
-  }
+  const counts = await runExtraction({
+    storage,
+    intelligence,
+    maxAttempts,
+    promote: async (candidates) => {
+      totals = addCounts(totals, await promoteFactCandidates(candidates, ctx))
+    },
+  }, pending)
 
   if (totals.kindMissing > 0) {
     console.warn(
@@ -880,10 +856,7 @@ export async function deepSleep(
   return {
     cycle: 'deep',
     ...tierCounts,
-    extractionFailed,
-    extractionExhausted,
-    extractionDeferred,
-    noEpisodes,
+    ...counts,
     graphNodesCreated: graphAvailable ? graphNodesCreated : undefined,
     graphEdgesCreated: graphAvailable ? graphEdgesCreated : undefined,
     graphContextKept: graphAvailable ? graphContextKept : undefined,

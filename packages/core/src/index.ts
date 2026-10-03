@@ -83,6 +83,7 @@ export type {
   SupersessionFactKind,
   SupersessionRuleOutcome,
   FactExtractionErrorKind,
+  ExtractionErrorClass,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,
@@ -91,6 +92,10 @@ export {
   isEmptyClassifierReply,
   FactExtractionError,
   isFactExtractionError,
+  EmptyFactReplyError,
+  isEmptyFactReply,
+  classifyExtractionError,
+  isCredentialError,
   SUPERSESSION_NEW_FACT_KEY,
   supersessionRuleOutcome,
   isSupersessionFactKind,
