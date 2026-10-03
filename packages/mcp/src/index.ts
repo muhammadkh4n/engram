@@ -9,9 +9,11 @@
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { createEngramServer } from './server-core.js'
+import { createEngramServer, recallOutputPolicyAtStartup } from './server-core.js'
 
 async function main(): Promise<void> {
+  // Logs to stderr, so the JSON-RPC stream on stdout stays clean.
+  recallOutputPolicyAtStartup()
   const server = createEngramServer()
   const transport = new StdioServerTransport()
   await server.connect(transport)

@@ -21,6 +21,7 @@ import {
   startConsolidationWorker,
   MAX_FORGET_IDS,
   recallOutputPolicyFromEnv,
+  DEFAULT_RELATED_SHARE,
   degradedRecallNotice,
   supersessionSettingsFromEnv,
 } from '@engram-mem/core'
@@ -366,15 +367,24 @@ export async function getMemory(): Promise<Memory> {
 }
 
 /**
- * Resolve the recall output policy from the environment and log it. Called
- * once when the memory stack is built, so a malformed ENGRAM_RECALL_* value
- * fails startup instead of every recall. The log line carries numbers only.
+ * Resolve the recall output policy from the environment and log it. The
+ * server entry points call it before they serve anything, because the memory
+ * stack is built lazily: validating only there would let the HTTP server pass
+ * /health while every recall fails on a malformed ENGRAM_RECALL_* value. The
+ * stack build re-validates without logging, for callers that skip the entry
+ * points. The log line
+ * carries numbers only: the effective Related share and item cap, where the
+ * cap defaults to a quarter of the budget and is unbounded without one.
  */
 export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
   const policy = recallOutputPolicyFromEnv(env)
+  const itemMaxTokens =
+    policy.itemMaxTokens ??
+    (policy.tokenBudget !== undefined ? Math.max(1, Math.floor(policy.tokenBudget / 4)) : 'unbounded')
   console.error(
     `[engram-mcp] recall output policy: emitK=${policy.emitK ?? 'unbounded'} ` +
-      `tokenBudget=${policy.tokenBudget ?? 'unbounded'} faint=${policy.faint ? 'on' : 'off'}`,
+      `tokenBudget=${policy.tokenBudget ?? 'unbounded'} faint=${policy.faint ? 'on' : 'off'} ` +
+      `relatedShare=${policy.relatedShare ?? DEFAULT_RELATED_SHARE} itemMaxTokens=${itemMaxTokens}`,
   )
   return policy
 }
@@ -391,7 +401,7 @@ export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.e
 }
 
 async function buildMemoryStack(): Promise<MemoryStack> {
-  recallOutputPolicyAtStartup()
+  recallOutputPolicyFromEnv(process.env)
   const { timeZone } = parseTimeZoneEnv()
   const supersession = supersessionSettingsAtStartup()
   const recallLog = recallLogFromEnv()
@@ -749,6 +759,9 @@ function toolError(message: string): ToolTextResult {
   return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
 }
 
+export const RECALL_BUDGET_TOO_SMALL =
+  'Memories matched, but the token budget is too small to show one. Raise token_budget or ENGRAM_RECALL_TOKEN_BUDGET.'
+
 /** A degraded recall is still an answer: the reader gets the reason and the
  *  keyword results, never a tool error that hides both. */
 export async function runMemoryRecall(
@@ -778,6 +791,15 @@ export async function runMemoryRecall(
         truncated: result.payload?.truncated === true,
       }),
     )
+  }
+
+  if (!result.formatted && result.memories.length > 0) {
+    // Memories matched but none could be shown: the budget left no section
+    // the minimum room after the header and notice, or no first item fit its
+    // room with its tag and minimum content. Saying none matched would be
+    // false.
+    const notice = result.degraded ? `${degradedRecallNotice(result.degraded)}\n` : ''
+    return toolText(`${notice}${RECALL_BUDGET_TOO_SMALL}`)
   }
 
   if (!result.formatted || result.memories.length === 0) {

@@ -745,13 +745,18 @@ describe('recall engine — output policy', () => {
 
   it('applies a per-call token budget over the env budget', async () => {
     process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = '1000000'
+    const unbounded = await recall('TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts())
+    expect(unbounded.payload.truncated).toBe(false)
+    const budget = unbounded.estimatedTokens - 10
 
     const result = await recall(
-      'TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts({ tokenBudget: 1 }),
+      'TypeScript strict mode', createMockStorage(), new SensoryBuffer(), makeOpts({ tokenBudget: budget }),
     )
 
-    expect(result.payload.items).toHaveLength(1)
+    expect(result.payload.items.length).toBeGreaterThan(0)
+    expect(result.payload.items.length).toBeLessThan(unbounded.payload.items.length)
     expect(result.payload.truncated).toBe(true)
+    expect(result.estimatedTokens).toBeLessThanOrEqual(budget)
     expect(result.estimatedTokens).toBe(Math.ceil(result.formatted.length / 4))
   })
 
@@ -867,22 +872,33 @@ describe('recall engine — reconsolidation follows the emitted payload', () => 
     expect(storage.procedural.recordShown).not.toHaveBeenCalled()
   })
 
-  it('records shown only for the 3 memories a token budget emitted', async () => {
+  it('records shown for exactly the emitted prefixes when Related holds its share of a budget', async () => {
     const unbounded = await deepRecall(storageWithHits(5), { reconsolidate: false })
-    const third = unbounded.payload.items[2]
-    expect(third?.section).toBe('recalled')
-    const budget = Math.ceil(unbounded.formatted.slice(0, third?.end).length / 4)
+    expect(unbounded.associations).toHaveLength(1)
+    // The largest budget that cuts the ranked section while Related keeps its item.
+    let budget = unbounded.estimatedTokens
+    let probe = unbounded
+    while (budget > 1 && !(probe.payload.emittedMemories < 5 && probe.payload.emittedAssociations === 1)) {
+      budget--
+      probe = await deepRecall(storageWithHits(5), { reconsolidate: false, tokenBudget: budget })
+    }
     const storage = storageWithHits(5)
 
     const result = await deepRecall(storage, { tokenBudget: budget })
 
-    expect(result.payload.emittedMemories).toBe(3)
-    expect(result.payload.emittedAssociations).toBe(0)
+    const { emittedMemories, emittedAssociations } = result.payload
+    expect(emittedMemories).toBeGreaterThan(0)
+    expect(emittedMemories).toBeLessThan(5)
+    expect(emittedAssociations).toBe(1)
     expect(result.memories).toHaveLength(5)
-    expect(shownIds(storage)).toEqual(result.memories.slice(0, 3).map((m) => m.id))
+    const emitted = [...result.memories.slice(0, emittedMemories), ...result.associations.slice(0, emittedAssociations)]
+    expect(result.payload.items.map((i) => i.id)).toEqual(emitted.map((m) => m.id))
+    expect(shownIds(storage)).toEqual(emitted.map((m) => m.id))
     await flush()
     const coRecalled = vi.mocked(storage.associations.upsertCoRecalled).mock.calls.flatMap((c) => [c[0], c[2]])
-    expect(new Set(coRecalled)).toEqual(new Set(result.memories.slice(0, 3).map((m) => m.id)))
+    expect(coRecalled.length).toBeGreaterThan(0)
+    const emittedIds = new Set(emitted.map((m) => m.id))
+    for (const id of coRecalled) expect(emittedIds.has(id as string)).toBe(true)
   })
 
   it('records shown for the emitted memories and the emitted associations', async () => {
