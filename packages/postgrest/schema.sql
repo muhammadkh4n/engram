@@ -760,11 +760,17 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
 --
--- p_kinds and p_exclude_session_id filter as in engram_text_match. On
--- episodes the kind test reads idx_episodes_kind's expression, whose
--- statistics let the planner see how few rows a rare kind keeps and pick an
--- exact scan over the HNSW post-filter. On the other tiers the kind test
--- names no column, so a tier left out by p_kinds is not scanned at all.
+-- p_kinds and p_exclude_session_id filter as in engram_text_match. The SET
+-- clauses keep this function from being inlined, so its statement is planned
+-- with the arguments as unbound parameters. The episode kind test is then
+-- `p_kinds IS NULL OR engram_episode_kind(...) = ANY(p_kinds)`, which no
+-- index can serve: the planner neither uses idx_episodes_kind nor reads its
+-- statistics, and estimates the tier's rows with default selectivities. On
+-- PostgreSQL 17 with 20,000 episodes the episode tier is a sequential scan
+-- with the kind test as a row filter, sorted by distance, whether p_kinds is
+-- set or not; an exact scan, so a filtered call misses no row. On the other
+-- tiers the kind test names no column and becomes a one-time filter, so a
+-- tier left out by p_kinds is not scanned at all.
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
@@ -1393,8 +1399,11 @@ CREATE INDEX IF NOT EXISTS idx_episodes_fts ON public.memory_episodes USING gin 
 -- An expression index instead of a stored kind column: adding a stored
 -- generated column rewrites memory_episodes and rebuilds its HNSW index,
 -- while this builds one btree beside them. Partial on the rows recall can
--- return, as the HNSW index is. Its statistics give the planner the share of
--- each kind for the p_kinds filter of the search functions.
+-- return, as the HNSW index is. It serves a query that compares
+-- engram_episode_kind(metadata, session_id) with a known kind list. The
+-- search functions are planned with p_kinds as an unbound parameter behind
+-- `p_kinds IS NULL OR ...`, so they use neither this index nor its
+-- statistics; see engram_vector_search.
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_kind ON public.memory_episodes USING btree (public.engram_episode_kind(metadata, session_id)) WHERE (forgotten_at IS NULL);
