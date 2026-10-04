@@ -10,7 +10,7 @@ import { ConversationStore, type SensoryBuffer } from './systems/sensory-buffer.
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
 import { recall as engineRecall } from './retrieval/engine.js'
-import type { MemoryKind } from './memory-kind.js'
+import { assertMemoryKinds, type MemoryKind } from './memory-kind.js'
 import { selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
@@ -682,6 +682,9 @@ export class Memory {
     }
   ): Promise<RecallResult> {
     this.assertInitialized()
+    // A bad kinds list must fail before the query is embedded (a paid call)
+    // and before the conversation's intent or priming state is written.
+    if (opts?.kinds !== undefined) assertMemoryKinds(opts.kinds)
     const conversationKey = opts?.conversationKey
     const conversation = this.conversationState(conversationKey)
 

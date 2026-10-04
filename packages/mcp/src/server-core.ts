@@ -873,8 +873,7 @@ export function formatForgetByIds(result: ForgetByIdsResult): string {
   return [summary, ...detail].join('\n')
 }
 
-/** The memory_forget tool body, separated from the server so it can run
- *  against any object with the two forget entry points. */
+/** The memory_ingest tool body: validates the arguments and stores one memory tagged as a deliberate note. */
 export async function runMemoryIngest(
   mem: Pick<Memory, 'ingest'>,
   args: Record<string, unknown>,
@@ -905,6 +904,8 @@ export async function runMemoryIngest(
   return toolText('Memory stored.')
 }
 
+/** The memory_forget tool body, separated from the server so it can run
+ *  against any object with the two forget entry points. */
 export async function runMemoryForget(
   mem: Pick<Memory, 'forget' | 'forgetByIds'>,
   args: Record<string, unknown>,

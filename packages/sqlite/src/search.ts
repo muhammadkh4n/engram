@@ -87,15 +87,25 @@ const TIER_KIND: Partial<Record<MemoryType, MemoryKind>> = {
   procedural: 'procedure',
 }
 
+function parseJsonOrNull(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
 /**
  * Register `engram_episode_kind(metadata, session_id)` on `db`. It delegates
  * to core's `memoryKind`, so the filter runs inside the WHERE clause (before
  * any LIMIT) while the kind rules stay defined in one place. Metadata that is
- * not a JSON object counts as no metadata, as `metadata->>'key'` would in SQL.
+ * not a JSON object counts as no metadata, as `metadata->>'key'` would in SQL;
+ * that includes text that is not valid JSON, since a throw here would fail the
+ * whole query for one bad row.
  */
 export function registerEpisodeKindFunction(db: Database.Database): void {
   db.function(EPISODE_KIND_FUNCTION, { deterministic: true }, (metadataJson: unknown, sessionId: unknown) => {
-    const parsed: unknown = typeof metadataJson === 'string' ? JSON.parse(metadataJson) : null
+    const parsed = typeof metadataJson === 'string' ? parseJsonOrNull(metadataJson) : null
     const metadata =
       parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
         ? (parsed as Record<string, unknown>)

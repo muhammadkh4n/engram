@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import type Database from 'better-sqlite3'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { MEMORY_KINDS } from '@engram-mem/core'
 import type { MemoryKind, MemoryType } from '@engram-mem/core'
@@ -188,5 +189,21 @@ describe('SqliteStorageAdapter kind and session filters', () => {
       limit: 50,
     })
     expect(results.map((r) => r.item.data.id)).toEqual([decision])
+  })
+
+  it('an episode whose metadata is not valid JSON counts as no metadata instead of failing the query', async () => {
+    const decision = await insertRow(adapter, 'episode', {
+      sessionId: 'session-json-3c7a',
+      metadata: { source: 'hook-capture', salienceCategory: 'decision' },
+    })
+    const malformed = await insertRow(adapter, 'episode', { sessionId: 'session-json-3c7a' })
+    const db = (adapter as unknown as { db: Database.Database }).db
+    db.prepare('UPDATE episodes SET metadata = ? WHERE id = ?').run('{"salienceCategory": "decision"', malformed)
+
+    const vector = await adapter.vectorSearch(SAME_DIRECTION, { kinds: ['decision'], limit: 50 })
+    const text = await adapter.textBoost([TERM], { kinds: ['decision'], limit: 50 })
+
+    expect(vector.map((r) => r.item.data.id)).toEqual([decision])
+    expect(text.map((r) => r.id)).toEqual([decision])
   })
 })

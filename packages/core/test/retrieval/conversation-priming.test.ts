@@ -166,6 +166,34 @@ describe('Memory.recall — priming is scoped to one conversation', () => {
     expect(h.store.peek('conv-a')?.getPrimed()).toEqual(before)
   })
 
+  it('an empty kinds list throws before the query is embedded or the conversation is touched', async () => {
+    const embed = vi.fn().mockResolvedValue([0.1, 0.2, 0.3])
+    const memory = new Memory({
+      storage: createMockStorage({ vectorSearchResults: ROWS, textBoostResults: [] }),
+      intelligence: { embed, embedQuery: embed, dimensions: () => 3 },
+    })
+    await memory.initialize()
+    const store = (memory as unknown as { conversations: ConversationStore }).conversations
+    try {
+      await memory.recall(QUERY, { reconsolidate: false, strategyOverride: RECALL_STRATEGIES.deep, conversationKey: 'conv-k' })
+      const conversation = store.peek('conv-k')!
+      const primedBefore = conversation.getPrimed().map((p) => ({ ...p }))
+      expect(primedBefore.length).toBeGreaterThan(0)
+      const intentBefore = conversation.getIntent()
+      embed.mockClear()
+
+      await expect(
+        memory.recall(QUERY, { reconsolidate: false, conversationKey: 'conv-k', kinds: [] }),
+      ).rejects.toThrow(RangeError)
+
+      expect(embed).not.toHaveBeenCalled()
+      expect(store.peek('conv-k')!.getPrimed()).toEqual(primedBefore)
+      expect(store.peek('conv-k')!.getIntent()).toBe(intentBefore)
+    } finally {
+      await memory.dispose()
+    }
+  })
+
   it('a session handle uses its session id as the conversation key', async () => {
     const session = h.memory.session('sess-77')
     await session.recall(QUERY, RECALL)
