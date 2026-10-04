@@ -259,7 +259,7 @@ find /backups -name 'engram-*.dump' -mtime +14 -delete
 
 **`[engram] lexical leg failed: …` / `lexical=error` in the `[recall]` line**: keyword matching failed and recall fell back to vector search alone. After an upgrade this is usually `engram_text_match` missing — apply `schema.sql` and reload PostgREST's schema cache.
 
-**Vector index not being used**: pgvector picks the HNSW index only above a row-count threshold. For small tables (<10k rows) sequential scan can be faster. Run `ANALYZE memory_episodes` to refresh stats; `EXPLAIN (ANALYZE)` to confirm.
+**Vector index not being used**: on PostgreSQL 17 with pgvector 0.8.2, `engram_vector_search` does not use the HNSW indexes. Its `SET` clauses stop it from being inlined, so it gets a generic plan with a parameter `LIMIT`, which the planner costs as 10% of the rows; every tier is then an exact sequential scan and sort, and its time grows with the table (measured up to 200,000 episodes). A bare query with a literal `LIMIT` can use HNSW, so an `EXPLAIN` of the query text says nothing about the function: check plans through the function itself, with `auto_explain` (`auto_explain.log_nested_statements = on`, `auto_explain.log_min_duration = 0`) while calling the RPC.
 
 ## License
 

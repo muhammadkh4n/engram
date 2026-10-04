@@ -724,9 +724,10 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- engram_recall and engram_hybrid_recall each pin the same three, for the
 -- reasons given here.
 --
--- Each tier is its own nearest-N subquery, so the planner chooses the access
--- path per tier: on a small tier it uses an exact sequential scan and sort; on
--- a large one it drives the ORDER BY from the tier's HNSW index.
+-- Each tier is its own nearest-N subquery with its own access path. For
+-- engram_vector_search, measured on PostgreSQL 17 with pgvector 0.8.2 and the
+-- SET clauses below, that path is never the HNSW index: see the note above
+-- its CREATE. The settings below matter whenever a plan does use the index.
 --
 -- On the index path only the partial index predicate (`forgotten_at IS NULL`
 -- on episodes, semantic and procedural; none on digests) is part of the
@@ -760,15 +761,23 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
 --
--- p_kinds and p_exclude_session_id filter as in engram_text_match. The SET
--- clauses keep this function from being inlined, so its statement is planned
--- with the arguments as unbound parameters. The episode kind test is then
--- `p_kinds IS NULL OR engram_episode_kind(...) = ANY(p_kinds)`, which no
--- index can serve: the planner neither uses idx_episodes_kind nor reads its
--- statistics, and estimates the tier's rows with default selectivities. On
--- PostgreSQL 17 with 20,000 episodes the episode tier is a sequential scan
--- with the kind test as a row filter, sorted by distance, whether p_kinds is
--- set or not; an exact scan, so a filtered call misses no row. On the other
+-- p_kinds and p_exclude_session_id filter as in engram_text_match.
+--
+-- Access path, measured on PostgreSQL 17 with pgvector 0.8.2 and these SET
+-- clauses (other versions may plan differently): the SET clauses keep this
+-- function from being inlined, so its statement gets a generic plan with the
+-- arguments as unbound parameters. The planner costs a LIMIT given by a
+-- parameter as 10% of the rows, which makes the HNSW path look several times
+-- dearer than a sequential scan. At every measured size, from about 9,000 up
+-- to 200,000 episodes, each tier is a sequential scan (parallel on the larger
+-- tables) sorted by distance, with or without p_kinds and
+-- p_exclude_session_id: the results are exact, and its time grows with the
+-- table.
+--
+-- The episode kind test is `p_kinds IS NULL OR engram_episode_kind(...) =
+-- ANY(p_kinds)`, a row filter in that scan; the planner neither uses
+-- idx_episodes_kind nor reads its statistics. Because the scan is exact, a
+-- filtered call returns min(LIMIT, matching rows) for the tier. On the other
 -- tiers the kind test names no column and becomes a one-time filter, so a
 -- tier left out by p_kinds is not scanned at all.
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
@@ -1403,7 +1412,10 @@ CREATE INDEX IF NOT EXISTS idx_episodes_fts ON public.memory_episodes USING gin 
 -- engram_episode_kind(metadata, session_id) with a known kind list. The
 -- search functions are planned with p_kinds as an unbound parameter behind
 -- `p_kinds IS NULL OR ...`, so they use neither this index nor its
--- statistics; see engram_vector_search.
+-- statistics; see engram_vector_search. Even a query with a literal kind
+-- list, which can use this index as a bitmap scan, does not get estimates
+-- from it: PostgreSQL keeps no usable statistics for a partial expression
+-- index, so the kind test is estimated with a default selectivity.
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_kind ON public.memory_episodes USING btree (public.engram_episode_kind(metadata, session_id)) WHERE (forgotten_at IS NULL);
