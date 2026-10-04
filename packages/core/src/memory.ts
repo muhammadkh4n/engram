@@ -115,7 +115,7 @@ export interface SessionHandle {
   ingest(message: Omit<Message, 'sessionId'>): Promise<void>
   /** Recalls are primed by this session's earlier recalls only; the session
    *  id is the conversation key unless `conversationKey` overrides it. */
-  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean; conversationKey?: string }) : Promise<RecallResult>
+  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean; conversationKey?: string; kinds?: MemoryKind[]; excludeSessionId?: string }) : Promise<RecallResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1161,7 @@ export class Memory {
       },
       // The session is the conversation: its recalls prime each other and
       // no other session's.
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean; conversationKey?: string }) => {
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean; conversationKey?: string; kinds?: MemoryKind[]; excludeSessionId?: string }) => {
         return this.recall(query, { ...opts, conversationKey: opts?.conversationKey ?? sid })
       },
     }

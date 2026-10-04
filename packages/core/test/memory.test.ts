@@ -1169,4 +1169,21 @@ describe('Memory — recall() kind and session filter', () => {
       memory.recall('Postgres billing service', { kinds: ['nonsense'] as unknown as ['decision'] }),
     ).rejects.toThrow(/unknown memory kind/)
   })
+
+  it('forwards kinds and excludeSessionId from a session handle to Memory.recall', async () => {
+    const recall = vi.spyOn(memory, 'recall')
+    const handle = memory.session('live-sess-k7q')
+
+    const result = await handle.recall('Postgres billing service', {
+      kinds: ['decision'],
+      excludeSessionId: 'live-sess-k7q',
+    })
+
+    expect(recall).toHaveBeenCalledWith('Postgres billing service', {
+      kinds: ['decision'],
+      excludeSessionId: 'live-sess-k7q',
+      conversationKey: 'live-sess-k7q',
+    })
+    expect(contents(result)).toEqual(['Decided the billing service stores Postgres snapshots nightly'])
+  })
 })

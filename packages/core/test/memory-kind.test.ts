@@ -11,6 +11,7 @@ import {
 import * as core from '../src/index.js'
 import type { MemoryType, SearchOptions } from '../src/types.js'
 import type { StorageAdapter } from '../src/adapters/storage.js'
+import type { Memory, SessionHandle } from '../src/memory.js'
 
 interface KindCase {
   why: string
@@ -102,5 +103,15 @@ describe('search options', () => {
   it('per-tier search options do not offer filters the tier searches do not apply', () => {
     expectTypeOf<SearchOptions>().not.toHaveProperty('kinds')
     expectTypeOf<SearchOptions>().not.toHaveProperty('excludeSessionId')
+  })
+})
+
+describe('recall options', () => {
+  it('a session handle takes the same kind filter and session exclusion as Memory.recall', () => {
+    type MemoryOpts = NonNullable<Parameters<Memory['recall']>[1]>
+    type HandleOpts = NonNullable<Parameters<SessionHandle['recall']>[1]>
+    expectTypeOf<HandleOpts['kinds']>().toEqualTypeOf<MemoryOpts['kinds']>()
+    expectTypeOf<HandleOpts['excludeSessionId']>().toEqualTypeOf<MemoryOpts['excludeSessionId']>()
+    expectTypeOf<HandleOpts['kinds']>().toEqualTypeOf<MemoryKind[] | undefined>()
   })
 })
