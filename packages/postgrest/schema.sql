@@ -1428,8 +1428,13 @@ CREATE INDEX IF NOT EXISTS idx_episodes_fts ON public.memory_episodes USING gin 
 -- `p_kinds IS NULL OR ...`, so they use neither this index nor its
 -- statistics; see engram_vector_search. Even a query with a literal kind
 -- list, which can use this index as a bitmap scan, does not get estimates
--- from it: PostgreSQL keeps no usable statistics for a partial expression
--- index, so the kind test is estimated with a default selectivity.
+-- from it: ANALYZE does collect statistics for the index expression, but
+-- PostgreSQL's selectivity estimation does not consult the statistics of a
+-- partial index, so the kind test is estimated with a default selectivity.
+--
+-- A plain CREATE INDEX blocks writes to memory_episodes while it builds; on
+-- a large existing table build it first with CREATE INDEX CONCURRENTLY (see
+-- the package README) and this statement then skips it.
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_kind ON public.memory_episodes USING btree (public.engram_episode_kind(metadata, session_id)) WHERE (forgotten_at IS NULL);
