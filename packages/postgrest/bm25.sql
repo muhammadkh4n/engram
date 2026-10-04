@@ -216,7 +216,10 @@ DROP FUNCTION IF EXISTS public.engram_bm25_match(text[], integer, text, text);
 --
 -- Filters. p_kinds and p_exclude_session_id keep the rows engram_text_match
 -- keeps under the same arguments, so they are applied where a term picks its
--- candidates: the cap is filled with rows the caller can receive.
+-- candidates: the cap is filled with rows the caller can receive. As in
+-- engram_text_match, the episode branch first tests p_kinds against the
+-- kinds engram_episode_kind can return, a one-time filter that skips the
+-- episode scan when no requested kind is an episode kind.
 --
 -- An empty or NULL p_terms, or terms that reduce to no lexemes, return no
 -- rows. p_project_id is accepted for caller compatibility and filters
@@ -256,6 +259,7 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             WHERE e.fts @@ mt.q
               AND e.forgotten_at IS NULL
               AND (p_session_id IS NULL OR e.session_id = p_session_id)
+              AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
               AND (p_kinds IS NULL OR engram_episode_kind(e.metadata, e.session_id) = ANY(p_kinds))
               AND (p_exclude_session_id IS NULL OR e.session_id IS DISTINCT FROM p_exclude_session_id)
             ORDER BY ts_rank_cd(e.fts, mt.q, 2) DESC, e.id

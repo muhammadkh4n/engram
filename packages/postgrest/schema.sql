@@ -246,6 +246,9 @@ $$;
 -- which resolve under any search_path, including the empty one this file
 -- runs with. Changing the body changes what idx_episodes_kind holds: a
 -- re-apply that alters it must REINDEX INDEX public.idx_episodes_kind.
+-- engram_vector_search, engram_text_match and engram_bm25_match list every
+-- kind this function can return, to skip the episode tier when none is
+-- asked for: a kind added here must be added to those three lists.
 --
 -- An INSERT into memory_episodes evaluates the index expression as the
 -- inserting role, which therefore needs EXECUTE: service_role has it, and the
@@ -636,6 +639,13 @@ DROP FUNCTION IF EXISTS public.engram_text_match(text[], integer, text, text);
 -- 'procedure' (procedural). p_exclude_session_id leaves out the episodes and
 -- digests of that session; semantic and procedural rows belong to no session
 -- and are kept. With both NULL every row matches as before, in the same order.
+--
+-- The episode branch first tests p_kinds against the list of kinds
+-- engram_episode_kind can return. That clause reads no column, so the
+-- planner makes it a one-time filter: when no requested kind is an episode
+-- kind, memory_episodes is not scanned at all. Being parameter-only, it is
+-- estimated as always true and leaves the unfiltered plan's row estimates
+-- as they were.
 CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
@@ -656,6 +666,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
     WHERE me.fts @@ mq.q
       AND me.forgotten_at IS NULL
       AND (p_session_id IS NULL OR me.session_id = p_session_id)
+      AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
       AND (p_kinds IS NULL OR engram_episode_kind(me.metadata, me.session_id) = ANY(p_kinds))
       AND (p_exclude_session_id IS NULL OR me.session_id IS DISTINCT FROM p_exclude_session_id)
 
@@ -777,9 +788,11 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- The episode kind test is `p_kinds IS NULL OR engram_episode_kind(...) =
 -- ANY(p_kinds)`, a row filter in that scan; the planner neither uses
 -- idx_episodes_kind nor reads its statistics. Because the scan is exact, a
--- filtered call returns min(LIMIT, matching rows) for the tier. On the other
--- tiers the kind test names no column and becomes a one-time filter, so a
--- tier left out by p_kinds is not scanned at all.
+-- filtered call returns min(LIMIT, matching rows) for the tier. The episode
+-- tier also tests p_kinds against the episode kind list (see
+-- engram_text_match), and on the other tiers the kind test names no column:
+-- each is a one-time filter, so a tier left out by p_kinds is not scanned at
+-- all.
 CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
@@ -799,6 +812,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
       WHERE me.embedding IS NOT NULL
         AND me.forgotten_at IS NULL
         AND (p_session_id IS NULL OR me.session_id = p_session_id)
+        AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
         AND (p_kinds IS NULL OR engram_episode_kind(me.metadata, me.session_id) = ANY(p_kinds))
         AND (p_exclude_session_id IS NULL OR me.session_id IS DISTINCT FROM p_exclude_session_id)
       ORDER BY me.embedding <=> p_query_embedding

@@ -309,6 +309,22 @@ describe.each(SEARCH_FUNCTIONS)('$file $name', ({ sql, name, old, args }) => {
     )
   })
 
+  it('skips the episode scan through a parameter-only test when no requested kind is an episode kind', () => {
+    const episode = branches(body).get('episode')!
+    const guard = episode.match(/AND \(p_kinds IS NULL OR p_kinds && ARRAY\[([^\]]*)\]\)/)
+    expect(guard).not.toBeNull()
+    const listed = [...guard![1]!.matchAll(/'(\w+)'/g)].map((m) => m[1]!)
+    const { rules, otherwise } = kindRules()
+    expect(new Set(listed)).toEqual(new Set([...rules.map((r) => r.kind), otherwise]))
+    expect(listed).toHaveLength(new Set(listed).size)
+    // A clause naming no column is what the planner turns into a one-time
+    // filter; the row classifier stays a separate condition.
+    expect(guard![0]).not.toMatch(/\w+\.\w+/)
+    for (const [type, chunk] of branches(body)) {
+      if (type !== 'episode') expect(chunk).not.toContain('p_kinds &&')
+    }
+  })
+
   it('keeps digests only for the digest kind and applies the session exclusion to them', () => {
     const digest = branches(body).get('digest')!
     expect(digest).toContain("AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))")
@@ -324,8 +340,8 @@ describe.each(SEARCH_FUNCTIONS)('$file $name', ({ sql, name, old, args }) => {
   })
 
   it('reads each filter parameter only inside a NULL-guarded condition', () => {
-    expect(body.match(/\bp_kinds\b/g)).toHaveLength(8)
-    expect(body.match(/p_kinds IS NULL OR/g)).toHaveLength(4)
+    expect(body.match(/\bp_kinds\b/g)).toHaveLength(10)
+    expect(body.match(/p_kinds IS NULL OR/g)).toHaveLength(5)
     expect(body.match(/\bp_exclude_session_id\b/g)).toHaveLength(4)
     expect(body.match(/p_exclude_session_id IS NULL OR/g)).toHaveLength(2)
   })
