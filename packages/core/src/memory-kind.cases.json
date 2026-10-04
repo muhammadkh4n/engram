@@ -1,0 +1,387 @@
+[
+  {
+    "why": "a digest row",
+    "tier": "digest",
+    "metadata": {},
+    "sessionId": null,
+    "kind": "digest"
+  },
+  {
+    "why": "tier decides before any metadata",
+    "tier": "digest",
+    "metadata": {
+      "source": "git-commit",
+      "salienceCategory": "decision"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "digest"
+  },
+  {
+    "why": "a semantic memory",
+    "tier": "semantic",
+    "metadata": {},
+    "sessionId": null,
+    "kind": "fact"
+  },
+  {
+    "why": "semantic tier wins over a summary type",
+    "tier": "semantic",
+    "metadata": {
+      "type": "session-summary"
+    },
+    "sessionId": "default",
+    "kind": "fact"
+  },
+  {
+    "why": "a procedural memory",
+    "tier": "procedural",
+    "metadata": {},
+    "sessionId": null,
+    "kind": "procedure"
+  },
+  {
+    "why": "procedural tier wins over a category",
+    "tier": "procedural",
+    "metadata": {
+      "salienceCategory": "lesson"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "procedure"
+  },
+  {
+    "why": "session summary",
+    "tier": "episode",
+    "metadata": {
+      "type": "session-summary",
+      "source": "hook-capture"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "summary"
+  },
+  {
+    "why": "pre-compact summary",
+    "tier": "episode",
+    "metadata": {
+      "type": "pre-compact-summary"
+    },
+    "sessionId": "default",
+    "kind": "summary"
+  },
+  {
+    "why": "summary wins over commit",
+    "tier": "episode",
+    "metadata": {
+      "type": "session-summary",
+      "source": "git-commit",
+      "salienceCategory": "milestone"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "summary"
+  },
+  {
+    "why": "an unlisted type is not a summary",
+    "tier": "episode",
+    "metadata": {
+      "type": "summary"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  },
+  {
+    "why": "a git-commit row with category milestone is a commit",
+    "tier": "episode",
+    "metadata": {
+      "source": "git-commit",
+      "salienceCategory": "milestone"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "commit"
+  },
+  {
+    "why": "commit wins over ruling",
+    "tier": "episode",
+    "metadata": {
+      "source": "git-commit",
+      "salienceCategory": "ruling"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "commit"
+  },
+  {
+    "why": "commit needs no category",
+    "tier": "episode",
+    "metadata": {
+      "source": "git-commit"
+    },
+    "sessionId": "default",
+    "kind": "commit"
+  },
+  {
+    "why": "ruling category",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "ruling"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "ruling"
+  },
+  {
+    "why": "ruling wins over the note rule",
+    "tier": "episode",
+    "metadata": {
+      "salienceCategory": "ruling"
+    },
+    "sessionId": "default",
+    "kind": "ruling"
+  },
+  {
+    "why": "proposal category",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "proposal"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "proposal"
+  },
+  {
+    "why": "knowledge category fact",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "fact"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "knowledge"
+  },
+  {
+    "why": "knowledge category lesson",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "lesson"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "knowledge"
+  },
+  {
+    "why": "knowledge category preference",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "preference"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "knowledge"
+  },
+  {
+    "why": "knowledge category external_fact",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "external_fact"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "knowledge"
+  },
+  {
+    "why": "knowledge category identity",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "identity"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "knowledge"
+  },
+  {
+    "why": "decision category",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "decision"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "decision"
+  },
+  {
+    "why": "decision wins over the note rule",
+    "tier": "episode",
+    "metadata": {
+      "salienceCategory": "decision"
+    },
+    "sessionId": "default",
+    "kind": "decision"
+  },
+  {
+    "why": "progress category milestone",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "milestone"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "progress"
+  },
+  {
+    "why": "progress category plan",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "plan"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "progress"
+  },
+  {
+    "why": "progress category context_switch",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "context_switch"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "progress"
+  },
+  {
+    "why": "progress category risk",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "risk"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "progress"
+  },
+  {
+    "why": "progress category emotional_signal",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "emotional_signal"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "progress"
+  },
+  {
+    "why": "memory-ingest source with a real session",
+    "tier": "episode",
+    "metadata": {
+      "source": "memory-ingest"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "note"
+  },
+  {
+    "why": "memory-ingest with an unknown category",
+    "tier": "episode",
+    "metadata": {
+      "source": "memory-ingest",
+      "salienceCategory": "chitchat"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "note"
+  },
+  {
+    "why": "no source and session default",
+    "tier": "episode",
+    "metadata": {},
+    "sessionId": "default",
+    "kind": "note"
+  },
+  {
+    "why": "no source and an empty session",
+    "tier": "episode",
+    "metadata": {},
+    "sessionId": "",
+    "kind": "note"
+  },
+  {
+    "why": "no source and no session",
+    "tier": "episode",
+    "metadata": {},
+    "sessionId": null,
+    "kind": "note"
+  },
+  {
+    "why": "a JSON-null source counts as no source",
+    "tier": "episode",
+    "metadata": {
+      "source": null
+    },
+    "sessionId": "default",
+    "kind": "note"
+  },
+  {
+    "why": "no source and a UUID session",
+    "tier": "episode",
+    "metadata": {},
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  },
+  {
+    "why": "the default session id is case-sensitive",
+    "tier": "episode",
+    "metadata": {},
+    "sessionId": "Default",
+    "kind": "turn"
+  },
+  {
+    "why": "any other source in the default session",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture"
+    },
+    "sessionId": "default",
+    "kind": "turn"
+  },
+  {
+    "why": "an empty-string source is still a source",
+    "tier": "episode",
+    "metadata": {
+      "source": ""
+    },
+    "sessionId": "default",
+    "kind": "turn"
+  },
+  {
+    "why": "an unknown category is a turn",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "chitchat"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  },
+  {
+    "why": "inbound mail",
+    "tier": "episode",
+    "metadata": {
+      "source": "inbound-email"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  },
+  {
+    "why": "categories are case-sensitive",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": "Decision"
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  },
+  {
+    "why": "a non-string category matches nothing",
+    "tier": "episode",
+    "metadata": {
+      "source": "hook-capture",
+      "salienceCategory": 7
+    },
+    "sessionId": "0193a1b2-7c4d-7e5f-8a9b-1c2d3e4f5a6b",
+    "kind": "turn"
+  }
+]

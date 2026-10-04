@@ -1,5 +1,6 @@
 import type { RecallPayload } from './retrieval/output-policy.js'
 import type { FusionConfig } from './retrieval/fusion-config.js'
+import type { MemoryKind } from './memory-kind.js'
 
 // === Memory Types ===
 
@@ -430,6 +431,10 @@ export interface SearchOptions {
   beforeDate?: Date
   /** Wave 5: scope results to a specific project. NULL rows always returned (backward compat). */
   projectId?: string
+  /** Only return memories of these kinds (see `memoryKind`). Absent means every kind; an empty list is rejected. */
+  kinds?: MemoryKind[]
+  /** Leave out memories captured in this session, e.g. the caller's own live conversation. */
+  excludeSessionId?: string
 }
 
 export interface SearchResult<T> {
