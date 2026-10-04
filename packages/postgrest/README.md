@@ -106,6 +106,8 @@ Engram ships a single idempotent `schema.sql` — bundled in this npm package an
 
 > **RPC access:** only `service_role` may execute the RPC functions in `schema.sql` and `bm25.sql`. They run as their owner (`SECURITY DEFINER`), so both files revoke `EXECUTE` from `PUBLIC`, `anon` and `authenticated` and grant it to `service_role`: every `/rpc/engram_*` endpoint refuses a request with the anon key or with no JWT (`401`, error code `42501`). Configure the adapter with a service-role JWT. After upgrading, re-apply `schema.sql` (and `bm25.sql` if you use it) and reload PostgREST's schema cache, so an existing database drops the grants older versions left in place.
 
+> **Memory kinds and the search filters:** every stored memory has a kind, derived from fields its row already carries; nothing stores it and no row is rewritten. The digest, semantic and procedural tiers are the kinds `digest`, `fact` and `procedure`. An episode's kind comes from `engram_episode_kind(metadata jsonb, session_id text)`, an `IMMUTABLE` SQL function whose rules, first match wins, are: `summary` (`metadata.type` is `session-summary` or `pre-compact-summary`), `commit` (`metadata.source` is `git-commit`), `ruling`, `proposal`, `knowledge` (`fact`, `lesson`, `preference`, `external_fact`, `identity`), `decision` and `progress` (`milestone`, `plan`, `context_switch`, `risk`, `emotional_signal`) from `metadata.salienceCategory`, `note` (`metadata.source` is `memory-ingest`, or there is no source and the session is NULL, empty or `default`), and `turn` for any other episode. The partial expression index `idx_episodes_kind` on `memory_episodes (engram_episode_kind(metadata, session_id)) WHERE forgotten_at IS NULL` serves the filter and gives the planner each kind's share; it is a btree built beside the existing indexes, with no table rewrite. `engram_vector_search`, `engram_text_match` and `engram_bm25_match` take two trailing parameters, `p_kinds text[] DEFAULT NULL` (keep only these kinds) and `p_exclude_session_id text DEFAULT NULL` (leave out that session's episodes and digests; semantic and procedural rows have no session and are kept). With both NULL the results and their order are what they were. The apply drops each function's previous signature first, so each name keeps one function, and `engram_episode_kind` is executable by `service_role` only, like the RPCs: an `INSERT` into `memory_episodes` evaluates the index expression as the inserting role. After re-applying `schema.sql` (and `bm25.sql`), run `NOTIFY pgrst, 'reload schema';` so PostgREST sees the new signatures. A later change to the function's rules needs `REINDEX INDEX public.idx_episodes_kind` after the apply, since the index holds the kinds the old rules computed.
+
 Tables (all in `public`):
 - `memory_episodes` — raw turns with embeddings
 - `memory_digests` — light-sleep summaries
@@ -154,7 +156,7 @@ The adapter probes for `engram_bm25_match` when it initializes and keeps that mo
 
 ### Upgrading an existing install
 
-Re-apply `bm25.sql` (same flags as above), then reload PostgREST's schema cache. No service restart is needed: the function's name and signature do not change.
+Re-apply `bm25.sql` (same flags as above), then reload PostgREST's schema cache with `NOTIFY pgrst, 'reload schema';`. No service restart is needed: the function keeps its name, and a signature change only appends parameters with defaults, so a running service's calls still resolve. The file drops the previous signature before creating the new one (when `p_kinds` and `p_exclude_session_id` were added, it dropped `engram_bm25_match(text[], integer, text, text)`), because PostgREST cannot resolve a call when two functions share a name.
 
 pg_textsearch writes `k1` and `b` into each index's metapage when the index is built. `ALTER INDEX … SET (b = …)` only rewrites the stored options, and scores keep the old value until a rebuild. So before creating the indexes, `bm25.sql` drops any of the four whose stored options (`pg_class.reloptions`) are not exactly `text_config=english, k1=1.2, b=0.4`, and builds it again. While an index is rebuilt, writes to its table wait. An index that already has these options is kept, so applying the file again rebuilds nothing.
 
@@ -169,7 +171,7 @@ DROP INDEX public.idx_episodes_bm25;
 DROP INDEX public.idx_digests_bm25;
 DROP INDEX public.idx_semantic_bm25;
 DROP INDEX public.idx_procedural_bm25;
-DROP FUNCTION public.engram_bm25_match(text[], integer, text, text);
+DROP FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text);
 DROP EXTENSION pg_textsearch;
 ```
 
