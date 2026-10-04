@@ -1,9 +1,9 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, expectTypeOf, vi } from 'vitest'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SearchResult, TypedMemory } from '@engram-mem/core'
-import { RecallEngine, exactCosine, type RecallEngineOpts } from '../src/engine.js'
+import type { SearchResult, StorageAdapter, TypedMemory } from '@engram-mem/core'
+import { RecallEngine, exactCosine, type RecallEngineOpts, type VectorSearchOpts } from '../src/engine.js'
 import {
   FakeStorageAdapter,
   buildCorpus,
@@ -234,6 +234,71 @@ describe('RecallEngine: filter parity (sqlite semantics)', () => {
     const withEmptyFilters = await engine.vectorSearch(q, { projectId: '', sessionId: '', limit: 10 })
     const withNoFilters = await engine.vectorSearch(q, { limit: 10 })
     expectSameResults(withEmptyFilters, withNoFilters)
+  })
+})
+
+describe('RecallEngine: kind and session-exclusion filters go to storage', () => {
+  it('a warm engine given kinds asks inner.vectorSearch with every option intact and does not scan', async () => {
+    const fake = freshFake()
+    const engine = await readyEngine(fake)
+    const scan = vi.spyOn(engine['store'], 'scanTier1')
+    const inner = vi.spyOn(fake, 'vectorSearch')
+    const q = perturb(emb(CORPUS.rows[12]), CORPUS.rng, 0.2)
+    const opts: VectorSearchOpts = {
+      limit: 7,
+      tiers: ['episode', 'digest'],
+      projectId: 'proj-a',
+      kinds: ['decision', 'knowledge'],
+      excludeSessionId: 'sess-live',
+    }
+
+    const res = await engine.vectorSearch(q, opts)
+
+    expect(inner).toHaveBeenCalledTimes(1)
+    expect(inner).toHaveBeenCalledWith(q, opts)
+    expect(scan).not.toHaveBeenCalled()
+    expect(engine.stats().state).toBe('ready')
+    expect(engine.stats().filteredPassthroughCalls).toBe(1)
+    expect(engine.stats().passthroughCalls).toBe(0)
+    expect(engine.stats().lastTier1M).toBeNull()
+    expectSameResults(res, await fake.referenceScan(q, opts))
+  })
+
+  it('a warm engine given only excludeSessionId also answers from storage', async () => {
+    const fake = freshFake()
+    const engine = await readyEngine(fake)
+    const scan = vi.spyOn(engine['store'], 'scanTier1')
+    const inner = vi.spyOn(fake, 'vectorSearch')
+    const q = perturb(emb(CORPUS.rows[40]), CORPUS.rng, 0.2)
+
+    await engine.vectorSearch(q, { limit: 5, excludeSessionId: 'sess-1' })
+
+    expect(inner).toHaveBeenCalledWith(q, { limit: 5, excludeSessionId: 'sess-1' })
+    expect(scan).not.toHaveBeenCalled()
+    expect(engine.stats().filteredPassthroughCalls).toBe(1)
+  })
+
+  it('a warm engine without those filters keeps the RAM path', async () => {
+    const fake = freshFake()
+    const engine = await readyEngine(fake)
+    const scan = vi.spyOn(engine['store'], 'scanTier1')
+    const inner = vi.spyOn(fake, 'vectorSearch')
+    const q = perturb(emb(CORPUS.rows[12]), CORPUS.rng, 0.2)
+    const opts = { limit: 7, tiers: ['episode' as const, 'digest' as const], sessionId: 'sess-1' }
+
+    const res = await engine.vectorSearch(q, opts)
+
+    expect(scan).toHaveBeenCalled()
+    expect(inner).not.toHaveBeenCalled()
+    expect(engine.stats().filteredPassthroughCalls).toBe(0)
+    expect(engine.stats().lastTier1M).not.toBeNull()
+    expectSameResults(res, await fake.referenceScan(q, opts))
+  })
+
+  it("the engine's vectorSearch opts type is the storage port's opts type", () => {
+    type PortOpts = NonNullable<Parameters<StorageAdapter['vectorSearch']>[1]>
+    expectTypeOf<VectorSearchOpts>().toEqualTypeOf<PortOpts>()
+    expectTypeOf<Parameters<RecallEngine['vectorSearch']>[1]>().toEqualTypeOf<PortOpts | undefined>()
   })
 })
 
