@@ -108,3 +108,50 @@ describe('recall engine — faintAssociations', () => {
     })
   })
 })
+
+describe('recall engine — kind and session filter on graph neighbours', () => {
+  beforeEach(() => {
+    activate.mockReset()
+  })
+
+  function storedNeighbour(id: string, type: RetrievedMemory['type']): RetrievedMemory {
+    return { ...neighbour(id, 0.3), type }
+  }
+
+  it('judges an episode neighbour on its stored session and drops it from Related and Faint', async () => {
+    // ep-assoc-1 is stored under sess-2, ep-1 under sess-1 (mock storage fixtures).
+    activate.mockResolvedValue({
+      associations: [storedNeighbour('ep-assoc-1', 'episode'), storedNeighbour('ep-1', 'episode')],
+      context: composite([storedNeighbour('ep-assoc-1', 'episode')]),
+    })
+    const storage = createMockStorage()
+
+    const result = await recall('what did we decide about the deploy?', storage, new SensoryBuffer(), {
+      strategy: RECALL_STRATEGIES.deep,
+      embedding: DUMMY_EMBEDDING,
+      graph: GRAPH,
+      excludeSessionId: 'sess-2',
+    })
+
+    expect(result.associations.map((a) => a.id)).toEqual(['ep-1'])
+    expect(result).not.toHaveProperty('faintAssociations')
+    expect(result.formatted).not.toContain('graph neighbour ep-assoc-1')
+  })
+
+  it('keeps a semantic neighbour by tier alone and drops a neighbour storage no longer returns', async () => {
+    activate.mockResolvedValue({
+      associations: [storedNeighbour('sem-k7q', 'semantic'), storedNeighbour('gone-k7q', 'episode')],
+      context: composite([]),
+    })
+    const storage = createMockStorage()
+
+    const result = await recall('what did we decide about the deploy?', storage, new SensoryBuffer(), {
+      strategy: RECALL_STRATEGIES.deep,
+      embedding: DUMMY_EMBEDDING,
+      graph: GRAPH,
+      kinds: ['fact', 'turn'],
+    })
+
+    expect(result.associations.map((a) => a.id)).toEqual(['sem-k7q'])
+  })
+})

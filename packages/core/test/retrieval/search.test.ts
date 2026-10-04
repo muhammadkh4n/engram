@@ -982,3 +982,67 @@ describe('unifiedSearch — recency clock', () => {
     expect((await run())[0]!.relevance).toBeLessThan(atNow[0]!.relevance)
   })
 })
+
+describe('unifiedSearch — kind and session filter', () => {
+  const OWN_SESSION = 'live-sess-k7q'
+
+  function run(storage: ReturnType<typeof createMockStorage>, extra: Record<string, unknown> = {}) {
+    return unifiedSearch({
+      query: 'TypeScript strict mode',
+      embedding: [0.1, 0.2, 0.3],
+      strategy: LIGHT_STRATEGY,
+      storage,
+      sensory: null,
+      ...extra,
+    })
+  }
+
+  it('forwards kinds and excludeSessionId to vectorSearch and textBoost', async () => {
+    const storage = createMockStorage()
+
+    await run(storage, { kinds: ['decision', 'fact'], excludeSessionId: OWN_SESSION })
+
+    expect(storage.vectorSearch).toHaveBeenCalledWith([0.1, 0.2, 0.3], {
+      limit: 32,
+      sessionId: undefined,
+      kinds: ['decision', 'fact'],
+      excludeSessionId: OWN_SESSION,
+    })
+    const [, boostOpts] = vi.mocked(storage.textBoost).mock.calls[0]!
+    expect(boostOpts).toMatchObject({ kinds: ['decision', 'fact'], excludeSessionId: OWN_SESSION })
+  })
+
+  it('passes neither key to storage when the options are absent', async () => {
+    const storage = createMockStorage()
+
+    await run(storage)
+
+    const [, vectorOpts] = vi.mocked(storage.vectorSearch).mock.calls[0]!
+    const [, boostOpts] = vi.mocked(storage.textBoost).mock.calls[0]!
+    expect(Object.keys(vectorOpts ?? {}).sort()).toEqual(['limit', 'sessionId'])
+    expect(Object.keys(boostOpts ?? {}).sort()).toEqual(['limit', 'sessionId'])
+  })
+
+  it('applies the filter to the per-tier text fallback, which takes none itself', async () => {
+    const decision: Episode = {
+      ...MOCK_EPISODE,
+      id: 'ep-decided-k7q',
+      sessionId: 'other-sess-k7q',
+      metadata: { source: 'hook', salienceCategory: 'decision' },
+    }
+    const ownDecision: Episode = { ...decision, id: 'ep-own-k7q', sessionId: OWN_SESSION }
+    const storage = createMockStorage({
+      vectorSearchResults: [],
+      textBoostResults: [],
+      episodeResults: [
+        { item: decision, similarity: 0.8 },
+        { item: ownDecision, similarity: 0.8 },
+        { item: MOCK_EPISODE, similarity: 0.8 },
+      ],
+    })
+
+    const result = await run(storage, { kinds: ['decision', 'digest'], excludeSessionId: OWN_SESSION })
+
+    expect(result.map((r) => r.id).sort()).toEqual(['dig-1', 'ep-decided-k7q'])
+  })
+})

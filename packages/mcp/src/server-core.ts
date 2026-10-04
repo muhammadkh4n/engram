@@ -293,6 +293,10 @@ export function chatIntelligenceOptionsFromEnv(
 
 const DEFAULT_SALIENCE_THRESHOLD = 0.7
 
+/** `metadata.source` of rows the memory_ingest tool writes; core's memory
+ *  kind rules read this value as a note. */
+export const MEMORY_INGEST_SOURCE = 'memory-ingest'
+
 /**
  * ENGRAM_SALIENCE_THRESHOLD: the classifier confidence a capture needs to be
  * stored, a number in 0..1 (default 0.7). Anything else fails startup: a
@@ -871,6 +875,36 @@ export function formatForgetByIds(result: ForgetByIdsResult): string {
 
 /** The memory_forget tool body, separated from the server so it can run
  *  against any object with the two forget entry points. */
+export async function runMemoryIngest(
+  mem: Pick<Memory, 'ingest'>,
+  args: Record<string, unknown>,
+): Promise<ToolTextResult> {
+  const content = args['content']
+  const role = args['role']
+  const sessionId = args['session_id']
+  const projectId = normalizeProjectId(args['project_id'])
+
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return toolError('content must be a non-empty string')
+  }
+  if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+    return toolError('role must be one of "user", "assistant", or "system"')
+  }
+
+  // The tool takes no source argument, so every row it writes is named as a
+  // deliberate note; capture routes write their own source.
+  await mem.ingest(
+    {
+      content: content.trim(),
+      role,
+      sessionId: typeof sessionId === 'string' ? sessionId : undefined,
+      metadata: { source: MEMORY_INGEST_SOURCE },
+    },
+    projectId ? { projectId } : undefined,
+  )
+  return toolText('Memory stored.')
+}
+
 export async function runMemoryForget(
   mem: Pick<Memory, 'forget' | 'forgetByIds'>,
   args: Record<string, unknown>,
@@ -911,42 +945,7 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_ingest') {
-        const content = args['content']
-        const role = args['role']
-        const sessionId = args['session_id']
-        const projectId = normalizeProjectId(args['project_id'])
-
-        if (typeof content !== 'string' || content.trim().length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: content must be a non-empty string' }],
-            isError: true,
-          }
-        }
-
-        if (role !== 'user' && role !== 'assistant' && role !== 'system') {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'Error: role must be one of "user", "assistant", or "system"',
-              },
-            ],
-            isError: true,
-          }
-        }
-
-        await mem.ingest(
-          {
-            content: content.trim(),
-            role,
-            sessionId: typeof sessionId === 'string' ? sessionId : undefined,
-          },
-          projectId ? { projectId } : undefined,
-        )
-
-        return {
-          content: [{ type: 'text' as const, text: 'Memory stored.' }],
-        }
+        return await runMemoryIngest(mem, args)
       }
 
       if (name === 'memory_forget') {

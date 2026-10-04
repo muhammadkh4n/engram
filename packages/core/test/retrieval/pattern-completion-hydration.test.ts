@@ -109,3 +109,36 @@ describe('pattern completion hydration', () => {
     expect(hit?.type).toBe('episode')
   })
 })
+
+describe('pattern completion under a kind or session filter', () => {
+  function storageWithLiveRows() {
+    const storage = createMockStorage(NO_SEARCH_HITS)
+    storage.getByIds = vi.fn(async (refs: Array<{ id: string; type: MemoryType }>) =>
+      refs.flatMap((ref) => {
+        const entry = ROWS[ref.id]
+        return entry && !entry.forgotten && entry.row.type === ref.type ? [entry.row] : []
+      }),
+    )
+    return storage
+  }
+
+  async function patternIds(filter: { kinds?: Array<'turn' | 'fact'>; excludeSessionId?: string }) {
+    const result = await recall('what did we decide about auth', storageWithLiveRows(), new SensoryBuffer(), {
+      strategy: RECALL_STRATEGIES.light,
+      embedding: [0.1, 0.2, 0.3],
+      graph: makeGraph(),
+      ...filter,
+    })
+    return result.memories.filter((m) => m.metadata['patternCompletion'] === true).map((m) => m.id)
+  }
+
+  it('drops a graph-found row of another kind', async () => {
+    // The live episode has no source and a named session: kind `turn`.
+    expect(await patternIds({ kinds: ['turn'] })).toEqual([LIVE_EPISODE_ID])
+    expect(await patternIds({ kinds: ['fact'] })).toEqual([])
+  })
+
+  it('drops a graph-found row from the excluded session', async () => {
+    expect(await patternIds({ excludeSessionId: MOCK_EPISODE.sessionId })).toEqual([])
+  })
+})

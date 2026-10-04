@@ -16,7 +16,8 @@ import {
   type RenderedPayload,
 } from './output-policy.js'
 import { synthesize } from '../synthesis/index.js'
-import { unifiedSearch } from './search.js'
+import { isRecallFilterActive, matchesRecallFilter, passesRecallFilter, unifiedSearch, type RecallFilter } from './search.js'
+import { assertMemoryKinds, type MemoryKind } from '../memory-kind.js'
 import { expandQueryCached, hypotheticalDocCached, type RecallLlmCache } from './llm-step-cache.js'
 import { failureReason } from './embed-failure.js'
 import { rankPriorSwitchesFromEnv } from './rank-priors.js'
@@ -40,6 +41,31 @@ import { resolveEventDate, isoDate } from '../utils/event-date.js'
 // When one id exists in several tiers, pattern completion keeps the first
 // tier in this order.
 const PATTERN_TYPE_PRECEDENCE: readonly MemoryType[] = ['episode', 'digest', 'semantic', 'procedural']
+
+/**
+ * Graph neighbours (Related and Faint) come from the association walk or
+ * spreading activation, not from the filtered storage search, and carry no
+ * session id. Episodes and digests are looked up again in one batched call so
+ * kind and session are judged on the stored row; semantic and procedural rows
+ * have no session, so their tier and metadata decide. A row the lookup no
+ * longer returns (forgotten since the walk) is dropped.
+ */
+async function filterRelated(
+  groups: ReadonlyArray<readonly RetrievedMemory[]>,
+  filter: RecallFilter,
+  storage: StorageAdapter,
+): Promise<RetrievedMemory[][]> {
+  const sessionScoped = (m: RetrievedMemory): boolean => m.type === 'episode' || m.type === 'digest'
+  const refs = groups.flat().filter(sessionScoped).map((m) => ({ id: m.id, type: m.type }))
+  const rows = refs.length > 0 ? await storage.getByIds(refs) : []
+  const rowByKey = new Map(rows.map((row) => [`${row.type}:${row.data.id}`, row]))
+  const keep = (m: RetrievedMemory): boolean => {
+    if (!sessionScoped(m)) return passesRecallFilter(m.type, { metadata: m.metadata, sessionId: null }, filter)
+    const row = rowByKey.get(`${m.type}:${m.id}`)
+    return row !== undefined && matchesRecallFilter(row, filter)
+  }
+  return groups.map((group) => group.filter(keep))
+}
 
 function getMemoryContent(typed: TypedMemory): string {
   switch (typed.type) {
@@ -168,6 +194,16 @@ export interface RecallOpts {
    * question. Absent: every recall that expands calls the model.
    */
   llmCache?: RecallLlmCache
+  /**
+   * Only memories of these kinds (see `memoryKind`), in Recalled, Related and
+   * Faint alike. Absent: every kind. An empty or unknown list is rejected.
+   */
+  kinds?: MemoryKind[]
+  /**
+   * Leave out the episodes and digests of this session, e.g. the caller's own
+   * live conversation, which it already has in context.
+   */
+  excludeSessionId?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +491,13 @@ export async function recall(
   // Per call for the same reason; an invalid override fails before searching.
   const fusion = resolveFusionConfig(strategy.fusion, process.env)
   const vectorUnavailable = opts.vectorUnavailable
+  // A bad kind list fails here, before any search work.
+  if (opts.kinds !== undefined) assertMemoryKinds(opts.kinds)
+  const filter: RecallFilter = {
+    ...(opts.kinds !== undefined ? { kinds: opts.kinds } : {}),
+    ...(opts.excludeSessionId !== undefined ? { excludeSessionId: opts.excludeSessionId } : {}),
+  }
+  const filterActive = isRecallFilterActive(filter)
 
   // Skip mode — return immediately
   if (strategy.mode === 'skip') {
@@ -521,6 +564,7 @@ export async function recall(
     fusion,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
     ...(vectorUnavailable !== undefined ? { vectorUnavailable: true } : {}),
+    ...filter,
   })
   stageEnd(timings, 'search', searchStart)
   const degraded = await recallDegradation(vectorUnavailable, lexicalFailure)
@@ -565,6 +609,7 @@ export async function recall(
           rankPriors,
           fusion,
           ...(opts.now !== undefined ? { now: opts.now } : {}),
+          ...filter,
         })
 
         memories = fuseByReciprocalRank(memories, hydeMemories, slateSize, fusion.rrfK)
@@ -664,6 +709,8 @@ export async function recall(
           const activation = mergedActivation.get(memoryId) ?? 0
           const typed = rowById.get(memoryId)
           if (!typed) continue
+          // Graph-found rows bypass the filtered storage search.
+          if (filterActive && !matchesRecallFilter(typed, filter)) continue
 
           patternMemories.push({
             id: memoryId,
@@ -812,6 +859,15 @@ export async function recall(
     associations = await stageAssociate(memories, legacyStrategy, storage, linkSwitches.walkExclude)
   }
   if (strategy.associations) stageEnd(timings, 'graph', graphStart)
+  if (filterActive && (associations.length > 0 || (compositeContext?.faintAssociations.length ?? 0) > 0)) {
+    const [related = [], faint = []] = await filterRelated(
+      [associations, compositeContext?.faintAssociations ?? []],
+      filter,
+      storage,
+    )
+    associations = related
+    if (compositeContext !== null) compositeContext = { ...compositeContext, faintAssociations: faint }
+  }
 
   // Stage 3: Topic priming
   const primed = sensory ? stagePrime(memories, associations, sensory) : []
