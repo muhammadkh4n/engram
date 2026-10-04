@@ -10,6 +10,7 @@ import {
 } from '../src/memory-kind.js'
 import * as core from '../src/index.js'
 import type { MemoryType, SearchOptions } from '../src/types.js'
+import type { StorageAdapter } from '../src/adapters/storage.js'
 
 interface KindCase {
   why: string
@@ -87,11 +88,19 @@ describe('assertMemoryKinds', () => {
 })
 
 describe('search options', () => {
-  it('accepts a kind filter and a session to leave out, both optional', () => {
-    const none: SearchOptions = {}
-    const both: SearchOptions = { kinds: ['decision'], excludeSessionId: 'session-under-test' }
-    expect(none.kinds).toBeUndefined()
+  it('offers the kind filter and session exclusion on vectorSearch and textBoost', () => {
+    type VectorOpts = NonNullable<Parameters<StorageAdapter['vectorSearch']>[1]>
+    type TextOpts = NonNullable<Parameters<StorageAdapter['textBoost']>[1]>
+    const both: VectorOpts & TextOpts = { kinds: ['decision'], excludeSessionId: 'session-under-test' }
     expect(both.kinds).toEqual(['decision'])
-    expectTypeOf<SearchOptions['kinds']>().toEqualTypeOf<MemoryKind[] | undefined>()
+    expectTypeOf<VectorOpts['kinds']>().toEqualTypeOf<MemoryKind[] | undefined>()
+    expectTypeOf<TextOpts['kinds']>().toEqualTypeOf<MemoryKind[] | undefined>()
+    expectTypeOf<VectorOpts['excludeSessionId']>().toEqualTypeOf<string | undefined>()
+    expectTypeOf<TextOpts['excludeSessionId']>().toEqualTypeOf<string | undefined>()
+  })
+
+  it('per-tier search options do not offer filters the tier searches do not apply', () => {
+    expectTypeOf<SearchOptions>().not.toHaveProperty('kinds')
+    expectTypeOf<SearchOptions>().not.toHaveProperty('excludeSessionId')
   })
 })
