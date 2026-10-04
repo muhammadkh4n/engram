@@ -1115,3 +1115,75 @@ describe('Memory — session()', () => {
     expect(result).toHaveProperty('formatted')
   })
 })
+
+describe('Memory — recall() kind and session filter', () => {
+  let memory: Memory
+
+  beforeEach(async () => {
+    memory = createMemory({ storage: makeStorage() })
+    await memory.initialize()
+    await memory.ingest({
+      role: 'user',
+      content: 'We chose Postgres for the billing service',
+      sessionId: 'live-sess-k7q',
+      metadata: { source: 'hook', salienceCategory: 'decision' },
+    })
+    await memory.ingest({
+      role: 'user',
+      content: 'Decided the billing service stores Postgres snapshots nightly',
+      sessionId: 'past-sess-k7q',
+      metadata: { source: 'hook', salienceCategory: 'decision' },
+    })
+    await memory.ingest({
+      role: 'assistant',
+      content: 'Postgres billing service logs look noisy today',
+      sessionId: 'past-sess-k7q',
+      metadata: { source: 'hook' },
+    })
+  })
+
+  afterEach(async () => {
+    await memory.dispose()
+  })
+
+  const contents = (result: Awaited<ReturnType<Memory['recall']>>) => result.memories.map((m) => m.content).sort()
+
+  it('returns every kind and session without the options', async () => {
+    const result = await memory.recall('Postgres billing service', { reconsolidate: false })
+
+    expect(contents(result)).toHaveLength(3)
+  })
+
+  it('reaches storage with kinds and excludeSessionId and returns only the matching rows', async () => {
+    const result = await memory.recall('Postgres billing service', {
+      reconsolidate: false,
+      kinds: ['decision'],
+      excludeSessionId: 'live-sess-k7q',
+    })
+
+    expect(contents(result)).toEqual(['Decided the billing service stores Postgres snapshots nightly'])
+  })
+
+  it('rejects an unknown kind', async () => {
+    await expect(
+      memory.recall('Postgres billing service', { kinds: ['nonsense'] as unknown as ['decision'] }),
+    ).rejects.toThrow(/unknown memory kind/)
+  })
+
+  it('forwards kinds and excludeSessionId from a session handle to Memory.recall', async () => {
+    const recall = vi.spyOn(memory, 'recall')
+    const handle = memory.session('live-sess-k7q')
+
+    const result = await handle.recall('Postgres billing service', {
+      kinds: ['decision'],
+      excludeSessionId: 'live-sess-k7q',
+    })
+
+    expect(recall).toHaveBeenCalledWith('Postgres billing service', {
+      kinds: ['decision'],
+      excludeSessionId: 'live-sess-k7q',
+      conversationKey: 'live-sess-k7q',
+    })
+    expect(contents(result)).toEqual(['Decided the billing service stores Postgres snapshots nightly'])
+  })
+})

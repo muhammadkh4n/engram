@@ -10,6 +10,7 @@ import { ConversationStore, type SensoryBuffer } from './systems/sensory-buffer.
 import { HeuristicIntentAnalyzer } from './intent/analyzer.js'
 import { AssociationManager } from './systems/association-manager.js'
 import { recall as engineRecall } from './retrieval/engine.js'
+import { assertMemoryKinds, type MemoryKind } from './memory-kind.js'
 import { selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 import { lightSleep } from './consolidation/light-sleep.js'
 import { deepSleep } from './consolidation/deep-sleep.js'
@@ -114,7 +115,7 @@ export interface SessionHandle {
   ingest(message: Omit<Message, 'sessionId'>): Promise<void>
   /** Recalls are primed by this session's earlier recalls only; the session
    *  id is the conversation key unless `conversationKey` overrides it. */
-  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean; conversationKey?: string }) : Promise<RecallResult>
+  recall(query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; skipTrivial?: boolean; conversationKey?: string; kinds?: MemoryKind[]; excludeSessionId?: string }) : Promise<RecallResult>
 }
 
 // ---------------------------------------------------------------------------
@@ -672,9 +673,18 @@ export class Memory {
        *  last intent carry over to its next recalls only. Never filters the
        *  search. Without it the recall reads and writes no priming state. */
       conversationKey?: string
+      /** Only memories of these kinds (see `memoryKind`). Absent: every
+       *  kind. An empty or unknown list is rejected. */
+      kinds?: MemoryKind[]
+      /** Leave out this session's episodes and digests, e.g. the caller's
+       *  own live conversation. */
+      excludeSessionId?: string
     }
   ): Promise<RecallResult> {
     this.assertInitialized()
+    // A bad kinds list must fail before the query is embedded (a paid call)
+    // and before the conversation's intent or priming state is written.
+    if (opts?.kinds !== undefined) assertMemoryKinds(opts.kinds)
     const conversationKey = opts?.conversationKey
     const conversation = this.conversationState(conversationKey)
 
@@ -731,6 +741,8 @@ export class Memory {
       ...(opts?.now !== undefined ? { now: opts.now } : {}),
       ...(opts?.reconsolidate === false ? { reconsolidate: false } : {}),
       ...(vectorUnavailable !== undefined ? { vectorUnavailable } : {}),
+      ...(opts?.kinds !== undefined ? { kinds: opts.kinds } : {}),
+      ...(opts?.excludeSessionId !== undefined ? { excludeSessionId: opts.excludeSessionId } : {}),
     })
 
     // Advance only this conversation's priming horizon.
@@ -1149,7 +1161,7 @@ export class Memory {
       },
       // The session is the conversation: its recalls prime each other and
       // no other session's.
-      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean; conversationKey?: string }) => {
+      recall: (query: string, opts?: { embedding?: number[]; tokenBudget?: number; strategyOverride?: Partial<RecallStrategy>; projectId?: string; skipTrivial?: boolean; conversationKey?: string; kinds?: MemoryKind[]; excludeSessionId?: string }) => {
         return this.recall(query, { ...opts, conversationKey: opts?.conversationKey ?? sid })
       },
     }

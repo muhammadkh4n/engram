@@ -223,6 +223,55 @@ $$;
 
 
 --
+-- Name: engram_episode_kind(jsonb, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The kind of an episode, derived from fields every episode already carries,
+-- so no row is rewritten to classify it. Rules in order, first match wins:
+-- summary (metadata.type is a session or pre-compact summary), commit
+-- (metadata.source git-commit), ruling, proposal, knowledge, decision and
+-- progress (metadata.salienceCategory), note (source memory-ingest, or no
+-- source in an unnamed session: NULL, '' or 'default'), and turn for every
+-- other episode. The other tiers are a kind each (digest, fact, procedure),
+-- applied by the search functions to the tier as a whole. The TypeScript
+-- memoryKind() in @engram-mem/core and the SQLite adapter implement the same
+-- rules and are checked against the same case file.
+--
+-- metadata->>'key' is NULL for an absent key and for JSON null, and the text
+-- form of any other value; a non-string value never equals a rule's string,
+-- so only a missing or null source counts as "no source".
+--
+-- IMMUTABLE and free of SET clauses so the planner can inline it and
+-- idx_episodes_kind can index it. The body names only pg_catalog operators,
+-- which resolve under any search_path, including the empty one this file
+-- runs with. Changing the body changes what idx_episodes_kind holds: a
+-- re-apply that alters it must REINDEX INDEX public.idx_episodes_kind.
+-- engram_vector_search, engram_text_match and engram_bm25_match list every
+-- kind this function can return, to skip the episode tier when none is
+-- asked for: a kind added here must be added to those three lists.
+--
+-- An INSERT into memory_episodes evaluates the index expression as the
+-- inserting role, which therefore needs EXECUTE: service_role has it, and the
+-- SECURITY DEFINER functions run as the owner.
+CREATE OR REPLACE FUNCTION public.engram_episode_kind(p_metadata jsonb, p_session_id text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE
+    WHEN p_metadata->>'type' IN ('session-summary', 'pre-compact-summary') THEN 'summary'
+    WHEN p_metadata->>'source' = 'git-commit' THEN 'commit'
+    WHEN p_metadata->>'salienceCategory' = 'ruling' THEN 'ruling'
+    WHEN p_metadata->>'salienceCategory' = 'proposal' THEN 'proposal'
+    WHEN p_metadata->>'salienceCategory' IN ('fact', 'lesson', 'preference', 'external_fact', 'identity') THEN 'knowledge'
+    WHEN p_metadata->>'salienceCategory' = 'decision' THEN 'decision'
+    WHEN p_metadata->>'salienceCategory' IN ('milestone', 'plan', 'context_switch', 'risk', 'emotional_signal') THEN 'progress'
+    WHEN p_metadata->>'source' = 'memory-ingest' THEN 'note'
+    WHEN p_metadata->>'source' IS NULL AND (p_session_id IS NULL OR p_session_id IN ('', 'default')) THEN 'note'
+    ELSE 'turn'
+  END
+$$;
+
+
+--
 -- Name: engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -563,8 +612,13 @@ $$;
 
 
 --
--- Name: engram_text_match(text[], integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_text_match(text[], integer, text, text, text[], text); Type: FUNCTION; Schema: public; Owner: -
 --
+
+-- Drop the signature without p_kinds and p_exclude_session_id: the new
+-- defaulted parameters would otherwise leave a second overload, and PostgREST
+-- cannot choose between two functions of one name.
+DROP FUNCTION IF EXISTS public.engram_text_match(text[], integer, text, text);
 
 -- Lexical match over the raw query terms. Each term becomes its own
 -- phraseto_tsquery: that parser runs the term through the same 'english'
@@ -579,7 +633,20 @@ $$;
 -- by memory_type and id, a key unique across the tiers: otherwise the LIMIT
 -- keeps whichever tied rows the scan meets first, and heap order changes
 -- whenever recall rewrites a returned row (shown_count).
-CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
+--
+-- p_kinds keeps only rows of the named kinds: an episode by
+-- engram_episode_kind, the other tiers as 'digest', 'fact' (semantic) and
+-- 'procedure' (procedural). p_exclude_session_id leaves out the episodes and
+-- digests of that session; semantic and procedural rows belong to no session
+-- and are kept. With both NULL every row matches as before, in the same order.
+--
+-- The episode branch first tests p_kinds against the list of kinds
+-- engram_episode_kind can return. That clause reads no column, so the
+-- planner makes it a one-time filter: when no requested kind is an episode
+-- kind, memory_episodes is not scanned at all. Being parameter-only, it is
+-- estimated as always true and leaves the unfiltered plan's row estimates
+-- as they were.
+CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     AS $$
@@ -599,6 +666,9 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
     WHERE me.fts @@ mq.q
       AND me.forgotten_at IS NULL
       AND (p_session_id IS NULL OR me.session_id = p_session_id)
+      AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
+      AND (p_kinds IS NULL OR engram_episode_kind(me.metadata, me.session_id) = ANY(p_kinds))
+      AND (p_exclude_session_id IS NULL OR me.session_id IS DISTINCT FROM p_exclude_session_id)
 
     UNION ALL
 
@@ -606,6 +676,8 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
       ts_rank_cd(md.fts, mq.q)::float
     FROM memory_digests md, match_query mq
     WHERE md.fts @@ mq.q
+      AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
+      AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
 
     UNION ALL
 
@@ -615,6 +687,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
     WHERE ms.fts @@ mq.q
       AND ms.superseded_by IS NULL
       AND ms.forgotten_at IS NULL
+      AND (p_kinds IS NULL OR 'fact' = ANY(p_kinds))
 
     UNION ALL
 
@@ -623,6 +696,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
     FROM memory_procedural mp, match_query mq
     WHERE mp.fts @@ mq.q
       AND mp.forgotten_at IS NULL
+      AND (p_kinds IS NULL OR 'procedure' = ANY(p_kinds))
   ) combined
   ORDER BY rank_score DESC, memory_type, id
   LIMIT p_match_count
@@ -645,7 +719,7 @@ $$;
 
 
 --
--- Name: engram_vector_search(public.vector, integer, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_vector_search(public.vector, integer, text, text, text[], text); Type: FUNCTION; Schema: public; Owner: -
 --
 
 -- Drop the pre-Wave-5 signature (without p_project_id) so the new defaulted
@@ -653,20 +727,24 @@ $$;
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text);
 
 -- RETURNS TABLE gained project_id (Wave 5) and then session_id (synthesis Stage 1), so CREATE OR REPLACE alone cannot upgrade an existing installation — drop the same-argument signature first.
+-- The same drop removes the signature without p_kinds and p_exclude_session_id,
+-- which would otherwise stay as a second overload PostgREST cannot resolve.
 DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text, text);
 
 -- The HNSW settings below apply to every vector RPC: engram_vector_search,
 -- engram_recall and engram_hybrid_recall each pin the same three, for the
 -- reasons given here.
 --
--- Each tier is its own nearest-N subquery, so the planner chooses the access
--- path per tier: on a small tier it uses an exact sequential scan and sort; on
--- a large one it drives the ORDER BY from the tier's HNSW index.
+-- Each tier is its own nearest-N subquery with its own access path. For
+-- engram_vector_search, measured on PostgreSQL 17 with pgvector 0.8.2 and the
+-- SET clauses below, that path is never the HNSW index: see the note above
+-- its CREATE. The settings below matter whenever a plan does use the index.
 --
 -- On the index path only the partial index predicate (`forgotten_at IS NULL`
 -- on episodes, semantic and procedural; none on digests) is part of the
--- index. Every other condition (`p_session_id`, semantic `superseded_by IS
--- NULL`) is a post-filter applied to the candidates the scan returns. A
+-- index. Every other condition (`p_session_id`, `p_kinds`,
+-- `p_exclude_session_id`, semantic `superseded_by IS NULL`) is a post-filter
+-- applied to the candidates the scan returns. A
 -- plain HNSW scan returns at most `hnsw.ef_search` candidates (default 40),
 -- so a selective post-filter can leave far fewer rows than the LIMIT asked
 -- for.
@@ -693,7 +771,29 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 --
 -- p_project_id is accepted for caller compatibility and filters nothing: a
 -- project tag only ranks rows (in the client), it never excludes them.
-CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
+--
+-- p_kinds and p_exclude_session_id filter as in engram_text_match.
+--
+-- Access path, measured on PostgreSQL 17 with pgvector 0.8.2 and these SET
+-- clauses (other versions may plan differently): the SET clauses keep this
+-- function from being inlined, so its statement gets a generic plan with the
+-- arguments as unbound parameters. The planner costs a LIMIT given by a
+-- parameter as 10% of the rows, which makes the HNSW path look several times
+-- dearer than a sequential scan. At every measured size, from about 9,000 up
+-- to 200,000 episodes, each tier is a sequential scan (parallel on the larger
+-- tables) sorted by distance, with or without p_kinds and
+-- p_exclude_session_id: the results are exact, and its time grows with the
+-- table.
+--
+-- The episode kind test is `p_kinds IS NULL OR engram_episode_kind(...) =
+-- ANY(p_kinds)`, a row filter in that scan; the planner neither uses
+-- idx_episodes_kind nor reads its statistics. Because the scan is exact, a
+-- filtered call returns min(LIMIT, matching rows) for the tier. The episode
+-- tier also tests p_kinds against the episode kind list (see
+-- engram_text_match), and on the other tiers the kind test names no column:
+-- each is a one-time filter, so a tier left out by p_kinds is not scanned at
+-- all.
+CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.vector, p_match_count integer DEFAULT 15, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, content text, role text, salience double precision, access_count integer, created_at timestamp with time zone, similarity double precision, entities text[], metadata jsonb, project_id text, session_id text)
     LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
     SET search_path TO 'public'
     SET hnsw.ef_search TO '150'
@@ -712,6 +812,9 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
       WHERE me.embedding IS NOT NULL
         AND me.forgotten_at IS NULL
         AND (p_session_id IS NULL OR me.session_id = p_session_id)
+        AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
+        AND (p_kinds IS NULL OR engram_episode_kind(me.metadata, me.session_id) = ANY(p_kinds))
+        AND (p_exclude_session_id IS NULL OR me.session_id IS DISTINCT FROM p_exclude_session_id)
       ORDER BY me.embedding <=> p_query_embedding
       LIMIT p_match_count
     ) ep
@@ -727,6 +830,8 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         md.key_topics, md.metadata, md.project_id, md.session_id
       FROM memory_digests md
       WHERE md.embedding IS NOT NULL
+        AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
+        AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
       ORDER BY md.embedding <=> p_query_embedding
       LIMIT p_match_count
     ) dg
@@ -743,6 +848,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
       FROM memory_semantic ms
       WHERE ms.embedding IS NOT NULL AND ms.superseded_by IS NULL
         AND ms.forgotten_at IS NULL
+        AND (p_kinds IS NULL OR 'fact' = ANY(p_kinds))
       ORDER BY ms.embedding <=> p_query_embedding
       LIMIT p_match_count
     ) sm
@@ -759,6 +865,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
       FROM memory_procedural mp
       WHERE mp.embedding IS NOT NULL
         AND mp.forgotten_at IS NULL
+        AND (p_kinds IS NULL OR 'procedure' = ANY(p_kinds))
       ORDER BY mp.embedding <=> p_query_embedding
       LIMIT p_match_count
     ) pr
@@ -1310,6 +1417,30 @@ CREATE INDEX IF NOT EXISTS idx_episodes_fts ON public.memory_episodes USING gin 
 
 
 --
+-- Name: idx_episodes_kind; Type: INDEX; Schema: public; Owner: -
+--
+-- An expression index instead of a stored kind column: adding a stored
+-- generated column rewrites memory_episodes and rebuilds its HNSW index,
+-- while this builds one btree beside them. Partial on the rows recall can
+-- return, as the HNSW index is. It serves a query that compares
+-- engram_episode_kind(metadata, session_id) with a known kind list. The
+-- search functions are planned with p_kinds as an unbound parameter behind
+-- `p_kinds IS NULL OR ...`, so they use neither this index nor its
+-- statistics; see engram_vector_search. Even a query with a literal kind
+-- list, which can use this index as a bitmap scan, does not get estimates
+-- from it: ANALYZE does collect statistics for the index expression, but
+-- PostgreSQL's selectivity estimation does not consult the statistics of a
+-- partial index, so the kind test is estimated with a default selectivity.
+--
+-- A plain CREATE INDEX blocks writes to memory_episodes while it builds; on
+-- a large existing table build it first with CREATE INDEX CONCURRENTLY (see
+-- the package README) and this statement then skips it.
+--
+
+CREATE INDEX IF NOT EXISTS idx_episodes_kind ON public.memory_episodes USING btree (public.engram_episode_kind(metadata, session_id)) WHERE (forgotten_at IS NULL);
+
+
+--
 -- Name: idx_episodes_project; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1569,6 +1700,8 @@ BEGIN
   PERFORM public.engram_text_boost('smoke', 1);
   PERFORM public.engram_text_match(ARRAY['smoke', 'aca-2613'], 1);
   PERFORM public.engram_vector_search(v_unit, 1);
+  PERFORM public.engram_text_match(ARRAY['smoke'], 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
+  PERFORM public.engram_vector_search(v_unit, 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
   v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
@@ -1594,7 +1727,10 @@ $smoke$;
 -- after the last function definition and re-applying the file restores it.
 --
 -- Every function below is an RPC endpoint and gets the service_role grant;
--- this file defines no trigger functions. match_episodes and match_digests
+-- this file defines no trigger functions. engram_episode_kind is read by the
+-- search functions and by idx_episodes_kind, and an INSERT into
+-- memory_episodes evaluates it as the inserting role, so service_role needs
+-- its grant to write episodes. match_episodes and match_digests
 -- are SECURITY INVOKER, kept for adapters on the pre-recall-RPC schema.
 --
 
@@ -1602,6 +1738,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, doubl
 REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -1609,9 +1746,9 @@ REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM PUBLIC;
 
@@ -1628,6 +1765,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -1635,9 +1773,9 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM %I', role_name);
     END IF;
@@ -1649,6 +1787,7 @@ GRANT EXECUTE ON FUNCTION public.engram_association_walk(uuid[], integer, double
 GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double precision, integer, integer, double precision, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;
@@ -1656,9 +1795,9 @@ GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) TO service_role;
 

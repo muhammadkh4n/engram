@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
+import type { MemoryType, MemoryKind, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 import type { StorageAdapter, LookupOptions, AccessQuantileTier } from '@engram-mem/core'
 import { assertAccessQuantileArgs } from '@engram-mem/core'
 import { cosineF32, blobToF32 } from './vector-search.js'
@@ -10,7 +10,13 @@ import { SqliteSemanticStorage } from './semantic.js'
 import { SqliteProceduralStorage } from './procedural.js'
 import { SqliteAssociationStorage } from './associations.js'
 import { SqliteConsolidationRunStorage } from './consolidation-runs.js'
-import { julianToDate, dateToJulian, orOfFtsStrings } from './search.js'
+import {
+  julianToDate,
+  dateToJulian,
+  orOfFtsStrings,
+  registerEpisodeKindFunction,
+  kindSessionClause,
+} from './search.js'
 
 /**
  * SQL suffixes for id lookups. Unless `includeInactive` is set, a tombstoned
@@ -49,6 +55,7 @@ export class SqliteStorageAdapter implements StorageAdapter {
     this.db.pragma('wal_autocheckpoint = 1000')
 
     runMigrations(this.db)
+    registerEpisodeKindFunction(this.db)
 
     this._episodes = new SqliteEpisodeStorage(this.db)
     this._digests = new SqliteDigestStorage(this.db)
@@ -209,6 +216,8 @@ export class SqliteStorageAdapter implements StorageAdapter {
     sessionId?: string
     tiers?: MemoryType[]
     projectId?: string
+    kinds?: MemoryKind[]
+    excludeSessionId?: string
   }): Promise<SearchResult<TypedMemory>[]> {
     const db = this.assertDb()
     const limit = opts?.limit ?? 15
@@ -223,16 +232,23 @@ export class SqliteStorageAdapter implements StorageAdapter {
     // Parameterized project filter — SQL clause + params to append to each query
     const projectFilter = opts?.projectId ? ' AND (project_id = ? OR project_id IS NULL)' : ''
     const projectParams: unknown[] = opts?.projectId ? [opts.projectId] : []
+    // Kind and session filters sit in each tier's WHERE clause, so the
+    // candidate pool and the final limit only ever see matching rows.
+    const filter = { kinds: opts?.kinds, excludeSessionId: opts?.excludeSessionId }
+    const episodeFilter = kindSessionClause('episode', filter)
+    const digestFilter = kindSessionClause('digest', filter)
+    const semanticFilter = kindSessionClause('semantic', filter)
+    const proceduralFilter = kindSessionClause('procedural', filter)
 
-    if (tiers.includes('episode')) {
+    if (tiers.includes('episode') && episodeFilter) {
       let sql: string
       let params: unknown[]
       if (opts?.sessionId) {
-        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL AND session_id = ?${projectFilter}`
-        params = [opts.sessionId, ...projectParams]
+        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL AND session_id = ?${projectFilter}${episodeFilter.sql}`
+        params = [opts.sessionId, ...projectParams, ...episodeFilter.params]
       } else {
-        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}`
-        params = [...projectParams]
+        sql = `SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}${episodeFilter.sql}`
+        params = [...projectParams, ...episodeFilter.params]
       }
       const rows = db.prepare(sql).all(...params) as ScoreRow[]
       for (const row of rows) {
@@ -242,10 +258,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
       }
     }
 
-    if (tiers.includes('digest')) {
+    if (tiers.includes('digest') && digestFilter) {
       const rows = db.prepare(
-        `SELECT id, embedding FROM digests WHERE embedding IS NOT NULL${projectFilter}`
-      ).all(...projectParams) as ScoreRow[]
+        `SELECT id, embedding FROM digests WHERE embedding IS NOT NULL${projectFilter}${digestFilter.sql}`
+      ).all(...projectParams, ...digestFilter.params) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const sim = cosineF32(embedding, blobToF32(row.embedding))
@@ -253,10 +269,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
       }
     }
 
-    if (tiers.includes('semantic')) {
+    if (tiers.includes('semantic') && semanticFilter) {
       const rows = db.prepare(
-        `SELECT id, embedding FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL${projectFilter}`
-      ).all(...projectParams) as ScoreRow[]
+        `SELECT id, embedding FROM semantic WHERE embedding IS NOT NULL AND superseded_by IS NULL AND forgotten_at IS NULL${projectFilter}${semanticFilter.sql}`
+      ).all(...projectParams, ...semanticFilter.params) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const sim = cosineF32(embedding, blobToF32(row.embedding))
@@ -264,10 +280,10 @@ export class SqliteStorageAdapter implements StorageAdapter {
       }
     }
 
-    if (tiers.includes('procedural')) {
+    if (tiers.includes('procedural') && proceduralFilter) {
       const rows = db.prepare(
-        `SELECT id, embedding FROM procedural WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}`
-      ).all(...projectParams) as ScoreRow[]
+        `SELECT id, embedding FROM procedural WHERE embedding IS NOT NULL AND forgotten_at IS NULL${projectFilter}${proceduralFilter.sql}`
+      ).all(...projectParams, ...proceduralFilter.params) as ScoreRow[]
       for (const row of rows) {
         if (!row.embedding) continue
         const sim = cosineF32(embedding, blobToF32(row.embedding))
@@ -338,6 +354,8 @@ export class SqliteStorageAdapter implements StorageAdapter {
     limit?: number
     sessionId?: string
     projectId?: string
+    kinds?: MemoryKind[]
+    excludeSessionId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     const db = this.assertDb()
     if (terms.length === 0) return []
@@ -354,10 +372,14 @@ export class SqliteStorageAdapter implements StorageAdapter {
       { type: 'semantic', fts: 'semantic_fts', table: 'semantic', alive: 'AND t.superseded_by IS NULL AND t.forgotten_at IS NULL' },
       { type: 'procedural', fts: 'procedural_fts', table: 'procedural', alive: 'AND t.forgotten_at IS NULL' },
     ]
+    const filter = { kinds: opts?.kinds, excludeSessionId: opts?.excludeSessionId }
     for (const tier of tiers) {
+      // The filters go in the WHERE clause so the per-tier LIMIT counts only matching rows.
+      const kindSession = kindSessionClause(tier.type, filter, 't.')
+      if (!kindSession) continue
       const scope = projectId ? 'AND (t.project_id = ? OR t.project_id IS NULL)' : ''
-      const sql = `SELECT t.id, rank FROM ${tier.fts} f JOIN ${tier.table} t ON t.rowid = f.rowid WHERE ${tier.fts} MATCH ? ${tier.alive} ${scope} ORDER BY rank LIMIT ?`
-      const params: unknown[] = projectId ? [ftsQuery, projectId, limit] : [ftsQuery, limit]
+      const sql = `SELECT t.id, rank FROM ${tier.fts} f JOIN ${tier.table} t ON t.rowid = f.rowid WHERE ${tier.fts} MATCH ? ${tier.alive} ${scope}${kindSession.sql} ORDER BY rank LIMIT ?`
+      const params: unknown[] = [ftsQuery, ...(projectId ? [projectId] : []), ...kindSession.params, limit]
       let rows: Array<{ id: string; rank: number }>
       try {
         rows = db.prepare(sql).all(...params) as Array<{ id: string; rank: number }>

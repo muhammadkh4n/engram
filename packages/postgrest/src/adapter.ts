@@ -1,5 +1,5 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import type { MemoryType, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
+import type { MemoryType, MemoryKind, TypedMemory, SensorySnapshot, SearchResult } from '@engram-mem/core'
 import type { StorageAdapter, LookupOptions, AccessQuantileTier } from '@engram-mem/core'
 import { assertAccessQuantileArgs } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
@@ -320,6 +320,8 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     sessionId?: string
     tiers?: MemoryType[]
     projectId?: string
+    kinds?: MemoryKind[]
+    excludeSessionId?: string
   }): Promise<SearchResult<TypedMemory>[]> {
     this.assertInitialized()
     const { data, error } = await this.client.rpc('engram_vector_search', {
@@ -327,6 +329,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       p_match_count: opts?.limit ?? 15,
       p_session_id: opts?.sessionId ?? null,
       p_project_id: opts?.projectId ?? null,
+      ...kindFilterArgs(opts),
     })
     if (error) throw new Error(`vectorSearch failed: ${error.message}`)
 
@@ -345,6 +348,8 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     limit?: number
     sessionId?: string
     projectId?: string
+    kinds?: MemoryKind[]
+    excludeSessionId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>> {
     this.assertInitialized()
 
@@ -363,6 +368,7 @@ export class PostgRestStorageAdapter implements StorageAdapter {
       p_match_count: opts?.limit ?? 30,
       p_session_id: opts?.sessionId ?? null,
       p_project_id: opts?.projectId ?? null,
+      ...kindFilterArgs(opts),
     })
     if (error) throw new Error(`textBoost failed: ${error.message}`)
 
@@ -713,6 +719,23 @@ function rowToProcedural(row: ProceduralRow): ProceduralMemory {
 // ---------------------------------------------------------------------------
 // Types and helpers for vectorSearch / textBoost
 // ---------------------------------------------------------------------------
+
+/**
+ * Named arguments for the kind filter and the session exclusion, each present
+ * only when its option is set. PostgREST resolves a function by the names it
+ * is called with, so a server whose search functions predate p_kinds and
+ * p_exclude_session_id still answers a call that leaves them out. An empty
+ * `kinds` is forwarded as is and matches nothing.
+ */
+function kindFilterArgs(opts?: {
+  kinds?: MemoryKind[]
+  excludeSessionId?: string
+}): { p_kinds?: MemoryKind[]; p_exclude_session_id?: string } {
+  return {
+    ...(opts?.kinds !== undefined ? { p_kinds: opts.kinds } : {}),
+    ...(opts?.excludeSessionId !== undefined ? { p_exclude_session_id: opts.excludeSessionId } : {}),
+  }
+}
 
 interface VectorSearchRow {
   id: string

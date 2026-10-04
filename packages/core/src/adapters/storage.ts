@@ -15,6 +15,7 @@ import type {
   ConsolidationRun,
   ConsolidateResult,
 } from '../types.js'
+import type { MemoryKind } from '../memory-kind.js'
 
 /**
  * Options for id lookups (`getById`, `getByIds`, `episodes.getByIds`).
@@ -289,12 +290,20 @@ export interface StorageAdapter {
     sessionId?: string
     tiers?: MemoryType[]
     projectId?: string  // Wave 5
+    /** Only rows of these kinds; absent means every kind. Callers validate with `assertMemoryKinds`. */
+    kinds?: MemoryKind[]
+    /** Leave out rows whose session id equals this one. */
+    excludeSessionId?: string
   }): Promise<SearchResult<TypedMemory>[]>
 
   textBoost(terms: string[], opts?: {
     limit?: number
     sessionId?: string
     projectId?: string  // Wave 5
+    /** Only rows of these kinds; absent means every kind. Callers validate with `assertMemoryKinds`. */
+    kinds?: MemoryKind[]
+    /** Leave out rows whose session id equals this one. */
+    excludeSessionId?: string
   }): Promise<Array<{ id: string; type: MemoryType; boost: number }>>
 
   episodes: EpisodeStorage

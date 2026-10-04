@@ -1,4 +1,6 @@
 export * from './types.js'
+export { MEMORY_KINDS, memoryKind, isMemoryKind, assertMemoryKinds } from './memory-kind.js'
+export type { MemoryKind, MemoryKindRow } from './memory-kind.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {

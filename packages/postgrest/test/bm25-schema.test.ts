@@ -258,7 +258,7 @@ describe("bm25.sql revokes EXECUTE on pg_textsearch's own functions", () => {
   it('grants EXECUTE back to no role; the only grant is engram_bm25_match to service_role', () => {
     const grants = bm25.match(/^.*\bGRANT\b.*$/gm) ?? []
     expect(grants).toEqual([
-      'GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) TO service_role;',
     ])
   })
 
@@ -413,7 +413,7 @@ describe('bm25.sql stays optional and plain SQL', () => {
     // without this the function outlives the extension and every call to it
     // fails with "function to_bm25query does not exist".
     expect(bm25).toMatch(
-      /ALTER FUNCTION public\.engram_bm25_match\(text\[\], integer, text, text\) DEPENDS ON EXTENSION pg_textsearch;/,
+      /ALTER FUNCTION public\.engram_bm25_match\(text\[\], integer, text, text, text\[\], text\) DEPENDS ON EXTENSION pg_textsearch;/,
     )
     expect(bm25.indexOf('DEPENDS ON EXTENSION')).toBeGreaterThan(
       bm25.indexOf('CREATE OR REPLACE FUNCTION public.engram_bm25_match'),
@@ -436,7 +436,7 @@ describe('BM25 removal is explicit drops, never CASCADE', () => {
   )
   const removal = [
     ...bm25Indexes().map((i) => `DROP INDEX public.${i.name};`),
-    'DROP FUNCTION public.engram_bm25_match(text[], integer, text, text);',
+    'DROP FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text);',
     'DROP EXTENSION pg_textsearch;',
   ]
 

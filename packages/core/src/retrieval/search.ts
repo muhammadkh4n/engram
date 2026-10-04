@@ -1,9 +1,11 @@
 import type {
+  MemoryType,
   RecallStrategy,
   RetrievedMemory,
   TypedMemory,
 } from '../types.js'
 import type { StorageAdapter } from '../adapters/storage.js'
+import { memoryKind, type MemoryKind, type MemoryKindRow } from '../memory-kind.js'
 import type { SensoryBuffer } from '../systems/sensory-buffer.js'
 import { applyProjectRanking, type ProjectRanking } from './project-groups.js'
 import { cosineSimilarity } from '../ingestion/near-duplicate.js'
@@ -48,6 +50,57 @@ function extractSessionId(typed: TypedMemory): string | null {
     return typed.data.sessionId || null
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Kind and session filter
+// ---------------------------------------------------------------------------
+
+/** Which memories a recall may return. Absent fields do not filter. */
+export interface RecallFilter {
+  /** Only memories of these kinds (validated by `assertMemoryKinds`). */
+  kinds?: readonly MemoryKind[]
+  /** Leave out episodes and digests stored under this session id. */
+  excludeSessionId?: string
+}
+
+export function isRecallFilterActive(filter: RecallFilter): boolean {
+  return filter.kinds !== undefined || filter.excludeSessionId !== undefined
+}
+
+/** The row's own session id as storage holds it; semantic and procedural
+ *  rows carry none. */
+function rowSessionId(typed: TypedMemory): string | null {
+  return typed.type === 'episode' || typed.type === 'digest' ? typed.data.sessionId : null
+}
+
+/**
+ * Whether a stored row passes the filter, with the same answers the storage
+ * search functions give: the kind is `memoryKind` over the row's metadata and
+ * raw session id, and exclusion compares that session id exactly, so a
+ * semantic or procedural row is never excluded. Rows that reach a recall
+ * without going through the filtered storage search (graph neighbours, the
+ * per-tier text fallback) are checked with this.
+ */
+export function matchesRecallFilter(typed: TypedMemory, filter: RecallFilter): boolean {
+  return passesRecallFilter(typed.type, { metadata: typed.data.metadata, sessionId: rowSessionId(typed) }, filter)
+}
+
+/** `matchesRecallFilter` over a row's tier, metadata and raw session id. */
+export function passesRecallFilter(tier: MemoryType, row: MemoryKindRow, filter: RecallFilter): boolean {
+  const sessionId = row.sessionId ?? null
+  if (filter.excludeSessionId !== undefined && sessionId === filter.excludeSessionId) return false
+  if (filter.kinds === undefined) return true
+  return filter.kinds.includes(memoryKind(tier, row))
+}
+
+/** The filter as storage search options; absent fields are left out so an
+ *  unfiltered call keeps its exact argument shape. */
+function storageFilterOpts(filter: RecallFilter): { kinds?: MemoryKind[]; excludeSessionId?: string } {
+  return {
+    ...(filter.kinds !== undefined ? { kinds: [...filter.kinds] } : {}),
+    ...(filter.excludeSessionId !== undefined ? { excludeSessionId: filter.excludeSessionId } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +237,10 @@ export interface UnifiedSearchOpts {
   /** Project/group boost applied before the maxResults cut, so same-project
    *  candidates are not crowded out of the slate the reranker sees. */
   projectRanking?: ProjectRanking
+  /** Only memories of these kinds; forwarded to both storage searches. */
+  kinds?: readonly MemoryKind[]
+  /** Leave out this session's episodes and digests; forwarded to both storage searches. */
+  excludeSessionId?: string
   /** Called when storage.textBoost throws. The recall continues with an
    *  empty lexical leg; the caller can mark the failure in its diagnostics. */
   onLexicalError?: (err: unknown) => void
@@ -295,6 +352,11 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
     query, embedding, strategy, storage, sensory, sessionId, expandedTerms, projectId, projectRanking, onLexicalError,
     lexicalReserve = 0, rankPriors = RANK_PRIORS_OFF, vectorUnavailable = false,
   } = opts
+  const filter: RecallFilter = {
+    ...(opts.kinds !== undefined ? { kinds: opts.kinds } : {}),
+    ...(opts.excludeSessionId !== undefined ? { excludeSessionId: opts.excludeSessionId } : {}),
+  }
+  const filterOpts = storageFilterOpts(filter)
 
   if (strategy.mode === 'skip' || strategy.maxResults === 0) {
     return []
@@ -319,6 +381,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
         limit: vectorLimit,
         sessionId,
         ...(projectId !== undefined ? { projectId } : {}),
+        ...filterOpts,
       })
     : []
 
@@ -333,6 +396,7 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
           limit: bm25Limit,
           sessionId,
           ...(projectId !== undefined ? { projectId } : {}),
+          ...filterOpts,
         },
         onLexicalError,
       )
@@ -421,7 +485,11 @@ export async function unifiedSearch(opts: UnifiedSearchOpts): Promise<RetrievedM
       })
     }
 
+    // The per-tier search takes no kind or session filter, so its hits are
+    // checked here; a filtered recall must not widen on this fallback.
+    const filterActive = isRecallFilterActive(filter)
     for (const { typed, similarity } of textHits) {
+      if (filterActive && !matchesRecallFilter(typed, filter)) continue
       scored.push(scoreCandidate(typed, similarity, 0, strategy, sensory, fusion, nowMs))
       typedById.set(typed.data.id, typed)
     }

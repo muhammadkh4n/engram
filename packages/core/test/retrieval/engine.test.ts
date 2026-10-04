@@ -1039,3 +1039,72 @@ describe('recall engine — rank priors', () => {
     expect(storage.semantic.recordAccessAndBoost).not.toHaveBeenCalled()
   })
 })
+
+describe('recall engine — kind and session filter', () => {
+  // The walk fixture's neighbour is an episode with no source in a named
+  // session, so its kind is `turn`; its session is MOCK_ASSOCIATED_EPISODE's.
+  const NEIGHBOUR_SESSION = 'sess-2'
+  const QUERY = 'What is TypeScript strict mode?'
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function recallDeep(storage: ReturnType<typeof createMockStorage>, overrides: Partial<RecallOpts> = {}) {
+    return recall(QUERY, storage, new SensoryBuffer(), makeOpts({ strategy: RECALL_STRATEGIES.deep, ...overrides }))
+  }
+
+  it('forwards kinds and excludeSessionId to vectorSearch and textBoost', async () => {
+    const storage = createMockStorage()
+
+    await recallDeep(storage, { kinds: ['decision'], excludeSessionId: 'live-sess-k7q' })
+
+    const [, vectorOpts] = vi.mocked(storage.vectorSearch).mock.calls[0]!
+    const [, boostOpts] = vi.mocked(storage.textBoost).mock.calls[0]!
+    expect(vectorOpts).toMatchObject({ kinds: ['decision'], excludeSessionId: 'live-sess-k7q' })
+    expect(boostOpts).toMatchObject({ kinds: ['decision'], excludeSessionId: 'live-sess-k7q' })
+  })
+
+  it('rejects an empty kind list before searching', async () => {
+    const storage = createMockStorage()
+
+    await expect(recallDeep(storage, { kinds: [] })).rejects.toThrow(RangeError)
+    expect(storage.vectorSearch).not.toHaveBeenCalled()
+  })
+
+  it('drops an association of a kind the recall did not ask for', async () => {
+    const kept = await recallDeep(createMockStorage(), { kinds: ['turn', 'fact'] })
+    const dropped = await recallDeep(createMockStorage(), { kinds: ['decision', 'fact'] })
+
+    expect(kept.associations.map((a) => a.id)).toEqual(['ep-assoc-1'])
+    expect(dropped.associations).toEqual([])
+    expect(dropped.formatted).not.toContain('TypeScript compiler options')
+  })
+
+  it('drops an association stored under the excluded session', async () => {
+    const kept = await recallDeep(createMockStorage(), { excludeSessionId: 'other-sess-k7q' })
+    const dropped = await recallDeep(createMockStorage(), { excludeSessionId: NEIGHBOUR_SESSION })
+
+    expect(kept.associations.map((a) => a.id)).toEqual(['ep-assoc-1'])
+    expect(dropped.associations).toEqual([])
+  })
+
+  it('without the options, storage sees the same arguments and the result is unchanged', async () => {
+    const plain = createMockStorage()
+    const explicit = createMockStorage()
+
+    // One recency instant for both, so the scores compare exactly.
+    const now = new Date()
+    const before = await recallDeep(plain, { now })
+    const after = await recallDeep(explicit, { now, kinds: undefined, excludeSessionId: undefined })
+
+    const [, vectorOpts] = vi.mocked(plain.vectorSearch).mock.calls[0]!
+    expect(Object.keys(vectorOpts ?? {}).sort()).toEqual(['limit', 'sessionId'])
+    const [, boostOpts] = vi.mocked(plain.textBoost).mock.calls[0]!
+    expect(Object.keys(boostOpts ?? {}).sort()).toEqual(['limit', 'sessionId'])
+    // The association filter re-reads rows; an unfiltered recall must not.
+    expect(vi.mocked(plain.getByIds).mock.calls.length).toBe(vi.mocked(explicit.getByIds).mock.calls.length)
+    expect(before.associations.map((a) => a.id)).toEqual(['ep-assoc-1'])
+    expect(JSON.stringify({ ...after, timings: undefined })).toBe(JSON.stringify({ ...before, timings: undefined }))
+  })
+})

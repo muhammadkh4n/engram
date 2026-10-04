@@ -14,7 +14,9 @@
  * State machine: cold -> warming -> ready, or -> disabled (permanent
  * passthrough). Every state other than `ready` passes `vectorSearch`
  * straight through to the inner adapter, so the engine can never degrade
- * recall below the existing baseline. `warm()` never throws: any unexpected
+ * recall below the existing baseline. A query that filters by kind or leaves
+ * out a session goes to the inner adapter in every state (see
+ * `needsStorageFilter`). `warm()` never throws: any unexpected
  * failure (including an adapter without `scanEmbeddings`, a corpus larger
  * than `maxVectors`, or a scan that indexed zero of the rows it saw — e.g. an
  * embedding-dimension mismatch — while a genuinely empty, freshly-provisioned
@@ -57,12 +59,24 @@ const SNAPSHOT_DEBOUNCE_MS = 60_000
  */
 const RECONCILE_OVERLAP_MS = 60_000
 
-/** Matches the inner `StorageAdapter.vectorSearch` opts shape (inlined on the port). */
-export interface VectorSearchOpts {
-  limit?: number
-  sessionId?: string
-  tiers?: MemoryType[]
-  projectId?: string
+/**
+ * The inner `StorageAdapter.vectorSearch` opts, derived from the port rather
+ * than copied: an option the port gains later is part of this type at once,
+ * so the engine cannot silently drop it on its way to the inner adapter.
+ */
+export type VectorSearchOpts = NonNullable<Parameters<StorageAdapter['vectorSearch']>[1]>
+
+/**
+ * True when the query filters by kind or leaves out a session. The RAM store
+ * holds no kind per slot (a kind is derived from the row's metadata), and the
+ * session exclusion is a per-tier rule the storage adapters own, so such a
+ * query is answered by the inner adapter, which applies both filters before
+ * its limit and returns an exact result. Filtering the engine's candidates
+ * after the scan instead would return fewer rows than asked for whenever the
+ * filter rejects some of them.
+ */
+function needsStorageFilter(opts: VectorSearchOpts | undefined): boolean {
+  return opts?.kinds !== undefined || opts?.excludeSessionId !== undefined
 }
 
 export interface RecallEngineOpts {
@@ -93,6 +107,8 @@ export interface EngineStats {
   lastWarmMs: number | null
   snapshotUsed: boolean
   passthroughCalls: number
+  /** Queries answered by the inner adapter while ready because they filter by kind or exclude a session (see `needsStorageFilter`). */
+  filteredPassthroughCalls: number
   // --- extensions beyond the base design surface (observability counters) ---
   /** Rows whose hydrated embedding could not be parsed at tier 3, so the tier-2 estimate was kept. */
   estimateFallbacks: number
@@ -176,6 +192,7 @@ export class RecallEngine {
   // --- stats ---
   private unindexed = 0
   private passthroughCalls = 0
+  private filteredPassthroughCalls = 0
   private estimateFallbacks = 0
   private reconcileErrors = 0
   private invalidQueries = 0
@@ -456,6 +473,10 @@ export class RecallEngine {
       this.passthroughCalls++
       return this.inner.vectorSearch(embedding, opts)
     }
+    if (needsStorageFilter(opts)) {
+      this.filteredPassthroughCalls++
+      return this.inner.vectorSearch(embedding, opts)
+    }
 
     try {
       return await this.readyVectorSearch(embedding, opts)
@@ -662,6 +683,7 @@ export class RecallEngine {
       lastWarmMs: this.lastWarmMs,
       snapshotUsed: this.snapshotUsed,
       passthroughCalls: this.passthroughCalls,
+      filteredPassthroughCalls: this.filteredPassthroughCalls,
       estimateFallbacks: this.estimateFallbacks,
       reconcileErrors: this.reconcileErrors,
       invalidQueries: this.invalidQueries,

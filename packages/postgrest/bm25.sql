@@ -32,7 +32,7 @@
 --   DROP INDEX public.idx_digests_bm25;
 --   DROP INDEX public.idx_semantic_bm25;
 --   DROP INDEX public.idx_procedural_bm25;
---   DROP FUNCTION public.engram_bm25_match(text[], integer, text, text);
+--   DROP FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text);
 --   DROP EXTENSION pg_textsearch;
 --
 -- The last statement fails if anything else still uses the extension, and
@@ -159,8 +159,15 @@ CREATE INDEX IF NOT EXISTS idx_procedural_bm25 ON public.memory_procedural
 
 
 --
--- Name: engram_bm25_match(text[], integer, text, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_bm25_match(text[], integer, text, text, text[], text); Type: FUNCTION; Schema: public; Owner: -
 --
+
+-- Drop the signature without p_kinds and p_exclude_session_id: the new
+-- defaulted parameters would otherwise leave a second overload, and PostgREST
+-- cannot choose between two functions of one name. The drop also removes the
+-- old signature's grants and its dependency on the extension; both are
+-- declared again for the new one below.
+DROP FUNCTION IF EXISTS public.engram_bm25_match(text[], integer, text, text);
 
 -- BM25 counterpart of engram_text_match, with the same signature and result
 -- shape so the adapter can call either one. It matches exactly the rows
@@ -207,11 +214,18 @@ CREATE INDEX IF NOT EXISTS idx_procedural_bm25 ON public.memory_procedural
 -- recall rewrites the rows it returns (shown_count), so two calls with the
 -- same terms over the same rows could return different id sets.
 --
+-- Filters. p_kinds and p_exclude_session_id keep the rows engram_text_match
+-- keeps under the same arguments, so they are applied where a term picks its
+-- candidates: the cap is filled with rows the caller can receive. As in
+-- engram_text_match, the episode branch first tests p_kinds against the
+-- kinds engram_episode_kind can return, a one-time filter that skips the
+-- episode scan when no requested kind is an episode kind.
+--
 -- An empty or NULL p_terms, or terms that reduce to no lexemes, return no
 -- rows. p_project_id is accepted for caller compatibility and filters
 -- nothing: a project tag only ranks rows (in the client), it never excludes
 -- them.
-CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
+CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_count integer DEFAULT 30, p_session_id text DEFAULT NULL::text, p_project_id text DEFAULT NULL::text, p_kinds text[] DEFAULT NULL::text[], p_exclude_session_id text DEFAULT NULL::text) RETURNS TABLE(id uuid, memory_type text, rank_score double precision)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -245,6 +259,9 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             WHERE e.fts @@ mt.q
               AND e.forgotten_at IS NULL
               AND (p_session_id IS NULL OR e.session_id = p_session_id)
+              AND (p_kinds IS NULL OR p_kinds && ARRAY['summary', 'commit', 'ruling', 'proposal', 'knowledge', 'decision', 'progress', 'note', 'turn'])
+              AND (p_kinds IS NULL OR engram_episode_kind(e.metadata, e.session_id) = ANY(p_kinds))
+              AND (p_exclude_session_id IS NULL OR e.session_id IS DISTINCT FROM p_exclude_session_id)
             ORDER BY ts_rank_cd(e.fts, mt.q, 2) DESC, e.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
@@ -269,6 +286,8 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             SELECT d.id, row_number() OVER (ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id) AS term_rank
             FROM memory_digests d
             WHERE d.fts @@ mt.q
+              AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
+              AND (p_exclude_session_id IS NULL OR d.session_id IS DISTINCT FROM p_exclude_session_id)
             ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
@@ -295,6 +314,7 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             WHERE s.fts @@ mt.q
               AND s.superseded_by IS NULL
               AND s.forgotten_at IS NULL
+              AND (p_kinds IS NULL OR 'fact' = ANY(p_kinds))
             ORDER BY ts_rank_cd(s.fts, mt.q, 2) DESC, s.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
@@ -320,6 +340,7 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             FROM memory_procedural p
             WHERE p.fts @@ mt.q
               AND p.forgotten_at IS NULL
+              AND (p_kinds IS NULL OR 'procedure' = ANY(p_kinds))
             ORDER BY ts_rank_cd(p.fts, mt.q, 2) DESC, p.id
             LIMIT (SELECT candidate_cap FROM bounds)
           ) c
@@ -343,7 +364,7 @@ $$;
 -- JWT run it. Clients authenticate with the service-role key: EXECUTE is
 -- revoked from those roles and granted to service_role explicitly, as
 -- schema.sql does for its RPC functions.
-REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) FROM PUBLIC;
 
 DO $$
 DECLARE
@@ -352,16 +373,16 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) FROM %I', role_name);
     END IF;
   END LOOP;
 END
 $$;
 
-GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) TO service_role;
 
 -- A LANGUAGE sql body records no dependency on to_bm25query or <@>, so this
 -- declares one: DROP EXTENSION pg_textsearch then removes the function too,
 -- and the service falls back to engram_text_match instead of finding a
 -- function whose every call fails. Re-applying adds no second dependency.
-ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text) DEPENDS ON EXTENSION pg_textsearch;
+ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) DEPENDS ON EXTENSION pg_textsearch;

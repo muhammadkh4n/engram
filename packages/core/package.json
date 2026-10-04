@@ -31,7 +31,7 @@
   "scripts": {
     "build": "tsc && mkdir -p dist/ingest/data && cp src/ingest/data/common-passwords.txt dist/ingest/data/",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "clean": "rm -rf dist"
   },
   "dependencies": {
