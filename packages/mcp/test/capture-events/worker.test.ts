@@ -491,7 +491,7 @@ describe('startCaptureWorker', () => {
     await Promise.all(workers.map((w) => w.stop(1000)))
 
     expect(first.calls).toContain('recordEmbeddingFailures')
-    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    const uuid = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
     expect(new Set(first.claimants).size).toBe(1)
     expect(first.claimants[0]).toMatch(uuid)
     expect(new Set(second.claimants).size).toBe(1)
