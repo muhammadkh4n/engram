@@ -4,20 +4,26 @@
  * per secret name, over every item and capture event. It writes nothing; a
  * stored hit is removed by a manual forget.
  *
- * Needs SUPABASE_URL, SUPABASE_KEY and ENGRAM_SECRET_SOURCES_FILE. It refuses
- * to scan with a registry that read no configuration, could not read a path,
- * or holds no value: that scan would print a false zero.
+ * Needs every variable a capture-enabled server needs (server-env.ts): the
+ * registry masks the credentials of the process it runs in, so a scan that
+ * lacks one of the server's credentials cannot count its stored copies. Run it
+ * with the server's environment: `node --env-file=<the server's env file>
+ * dist/capture-events/secret-scan-cli.js`. It also refuses to scan with a
+ * registry that read no configuration, could not read a path, or holds no
+ * value. Each of those scans would print a false zero.
  *
  * Output: per table `<table> scanned=<n> matches=<n>`, then per secret
  * `secret <NAME> matches=<n> ids=<table>:<id>,…` (first 50 rows), then
- * `stored secrets: <n>`. Never a value or a stored text.
+ * `stored secrets: <n>`, then `process credentials registered: <NAME>,…`.
+ * Never a value or a stored text.
  * Exit 0 when nothing is found, 3 when something is, 1 on an error.
  */
 
-import { SCAN_TARGETS, SECRET_SOURCES_ENV, defaultSecretRegistry } from '@engram-mem/core'
+import { PROCESS_SECRET_ENV_NAMES, SCAN_TARGETS, SECRET_SOURCES_ENV, defaultSecretRegistry } from '@engram-mem/core'
 import type { CaptureStore, KnownValueSpan, SecretRegistry } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { isEntryPoint } from '../ingest/entry-point.js'
+import { missingCaptureServerEnv } from './server-env.js'
 
 export const SECRET_SCAN_PAGE_SIZE = 500
 export const SECRET_SCAN_IDS_SHOWN = 50
@@ -113,16 +119,52 @@ export async function runSecretScan(
   return total === 0 ? EXIT_CLEAN : EXIT_FOUND
 }
 
-async function main(): Promise<number> {
-  const io: SecretScanIo = { out: (line) => console.log(line), err: (line) => console.error(line) }
-  for (const name of ['SUPABASE_URL', 'SUPABASE_KEY', SECRET_SOURCES_ENV]) {
-    if (!process.env[name]) {
-      io.err(`engram-secret-scan: ${name} is required`)
-      return EXIT_ERROR
-    }
+export interface SecretScanCliDeps {
+  createStore: (url: string, key: string) => Pick<CaptureStore, 'scanPage'>
+  io: SecretScanIo
+  /** Defaults to the process-wide registry, which reads process.env. */
+  registry?: () => SecretRegistry
+  env?: NodeJS.ProcessEnv
+}
+
+/**
+ * Process credentials the registry holds, by name: a set variable whose value
+ * the registry does not find under that name (too short, a public default)
+ * is left out.
+ */
+function registeredProcessNames(registry: SecretRegistry, env: NodeJS.ProcessEnv): string[] {
+  return PROCESS_SECRET_ENV_NAMES.filter((name) => {
+    const value = env[name]
+    return !!value && registry.findKnownValues(value).some((span) => span.name === name)
+  })
+}
+
+/** The CLI: checks the server's variables before building a store or reading a page, then scans. */
+export async function runSecretScanCli(deps: SecretScanCliDeps): Promise<number> {
+  const env = deps.env ?? process.env
+  const missing = missingCaptureServerEnv(env)
+  if (missing.length > 0) {
+    deps.io.err(
+      `engram-secret-scan: missing ${missing.join(', ')}. The scan counts the server's own credentials only when ` +
+        `it holds them, so run it with the server's environment: ` +
+        `node --env-file=<the server's env file> <path to>/dist/capture-events/secret-scan-cli.js`,
+    )
+    return EXIT_ERROR
   }
-  const store = new PostgRestCaptureStore({ url: process.env.SUPABASE_URL!, key: process.env.SUPABASE_KEY! })
-  return runSecretScan(store, defaultSecretRegistry(), io)
+  const registry = (deps.registry ?? defaultSecretRegistry)()
+  const store = deps.createStore(env['SUPABASE_URL']!, env['SUPABASE_KEY']!)
+  const code = await runSecretScan(store, registry, deps.io)
+  if (code !== EXIT_ERROR) {
+    deps.io.out(`process credentials registered: ${registeredProcessNames(registry, env).join(',')}`)
+  }
+  return code
+}
+
+async function main(): Promise<number> {
+  return runSecretScanCli({
+    createStore: (url, key) => new PostgRestCaptureStore({ url, key }),
+    io: { out: (line) => console.log(line), err: (line) => console.error(line) },
+  })
 }
 
 if (isEntryPoint(import.meta.url)) {

@@ -3,9 +3,10 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { createSecretRegistry } from '@engram-mem/core'
+import { createSecretRegistry, resetDefaultSecretRegistry } from '@engram-mem/core'
 import type { CaptureStore, ScanRow, ScanTarget, SecretRegistry } from '@engram-mem/core'
-import { runSecretScan, SECRET_SCAN_PAGE_SIZE } from '../../src/capture-events/secret-scan-cli.js'
+import { runSecretScan, runSecretScanCli, SECRET_SCAN_PAGE_SIZE } from '../../src/capture-events/secret-scan-cli.js'
+import { CAPTURE_SERVER_REQUIRED_ENV } from '../../src/capture-events/server-env.js'
 
 const VALUE = ('e6' + randomBytes(24).toString('hex')).slice(0, 32)
 const ITEM_ID = '00000000-0000-4000-8000-0000000000c3'
@@ -146,5 +147,95 @@ describe('engram-secret-scan', () => {
     expect(code).toBe(1)
     expect(out).toEqual([])
     expect(err).toEqual(['engram-secret-scan: failed: scanPage failed (42501): permission denied for table memory_items'])
+  })
+})
+
+describe('engram-secret-scan from the environment', () => {
+  const CAPTURE_TOKEN = ('c7' + randomBytes(24).toString('hex')).slice(0, 40)
+  const BEARER = ('b8' + randomBytes(24).toString('hex')).slice(0, 40)
+
+  /** The env a capture-enabled server runs with; the registry reads process.env, so it is stubbed. */
+  function stubServerEnv(overrides: Record<string, string | undefined> = {}): void {
+    writeFileSync(join(dir, 'secrets.json'), JSON.stringify({ DEPLOY_TOKEN: VALUE }))
+    writeFileSync(join(dir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
+    const env: Record<string, string | undefined> = {
+      XDG_CACHE_HOME: join(dir, 'cache'),
+      BEARER_TOKEN: BEARER,
+      ENGRAM_CAPTURE_TOKEN: CAPTURE_TOKEN,
+      ENGRAM_PROJECT_REGISTRY_FILE: join(dir, 'projects.json'),
+      ENGRAM_SECRET_SOURCES_FILE: join(dir, 'sources.json'),
+      SUPABASE_URL: 'http://127.0.0.1:3000',
+      SUPABASE_KEY: ('d4' + randomBytes(24).toString('hex')).slice(0, 40),
+      OPENAI_API_KEY: ('a9' + randomBytes(24).toString('hex')).slice(0, 40),
+      SUPABASE_SERVICE_KEY: '',
+      ENGRAM_DOCUMENTS_TOKEN: '',
+      NEO4J_PASSWORD: '',
+      ENGRAM_CHAT_API_KEY: '',
+      ENGRAM_SERVER_TOKEN: '',
+      ...overrides,
+    }
+    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value)
+    resetDefaultSecretRegistry()
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    resetDefaultSecretRegistry()
+  })
+
+  async function runCli(store: Pick<CaptureStore, 'scanPage'>) {
+    const out: string[] = []
+    const err: string[] = []
+    const urls: string[] = []
+    const code = await runSecretScanCli({
+      createStore: (url) => {
+        urls.push(url)
+        return store
+      },
+      io: { out: (l) => out.push(l), err: (l) => err.push(l) },
+    })
+    return { code, out, err, urls }
+  }
+
+  it('shares one required list with the server, the capture token and the bearer token included', () => {
+    expect(CAPTURE_SERVER_REQUIRED_ENV).toEqual(
+      expect.arrayContaining(['BEARER_TOKEN', 'ENGRAM_CAPTURE_TOKEN', 'OPENAI_API_KEY', 'SUPABASE_KEY', 'ENGRAM_SECRET_SOURCES_FILE']),
+    )
+  })
+
+  it('exits 1 without reading a page when ENGRAM_CAPTURE_TOKEN is unset, naming it and the fix', async () => {
+    stubServerEnv({ ENGRAM_CAPTURE_TOKEN: undefined, BEARER_TOKEN: '' })
+    const { store, reads } = fakeStore({ memory_items: [{ id: ITEM_ID, texts: [VALUE] }] })
+    const { code, out, err, urls } = await runCli(store)
+    expect(code).toBe(1)
+    expect(reads).toEqual([])
+    expect(urls).toEqual([])
+    expect(out).toEqual([])
+    const message = err.join('\n')
+    expect(message).toContain('ENGRAM_CAPTURE_TOKEN')
+    expect(message).toContain('BEARER_TOKEN')
+    expect(message).not.toContain('OPENAI_API_KEY')
+    expect(message).toContain('node --env-file=')
+  })
+
+  it('with the full list set, counts a stored copy of the capture token under its name and lists the registered names', async () => {
+    stubServerEnv()
+    const { store } = fakeStore({
+      memory_capture_events: [{ id: '9', texts: [`curl -H "X-Token: ${CAPTURE_TOKEN}" localhost`] }],
+    })
+    const { code, out, err, urls } = await runCli(store)
+    expect(err).toEqual([])
+    expect(urls).toEqual(['http://127.0.0.1:3000'])
+    expect(code).toBe(3)
+    expect(out).toEqual([
+      'memory_items scanned=0 matches=0',
+      'memory_capture_events scanned=1 matches=1',
+      'secret ENGRAM_CAPTURE_TOKEN matches=1 ids=memory_capture_events:9',
+      'stored secrets: 1',
+      'process credentials registered: SUPABASE_KEY,OPENAI_API_KEY,BEARER_TOKEN,ENGRAM_CAPTURE_TOKEN',
+    ])
+    const printed = [...out, ...err].join('\n')
+    expect(printed).not.toContain(CAPTURE_TOKEN)
+    expect(printed).not.toContain(BEARER)
   })
 })

@@ -2,13 +2,13 @@
  * captureEventsConfigFromEnv: off while ENGRAM_CAPTURE_TOKEN is unset; with
  * it set, every variable the route needs is required by name and the project
  * registry must load, so the server never starts with a route that can only
- * answer 503. Importing the entry point must not start the server.
+ * answer 503.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { captureEventsConfigFromEnv } from '../src/index-http.js'
+import { captureEventsConfigFromEnv } from '../src/http-server.js'
 
 let dir: string
 let registryFile: string
@@ -35,6 +35,7 @@ afterAll(() => {
 
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
+    BEARER_TOKEN: 'b'.repeat(32),
     ENGRAM_CAPTURE_TOKEN: 'c'.repeat(32),
     ENGRAM_PROJECT_REGISTRY_FILE: registryFile,
     ENGRAM_SECRET_SOURCES_FILE: join(dir, 'sources.json'),
@@ -61,6 +62,7 @@ describe('captureEventsConfigFromEnv', () => {
   })
 
   it.each([
+    'BEARER_TOKEN',
     'ENGRAM_PROJECT_REGISTRY_FILE',
     'ENGRAM_SECRET_SOURCES_FILE',
     'SUPABASE_URL',
