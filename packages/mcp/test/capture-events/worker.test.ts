@@ -19,7 +19,7 @@ import {
   type CaptureWorkerEmbedder,
   type CaptureWorkerOptions,
 } from '../../src/capture-events/worker.js'
-import { SHUTDOWN_GRACE_MS, shutdown, type ShutdownDeps } from '../../src/index-http.js'
+import { SHUTDOWN_GRACE_MS, shutdown, type ShutdownDeps } from '../../src/http-server.js'
 
 const MODEL = 'sample-embed:1536:v2'
 const DIMENSIONS = 1536
