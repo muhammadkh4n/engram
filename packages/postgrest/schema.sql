@@ -2397,6 +2397,12 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- Name: engram_insert_items(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
+
+-- CREATE OR REPLACE cannot change the result columns, so a database holding an
+-- earlier result shape of this function would refuse the re-apply. Its grants
+-- are re-issued below.
+DROP FUNCTION IF EXISTS public.engram_insert_items(jsonb);
+
 -- Inserts 1 to 500 items given as JSON objects keyed by column name. Every
 -- column may be sent except the ones the database or a later write owns:
 -- superseded_by, valid_to, restated_at, retired_at, retired_reason,
