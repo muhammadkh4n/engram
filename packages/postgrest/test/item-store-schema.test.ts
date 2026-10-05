@@ -12,6 +12,7 @@ import {
   CAPTURE_EVENT_TYPES,
   ENTITY_TYPES,
   ITEM_CLASSES,
+  ITEM_INVARIANTS,
   ITEM_KINDS,
   REGISTER_STATUSES,
   SOURCE_TYPES,
@@ -320,5 +321,92 @@ describe('turbo passes the real-Postgres image variables to tests', () => {
     expect(turbo.tasks.test?.env).toEqual(
       expect.arrayContaining(['ENGRAM_TEST_PG_IMAGE', 'ENGRAM_TEST_POSTGREST_IMAGE']),
     )
+  })
+})
+
+const ITEM_RPCS = [
+  ['engram_insert_items', '(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean) LANGUAGE plpgsql'],
+  ['engram_forget_items', '(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid) LANGUAGE plpgsql'],
+  ['engram_retire_items', '(p_ids uuid[], p_reason text) RETURNS SETOF uuid LANGUAGE plpgsql'],
+  ['engram_unretire_items', '(p_ids uuid[]) RETURNS SETOF uuid LANGUAGE plpgsql'],
+  ['engram_supersede_item', '(p_old uuid, p_new uuid) RETURNS boolean LANGUAGE plpgsql'],
+  ['engram_invariant_counts', '() RETURNS TABLE(name text, violations bigint) LANGUAGE sql STABLE'],
+] as const
+
+const ITEM_RPC_NAMES = ITEM_RPCS.map(([name]) => name)
+
+/** Columns an insert may not set: the database or a later write owns them. */
+const NOT_INSERT_COLUMNS = [
+  'superseded_by',
+  'restated_at',
+  'retired_at',
+  'retired_reason',
+  'forgotten_at',
+  'forgotten_reason',
+  'content_hash',
+  'created_at',
+]
+
+describe('item store RPCs', () => {
+  it.each(ITEM_RPCS)('%s is SECURITY DEFINER with a fixed search_path', (name, signature) => {
+    expect(squash(functionDefinition(name))).toContain(
+      `CREATE OR REPLACE FUNCTION public.${name}${signature} SECURITY DEFINER SET search_path TO 'public' AS $$`,
+    )
+  })
+
+  it('defines them after the triggers and before row security', () => {
+    const lastTrigger = Math.max(...TRIGGER_NAMES.map((n) => schema.indexOf(`TRIGGER ${n} `)))
+    const offsets = ITEM_RPC_NAMES.map((n) => schema.indexOf(`CREATE OR REPLACE FUNCTION public.${n}(`))
+    expect(Math.min(...offsets)).toBeGreaterThan(lastTrigger)
+    expect(schema.indexOf('ENABLE ROW LEVEL SECURITY;')).toBeGreaterThan(Math.max(...offsets))
+  })
+
+  it.each(ITEM_RPC_NAMES)('%s raises only 22023 or 23514, its own name first, never a value', (name) => {
+    const raises = [...functionDefinition(name).matchAll(/RAISE EXCEPTION([\s\S]*?);/g)].map((m) => squash(m[1]!))
+    if (name === 'engram_invariant_counts') {
+      expect(raises).toEqual([])
+      return
+    }
+    expect(raises.length).toBeGreaterThan(0)
+    for (const raise of raises) {
+      expect(raise).toMatch(
+        new RegExp(
+          `^USING ERRCODE = '(invalid_parameter_value|check_violation)', MESSAGE = (format\\()?'${name}: [^']*'( \\|\\| v_problem|, v_count\\))?$`,
+        ),
+      )
+    }
+  })
+
+  it('engram_insert_items accepts exactly the insert columns of memory_items, and inserts them all', () => {
+    const columns = [...tableBody('memory_items').matchAll(/^ {4}(\w+) /gm)]
+      .map((m) => m[1]!)
+      .filter((c) => c !== 'CONSTRAINT')
+    const insertColumns = columns.filter((c) => !NOT_INSERT_COLUMNS.includes(c))
+    expect(columns).toEqual(expect.arrayContaining(NOT_INSERT_COLUMNS))
+    const body = functionDefinition('engram_insert_items')
+    const accepted = [...body.matchAll(/\('(\w+)', '(?:string|number|boolean|array|object)', /g)].map((m) => m[1])
+    expect(accepted).toEqual(insertColumns)
+    const target = body.match(/INSERT INTO public\.memory_items AS m \(([^)]*)\)/)
+    expect(target).not.toBeNull()
+    expect(squash(target![1]!).split(', ')).toEqual(insertColumns)
+    expect(squash(body)).toContain(
+      "ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING",
+    )
+  })
+
+  it('engram_invariant_counts reports the core invariants, in order', () => {
+    const names = [...functionDefinition('engram_invariant_counts').matchAll(/^ {6}\((\d), '(\w+)', \(/gm)]
+    expect(names.map((m) => Number(m[1]))).toEqual(ITEM_INVARIANTS.map((_, i) => i + 1))
+    expect(names.map((m) => m[2])).toEqual([...ITEM_INVARIANTS])
+  })
+
+  it('the post-apply smoke calls the read-only item RPCs on the nil uuid', () => {
+    const start = schema.indexOf('DO $smoke$')
+    const smoke = schema.slice(start, schema.indexOf('$smoke$;', start))
+    const nil = "ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]"
+    expect(smoke).toContain('PERFORM * FROM public.engram_invariant_counts();')
+    expect(smoke).toContain(`PERFORM * FROM public.engram_forget_items(${nil}, 'smoke');`)
+    expect(smoke).toContain(`PERFORM * FROM public.engram_retire_items(${nil}, 'smoke');`)
+    expect(smoke).toContain(`PERFORM * FROM public.engram_unretire_items(${nil});`)
   })
 })

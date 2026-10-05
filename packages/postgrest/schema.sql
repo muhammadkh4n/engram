@@ -2177,6 +2177,492 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 
 
 --
+-- Item store RPCs. Writers go through these instead of plain table writes
+-- where a write needs more than one statement or must be idempotent: PostgREST
+-- runs each request as one transaction, and its on_conflict names columns,
+-- not the expression index on source->>'event_key'. Each is SECURITY DEFINER
+-- with a fixed search_path and executable by service_role only. An invalid
+-- argument raises SQLSTATE 22023 (invalid_parameter_value) and a refused rule
+-- 23514 (check_violation), both with the message "<function name>: <reason>",
+-- which names keys and positions but never quotes a value. The triggers above
+-- still check every row these functions write.
+--
+
+--
+-- Name: engram_insert_items(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Inserts 1 to 500 items given as JSON objects keyed by column name. Every
+-- column may be sent except the ones the database or a later write owns:
+-- superseded_by, restated_at, retired_at, retired_reason, forgotten_at,
+-- forgotten_reason, content_hash and created_at. Each key is checked for its
+-- JSON type and for a value its column type accepts before anything is
+-- written, so a bad value is reported by object position and key instead of
+-- as a cast error that quotes it; class, kind, speaker, trust, content,
+-- search_text, occurred_at and source are required. A missing id is generated.
+-- An object whose source.event_key is already stored, or appears earlier in
+-- the same call, is skipped and reported with the stored id and
+-- inserted = false, so a retried delivery is a no-op. One row per object comes
+-- back, in input order. The deferred lineage and supersession checks run at
+-- the caller's commit, so a statement may come before the utterance it quotes
+-- and one failing object fails them all.
+CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_count integer;
+  v_problem text;
+  v_ids uuid[];
+  v_inserted uuid[];
+BEGIN
+  IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_insert_items: p_items must be a JSON array';
+  END IF;
+  v_count := jsonb_array_length(p_items);
+  IF v_count < 1 OR v_count > 500 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_insert_items: p_items holds %s objects, not 1 to 500', v_count);
+  END IF;
+
+  SELECT format('object %s is not a JSON object', t.n) INTO v_problem
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+   WHERE jsonb_typeof(t.e) <> 'object'
+   ORDER BY t.n
+   LIMIT 1;
+
+  IF v_problem IS NULL THEN
+    WITH spec(col, json_type, sql_type) AS (
+      VALUES ('id', 'string', 'uuid'), ('class', 'string', NULL), ('kind', 'string', NULL),
+             ('speaker', 'string', NULL), ('trust', 'number', 'smallint'), ('project_id', 'string', NULL),
+             ('workspace_id', 'string', NULL), ('plan_slug', 'string', NULL), ('session_id', 'string', NULL),
+             ('subject_id', 'string', 'uuid'), ('content', 'string', NULL), ('search_text', 'string', NULL),
+             ('context', 'string', NULL), ('embedding', 'array', NULL), ('embedding_model', 'string', NULL),
+             ('occurred_at', 'string', 'timestamptz'), ('valid_to', 'string', 'timestamptz'),
+             ('standing', 'boolean', NULL), ('register_status', 'string', NULL), ('register_ref', 'string', NULL),
+             ('source', 'object', NULL), ('lineage', 'array', NULL), ('extraction_run_id', 'string', 'uuid')
+    ), field AS (
+      SELECT t.n, k.key, k.value, s.col, s.json_type, s.sql_type
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+       CROSS JOIN LATERAL jsonb_each(t.e) AS k(key, value)
+        LEFT JOIN spec s ON s.col = k.key
+    ), problem AS (
+      SELECT f.n, f.key,
+             CASE
+               WHEN f.col IS NULL THEN
+                 format('object %s has the key %s, which is not an insert column', f.n, quote_ident(left(f.key, 63)))
+               WHEN f.value = 'null'::jsonb THEN NULL
+               WHEN jsonb_typeof(f.value) <> f.json_type THEN
+                 format('object %s: %s must be a JSON %s or null', f.n, f.col, f.json_type)
+               WHEN f.sql_type IS NOT NULL
+                    AND NOT pg_input_is_valid(CASE WHEN f.json_type = 'string' THEN f.value #>> '{}' ELSE f.value::text END, f.sql_type) THEN
+                 format('object %s: %s is not a valid %s', f.n, f.col, f.sql_type)
+               WHEN f.col = 'embedding'
+                    AND (jsonb_array_length(f.value) <> 1536
+                         OR EXISTS (SELECT 1 FROM jsonb_array_elements(f.value) AS x(v)
+                                     WHERE CASE WHEN jsonb_typeof(x.v) = 'number' THEN abs(x.v::text::numeric) > 3.4028234663852886e38 ELSE true END)) THEN
+                 format('object %s: embedding must hold 1536 numbers in the real range', f.n)
+               WHEN f.col = 'lineage'
+                    AND EXISTS (SELECT 1 FROM jsonb_array_elements(f.value) AS x(v)
+                                 WHERE jsonb_typeof(x.v) <> 'string' OR NOT pg_input_is_valid(x.v #>> '{}', 'uuid')) THEN
+                 format('object %s: lineage must hold uuid strings only', f.n)
+             END AS reason
+        FROM field f
+    )
+    SELECT p.reason INTO v_problem
+      FROM problem p
+     WHERE p.reason IS NOT NULL
+     ORDER BY p.n, p.key
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NULL THEN
+    SELECT format('object %s has no %s', t.n, r.col) INTO v_problem
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+     CROSS JOIN unnest(ARRAY['class', 'kind', 'speaker', 'trust', 'content', 'search_text', 'occurred_at', 'source']) WITH ORDINALITY AS r(col, k)
+     WHERE coalesce(t.e -> r.col, 'null'::jsonb) = 'null'::jsonb
+     ORDER BY t.n, r.k
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_insert_items: ' || v_problem;
+  END IF;
+
+  v_ids := ARRAY(
+    SELECT coalesce((t.e ->> 'id')::uuid, gen_random_uuid())
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+     ORDER BY t.n);
+
+  WITH added AS (
+    INSERT INTO public.memory_items AS m (
+      id, class, kind, speaker, trust, project_id, workspace_id, plan_slug, session_id, subject_id,
+      content, search_text, context, embedding, embedding_model, occurred_at, valid_to, standing,
+      register_status, register_ref, source, lineage, extraction_run_id)
+    SELECT v_ids[t.n::integer],
+           t.e ->> 'class',
+           t.e ->> 'kind',
+           t.e ->> 'speaker',
+           (t.e ->> 'trust')::smallint,
+           t.e ->> 'project_id',
+           t.e ->> 'workspace_id',
+           t.e ->> 'plan_slug',
+           t.e ->> 'session_id',
+           (t.e ->> 'subject_id')::uuid,
+           t.e ->> 'content',
+           t.e ->> 'search_text',
+           t.e ->> 'context',
+           CASE WHEN jsonb_typeof(t.e -> 'embedding') = 'array' THEN (t.e -> 'embedding')::text::public.vector END,
+           t.e ->> 'embedding_model',
+           (t.e ->> 'occurred_at')::timestamptz,
+           (t.e ->> 'valid_to')::timestamptz,
+           (t.e ->> 'standing')::boolean,
+           t.e ->> 'register_status',
+           t.e ->> 'register_ref',
+           t.e -> 'source',
+           CASE WHEN jsonb_typeof(t.e -> 'lineage') = 'array'
+                THEN ARRAY(SELECT l.value::uuid FROM jsonb_array_elements_text(t.e -> 'lineage') WITH ORDINALITY AS l(value, k) ORDER BY l.k)
+                ELSE '{}'::uuid[] END,
+           (t.e ->> 'extraction_run_id')::uuid
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+     ORDER BY t.n
+    ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING
+    RETURNING m.id
+  )
+  SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+
+  RETURN QUERY
+  WITH input AS (
+    SELECT t.n::integer AS n,
+           v_ids[t.n::integer] AS item_id,
+           t.e -> 'source' ->> 'event_key' AS event_key,
+           row_number() OVER (PARTITION BY v_ids[t.n::integer] ORDER BY t.n) = 1 AS first_with_id
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+  ), outcome AS (
+    SELECT i.n, i.item_id, i.event_key, i.first_with_id AND i.item_id = ANY (v_inserted) AS added
+      FROM input i
+  )
+  SELECT o.n,
+         CASE WHEN o.added THEN o.item_id
+              ELSE (SELECT x.id FROM public.memory_items x
+                     WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = o.event_key) END,
+         o.added
+    FROM outcome o
+   ORDER BY o.n;
+END; $$;
+
+
+--
+-- Name: engram_forget_items(uuid[], text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Forgets 1 to 50 listed items and every live item derived from them through
+-- lineage, at any depth, in one UPDATE. The closure is computed first, each id
+-- once: a listed id keeps the caller's reason, and a descendant gets
+-- "lineage: <listed id> forgotten: <reason>", naming the first listed id
+-- (in p_ids order) it descends from. The live items whose superseded_by is in
+-- the closure are read before the UPDATE; the forget cascade trigger then
+-- re-points each to the nearest live successor or restores it, and both
+-- outcomes are reported with via = the forgotten successor. Unknown and
+-- already forgotten ids yield no row. Rows: (item_id, 'forgotten', NULL) for
+-- the listed ids in p_ids order, then (item_id, 'forgotten', listed id) for
+-- the descendants, then (item_id, 'repointed' | 'restored', the forgotten
+-- successor) ordered by item_id.
+CREATE OR REPLACE FUNCTION public.engram_forget_items(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_closure uuid[];
+  v_roots uuid[];
+  v_successors uuid[];
+  v_targets uuid[];
+  v_forgotten uuid[];
+  v_forgotten_via uuid[];
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) NOT BETWEEN 1 AND 50 OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_items: p_ids must hold 1 to 50 ids and no NULL';
+  END IF;
+  IF p_reason IS NULL OR p_reason !~ '\S' OR char_length(p_reason) > 2000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_items: p_reason must be non-blank and at most 2000 characters';
+  END IF;
+
+  WITH RECURSIVE walk(node, root) AS (
+    SELECT i.id, i.id
+      FROM public.memory_items i
+     WHERE i.id = ANY (p_ids) AND i.forgotten_at IS NULL
+    UNION
+    SELECT c.id, w.root
+      FROM walk w
+      JOIN public.memory_items c ON c.lineage @> ARRAY[w.node]
+     WHERE c.forgotten_at IS NULL
+  ), chosen AS (
+    SELECT DISTINCT ON (w.node)
+           w.node,
+           CASE WHEN w.node = ANY (p_ids) THEN NULL ELSE w.root END AS root,
+           array_position(p_ids, w.root) AS root_pos
+      FROM walk w
+     ORDER BY w.node, (w.node = w.root) DESC, array_position(p_ids, w.root)
+  )
+  SELECT array_agg(c.node ORDER BY c.root IS NOT NULL, c.root_pos, c.node),
+         array_agg(c.root ORDER BY c.root IS NOT NULL, c.root_pos, c.node)
+    INTO v_closure, v_roots
+    FROM chosen c;
+
+  IF v_closure IS NULL THEN
+    RETURN;
+  END IF;
+
+  SELECT array_agg(s.id ORDER BY s.id), array_agg(s.superseded_by ORDER BY s.id)
+    INTO v_successors, v_targets
+    FROM public.memory_items s
+   WHERE s.superseded_by = ANY (v_closure)
+     AND s.forgotten_at IS NULL
+     AND NOT (s.id = ANY (v_closure));
+
+  WITH gone AS (
+    UPDATE public.memory_items m
+       SET forgotten_at = now(),
+           forgotten_reason = CASE WHEN c.root IS NULL THEN p_reason
+                                   ELSE format('lineage: %s forgotten: %s', c.root, p_reason) END
+      FROM unnest(v_closure, v_roots) WITH ORDINALITY AS c(node, root, k)
+     WHERE m.id = c.node AND m.forgotten_at IS NULL
+    RETURNING m.id AS node, c.root AS root, c.k AS k
+  )
+  SELECT array_agg(g.node ORDER BY g.k), array_agg(g.root ORDER BY g.k)
+    INTO v_forgotten, v_forgotten_via
+    FROM gone g;
+
+  IF v_forgotten IS NULL THEN
+    RETURN;
+  END IF;
+
+  RETURN QUERY
+  SELECT f.node, 'forgotten'::text, f.root
+    FROM unnest(v_forgotten, v_forgotten_via) WITH ORDINALITY AS f(node, root, k)
+   ORDER BY f.k;
+
+  RETURN QUERY
+  SELECT s.node,
+         CASE WHEN m.superseded_by IS NULL THEN 'restored' ELSE 'repointed' END,
+         s.target
+    FROM unnest(v_successors, v_targets) AS s(node, target)
+    JOIN public.memory_items m ON m.id = s.node
+   WHERE s.target = ANY (v_forgotten)
+     AND m.forgotten_at IS NULL
+     AND m.superseded_by IS DISTINCT FROM s.target
+   ORDER BY s.node;
+END; $$;
+
+
+--
+-- Name: engram_retire_items(uuid[], text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Retires 1 to 50 live, unretired items: they stay stored and keep their
+-- lineage, and readers leave them out by default. Returns the ids it retired.
+CREATE OR REPLACE FUNCTION public.engram_retire_items(p_ids uuid[], p_reason text) RETURNS SETOF uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) NOT BETWEEN 1 AND 50 OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_items: p_ids must hold 1 to 50 ids and no NULL';
+  END IF;
+  IF p_reason IS NULL OR p_reason !~ '\S' OR char_length(p_reason) > 2000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_items: p_reason must be non-blank and at most 2000 characters';
+  END IF;
+  RETURN QUERY
+  WITH retired AS (
+    UPDATE public.memory_items m
+       SET retired_at = now(), retired_reason = p_reason
+     WHERE m.id = ANY (p_ids) AND m.forgotten_at IS NULL AND m.retired_at IS NULL
+    RETURNING m.id
+  )
+  SELECT r.id FROM retired r ORDER BY r.id;
+END; $$;
+
+
+--
+-- Name: engram_unretire_items(uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Clears both retire columns on 1 to 50 live, retired items. Returns the ids
+-- it unretired.
+CREATE OR REPLACE FUNCTION public.engram_unretire_items(p_ids uuid[]) RETURNS SETOF uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) NOT BETWEEN 1 AND 50 OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_unretire_items: p_ids must hold 1 to 50 ids and no NULL';
+  END IF;
+  RETURN QUERY
+  WITH unretired AS (
+    UPDATE public.memory_items m
+       SET retired_at = NULL, retired_reason = NULL
+     WHERE m.id = ANY (p_ids) AND m.forgotten_at IS NULL AND m.retired_at IS NOT NULL
+    RETURNING m.id
+  )
+  SELECT u.id FROM unretired u ORDER BY u.id;
+END; $$;
+
+
+--
+-- Name: engram_supersede_item(uuid, uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Marks p_old as superseded by p_new. Both rows are locked FOR UPDATE in id
+-- order, so two calls on the same pair cannot deadlock, and every rule is
+-- checked on the locked rows: both exist and are live, they differ, share a
+-- class, p_new occurred strictly later, and p_old is not superseded by a third
+-- item (replacing a successor is forgetting it). A missing or equal id is an
+-- invalid argument (22023); a broken rule is refused (23514). Returns false
+-- when p_old is already superseded by p_new; otherwise sets superseded_by and
+-- ends p_old's validity at p_new's event time unless it already ended earlier.
+CREATE OR REPLACE FUNCTION public.engram_supersede_item(p_old uuid, p_new uuid) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_old record;
+  v_new record;
+BEGIN
+  IF p_old IS NULL OR p_new IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_supersede_item: p_old and p_new are required';
+  END IF;
+  IF p_old = p_new THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_supersede_item: an item cannot supersede itself';
+  END IF;
+
+  PERFORM 1 FROM public.memory_items i WHERE i.id IN (p_old, p_new) ORDER BY i.id FOR UPDATE;
+
+  SELECT i.class, i.occurred_at, i.superseded_by, i.forgotten_at INTO v_old
+    FROM public.memory_items i WHERE i.id = p_old;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_supersede_item: p_old names no item';
+  END IF;
+  SELECT i.class, i.occurred_at, i.forgotten_at INTO v_new
+    FROM public.memory_items i WHERE i.id = p_new;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_supersede_item: p_new names no item';
+  END IF;
+
+  IF v_old.forgotten_at IS NOT NULL OR v_new.forgotten_at IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_supersede_item: a forgotten item neither supersedes nor is superseded';
+  END IF;
+  IF v_old.class <> v_new.class THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_supersede_item: the items have different classes';
+  END IF;
+  IF v_old.superseded_by = p_new THEN
+    RETURN false;
+  END IF;
+  IF v_old.superseded_by IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_supersede_item: p_old is already superseded by another item';
+  END IF;
+  IF v_new.occurred_at <= v_old.occurred_at THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_supersede_item: p_new did not occur later than p_old';
+  END IF;
+
+  UPDATE public.memory_items m
+     SET superseded_by = p_new,
+         valid_to = least(coalesce(m.valid_to, v_new.occurred_at), v_new.occurred_at)
+   WHERE m.id = p_old;
+  RETURN true;
+END; $$;
+
+
+--
+-- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Violations of the item invariants that can be counted in SQL, one row each,
+-- in this order; every invariant holds when all are zero. The CHECKs and
+-- triggers refuse these writes, so a non-zero count means a writer bypassed
+-- them (a superuser, or triggers disabled by session_replication_role).
+-- - assistant_authored_mk_claims: mk_statements not spoken by MK, and ledger
+--   decisions attributed to MK (source.by = 'mk') without a non-blank
+--   source.quote and source.quote_source.
+-- - quote_not_in_lineage: mk_statements whose content does not occur, under
+--   the quote rule, in an utterance spoken by MK in their lineage.
+-- - lineage_to_forgotten: live items with a forgotten item in their lineage.
+-- - utterance_time_mismatch: utterances whose source.event_id names a capture
+--   event with a different occurred_at, plus transcript and history
+--   utterances with no such event. event_id is cast only when it is 1 to 18
+--   digits, so a malformed or oversized value counts as no event instead of
+--   failing the count.
+-- - unregistered_project: items whose project_id is not a registered project,
+--   or whose workspace_id is not a registered workspace.
+-- Forgotten items are counted too, except where the invariant is about live
+-- items: forgetting hides an item, it does not make a broken row valid.
+CREATE OR REPLACE FUNCTION public.engram_invariant_counts() RETURNS TABLE(name text, violations bigint)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT v.name, v.violations
+    FROM (VALUES
+      (1, 'assistant_authored_mk_claims', (
+        SELECT count(*)
+          FROM public.memory_items i
+         WHERE (i.class = 'mk_statement' AND i.speaker <> 'mk')
+            OR (i.class = 'artifact' AND i.kind = 'ledger_decision'
+                AND (i.source ->> 'by') IS NOT DISTINCT FROM 'mk'
+                AND (coalesce(i.source ->> 'quote', '') !~ '\S' OR coalesce(i.source ->> 'quote_source', '') !~ '\S')))),
+      (2, 'quote_not_in_lineage', (
+        SELECT count(*)
+          FROM public.memory_items s
+         WHERE s.class = 'mk_statement'
+           AND NOT EXISTS (
+             SELECT 1
+               FROM public.memory_items u
+              WHERE u.id = ANY (s.lineage)
+                AND u.class = 'utterance'
+                AND u.speaker = 'mk'
+                AND public.engram_norm_quote(s.content) <> ''
+                AND strpos(public.engram_norm_quote(u.content), public.engram_norm_quote(s.content)) > 0))),
+      (3, 'lineage_to_forgotten', (
+        SELECT count(*)
+          FROM public.memory_items i
+         WHERE i.forgotten_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM public.memory_items l
+              WHERE l.id = ANY (i.lineage) AND l.forgotten_at IS NOT NULL))),
+      (4, 'utterance_time_mismatch', (
+        SELECT count(*)
+          FROM public.memory_items u
+          LEFT JOIN public.memory_capture_events e
+            ON e.id = CASE WHEN (u.source ->> 'event_id') ~ '^[0-9]{1,18}$' THEN (u.source ->> 'event_id')::bigint END
+         WHERE u.class = 'utterance'
+           AND ((e.id IS NOT NULL AND e.occurred_at <> u.occurred_at)
+                OR (e.id IS NULL AND (u.source ->> 'type') IN ('transcript', 'history'))))),
+      (5, 'unregistered_project', (
+        SELECT count(*)
+          FROM public.memory_items i
+         WHERE (i.project_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM public.memory_projects p WHERE p.id = i.project_id AND p.kind = 'project'))
+            OR (i.workspace_id IS NOT NULL AND NOT EXISTS (
+                  SELECT 1 FROM public.memory_projects w WHERE w.id = i.workspace_id AND w.kind = 'workspace'))))
+    ) AS v(ord, name, violations)
+   ORDER BY v.ord
+$$;
+
+
+--
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -2428,8 +2914,9 @@ GRANT USAGE, SELECT ON SEQUENCE public.memory_secret_hits_id_seq TO service_role
 -- ordering). Executes every recall RPC + the forget primitive against the just-
 -- applied schema so a missing forgotten_at column or a broken gate fails HERE: it
 -- aborts the apply under `psql -v ON_ERROR_STOP=1`, and otherwise surfaces as a
--- loud ERROR line in the apply log. Read-only except engram_mark_forgotten on the
--- nil UUID (matches nothing -> returns 0). Idempotent and safe to re-run. All
+-- loud ERROR line in the apply log. Read-only except engram_mark_forgotten and the
+-- item forget, retire and unretire RPCs on the nil UUID (match nothing, write
+-- nothing). Idempotent and safe to re-run. All
 -- names schema-qualified because the dump sets search_path = ''.
 --
 
@@ -2448,7 +2935,11 @@ BEGIN
   v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
-  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live';
+  PERFORM * FROM public.engram_invariant_counts();
+  PERFORM * FROM public.engram_forget_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke');
+  PERFORM * FROM public.engram_retire_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke');
+  PERFORM * FROM public.engram_unretire_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire and invariant counts callable';
 END;
 $smoke$;
 
@@ -2486,6 +2977,12 @@ REVOKE EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double pre
 REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -2519,6 +3016,12 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -2547,6 +3050,12 @@ GRANT EXECUTE ON FUNCTION public.engram_decay_pass(double precision, double prec
 GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double precision[], integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_insert_items(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_invariant_counts() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;

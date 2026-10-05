@@ -1,0 +1,689 @@
+/**
+ * The item store RPCs on real Postgres, called as service_role the way
+ * PostgREST calls them:
+ * - engram_insert_items is idempotent on source.event_key, returns one row
+ *   per object in input order, refuses any key that is not an insert column
+ *   and any value its column cannot take, and stores nothing when one object
+ *   breaks a rule;
+ * - engram_forget_items forgets the listed items and their lineage closure
+ *   and reports what it forgot and which successors were re-pointed or
+ *   restored;
+ * - retire, unretire and supersede act on live items only and refuse what
+ *   the store's rules forbid;
+ * - engram_invariant_counts reads zero on a store that keeps every rule and
+ *   exactly one for each violation seeded past the triggers.
+ */
+import { createHash } from 'node:crypto'
+import { ITEM_INVARIANTS } from '@engram-mem/core'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { realPgImage, startRealPg, type RealPg } from './harness.js'
+
+const SETUP_TIMEOUT_MS = 120_000
+const TEST_TIMEOUT_MS = 60_000
+
+const SUBJECT_ID = '01940000-0000-7000-8000-00000000a000'
+const T0 = Date.parse('2026-03-04T05:00:00Z')
+const EMBEDDING_DIMS = 1536
+
+/** Columns engram_insert_items refuses: the database or a later write owns them. */
+const NOT_INSERT_COLUMNS = [
+  'superseded_by',
+  'restated_at',
+  'retired_at',
+  'retired_reason',
+  'forgotten_at',
+  'forgotten_reason',
+  'content_hash',
+  'created_at',
+] as const
+
+type ItemObject = Record<string, unknown> & { id: string }
+
+interface InsertRow {
+  ord: number
+  id: string
+  inserted: boolean
+}
+
+interface Effect {
+  itemId: string
+  effect: string
+  via: string | null
+}
+
+let idCounter = 0
+function newId(): string {
+  idCounter += 1
+  return `01940000-0000-7000-8000-${String(idCounter).padStart(12, '0')}`
+}
+
+let keyCounter = 0
+function eventKey(): string {
+  keyCounter += 1
+  return `capture:tst-rpc-session:turn-${keyCounter}`
+}
+
+function at(minutes: number): string {
+  return new Date(T0 + minutes * 60_000).toISOString()
+}
+
+function hex(value: string): string {
+  return Buffer.from(value, 'utf8').toString('hex')
+}
+
+/** A text literal carried as UTF-8 hex, so any character reaches Postgres byte for byte. */
+function text(value: string): string {
+  return `convert_from(decode('${hex(value)}', 'hex'), 'UTF8')`
+}
+
+function jsonb(value: unknown): string {
+  return `${text(JSON.stringify(value))}::jsonb`
+}
+
+function uuidArray(ids: readonly string[]): string {
+  return `ARRAY[${ids.map((id) => `'${id}'`).join(', ')}]::uuid[]`
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+function utterance(content: string, overrides: Record<string, unknown> = {}): ItemObject {
+  return {
+    id: newId(),
+    class: 'utterance',
+    kind: 'user_prompt',
+    speaker: 'mk',
+    trust: 0,
+    content,
+    search_text: content,
+    occurred_at: at(0),
+    source: { type: 'transcript', event_key: eventKey() },
+    ...overrides,
+  }
+}
+
+function statement(content: string, lineage: readonly string[], overrides: Record<string, unknown> = {}): ItemObject {
+  return {
+    id: newId(),
+    class: 'mk_statement',
+    kind: 'ruling',
+    speaker: 'mk',
+    trust: 0,
+    subject_id: SUBJECT_ID,
+    content,
+    search_text: content,
+    occurred_at: at(0),
+    source: { type: 'extraction', event_key: `mk_statement:${eventKey()}` },
+    lineage,
+    standing: false,
+    ...overrides,
+  }
+}
+
+function observation(content: string, lineage: readonly string[], overrides: Record<string, unknown> = {}): ItemObject {
+  return {
+    id: newId(),
+    class: 'observation',
+    kind: 'fact',
+    speaker: 'assistant',
+    trust: 3,
+    subject_id: SUBJECT_ID,
+    content,
+    search_text: content,
+    occurred_at: at(0),
+    source: { type: 'extraction' },
+    lineage,
+    ...overrides,
+  }
+}
+
+function artifact(content: string, minutes: number, overrides: Record<string, unknown> = {}): ItemObject {
+  return {
+    id: newId(),
+    class: 'artifact',
+    kind: 'commit',
+    speaker: 'artifact',
+    trust: 1,
+    content,
+    search_text: content,
+    occurred_at: at(minutes),
+    source: { type: 'git' },
+    ...overrides,
+  }
+}
+
+describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
+  let pg: RealPg
+
+  beforeAll(async () => {
+    pg = await startRealPg()
+    await pg.applySchema()
+    await pg.psql(`INSERT INTO public.memory_subjects (id, label) VALUES ('${SUBJECT_ID}', 'release cadence')`)
+  }, SETUP_TIMEOUT_MS)
+
+  afterAll(async () => {
+    await pg?.stop()
+  }, TEST_TIMEOUT_MS)
+
+  async function asService<T>(sql: string): Promise<T> {
+    return JSON.parse(await pg.psqlAs('service_role', sql)) as T
+  }
+
+  async function insertItems(objects: unknown): Promise<InsertRow[]> {
+    return asService<InsertRow[]>(
+      `SELECT coalesce(json_agg(r ORDER BY r.ord), '[]'::json) FROM public.engram_insert_items(${jsonb(objects)}) AS r;`,
+    )
+  }
+
+  async function forget(ids: readonly string[], reason: string): Promise<Effect[]> {
+    return asService<Effect[]>(
+      `SELECT coalesce(json_agg(json_build_object('itemId', r.item_id, 'effect', r.effect, 'via', r.via) ORDER BY r.k), '[]'::json)
+         FROM public.engram_forget_items(${uuidArray(ids)}, ${text(reason)}) WITH ORDINALITY AS r(item_id, effect, via, k);`,
+    )
+  }
+
+  async function retire(ids: readonly string[], reason: string): Promise<string[]> {
+    return asService<string[]>(
+      `SELECT coalesce(json_agg(r.id ORDER BY r.id), '[]'::json) FROM public.engram_retire_items(${uuidArray(ids)}, ${text(reason)}) AS r(id);`,
+    )
+  }
+
+  async function unretire(ids: readonly string[]): Promise<string[]> {
+    return asService<string[]>(
+      `SELECT coalesce(json_agg(r.id ORDER BY r.id), '[]'::json) FROM public.engram_unretire_items(${uuidArray(ids)}) AS r(id);`,
+    )
+  }
+
+  async function supersede(oldId: string, newId_: string): Promise<boolean> {
+    return asService<boolean>(`SELECT to_json(public.engram_supersede_item('${oldId}', '${newId_}'));`)
+  }
+
+  /** Runs SQL as service_role that must fail; returns the verbose error, which carries the SQLSTATE. */
+  async function refusal(sql: string): Promise<string> {
+    try {
+      await pg.psqlAs('service_role', `\\set VERBOSITY verbose\n${sql}`)
+    } catch (error) {
+      return (error as Error).message
+    }
+    throw new Error('the call succeeded')
+  }
+
+  async function insertRefusal(objects: unknown): Promise<string> {
+    return refusal(`SELECT * FROM public.engram_insert_items(${jsonb(objects)});`)
+  }
+
+  async function rowCount(ids: readonly string[]): Promise<number> {
+    return Number(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = ANY (${uuidArray(ids)})`))
+  }
+
+  async function row<T>(id: string, columns: string): Promise<T> {
+    return JSON.parse(
+      await pg.psql(`SELECT row_to_json(x) FROM (SELECT ${columns} FROM public.memory_items WHERE id = '${id}') x`),
+    ) as T
+  }
+
+  describe('engram_insert_items', () => {
+    it('inserts an utterance and its statement, statement first, in one call, in input order', async () => {
+      const u = utterance('Cut the release branch on Thursdays.')
+      const s = statement('Cut the release branch on Thursdays.', [u.id])
+      expect(await insertItems([s, u])).toEqual([
+        { ord: 1, id: s.id, inserted: true },
+        { ord: 2, id: u.id, inserted: true },
+      ])
+      expect(await row(u.id, 'content_hash')).toEqual({ content_hash: sha256Hex(u.content as string) })
+      expect(await row(s.id, 'lineage')).toEqual({ lineage: [u.id] })
+    }, TEST_TIMEOUT_MS)
+
+    it('skips every object of a repeated call and returns the stored ids', async () => {
+      const u = utterance('Keep the staging data for a week.')
+      const s = statement('Keep the staging data for a week.', [u.id])
+      await insertItems([s, u])
+      expect(await insertItems([s, u])).toEqual([
+        { ord: 1, id: s.id, inserted: false },
+        { ord: 2, id: u.id, inserted: false },
+      ])
+      const retried = [
+        { ...s, id: newId() },
+        { ...u, id: newId() },
+      ]
+      expect(await insertItems(retried)).toEqual([
+        { ord: 1, id: s.id, inserted: false },
+        { ord: 2, id: u.id, inserted: false },
+      ])
+      expect(await rowCount(retried.map((o) => o.id))).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('reports an event key repeated within one call as the first object', async () => {
+      const first = utterance('Rotate the deploy key.')
+      const replay = { ...first, id: newId() }
+      expect(await insertItems([first, replay])).toEqual([
+        { ord: 1, id: first.id, inserted: true },
+        { ord: 2, id: first.id, inserted: false },
+      ])
+      expect(await rowCount([replay.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('generates an id for an object that has none', async () => {
+      const { id: _unused, ...withoutId } = utterance('Name the branch after the ticket.')
+      const [result] = await insertItems([withoutId])
+      expect(result!.inserted).toBe(true)
+      expect(result!.id).toMatch(/^[0-9a-f-]{36}$/)
+      expect(await rowCount([result!.id])).toBe(1)
+    }, TEST_TIMEOUT_MS)
+
+    it('converts every column from its JSON form', async () => {
+      const u = utterance('Ship it.')
+      const v = utterance('Ship it after review.')
+      const embedding = Array.from({ length: EMBEDDING_DIMS }, (_, i) => (i === 0 ? 0.5 : i === 1 ? -0.25 : 0))
+      const s = statement('Ship it', [v.id, u.id], {
+        context: 'Should the hotfix wait for review?',
+        embedding,
+        embedding_model: 'tst-embedder',
+        occurred_at: '2026-03-04T05:06:07.123Z',
+        valid_to: '2026-03-05T00:00:00Z',
+        standing: true,
+        register_status: 'recorded',
+        register_ref: 'R-TST-7',
+        session_id: 'tst-rpc-session',
+        plan_slug: 'tst-plan',
+      })
+      await insertItems([u, v, s])
+      expect(
+        await row(
+          s.id,
+          `vector_dims(embedding) AS dims, (embedding::real[])[1:3] AS head, embedding_model, lineage,
+           occurred_at = '2026-03-04T05:06:07.123Z'::timestamptz AS occurred_ok, valid_to = '2026-03-05T00:00:00Z'::timestamptz AS valid_to_ok,
+           standing, register_status, register_ref, context, session_id, plan_slug, subject_id, trust, source`,
+        ),
+      ).toEqual({
+        dims: EMBEDDING_DIMS,
+        head: [0.5, -0.25, 0],
+        embedding_model: 'tst-embedder',
+        lineage: [v.id, u.id],
+        occurred_ok: true,
+        valid_to_ok: true,
+        standing: true,
+        register_status: 'recorded',
+        register_ref: 'R-TST-7',
+        context: 'Should the hotfix wait for review?',
+        session_id: 'tst-rpc-session',
+        plan_slug: 'tst-plan',
+        subject_id: SUBJECT_ID,
+        trust: 0,
+        source: s.source,
+      })
+    }, TEST_TIMEOUT_MS)
+
+    it.each(NOT_INSERT_COLUMNS)('refuses the key %s by name and stores nothing', async (column) => {
+      const ok = utterance('This one is fine.')
+      const bad = { ...utterance('This one sends a column it does not own.'), [column]: null }
+      const message = await insertRefusal([ok, bad])
+      expect(message).toMatch(
+        new RegExp(`ERROR:\\s+22023: engram_insert_items: object 2 has the key ${column}, which is not an insert column`),
+      )
+      expect(await rowCount([ok.id, bad.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses a call that is not an array of 1 to 500 objects', async () => {
+      const many = Array.from({ length: 501 }, (_, i) => utterance(`Prompt number ${i}.`))
+      expect(await insertRefusal(many)).toMatch(/ERROR:\s+22023: engram_insert_items: p_items holds 501 objects, not 1 to 500/)
+      expect(await rowCount(many.map((o) => o.id))).toBe(0)
+      expect(await insertRefusal([])).toMatch(/22023: engram_insert_items: p_items holds 0 objects/)
+      expect(await insertRefusal({ items: [] })).toMatch(/22023: engram_insert_items: p_items must be a JSON array/)
+      expect(await insertRefusal([utterance('fine'), 'not an object'])).toMatch(
+        /22023: engram_insert_items: object 2 is not a JSON object/,
+      )
+    }, TEST_TIMEOUT_MS)
+
+    it.each([
+      ['a string trust', { trust: 'tst-zero' }, /object 1: trust must be a JSON number or null/],
+      ['a fractional trust', { trust: 0.5 }, /object 1: trust is not a valid smallint/],
+      ['a malformed id', { id: 'tst-not-a-uuid' }, /object 1: id is not a valid uuid/],
+      ['a malformed event time', { occurred_at: 'tst-some-day' }, /object 1: occurred_at is not a valid timestamptz/],
+      ['a source that is not an object', { source: 'transcript' }, /object 1: source must be a JSON object or null/],
+      ['a short embedding', { embedding: [0.1, 0.2, 0.3], embedding_model: 'tst-embedder' }, /object 1: embedding must hold 1536 numbers/],
+      ['a lineage of numbers', { lineage: [12] }, /object 1: lineage must hold uuid strings only/],
+      ['no content', { content: null }, /object 1 has no content/],
+    ])('refuses %s without quoting the value', async (_label, override, reason) => {
+      const bad = { ...utterance('A prompt with one bad value.'), ...override }
+      const message = await insertRefusal([bad])
+      expect(message).toMatch(/ERROR:\s+22023: engram_insert_items: /)
+      expect(message).toMatch(reason)
+      for (const value of Object.values(override)) {
+        if (typeof value === 'string') expect(message).not.toContain(value)
+      }
+      expect(
+        Number(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE content = 'A prompt with one bad value.'`)),
+      ).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('stores nothing when object 3 of 3 quotes words its utterance does not hold, at commit', async () => {
+      const u = utterance('Freeze merges during the audit.')
+      const v = utterance('Unfreeze them afterwards.')
+      const s = statement('Freeze merges during the migration.', [u.id])
+      const message = await insertRefusal([u, v, s])
+      expect(message).toMatch(/ERROR:\s+23514: memory_items_lineage: the quote does not occur in an mk utterance of its lineage/)
+      expect(await rowCount([u.id, v.id, s.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('stores nothing when object 3 of 3 breaks a CHECK', async () => {
+      const u = utterance('Pin the toolchain.')
+      const v = utterance('Pin it in the lockfile.')
+      const w = utterance('An mk prompt claiming assistant trust.', { trust: 3 })
+      const message = await insertRefusal([u, v, w])
+      expect(message).toMatch(/ERROR:\s+23514: .*violates check constraint "memory_items_trust_check"/)
+      expect(await rowCount([u.id, v.id, w.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+  })
+
+  describe('engram_forget_items', () => {
+    it('forgets an utterance, the statement quoting it and the observation built on that', async () => {
+      const u = utterance('Archive the old dashboards.')
+      const s = statement('Archive the old dashboards.', [u.id])
+      const o = observation('The old dashboards are archived monthly.', [s.id])
+      await insertItems([u, s, o])
+      expect(await forget([u.id], 'withdrawn by the speaker')).toEqual([
+        { itemId: u.id, effect: 'forgotten', via: null },
+        { itemId: s.id, effect: 'forgotten', via: u.id },
+        { itemId: o.id, effect: 'forgotten', via: u.id },
+      ])
+      expect(await row(u.id, 'forgotten_reason')).toEqual({ forgotten_reason: 'withdrawn by the speaker' })
+      expect(await row(s.id, 'forgotten_reason')).toEqual({
+        forgotten_reason: `lineage: ${u.id} forgotten: withdrawn by the speaker`,
+      })
+      expect(await row(o.id, 'forgotten_reason')).toEqual({
+        forgotten_reason: `lineage: ${u.id} forgotten: withdrawn by the speaker`,
+      })
+    }, TEST_TIMEOUT_MS)
+
+    it('lets a listed id win over a descendant, lists listed ids in call order, and names the first listed ancestor', async () => {
+      const u = utterance('Drop the beta flag.')
+      const s = statement('Drop the beta flag.', [u.id])
+      const o = observation('The beta flag gates the new importer.', [s.id])
+      await insertItems([u, s, o])
+      expect(await forget([s.id, u.id], 'superseded by a later decision')).toEqual([
+        { itemId: s.id, effect: 'forgotten', via: null },
+        { itemId: u.id, effect: 'forgotten', via: null },
+        { itemId: o.id, effect: 'forgotten', via: s.id },
+      ])
+      expect(await row(s.id, 'forgotten_reason')).toEqual({ forgotten_reason: 'superseded by a later decision' })
+    }, TEST_TIMEOUT_MS)
+
+    it('restores the item a forgotten successor superseded', async () => {
+      const a = artifact('fix: first attempt', 0)
+      const b = artifact('fix: second attempt', 10)
+      await insertItems([a, b])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await forget([b.id], 'reverted')).toEqual([
+        { itemId: b.id, effect: 'forgotten', via: null },
+        { itemId: a.id, effect: 'restored', via: b.id },
+      ])
+      expect(await row(a.id, 'superseded_by, valid_to')).toEqual({ superseded_by: null, valid_to: null })
+    }, TEST_TIMEOUT_MS)
+
+    it('re-points the first item of a chain past a forgotten middle', async () => {
+      const a = artifact('docs: v1', 0)
+      const b = artifact('docs: v2', 10)
+      const c = artifact('docs: v3', 20)
+      await insertItems([a, b, c])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await supersede(b.id, c.id)).toBe(true)
+      expect(await forget([b.id], 'wrong file')).toEqual([
+        { itemId: b.id, effect: 'forgotten', via: null },
+        { itemId: a.id, effect: 'repointed', via: b.id },
+      ])
+      expect(
+        await row(a.id, `superseded_by, valid_to = '${c.occurred_at}'::timestamptz AS ends_at_successor`),
+      ).toEqual({ superseded_by: c.id, ends_at_successor: true })
+    }, TEST_TIMEOUT_MS)
+
+    it('returns no row for an unknown or an already forgotten id', async () => {
+      const a = artifact('chore: tidy', 0)
+      await insertItems([a])
+      expect(await forget([newId()], 'not stored')).toEqual([])
+      expect(await forget([a.id], 'first')).toHaveLength(1)
+      expect(await forget([a.id], 'second')).toEqual([])
+      expect(await row(a.id, 'forgotten_reason')).toEqual({ forgotten_reason: 'first' })
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses 51 ids, a NULL id, and a blank or overlong reason', async () => {
+      const ids = Array.from({ length: 51 }, () => newId())
+      expect(await refusal(`SELECT * FROM public.engram_forget_items(${uuidArray(ids)}, 'too many');`)).toMatch(
+        /ERROR:\s+22023: engram_forget_items: p_ids must hold 1 to 50 ids and no NULL/,
+      )
+      expect(await refusal(`SELECT * FROM public.engram_forget_items(ARRAY[NULL]::uuid[], 'null id');`)).toMatch(
+        /22023: engram_forget_items: p_ids must hold 1 to 50 ids/,
+      )
+      expect(await refusal(`SELECT * FROM public.engram_forget_items(${uuidArray([newId()])}, '   ');`)).toMatch(
+        /22023: engram_forget_items: p_reason must be non-blank and at most 2000 characters/,
+      )
+      expect(
+        await refusal(`SELECT * FROM public.engram_forget_items(${uuidArray([newId()])}, repeat('x', 2001));`),
+      ).toMatch(/22023: engram_forget_items: p_reason must be non-blank/)
+    }, TEST_TIMEOUT_MS)
+  })
+
+  describe('engram_retire_items and engram_unretire_items', () => {
+    it('round-trips a retirement and acts only on items in the other state', async () => {
+      const a = artifact('feat: retired later', 0)
+      await insertItems([a])
+      expect(await retire([a.id], 'no longer relevant')).toEqual([a.id])
+      expect(await row(a.id, 'retired_at IS NOT NULL AS retired, retired_reason')).toEqual({
+        retired: true,
+        retired_reason: 'no longer relevant',
+      })
+      expect(await retire([a.id], 'again')).toEqual([])
+      expect(await row(a.id, 'retired_reason')).toEqual({ retired_reason: 'no longer relevant' })
+      expect(await unretire([a.id])).toEqual([a.id])
+      expect(await row(a.id, 'retired_at, retired_reason')).toEqual({ retired_at: null, retired_reason: null })
+      expect(await unretire([a.id])).toEqual([])
+    }, TEST_TIMEOUT_MS)
+
+    it('neither retires nor unretires a forgotten item', async () => {
+      const a = artifact('feat: forgotten first', 0)
+      const b = artifact('feat: retired, then forgotten', 0)
+      await insertItems([a, b])
+      expect(await retire([b.id], 'parked')).toEqual([b.id])
+      await forget([a.id, b.id], 'mistaken capture')
+      expect(await retire([a.id], 'too late')).toEqual([])
+      expect(await unretire([b.id])).toEqual([])
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses 51 ids and a blank reason', async () => {
+      const ids = Array.from({ length: 51 }, () => newId())
+      expect(await refusal(`SELECT * FROM public.engram_retire_items(${uuidArray(ids)}, 'too many');`)).toMatch(
+        /ERROR:\s+22023: engram_retire_items: p_ids must hold 1 to 50 ids and no NULL/,
+      )
+      expect(await refusal(`SELECT * FROM public.engram_retire_items(${uuidArray([newId()])}, '');`)).toMatch(
+        /22023: engram_retire_items: p_reason must be non-blank/,
+      )
+      expect(await refusal(`SELECT * FROM public.engram_unretire_items(${uuidArray(ids)});`)).toMatch(
+        /22023: engram_unretire_items: p_ids must hold 1 to 50 ids and no NULL/,
+      )
+    }, TEST_TIMEOUT_MS)
+  })
+
+  describe('engram_supersede_item', () => {
+    it('returns true, then false on a repeat, and ends validity at the successor', async () => {
+      const a = artifact('perf: cache v1', 0)
+      const b = artifact('perf: cache v2', 30)
+      await insertItems([a, b])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await supersede(a.id, b.id)).toBe(false)
+      expect(await row(a.id, `superseded_by, valid_to = '${b.occurred_at}'::timestamptz AS ends_at_successor`)).toEqual({
+        superseded_by: b.id,
+        ends_at_successor: true,
+      })
+    }, TEST_TIMEOUT_MS)
+
+    it('keeps a validity that already ended before the successor', async () => {
+      const a = artifact('perf: bounded', 0, { valid_to: at(5) })
+      const b = artifact('perf: replacement', 30)
+      await insertItems([a, b])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await row(a.id, `valid_to = '${at(5)}'::timestamptz AS kept`)).toEqual({ kept: true })
+    }, TEST_TIMEOUT_MS)
+
+    it.each([
+      ['an item of another class', () => [artifact('ci: a', 0), observation('CI runs on every push.', [], { occurred_at: at(10) })], /23514: engram_supersede_item: the items have different classes/],
+      ['an equal event time', () => [artifact('ci: b', 0), artifact('ci: b2', 0)], /23514: engram_supersede_item: p_new did not occur later than p_old/],
+      ['an earlier event time', () => [artifact('ci: c', 10), artifact('ci: c2', 0)], /23514: engram_supersede_item: p_new did not occur later than p_old/],
+    ])('refuses %s', async (_label, build, reason) => {
+      const [a, b] = build() as [ItemObject, ItemObject]
+      await insertItems([a, b])
+      expect(await refusal(`SELECT public.engram_supersede_item('${a.id}', '${b.id}');`)).toMatch(reason)
+      expect(await row(a.id, 'superseded_by')).toEqual({ superseded_by: null })
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses a p_old already superseded by a third item', async () => {
+      const a = artifact('build: one', 0)
+      const b = artifact('build: two', 10)
+      const c = artifact('build: three', 20)
+      await insertItems([a, b, c])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await refusal(`SELECT public.engram_supersede_item('${a.id}', '${c.id}');`)).toMatch(
+        /ERROR:\s+23514: engram_supersede_item: p_old is already superseded by another item/,
+      )
+      expect(await row(a.id, 'superseded_by')).toEqual({ superseded_by: b.id })
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses a forgotten item, the same id twice and an unknown id', async () => {
+      const a = artifact('test: kept', 0)
+      const b = artifact('test: forgotten', 10)
+      await insertItems([a, b])
+      await forget([b.id], 'bad capture')
+      expect(await refusal(`SELECT public.engram_supersede_item('${a.id}', '${b.id}');`)).toMatch(
+        /ERROR:\s+23514: engram_supersede_item: a forgotten item neither supersedes nor is superseded/,
+      )
+      expect(await refusal(`SELECT public.engram_supersede_item('${a.id}', '${a.id}');`)).toMatch(
+        /ERROR:\s+22023: engram_supersede_item: an item cannot supersede itself/,
+      )
+      expect(await refusal(`SELECT public.engram_supersede_item('${a.id}', '${newId()}');`)).toMatch(
+        /ERROR:\s+22023: engram_supersede_item: p_new names no item/,
+      )
+    }, TEST_TIMEOUT_MS)
+  })
+
+  describe('engram_invariant_counts', () => {
+    /** Empties the item tables; subjects stay. */
+    async function emptyStore(): Promise<void> {
+      await pg.psql(
+        'TRUNCATE public.memory_item_entities, public.memory_items, public.memory_extraction_runs, public.memory_capture_events, public.memory_projects;',
+      )
+    }
+
+    async function counts(): Promise<Array<[string, number]>> {
+      return asService<Array<[string, number]>>(
+        `SELECT coalesce(json_agg(json_build_array(r.name, r.violations) ORDER BY r.k), '[]'::json)
+           FROM public.engram_invariant_counts() WITH ORDINALITY AS r(name, violations, k);`,
+      )
+    }
+
+    function expected(violations: Partial<Record<(typeof ITEM_INVARIANTS)[number], number>> = {}): Array<[string, number]> {
+      return ITEM_INVARIANTS.map((name) => [name, violations[name] ?? 0])
+    }
+
+    async function captureEvent(occurredAt: string): Promise<string> {
+      keyCounter += 1
+      return pg.psql(
+        `INSERT INTO public.memory_capture_events (session_id, event_uuid, type, occurred_at, payload)
+         VALUES ('tst-rpc-session', 'evt-${keyCounter}', 'user_prompt', '${occurredAt}', '{}'::jsonb) RETURNING id;`,
+      )
+    }
+
+    /** A store that keeps every rule: registered scopes, utterances matching their events, a quoted statement. */
+    async function validStore(): Promise<{ utteranceId: string; eventId: string }> {
+      await emptyStore()
+      await pg.psql(`INSERT INTO public.memory_projects (id, kind) VALUES ('tst-ws', 'workspace');
+        INSERT INTO public.memory_projects (id, kind, workspace_id) VALUES ('tst-proj', 'project', 'tst-ws');`)
+      const eventId = await captureEvent(at(1))
+      const u = utterance('Tag releases from main only.', {
+        occurred_at: at(1),
+        project_id: 'tst-proj',
+        workspace_id: 'tst-ws',
+        source: { type: 'transcript', event_key: eventKey(), event_id: eventId },
+      })
+      const s = statement('Tag releases from main only.', [u.id], { project_id: 'tst-proj' })
+      const decision = artifact('Releases are tagged from main.', 2, {
+        kind: 'ledger_decision',
+        source: { type: 'ledger', by: 'mk', quote: 'Tag releases from main only.', quote_source: 'tst-ledger#d1' },
+      })
+      const gone = utterance('Something said by mistake.', { source: { type: 'history', event_id: await captureEvent(at(0)) } })
+      const goneStatement = statement('Something said by mistake.', [gone.id])
+      await insertItems([u, s, decision, gone, goneStatement])
+      await forget([gone.id], 'captured by mistake')
+      return { utteranceId: u.id, eventId }
+    }
+
+    /** Inserts as postgres with triggers disabled; the CHECKs still apply. */
+    async function insertPastTriggers(item: ItemObject): Promise<void> {
+      const full = {
+        lineage: [],
+        restated_at: [],
+        created_at: at(0),
+        ...item,
+        content_hash: sha256Hex(item.content as string),
+      }
+      await pg.psql(`SET session_replication_role = replica;
+        INSERT INTO public.memory_items SELECT * FROM jsonb_populate_record(NULL::public.memory_items, ${jsonb(full)});`)
+    }
+
+    it('reads zero for every invariant, in order, on an empty store', async () => {
+      await emptyStore()
+      expect(await counts()).toEqual(expected())
+    }, TEST_TIMEOUT_MS)
+
+    it('reads zero on a populated store that keeps every rule', async () => {
+      await validStore()
+      expect(await counts()).toEqual(expected())
+    }, TEST_TIMEOUT_MS)
+
+    it('counts one statement whose quote is not in its lineage', async () => {
+      const { utteranceId } = await validStore()
+      await insertPastTriggers(statement('Tag releases from any branch.', [utteranceId]))
+      expect(await counts()).toEqual(expected({ quote_not_in_lineage: 1 }))
+    }, TEST_TIMEOUT_MS)
+
+    it('counts one live item whose lineage holds a forgotten item', async () => {
+      await validStore()
+      const a = artifact('feat: the source', 0)
+      const o = observation('The source commit adds the importer.', [a.id])
+      await insertItems([a, o])
+      await pg.psql(`SET session_replication_role = replica;
+        UPDATE public.memory_items SET forgotten_at = now(), forgotten_reason = 'past the cascade' WHERE id = '${a.id}';`)
+      expect(await counts()).toEqual(expected({ lineage_to_forgotten: 1 }))
+    }, TEST_TIMEOUT_MS)
+
+    it('counts one utterance whose event has another time, then those with no event', async () => {
+      const { eventId } = await validStore()
+      await insertItems([utterance('Said a minute later.', { occurred_at: at(2), source: { type: 'transcript', event_id: eventId } })])
+      expect(await counts()).toEqual(expected({ utterance_time_mismatch: 1 }))
+      await insertItems([utterance('No event behind this one.', { source: { type: 'history' } })])
+      expect(await counts()).toEqual(expected({ utterance_time_mismatch: 2 }))
+      await insertItems([
+        utterance('An event id too large to be one.', { source: { type: 'transcript', event_id: '123456789012345678901234' } }),
+      ])
+      expect(await counts()).toEqual(expected({ utterance_time_mismatch: 3 }))
+    }, TEST_TIMEOUT_MS)
+
+    it('counts one item with an unregistered project, then one whose workspace is a project', async () => {
+      await validStore()
+      await insertItems([artifact('chore: elsewhere', 0, { project_id: 'tst-unregistered' })])
+      expect(await counts()).toEqual(expected({ unregistered_project: 1 }))
+      await insertItems([artifact('chore: wrong scope kind', 0, { workspace_id: 'tst-proj' })])
+      expect(await counts()).toEqual(expected({ unregistered_project: 2 }))
+    }, TEST_TIMEOUT_MS)
+
+    it('has no seedable assistant-authored claim: the CHECKs refuse both kinds even past the triggers', async () => {
+      const { utteranceId } = await validStore()
+      await expect(
+        insertPastTriggers(statement('Tag releases from main only.', [utteranceId], { speaker: 'assistant' })),
+      ).rejects.toThrow(/violates check constraint "memory_items_(speaker|assistant)_check"/)
+      await expect(
+        insertPastTriggers(artifact('An unquoted decision.', 0, { kind: 'ledger_decision', source: { type: 'ledger', by: 'mk' } })),
+      ).rejects.toThrow(/violates check constraint "memory_items_mk_decision_check"/)
+      expect(await counts()).toEqual(expected())
+    }, TEST_TIMEOUT_MS)
+  })
+})
