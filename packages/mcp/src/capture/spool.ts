@@ -26,7 +26,7 @@ import { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 import { captureClientInfo, sessionFileName, type CaptureClient, type CaptureEvent } from './events.js'
 import { appendCaptureLog } from './log.js'
 import { BATCH_BYTES_MAX } from './route-fit.js'
-import { acquireFileLock, refreshFileLock, releaseFileLock, writePrivateFileAtomic } from './transcript-cursor.js'
+import { acquireFileLease, type FileLease, writePrivateFileAtomic } from './transcript-cursor.js'
 
 type Env = Record<string, string | undefined>
 
@@ -367,9 +367,17 @@ function errorOf(body: unknown, status: number): string {
   return typeof error === 'string' && error.length > 0 ? clip(error) : `http_${status}`
 }
 
-/** 401, 403, 404 and 429 mean the server or its token is not ready yet, not that the batch is bad. */
-function isRefusal(status: number): boolean {
-  return status >= 400 && status < 500 && ![401, 403, 404, 429].includes(status)
+/**
+ * The capture route answers a request it will never accept with a JSON body
+ * `{error: string}`. A status alone proves nothing: a proxy or load balancer
+ * in front of it answers 4xx pages of its own (408, 499, an HTML 400) for
+ * requests the route never saw, and a batch dead-lettered on one of those
+ * would be lost for a transient fault.
+ */
+function isRouteError(body: unknown): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false
+  const error = (body as { error?: unknown }).error
+  return typeof error === 'string' && error.length > 0
 }
 
 async function post(ctx: SendContext, events: CaptureEvent[]): Promise<{ status: number; body: unknown } | { error: string }> {
@@ -440,6 +448,8 @@ async function sendBatch(ctx: SendContext, batch: Batch): Promise<Outcome> {
 
   if (status === 200) return settleAck(ctx, batch, { events, unsendable }, parseAck(body), at)
 
+  // A 413 from anything in the path means smaller requests may pass, so a
+  // file of several events is split whoever answered it.
   if (status === 413 && events.length > 1) {
     const half = Math.ceil(lines.length / 2)
     const halves: Batch[] = []
@@ -450,7 +460,9 @@ async function sendBatch(ctx: SendContext, batch: Batch): Promise<Outcome> {
     return { kind: 'split', batches: halves, dead: unsendable.length }
   }
 
-  if (status === 413 || isRefusal(status)) {
+  // The route's own refusal: a 400, or a 413 for one event that cannot be
+  // split further. Every other answer leaves the file for a retry.
+  if ((status === 400 || status === 413) && isRouteError(body)) {
     const reason = errorOf(body, status)
     await settle(ctx, batch, [...unsendable, ...events.map((event) => ({ at, status, reason, event }))])
     return { kind: 'dead', dead: unsendable.length + events.length }
@@ -514,7 +526,7 @@ class Drain {
   constructor(
     private readonly root: string,
     private readonly opts: DrainOptions,
-    private readonly lock: { path: string; token: string },
+    private readonly lease: FileLease,
   ) {}
 
   async run(): Promise<DrainStop | null> {
@@ -547,10 +559,9 @@ class Drain {
     const queue = [...batches]
     for (let batch = queue.shift(); batch !== undefined; batch = queue.shift()) {
       if (this.opts.deadlineMs !== undefined && Date.now() >= this.opts.deadlineMs) return 'deadline'
-      // A drain with no deadline can outlive the lock's stale age; refreshing
-      // it before each file keeps a second drainer from joining, and a lock
-      // that is no longer ours means one already has.
-      if (!(await refreshFileLock(this.lock.path, this.lock.token))) return 'lock_lost'
+      // The lease renews itself while a request is in flight; checking it
+      // before each file stops this drainer once another has taken over.
+      if (!(await this.lease.renew())) return 'lock_lost'
       const outcome = await sendBatch(ctx, batch)
       switch (outcome.kind) {
         case 'acked':
@@ -608,18 +619,18 @@ export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
   const root = opts.root ?? spoolRoot(opts.env)
   ensurePrivateDir(root)
   const lockPath = join(root, LOCK_FILE)
-  const lock = await acquireFileLock(lockPath, { staleMs: DRAIN_LOCK_STALE_MS, waitMs: 0 })
+  const lease = await acquireFileLease(lockPath, { staleMs: DRAIN_LOCK_STALE_MS, waitMs: 0 })
   const empty: Tally = { files_sent: 0, accepted: 0, duplicates: 0, rejected: 0, dead: 0 }
-  if (lock === undefined) {
+  if (lease === undefined) {
     return { ...empty, remaining: (await listBatches(root)).length, stopped: 'locked' }
   }
   try {
     await removeStaleTmp(root)
-    const drain = new Drain(root, opts, { path: lockPath, token: lock })
+    const drain = new Drain(root, opts, lease)
     const stopped = await drain.run()
     if (drain.tally.dead > 0) appendCaptureLog(opts.env, `spool drain dead-lettered ${drain.tally.dead} event(s)`)
     return { ...drain.tally, remaining: (await listBatches(root)).length, stopped }
   } finally {
-    await releaseFileLock(lockPath, lock)
+    await lease.release()
   }
 }

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +20,22 @@ import {
   uuid,
   writeTranscript,
 } from './transcripts.js'
+
+// Every read passes through unchanged; a test may run `afterRead` between
+// the read and the spool write, to act while the reader holds its lock.
+const readerHook = vi.hoisted(() => ({ afterRead: null as null | (() => void) }))
+
+vi.mock('../../src/capture/transcript-reader.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/capture/transcript-reader.js')>()
+  return {
+    ...actual,
+    readTranscriptEvents: async (...args: Parameters<typeof actual.readTranscriptEvents>) => {
+      const read = await actual.readTranscriptEvents(...args)
+      readerHook.afterRead?.()
+      return read
+    },
+  }
+})
 
 const SESSION = '00000000-0000-4000-8000-000000009300'
 const SECRET = 'qx7-fixture-secret-value-5531'
@@ -56,6 +72,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  readerHook.afterRead = null
   rmSync(home, { recursive: true, force: true })
 })
 
@@ -130,6 +147,21 @@ describe('spoolTranscript', () => {
     await expect(spoolTranscript(path, { env })).rejects.toThrow()
 
     expect(await loadCursor(cursorRoot(env), SESSION)).toEqual(before)
+  })
+
+  it('saves no cursor when its lock is taken over mid-read; the batch it spooled stays', async () => {
+    const path = writeTranscript(transcripts, SESSION, closedTurn(1, 'first prompt'))
+    const lock = join(cursorRoot(env), `${SESSION}.lock`)
+    readerHook.afterRead = () => writeFileSync(lock, 'another-holder\n')
+
+    const result = await spoolTranscript(path, { env })
+
+    expect(result).toEqual({ events: 2, files: 1, redactions: 0, dead: 0 })
+    expect(batchFiles()).toHaveLength(1)
+    expect(await loadCursor(cursorRoot(env), SESSION)).toBeNull()
+    expect(readFileSync(lock, 'utf8')).toBe('another-holder\n')
+    const log = readFileSync(captureLogPath(env), 'utf8')
+    expect(log).toContain('lost its lock')
   })
 
   it('closes a turn still open at EOF only when asked to', async () => {

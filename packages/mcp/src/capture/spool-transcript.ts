@@ -14,7 +14,7 @@ import { type CaptureRegistry, loadCaptureRegistry, resolveEventProject } from '
 import { appendCaptureLog } from './log.js'
 import { readyForRoute } from './route-fit.js'
 import { spoolRoot, writeDeadLetters, writeSpoolBatch } from './spool.js'
-import { cursorRoot, loadCursor, saveCursor, withReaderLock } from './transcript-cursor.js'
+import { cursorRoot, type FileLease, loadCursor, saveCursor, withReaderLock } from './transcript-cursor.js'
 import { readTranscriptEvents } from './transcript-reader.js'
 
 type Env = Record<string, string | undefined>
@@ -61,7 +61,9 @@ function projectResolver(registry: CaptureRegistry): (cwd: string | null, branch
  * Spools the transcript's new events under the session's reader lock and
  * returns counts only. A reader that could not take the lock returns zeros:
  * the holder reads once more for it. A failed spool write throws and leaves
- * the cursor where it was.
+ * the cursor where it was. A reader whose lock was taken over mid-read keeps
+ * the batch it wrote, whose events the server drops as repeats, and saves no
+ * cursor, which could land behind the one the new holder saves.
  */
 export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions): Promise<SpoolTranscriptResult> {
   const sessionId = transcriptSessionId(path)
@@ -71,7 +73,7 @@ export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions
   const total: SpoolTranscriptResult = { events: 0, files: 0, redactions: 0, dead: 0 }
   const log = (line: string): void => appendCaptureLog(opts.env, line)
 
-  const once = async (): Promise<void> => {
+  const once = async (lease: FileLease): Promise<void> => {
     const cursor = await loadCursor(cursors, sessionId)
     const read = await readTranscriptEvents(path, cursor, { resolveProject, forceClose: opts.forceClose })
     const now = new Date()
@@ -88,11 +90,15 @@ export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions
     const files = await writeSpoolBatch(sessionId, ready, { root: spool })
     writeDeadLetters(sessionId, refused, { root: spool })
     if (refused.length > 0) logRefused(log, refused)
-    await saveCursor(cursors, sessionId, read.cursor)
     total.events += ready.length
     total.files += files.length
     total.redactions += redactions
     total.dead += refused.length
+    if (!(await lease.renew())) {
+      log('spool reader lost its lock mid-read; its cursor was not saved')
+      return
+    }
+    await saveCursor(cursors, sessionId, read.cursor)
   }
 
   await withReaderLock(cursors, sessionId, once)
