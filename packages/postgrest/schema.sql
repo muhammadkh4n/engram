@@ -2406,9 +2406,11 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- now(), the clock skew a capture client is allowed; a later time is a wrong
 -- clock, not an event. The four-digit year and that limit keep it below year
 -- 10000; a year-1 time with a positive offset is still 1 BC in UTC, which
--- engram_time_in_range refuses, so that is reported by position too. source.event_key holds at most 512 characters, the
--- bound that keeps it inside a unique btree index row; a longer key is
--- refused here by position instead of failing the index. An object whose
+-- engram_time_in_range refuses, so that is reported by position too. source.event_key is absent or a
+-- non-blank string of at most 512 characters, the bound that keeps it inside
+-- a unique btree index row; any other key (a JSON null, a number, a blank
+-- string, a longer string) is refused here by position instead of failing
+-- memory_items_source_check or the index with no position. An object whose
 -- source.event_key is already stored, or
 -- appears earlier in the same call, is skipped and reported with the stored id
 -- and inserted = false, so a retried delivery is a no-op. One row per object
@@ -2491,6 +2493,10 @@ BEGIN
                     AND jsonb_typeof(f.value -> 'event_key') = 'string'
                     AND char_length(f.value ->> 'event_key') > 512 THEN
                  format('object %s: source.event_key is longer than 512 characters', f.n)
+               WHEN f.col = 'source'
+                    AND (f.value ? 'event_key')
+                    AND NOT (jsonb_typeof(f.value -> 'event_key') = 'string' AND (f.value ->> 'event_key') ~ '\S') THEN
+                 format('object %s: source.event_key must be absent or a non-blank string of at most 512 characters', f.n)
              END AS reason
         FROM field f
     )

@@ -372,6 +372,20 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await insertItems([longest])).toEqual([{ ord: 1, id: longest.id, inserted: true }])
     }, TEST_TIMEOUT_MS)
 
+    it.each([
+      ['a JSON null', null],
+      ['a number', 42],
+      ['a blank string', '  '],
+    ])('refuses by position a source.event_key that is %s, storing nothing', async (_label, badKey) => {
+      const first = utterance('Before the malformed key.')
+      const bad = artifact('chore: a malformed key', 0, { source: { type: 'git', event_key: badKey } })
+      const third = utterance('After the malformed key.')
+      expect(await insertRefusal([first, bad, third])).toMatch(
+        /ERROR:\s+22023: engram_insert_items: object 2: source\.event_key must be absent or a non-blank string of at most 512 characters/,
+      )
+      expect(await rowCount([first.id, bad.id, third.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
     it('generates an id for an object that has none', async () => {
       const { id: _unused, ...withoutId } = utterance('Name the branch after the ticket.')
       const [result] = await insertItems([withoutId])
