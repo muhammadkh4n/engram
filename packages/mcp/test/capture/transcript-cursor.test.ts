@@ -128,8 +128,10 @@ describe('eventUuidFromParts', () => {
     const id = eventUuidFromParts('session', 'commit', 'abc1234')
     expect(eventUuidFromParts('session', 'commit', 'abc1234')).toBe(id)
     expect(eventUuidFromParts('sessionc', 'ommit', 'abc1234')).not.toBe(id)
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
     expect(id[14]).toBe('8')
+    // RFC 9562 variant: the two top bits of byte 8 are 10.
+    expect(parseInt(id[19], 16) >> 2).toBe(2)
   })
 })
 
