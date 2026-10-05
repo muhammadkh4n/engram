@@ -132,17 +132,10 @@ describe('prompts', () => {
     ])
   })
 
-  it('cuts a prompt over the route cap to its head and marks it truncated', async () => {
+  it('keeps a prompt over the route cap whole, since a cut before scrubbing could split a secret', async () => {
     const long = 'a'.repeat(1_000_005)
-    const exact = 'b'.repeat(999_999)
-    const events = await eventsOf([humanPrompt(uuid(1), at(1), long), humanPrompt(uuid(2), at(2), exact)])
-    expect(events[0].payload).toEqual({ text: 'a'.repeat(1_000_000), truncated: true, transcript_line: 1 })
-    expect(events[1].payload).toEqual({ text: exact, transcript_line: 2 })
-  })
-
-  it('never cuts inside a surrogate pair', async () => {
-    const events = await eventsOf([humanPrompt(uuid(1), at(1), `${'c'.repeat(999_999)}\u{1F600}tail`)])
-    expect(events[0].payload).toEqual({ text: 'c'.repeat(999_999), truncated: true, transcript_line: 1 })
+    const events = await eventsOf([humanPrompt(uuid(1), at(1), long)])
+    expect(events[0].payload).toEqual({ text: long, transcript_line: 1 })
   })
 
   it('yields no event for CLI-written and model-written user entries', async () => {
@@ -374,13 +367,15 @@ describe('turns', () => {
     ).toEqual(['user_prompt'])
   })
 
-  it('cuts a final text over the free-text cap to its head', async () => {
-    const events = await eventsOf([
+  it('keeps a final text over the free-text cap whole for the scrubber to see', async () => {
+    const path = writeTranscript(dir, SESSION, [
       humanPrompt(uuid(1), at(1), 'dump it'),
       assistantText(uuid(2), at(2), 'e'.repeat(200_010)),
       turnEnd(uuid(3), at(3)),
     ])
-    expect((events[1].payload as { text: string }).text).toBe('e'.repeat(200_000))
+    // Read without the route check: the cap is applied after scrubbing, not here.
+    const { events } = await readTranscriptEvents(path, null, { resolveProject: stubProject })
+    expect((events[1].payload as { text: string }).text.length).toBe(200_010)
   })
 
   it('emits a turn open at EOF only once it closes, and never repeats what the open turn emitted', async () => {

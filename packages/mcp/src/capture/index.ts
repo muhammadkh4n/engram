@@ -13,7 +13,16 @@ export {
 } from './transcript-reader.js'
 export { cursorRoot, loadCursor, saveCursor, type TranscriptCursor, withReaderLock } from './transcript-cursor.js'
 export { planDirsAfter } from './plan-dirs.js'
-export { type DrainOptions, type DrainResult, type DrainStop, drainSpool, spoolRoot, writeSpoolBatch } from './spool.js'
+export {
+  type DrainOptions,
+  type DrainResult,
+  type DrainStop,
+  drainSpool,
+  spoolRoot,
+  writeDeadLetters,
+  writeSpoolBatch,
+} from './spool.js'
+export { readyForRoute, type RouteCheck, type RouteCheckOptions } from './route-fit.js'
 export { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 export { appendCaptureLog } from './log.js'
 export { type CaptureRegistry, loadCaptureRegistry, resolveEventProject } from './event-project.js'

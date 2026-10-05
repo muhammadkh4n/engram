@@ -1,15 +1,19 @@
 /**
  * Transcript to spool: reads the lines after the session's cursor, scrubs
- * every event, writes the batch, and only then saves the cursor. A crash
- * between the write and the save makes the next read send repeats, which the
- * server drops by event key; saving first would lose events for good.
+ * every event, fits it to the route, writes the batch, and only then saves
+ * the cursor. A crash between the write and the save makes the next read
+ * send repeats, which the server drops by event key; saving first would lose
+ * events for good. An event the route would refuse is dead-lettered here,
+ * scrubbed and whole, instead of being sent to be refused.
  */
 
 import { basename } from 'node:path'
 import { scrubEvent } from '../capture-events/scrub.js'
 import type { CaptureEvent, EventProject } from './events.js'
 import { type CaptureRegistry, loadCaptureRegistry, resolveEventProject } from './event-project.js'
-import { spoolRoot, writeSpoolBatch } from './spool.js'
+import { appendCaptureLog } from './log.js'
+import { readyForRoute } from './route-fit.js'
+import { spoolRoot, writeDeadLetters, writeSpoolBatch } from './spool.js'
 import { cursorRoot, loadCursor, saveCursor, withReaderLock } from './transcript-cursor.js'
 import { readTranscriptEvents } from './transcript-reader.js'
 
@@ -28,7 +32,11 @@ export interface SpoolTranscriptResult {
   files: number
   /** Values masked across those events. */
   redactions: number
+  /** Events dead-lettered because the route would refuse them. */
+  dead: number
 }
+
+const LOG_REASONS_MAX_CHARS = 300
 
 /** The session id of a transcript: its file name without `.jsonl`. */
 function transcriptSessionId(path: string): string {
@@ -60,25 +68,40 @@ export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions
   const cursors = cursorRoot(opts.env)
   const spool = spoolRoot(opts.env)
   const resolveProject = projectResolver(loadCaptureRegistry(opts.env))
-  const total: SpoolTranscriptResult = { events: 0, files: 0, redactions: 0 }
+  const total: SpoolTranscriptResult = { events: 0, files: 0, redactions: 0, dead: 0 }
+  const log = (line: string): void => appendCaptureLog(opts.env, line)
 
   const once = async (): Promise<void> => {
     const cursor = await loadCursor(cursors, sessionId)
     const read = await readTranscriptEvents(path, cursor, { resolveProject, forceClose: opts.forceClose })
-    const scrubbed: CaptureEvent[] = []
+    const now = new Date()
+    const ready: CaptureEvent[] = []
+    const refused: Array<{ reason: string; event: CaptureEvent }> = []
     let redactions = 0
     for (const event of read.events) {
       const result = await scrubEvent(event)
-      scrubbed.push(result.event)
       redactions += result.masked.length
+      const check = readyForRoute(result.event, { now, log })
+      if (check.ok) ready.push(check.event)
+      else refused.push({ reason: check.reason, event: result.event })
     }
-    const files = await writeSpoolBatch(sessionId, scrubbed, { root: spool })
+    const files = await writeSpoolBatch(sessionId, ready, { root: spool })
+    writeDeadLetters(sessionId, refused, { root: spool })
+    if (refused.length > 0) logRefused(log, refused)
     await saveCursor(cursors, sessionId, read.cursor)
-    total.events += scrubbed.length
+    total.events += ready.length
     total.files += files.length
     total.redactions += redactions
+    total.dead += refused.length
   }
 
   await withReaderLock(cursors, sessionId, once)
   return total
+}
+
+/** One capture-log line: the count and the distinct reasons, which name fields and rules, never values. */
+function logRefused(log: (line: string) => void, refused: ReadonlyArray<{ reason: string }>): void {
+  const reasons = [...new Set(refused.map((r) => r.reason))].join('; ')
+  const clipped = reasons.length > LOG_REASONS_MAX_CHARS ? reasons.slice(0, LOG_REASONS_MAX_CHARS) : reasons
+  log(`spool dead-lettered ${refused.length} event(s) the capture route refuses: ${clipped}`)
 }

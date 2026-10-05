@@ -95,7 +95,7 @@ describe('spoolTranscript', () => {
 
     const first = await spoolTranscript(path, { env })
 
-    expect(first).toEqual({ events: 2, files: 1, redactions: 0 })
+    expect(first).toEqual({ events: 2, files: 1, redactions: 0, dead: 0 })
     expect(batchFiles()).toHaveLength(1)
     expect(batchEvents().map((e) => e.type)).toEqual(['user_prompt', 'assistant_turn'])
     const cursor = await loadCursor(cursorRoot(env), SESSION)
@@ -104,7 +104,7 @@ describe('spoolTranscript', () => {
 
     const second = await spoolTranscript(path, { env })
 
-    expect(second).toEqual({ events: 0, files: 0, redactions: 0 })
+    expect(second).toEqual({ events: 0, files: 0, redactions: 0, dead: 0 })
     expect(batchFiles()).toHaveLength(1)
   })
 
