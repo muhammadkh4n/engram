@@ -7,17 +7,23 @@ import type { ForgetEffect, InsertedItem, InvariantCounts, MemoryItem, NewItem }
  * `ItemConstraintError`.
  */
 export interface ItemStore {
-  /** Idempotent on `source.event_key`: a stored key is skipped and its id returned. */
+  /**
+   * Idempotent on `source.event_key`: a stored key is skipped and its id
+   * returned. At most 500 items per call; more are refused before any write.
+   */
   insertItems(items: readonly NewItem[]): Promise<InsertedItem[]>
-  /** Forgotten items are skipped unless `includeForgotten`. */
+  /** Forgotten items are skipped unless `includeForgotten`. Any number of ids. */
   getItems(ids: readonly string[], opts?: { includeForgotten?: boolean }): Promise<MemoryItem[]>
-  /** Forgets the items and everything derived from them; acts on explicit ids only. */
+  /**
+   * Forgets the items and everything derived from them; acts on explicit ids
+   * only. At most 50 ids per call; more are refused before any write.
+   */
   forgetItems(ids: readonly string[], reason: string): Promise<ForgetEffect[]>
-  /** Returns the ids it retired. */
+  /** Returns the ids it retired. At most 50 ids per call; more are refused before any write. */
   retireItems(ids: readonly string[], reason: string): Promise<string[]>
-  /** Returns the ids it unretired. */
+  /** Returns the ids it unretired. At most 50 ids per call; more are refused before any write. */
   unretireItems(ids: readonly string[]): Promise<string[]>
-  /** False when `oldId` is already superseded by `newId`. */
+  /** False when `oldId` is already superseded by `newId`. One pair per call. */
   supersedeItem(oldId: string, newId: string): Promise<boolean>
   invariantCounts(): Promise<InvariantCounts>
 }

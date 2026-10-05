@@ -19,6 +19,8 @@ import { isUuid, onlyUuids } from './uuid.js'
 
 /** engram_insert_items refuses more objects than this in one call. */
 const MAX_INSERT_ITEMS = 500
+/** engram_forget_items, engram_retire_items and engram_unretire_items refuse more ids than this. */
+const MAX_IDS_PER_CALL = 50
 /** Ids per `in.(…)` filter, which travels in the request URL. */
 const GET_CHUNK_SIZE = 100
 
@@ -95,7 +97,7 @@ export class PostgRestItemStore implements ItemStore {
     if (items.length === 0) return []
     const objects = items.map((item, i) => toInsertObject(item, i + 1))
 
-    const { data, error } = await this.client.rpc('engram_insert_items', { p_items: objects })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_insert_items', { p_items: objects })
     if (error) throw toStoreError('insertItems', error)
 
     const rows = (data ?? []) as InsertRow[]
@@ -138,7 +140,7 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   async forgetItems(ids: readonly string[], reason: string): Promise<ForgetEffect[]> {
-    const pIds = onlyUuids(ids)
+    const pIds = idsForCall('forgetItems', ids)
     if (pIds.length === 0) return []
     const { data, error } = await this.rpcRetryingRollbacks('engram_forget_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('forgetItems', error)
@@ -146,7 +148,7 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   async retireItems(ids: readonly string[], reason: string): Promise<string[]> {
-    const pIds = onlyUuids(ids)
+    const pIds = idsForCall('retireItems', ids)
     if (pIds.length === 0) return []
     const { data, error } = await this.client.rpc('engram_retire_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('retireItems', error)
@@ -154,7 +156,7 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   async unretireItems(ids: readonly string[]): Promise<string[]> {
-    const pIds = onlyUuids(ids)
+    const pIds = idsForCall('unretireItems', ids)
     if (pIds.length === 0) return []
     const { data, error } = await this.client.rpc('engram_unretire_items', { p_ids: pIds })
     if (error) throw toStoreError('unretireItems', error)
@@ -168,10 +170,12 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   /**
-   * Runs an RPC that is idempotent (forget acts on live items only, supersede
-   * returns false once done) up to MAX_ATTEMPTS times while PostgreSQL rolls
-   * it back as a deadlock victim or a serialization failure, and returns the
-   * last result. Any other error, or success, returns at once.
+   * Runs an RPC up to MAX_ATTEMPTS times while PostgreSQL rolls it back as a
+   * deadlock victim or a serialization failure, and returns the last result.
+   * Any other error, or success, returns at once. Each call is one
+   * transaction, so a rolled-back call applied nothing, and the callers are
+   * safe to repeat: insert is idempotent on the event key, forget acts on
+   * live items only, supersede returns false once done.
    */
   private async rpcRetryingRollbacks(fn: string, args: Record<string, unknown>): Promise<RpcResult> {
     let result: RpcResult = { data: null, error: null }
@@ -195,6 +199,18 @@ export class PostgRestItemStore implements ItemStore {
       number
     >
   }
+}
+
+/**
+ * The uuids of `ids`, refused before any request when there are more than
+ * the RPC takes in one call. A malformed id cannot name a row and is dropped.
+ */
+function idsForCall(operation: string, ids: readonly string[]): string[] {
+  const pIds = onlyUuids(ids)
+  if (pIds.length > MAX_IDS_PER_CALL) {
+    throw new Error(`${operation} failed: ${pIds.length} ids, at most ${MAX_IDS_PER_CALL} per call`)
+  }
+  return pIds
 }
 
 /**

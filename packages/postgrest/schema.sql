@@ -598,7 +598,10 @@ $$;
 -- Name: engram_all_finite(timestamp with time zone[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- True when no element of the array is infinity or -infinity. A CHECK
+-- True when every element of the array is a finite time: no infinity, no
+-- -infinity and no NULL. isfinite(NULL) is NULL, so a NULL element is named
+-- explicitly; a reader converting restated_at would otherwise meet a
+-- restatement with no time. A CHECK
 -- constraint cannot hold a subquery, so memory_items_finite_check reaches the
 -- restated_at elements through this function. It must exist before the
 -- tables whose CHECKs call it. pg_catalog-qualified and without a SET clause,
@@ -607,7 +610,7 @@ CREATE OR REPLACE FUNCTION public.engram_all_finite(p_times timestamp with time 
     LANGUAGE sql IMMUTABLE PARALLEL SAFE
     AS $$
   SELECT NOT EXISTS (
-    SELECT 1 FROM pg_catalog.unnest(p_times) AS t(v) WHERE NOT pg_catalog.isfinite(t.v))
+    SELECT 1 FROM pg_catalog.unnest(p_times) AS t(v) WHERE t.v IS NULL OR NOT pg_catalog.isfinite(t.v))
 $$;
 
 
@@ -1969,11 +1972,20 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- NULL. occurred_at never changes after insert, so that value cannot go stale.
 -- A superseded_by naming no stored item leaves valid_to NULL, which
 -- memory_items_supersession_check refuses at once.
+-- A row with lineage takes the forget lock (7308892986227385959) shared
+-- before it is written, as engram_insert_items and engram_supersede_item do:
+-- its lineage check locks those rows FOR SHARE, in no fixed order, while a
+-- forget locks them FOR UPDATE in its own order, so the two would otherwise
+-- deadlock. Holding the key shared makes a forget wait for this transaction
+-- or this transaction wait for the forget.
 CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 BEGIN
+  IF cardinality(NEW.lineage) > 0 THEN
+    PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
+  END IF;
   NEW.content_hash := encode(sha256(convert_to(NEW.content, 'UTF8')), 'hex');
   NEW.created_at := now();
   NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);
@@ -2004,6 +2016,13 @@ END; $$;
 -- - a forgotten item's superseded_by, retired_at and retired_reason never
 --   change again, and superseded_by does not change in the UPDATE that
 --   forgets an item.
+-- - forgotten_at goes from NULL to a time only while this transaction holds
+--   the forget lock (advisory key 7308892986227385959) exclusively, as
+--   engram_forget_items does before it locks any row. The forget cascade
+--   locks rows as it runs, so a forget that started without the lock would
+--   take row locks in an order no other forget path shares and could
+--   deadlock with them; taking the lock here would come after this row's
+--   lock and have the same effect. A direct UPDATE that forgets is refused.
 -- memory_items_supersession still re-checks the target at commit, which
 -- catches a target forgotten by another transaction after this check.
 -- valid_to is derived again from superseded_by whenever either is in the
@@ -2045,6 +2064,17 @@ BEGIN
      AND (NEW.forgotten_at IS DISTINCT FROM OLD.forgotten_at OR NEW.forgotten_reason IS DISTINCT FROM OLD.forgotten_reason) THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('%s: forgotten_at and forgotten_reason are set once', TG_NAME);
+  END IF;
+  IF OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
+                      WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid() AND l.granted
+                        AND l.mode = 'ExclusiveLock'
+                        AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database())
+                        AND l.classid::bigint = (7308892986227385959 >> 32)
+                        AND l.objid::bigint = (7308892986227385959 & 4294967295)
+                        AND l.objsubid = 1) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: forgotten_at is set only while the transaction holds the forget lock exclusively', TG_NAME);
   END IF;
   IF OLD.forgotten_at IS NOT NULL
      AND (NEW.superseded_by IS DISTINCT FROM OLD.superseded_by
@@ -2190,7 +2220,8 @@ END; $$;
 -- Name: memory_items_forget_cascade(); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- Runs when forgotten_at goes from NULL to set, by any writer:
+-- Runs when forgotten_at goes from NULL to set, by a writer holding the
+-- forget lock exclusively (memory_items_before_update refuses any other):
 -- (a) every live item derived from this one, directly or through other live
 --     items, is forgotten in one UPDATE with the same forgotten_at and the
 --     reason "lineage: <id> forgotten", naming this item. Those updates fire
@@ -2423,6 +2454,13 @@ BEGIN
       MESSAGE = 'engram_insert_items: ' || v_problem;
   END IF;
 
+  -- Objects with lineage take the forget lock shared before any row is
+  -- written; memory_items_before_insert explains why.
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_items) AS t(e)
+              WHERE jsonb_typeof(t.e -> 'lineage') = 'array' AND jsonb_array_length(t.e -> 'lineage') > 0) THEN
+    PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
+  END IF;
+
   v_ids := ARRAY(
     SELECT coalesce((t.e ->> 'id')::uuid, gen_random_uuid())
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
@@ -2520,8 +2558,11 @@ END; $$;
 -- advisory lock 7308892986227385959 (the ASCII bytes of "engramfg") before
 -- it locks any row. Two forgets over overlapping closures would otherwise
 -- lock each other's rows in passes with no common order and deadlock.
--- engram_supersede_item holds the same key shared, so it waits for a forget
--- instead of deadlocking with it, and supersedes still run side by side.
+-- engram_supersede_item, and every insert of a row with lineage, hold the
+-- same key shared, so they wait for a forget instead of deadlocking with it
+-- and still run side by side. memory_items_before_update refuses forgotten_at
+-- from any transaction that does not hold the key exclusively, so every
+-- forget path takes its locks in this one order.
 CREATE OR REPLACE FUNCTION public.engram_forget_items(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -3139,7 +3180,9 @@ $smoke$;
 --
 -- Every function below except the memory_items_* trigger functions is an RPC
 -- endpoint and gets the service_role grant. The trigger functions are revoked
--- and granted to no role: PostgreSQL checks EXECUTE on a trigger function only
+-- from service_role as well and granted to no role, so a database whose
+-- default privileges give service_role EXECUTE on new functions ends with the
+-- same privileges as a fresh one. PostgreSQL checks EXECUTE on a trigger function only
 -- when CREATE TRIGGER binds it, never when the trigger fires, so every
 -- writer's INSERT and UPDATE still runs them, and a grant would only make them
 -- callable by name. engram_episode_kind is read by the
@@ -3179,6 +3222,11 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.

@@ -2,7 +2,8 @@
  * PostgRestItemStore against a mock PostgREST client: which RPC each method
  * calls and with what arguments, camelCase items mapped to the snake_case
  * columns and back, ids generated where the caller left them out, the 500
- * item cap enforced before any request, and database refusals turned into
+ * item cap and the 50 id cap enforced before any request, rolled-back calls
+ * retried, and database refusals turned into
  * ItemConstraintError without the error's `details` (which can carry the
  * failing row).
  */
@@ -429,6 +430,25 @@ describe('PostgRestItemStore write RPCs', () => {
     expect(rpc).not.toHaveBeenCalled()
   })
 
+  it('refuses more than 50 ids to forget, retire or unretire before any request, naming the limit', async () => {
+    const { client, rpc } = mockClient()
+    const store = storeWith(client)
+    const ids = Array.from({ length: 51 }, (_, i) => `01940000-0000-7000-8000-${String(i + 1).padStart(12, '0')}`)
+
+    await expect(store.forgetItems(ids, 'too many')).rejects.toThrow('forgetItems failed: 51 ids, at most 50 per call')
+    await expect(store.retireItems(ids, 'too many')).rejects.toThrow('retireItems failed: 51 ids, at most 50 per call')
+    await expect(store.unretireItems(ids)).rejects.toThrow('unretireItems failed: 51 ids, at most 50 per call')
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('sends exactly 50 ids in one request', async () => {
+    const { client, rpcCalls } = mockClient({ rpc: { data: [], error: null } })
+    const ids = Array.from({ length: 50 }, (_, i) => `01940000-0000-7000-8000-${String(i + 1).padStart(12, '0')}`)
+
+    await expect(storeWith(client).retireItems(ids, 'stale')).resolves.toEqual([])
+    expect(rpcCalls).toEqual([{ fn: 'engram_retire_items', args: { p_ids: ids, p_reason: 'stale' } }])
+  })
+
   it('supersedes through engram_supersede_item', async () => {
     const { client, rpcCalls } = mockClient({ rpc: { data: true, error: null } })
 
@@ -460,7 +480,7 @@ describe('PostgRestItemStore write RPCs', () => {
   })
 })
 
-describe('PostgRestItemStore retries of a rolled-back forget or supersede', () => {
+describe('PostgRestItemStore retries of a rolled-back insert, forget or supersede', () => {
   function pgError(code: string, message: string): PgError {
     return { code, message, details: null, hint: null }
   }
@@ -498,6 +518,21 @@ describe('PostgRestItemStore retries of a rolled-back forget or supersede', () =
 
     await expect(storeWith(client).supersedeItem(ID_A, ID_B)).resolves.toBe(true)
     expect(rpcCalls).toHaveLength(2)
+  })
+
+  it('retries an insert that hit a deadlock once and returns its rows', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('40P01', 'deadlock detected') },
+        { data: [{ ord: 1, id: ID_A, inserted: true }], error: null },
+      ),
+    })
+
+    const rows = await storeWith(client).insertItems([utterance])
+
+    expect(rows).toEqual([{ id: ID_A, eventKey: utterance.source.event_key ?? null, inserted: true }])
+    expect(rpcCalls).toHaveLength(2)
+    expect(rpcCalls[1]).toEqual(rpcCalls[0])
   })
 
   it('stops after three attempts and surfaces the last error', async () => {

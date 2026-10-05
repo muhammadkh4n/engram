@@ -119,6 +119,24 @@ describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => 
     expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = '${id}'`)).toBe('1')
   }, TEST_TIMEOUT_MS)
 
+  it('ends with the same trigger function privileges after a re-apply over a service_role grant', async () => {
+    const triggerAcls = () =>
+      pg.psql(`SELECT p.proname || '|' || coalesce(p.proacl::text, 'default') FROM pg_proc p
+               WHERE p.pronamespace = 'public'::regnamespace AND p.prorettype = 'trigger'::regtype
+                 AND p.proname LIKE 'memory\\_items\\_%' ORDER BY p.proname`)
+    const fresh = await triggerAcls()
+    expect(fresh.split('\n')).toHaveLength(5)
+    // A database whose default privileges give service_role EXECUTE on new functions holds this grant.
+    await pg.psql(`GRANT EXECUTE ON FUNCTION public.memory_items_before_insert(), public.memory_items_before_update(),
+      public.memory_items_lineage(), public.memory_items_supersession(), public.memory_items_forget_cascade() TO service_role`)
+    expect(await pg.psql("SELECT has_function_privilege('service_role', 'public.memory_items_before_update()', 'EXECUTE')")).toBe('t')
+
+    await pg.applySchema()
+
+    expect(await triggerAcls()).toBe(fresh)
+    expect(await pg.psql("SELECT has_function_privilege('service_role', 'public.memory_items_before_update()', 'EXECUTE')")).toBe('f')
+  }, TEST_TIMEOUT_MS)
+
   it('stores the storage parameters on memory_items', async () => {
     const options = (await pg.psql("SELECT unnest(reloptions) FROM pg_class WHERE oid = 'public.memory_items'::regclass"))
       .split('\n')

@@ -9,6 +9,9 @@
  * - every RPC function (anything but a trigger function) is granted to
  *   service_role explicitly, since a database without default privileges
  *   would otherwise leave the service unable to call it;
+ * - every trigger function has EXECUTE revoked from service_role too, so a
+ *   database whose default privileges grant service_role EXECUTE on new
+ *   functions ends with the same privileges as a fresh one;
  * - the privilege statements follow the function's definition, so a
  *   function that the file drops and re-creates gets them back on re-apply.
  * The function list is derived from the CREATE FUNCTION statements, so a new
@@ -67,6 +70,9 @@ function statementOffsets(sql: string, re: RegExp): Map<string, number> {
 const revokedFromPublic = (sql: string) =>
   statementOffsets(sql, /^REVOKE EXECUTE ON FUNCTION (public\.\w+\([^)]*\)) FROM PUBLIC;$/gm)
 
+const revokedFromServiceRole = (sql: string) =>
+  statementOffsets(sql, /^REVOKE EXECUTE ON FUNCTION (public\.\w+\([^)]*\)) FROM service_role;$/gm)
+
 const grantedToServiceRole = (sql: string) =>
   statementOffsets(sql, /^GRANT EXECUTE ON FUNCTION (public\.\w+\([^)]*\)) TO service_role;$/gm)
 
@@ -119,10 +125,21 @@ describe.each(FILES)('%s function privileges', (file) => {
     }
   })
 
+  it('revokes EXECUTE from service_role on every trigger function, after its definition, and on nothing else', () => {
+    const revoked = revokedFromServiceRole(sql)
+    for (const fn of functions.filter((f) => f.isTrigger)) {
+      expect(revoked.has(fn.signature), `${fn.signature} has no REVOKE ... FROM service_role`).toBe(true)
+      expect(revoked.get(fn.signature)!).toBeGreaterThan(fn.offset)
+    }
+    const rpcs = new Set(functions.filter((f) => !f.isTrigger).map((f) => f.signature))
+    for (const signature of revoked.keys()) expect(rpcs.has(signature), signature).toBe(false)
+  })
+
   it('names only functions the file creates in its privilege statements', () => {
     const created = new Set(functions.map((f) => f.signature))
     const named = [
       ...revokedFromPublic(sql).keys(),
+      ...revokedFromServiceRole(sql).keys(),
       ...grantedToServiceRole(sql).keys(),
       ...revokedFromApiRoles(sql).keys(),
     ]

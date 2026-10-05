@@ -171,10 +171,12 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
     return JSON.parse(await pg.psqlAs('service_role', sql)) as T
   }
 
+  function insertQuery(objects: unknown): string {
+    return `SELECT coalesce(json_agg(r ORDER BY r.ord), '[]'::json) FROM public.engram_insert_items(${jsonb(objects)}) AS r;`
+  }
+
   async function insertItems(objects: unknown): Promise<InsertRow[]> {
-    return asService<InsertRow[]>(
-      `SELECT coalesce(json_agg(r ORDER BY r.ord), '[]'::json) FROM public.engram_insert_items(${jsonb(objects)}) AS r;`,
-    )
+    return asService<InsertRow[]>(insertQuery(objects))
   }
 
   function forgetQuery(ids: readonly string[], reason: string): string {
@@ -670,6 +672,49 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         await holder.close()
         await forgetter.close()
         await superseder.close()
+      }
+    }, TEST_TIMEOUT_MS)
+
+    it('lets an insert with lineage and a concurrent forget over the same rows both finish, without a deadlock', async () => {
+      // Ids rise in creation order: early < late. The forget locks early, then late. The insert's lineage
+      // check runs at once here, so it holds late before it asks for early: the opposite order, which one
+      // call checking two lineage rows at commit can also take.
+      const early = artifact('feat: the importer', 0)
+      const late = artifact('feat: the exporter', 10)
+      await insertItems([early, late])
+      const fromLate = observation('The exporter reads what the importer wrote.', [late.id])
+      const fromEarly = observation('The importer feeds the exporter.', [early.id])
+      const inserter = await pg.session()
+      const forgetter = await pg.session()
+      const outcome = (run: Promise<string>) => run.then((out) => out, (error: Error) => error.message)
+      try {
+        for (const session of [inserter, forgetter]) {
+          await session.run('SET ROLE service_role;')
+          await session.run('\\set VERBOSITY verbose')
+        }
+        const forgetterPid = await forgetter.run('SELECT pg_backend_pid();')
+        await inserter.run('BEGIN;')
+        await inserter.run('SET CONSTRAINTS public.memory_items_lineage IMMEDIATE;')
+        await inserter.run(insertQuery([fromLate]))
+        const forgetting = outcome(forgetter.run(forgetQuery([early.id, late.id], 'the pipeline was dropped')))
+        await waitUntilLockWait(pg, forgetterPid)
+        const inserting = await outcome(inserter.run(insertQuery([fromEarly])))
+        const committing = await outcome(inserter.run('COMMIT;'))
+        const forgot = await forgetting
+
+        expect(inserting).not.toMatch(/40P01|deadlock/)
+        expect(committing).not.toMatch(/ERROR/)
+        expect(forgot).not.toMatch(/40P01|deadlock/)
+        const effects = (JSON.parse(forgot) as Effect[]).sort((x, y) => x.itemId.localeCompare(y.itemId))
+        expect(effects).toEqual([
+          { itemId: early.id, effect: 'forgotten', via: null },
+          { itemId: late.id, effect: 'forgotten', via: null },
+          { itemId: fromLate.id, effect: 'forgotten', via: late.id },
+          { itemId: fromEarly.id, effect: 'forgotten', via: early.id },
+        ])
+      } finally {
+        await inserter.close()
+        await forgetter.close()
       }
     }, TEST_TIMEOUT_MS)
 

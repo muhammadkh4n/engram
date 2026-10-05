@@ -9,7 +9,10 @@
  *   time;
  * - what was said never changes after insert, and forgetting is permanent;
  * - forgetting an item forgets what was derived from it and hands its
- *   supersessions to the next live successor or restores them.
+ *   supersessions to the next live successor or restores them;
+ * - forgotten_at is set only by a transaction holding the forget lock
+ *   exclusively, and an insert with lineage holds it shared, so forgets and
+ *   lineage checks wait for each other instead of deadlocking.
  * Every refused write must leave no row behind (or the row unchanged).
  */
 import { createHash } from 'node:crypto'
@@ -179,8 +182,22 @@ function inTransaction(...statements: string[]): string {
   return ['BEGIN;', ...statements, 'COMMIT;'].join('\n')
 }
 
-function forgetSql(id: string, reason: string, when = '2026-02-01T00:00:00Z'): string {
+/** The transaction-level advisory lock engram_forget_items holds exclusively while it forgets. */
+const FORGET_LOCK_KEY = '7308892986227385959'
+
+/** Runs `sql` in one statement that first takes the forget lock exclusively, as engram_forget_items does. */
+function underForgetLock(sql: string): string {
+  return `DO $forget$ BEGIN PERFORM pg_advisory_xact_lock(${FORGET_LOCK_KEY}); ${sql} END $forget$;`
+}
+
+/** A direct UPDATE that forgets one item, with nothing held. */
+function bareForgetSql(id: string, reason: string, when = '2026-02-01T00:00:00Z'): string {
   return `UPDATE public.memory_items SET forgotten_at = '${when}', forgotten_reason = ${text(reason)} WHERE id = '${id}';`
+}
+
+/** A direct forget by a writer holding the forget lock, the only way forgotten_at may be set outside the RPC. */
+function forgetSql(id: string, reason: string, when = '2026-02-01T00:00:00Z'): string {
+  return underForgetLock(bareForgetSql(id, reason, when))
 }
 
 describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => {
@@ -324,11 +341,25 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
     ])('an UPDATE that sets %s to a non-finite time violates the finite check', async (_label, assignment) => {
       const u = mkUtterance('Keep the times finite.')
       await commit(u)
+      // Setting forgotten_at needs the forget lock, or the BEFORE trigger refuses it ahead of the CHECK.
       await expectCheckViolation(
-        `UPDATE public.memory_items SET ${assignment} WHERE id = '${u.id}';`,
+        underForgetLock(`UPDATE public.memory_items SET ${assignment} WHERE id = '${u.id}';`),
         /violates check constraint "memory_items_finite_check"/,
       )
       expect(await column(u.id, `retired_at IS NULL AND forgotten_at IS NULL AND restated_at = '{}'`)).toBe('t')
+    }, TEST_TIMEOUT_MS)
+
+    it.each([
+      ['ARRAY[NULL]', `ARRAY[NULL]::timestamptz[]`],
+      ['a time and a NULL', `ARRAY['${at(5)}', NULL]::timestamptz[]`],
+    ])('an UPDATE that sets restated_at to %s violates the finite check, so a read never meets a NULL restatement', async (_label, value) => {
+      const u = mkUtterance('Restated without a time.')
+      await commit(u)
+      await expectCheckViolation(
+        `UPDATE public.memory_items SET restated_at = ${value} WHERE id = '${u.id}';`,
+        /violates check constraint "memory_items_finite_check"/,
+      )
+      expect(await column(u.id, `restated_at = '{}'`)).toBe('t')
     }, TEST_TIMEOUT_MS)
 
     it('a capture event at a non-finite occurred_at violates its finite check', async () => {
@@ -650,24 +681,29 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await column(b.id, 'superseded_by')).toBe(c.id)
     }, TEST_TIMEOUT_MS)
 
-    it('fails the commit of a statement whose utterance another session forgot first', async () => {
+    it('makes a forget wait for an open insert that derives from its item, then forgets the new row too', async () => {
       const u = mkUtterance('Race me to the commit.')
       await commit(u)
       const s = statement('Race me to the commit.', [u.id])
       const first = await verboseSession()
+      const second = await verboseSession()
       try {
+        const secondPid = await second.run('SELECT pg_backend_pid();')
         await first.run('BEGIN;')
         await first.run(insert(s))
-        await pg.psql(forgetSql(u.id, 'tst: forgotten by the other session'))
-        const message = await failureOf(first.run('COMMIT;'))
-        expect(message).toMatch(/ERROR:\s+23514: memory_items_lineage: lineage contains a forgotten item/)
+        const forgetting = second.run(forgetSql(u.id, 'tst: forgotten while the insert is open'))
+        await waitUntilLockWait(pg, secondPid)
+        await first.run('COMMIT;')
+        await forgetting
       } finally {
         await first.close()
+        await second.close()
       }
-      expect(await rowCount(s.id)).toBe(0)
+      expect(await column(s.id, `forgotten_reason = 'lineage: ${u.id} forgotten'`)).toBe('t')
+      expect(await column(u.id, 'forgotten_at IS NOT NULL')).toBe('t')
     }, TEST_TIMEOUT_MS)
 
-    it('makes a commit wait for a concurrent forget of its lineage, then fails it', async () => {
+    it('makes an insert with lineage wait for a running forget of its lineage, then fails its commit', async () => {
       const u = mkUtterance('Wait for the lock.')
       await commit(u)
       const s = statement('Wait for the lock.', [u.id])
@@ -675,14 +711,16 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const second = await verboseSession()
       try {
         const pid = await first.run('SELECT pg_backend_pid();')
-        await first.run('BEGIN;')
-        await first.run(insert(s))
         await second.run('BEGIN;')
-        await second.run(forgetSql(u.id, 'tst: forgotten while the other commit waits'))
-        const committing = failureOf(first.run('COMMIT;'))
+        await second.run(forgetSql(u.id, 'tst: forgotten while the other insert waits'))
+        await first.run('BEGIN;')
+        const inserting = first.run(insert(s))
         await waitUntilLockWait(pg, pid)
         await second.run('COMMIT;')
-        expect(await committing).toMatch(/ERROR:\s+23514: memory_items_lineage: lineage contains a forgotten item/)
+        await inserting
+        expect(await failureOf(first.run('COMMIT;'))).toMatch(
+          /ERROR:\s+23514: memory_items_lineage: lineage contains a forgotten item/,
+        )
       } finally {
         await first.close()
         await second.close()
@@ -803,12 +841,28 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await column(live.id, `retired_at IS NULL`)).toBe('t')
     }, TEST_TIMEOUT_MS)
 
+    it('refuses a direct UPDATE that forgets an item while the forget lock is not held exclusively', async () => {
+      const u = artifact('ci: forgotten by hand', { occurredAt: at(10) })
+      const child = observation('The runner forgotten by hand built the release.', [u.id])
+      await commit(u, child)
+      const NOT_UNDER_LOCK = /memory_items_before_update: forgotten_at is set only while the transaction holds the forget lock exclusively/
+      await expectServiceRefusal(bareForgetSql(u.id, 'tst: no lock'), NOT_UNDER_LOCK)
+      await expectServiceRefusal(
+        `DO $shared$ BEGIN PERFORM pg_advisory_xact_lock_shared(${FORGET_LOCK_KEY}); ${bareForgetSql(u.id, 'tst: shared lock')} END $shared$;`,
+        NOT_UNDER_LOCK,
+      )
+      expect(await column(u.id, 'forgotten_at IS NULL')).toBe('t')
+      expect(await column(child.id, 'forgotten_at IS NULL')).toBe('t')
+    }, TEST_TIMEOUT_MS)
+
     it('refuses setting superseded_by in the UPDATE that forgets the item', async () => {
       const a = artifact('ci: one runner', { occurredAt: at(10) })
       const b = artifact('ci: two runners', { occurredAt: at(20) })
       await commit(a, b)
       await expectServiceRefusal(
-        `UPDATE public.memory_items SET superseded_by = '${b.id}', forgotten_at = '2026-02-01T00:00:00Z', forgotten_reason = 'tst: both at once' WHERE id = '${a.id}';`,
+        underForgetLock(
+          `UPDATE public.memory_items SET superseded_by = '${b.id}', forgotten_at = '2026-02-01T00:00:00Z', forgotten_reason = 'tst: both at once' WHERE id = '${a.id}';`,
+        ),
         /memory_items_before_update: superseded_by cannot change on an item being forgotten/,
       )
       expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || (forgotten_at IS NULL)`)).toBe('none|true')
