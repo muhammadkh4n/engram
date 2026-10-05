@@ -30,6 +30,7 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
+export type { CaptureStore, ProjectRow } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'

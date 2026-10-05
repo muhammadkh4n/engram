@@ -2908,6 +2908,90 @@ END; $$;
 
 
 --
+-- Name: engram_sync_projects(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Upserts the project registry into memory_projects. p_rows is a JSON array
+-- of objects with exactly the keys id, kind, workspace_id, vault_folder and
+-- register_prefix (id and kind strings, the others string or null), each id
+-- once. Workspaces are written before projects, so a project may name a
+-- workspace from the same call. A row absent from p_rows is never deleted:
+-- items and events already carry its id. A row whose values are unchanged
+-- keeps its updated_at. Returns the number of rows inserted or changed. A
+-- malformed argument is an invalid argument (22023); a value the table
+-- refuses raises its constraint's error (23514, 23503).
+CREATE OR REPLACE FUNCTION public.engram_sync_projects(p_rows jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_workspaces integer;
+  v_projects integer;
+BEGIN
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_projects: p_rows must be a JSON array';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(p_rows) AS e(r)
+     WHERE CASE
+             WHEN jsonb_typeof(e.r) IS DISTINCT FROM 'object' THEN true
+             ELSE EXISTS (
+                    SELECT 1 FROM jsonb_object_keys(e.r) AS k(key)
+                     WHERE k.key NOT IN ('id', 'kind', 'workspace_id', 'vault_folder', 'register_prefix'))
+               OR jsonb_typeof(e.r -> 'id') IS DISTINCT FROM 'string'
+               OR jsonb_typeof(e.r -> 'kind') IS DISTINCT FROM 'string'
+               OR coalesce(jsonb_typeof(e.r -> 'workspace_id'), 'missing') NOT IN ('string', 'null')
+               OR coalesce(jsonb_typeof(e.r -> 'vault_folder'), 'missing') NOT IN ('string', 'null')
+               OR coalesce(jsonb_typeof(e.r -> 'register_prefix'), 'missing') NOT IN ('string', 'null')
+           END
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_projects: every row must be an object with exactly id, kind, workspace_id, vault_folder and register_prefix, id and kind strings, the others string or null';
+  END IF;
+  IF (SELECT count(*) <> count(DISTINCT e.r ->> 'id') FROM jsonb_array_elements(p_rows) AS e(r)) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_projects: p_rows names an id more than once';
+  END IF;
+
+  WITH upserted AS (
+    INSERT INTO public.memory_projects AS p (id, kind, workspace_id, vault_folder, register_prefix)
+    SELECT e.r ->> 'id', e.r ->> 'kind', e.r ->> 'workspace_id', e.r ->> 'vault_folder', e.r ->> 'register_prefix'
+      FROM jsonb_array_elements(p_rows) AS e(r)
+     WHERE e.r ->> 'kind' = 'workspace'
+     ORDER BY e.r ->> 'id'
+    ON CONFLICT (id) DO UPDATE
+       SET kind = EXCLUDED.kind, workspace_id = EXCLUDED.workspace_id, vault_folder = EXCLUDED.vault_folder,
+           register_prefix = EXCLUDED.register_prefix, updated_at = now()
+     WHERE (p.kind, p.workspace_id, p.vault_folder, p.register_prefix)
+           IS DISTINCT FROM (EXCLUDED.kind, EXCLUDED.workspace_id, EXCLUDED.vault_folder, EXCLUDED.register_prefix)
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_workspaces FROM upserted;
+
+  -- Every other kind goes through this insert, so a kind that is neither
+  -- value is refused by memory_projects_kind_check rather than skipped.
+  WITH upserted AS (
+    INSERT INTO public.memory_projects AS p (id, kind, workspace_id, vault_folder, register_prefix)
+    SELECT e.r ->> 'id', e.r ->> 'kind', e.r ->> 'workspace_id', e.r ->> 'vault_folder', e.r ->> 'register_prefix'
+      FROM jsonb_array_elements(p_rows) AS e(r)
+     WHERE e.r ->> 'kind' IS DISTINCT FROM 'workspace'
+     ORDER BY e.r ->> 'id'
+    ON CONFLICT (id) DO UPDATE
+       SET kind = EXCLUDED.kind, workspace_id = EXCLUDED.workspace_id, vault_folder = EXCLUDED.vault_folder,
+           register_prefix = EXCLUDED.register_prefix, updated_at = now()
+     WHERE (p.kind, p.workspace_id, p.vault_folder, p.register_prefix)
+           IS DISTINCT FROM (EXCLUDED.kind, EXCLUDED.workspace_id, EXCLUDED.vault_folder, EXCLUDED.register_prefix)
+    RETURNING 1
+  )
+  SELECT count(*) INTO v_projects FROM upserted;
+
+  RETURN v_workspaces + v_projects;
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3305,6 +3389,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -3351,6 +3436,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -3387,6 +3473,7 @@ GRANT EXECUTE ON FUNCTION public.engram_insert_items(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_invariant_counts() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
