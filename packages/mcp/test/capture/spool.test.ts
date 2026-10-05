@@ -245,6 +245,34 @@ describe('drainSpool', () => {
     expect(dead.every((d) => d.status === 400 && d.reason === 'events: must hold 1 to 500 items')).toBe(true)
   })
 
+  it.each([408, 425, 499])('keeps the file and backs off on a %i, which only a proxy answers', async (status) => {
+    await writeSpoolBatch(SESSION, prompts(1, 2), { root })
+    stub.reply = { status, body: { error: 'upstream timed out' } }
+    const result = await drainSpool({ env })
+    expect(result).toMatchObject({ files_sent: 0, dead: 0, remaining: 1, stopped: 'retry_later' })
+    expect(deadLetters()).toEqual([])
+    expect((await loadSpoolState(root)).failures).toBe(1)
+  })
+
+  it('keeps the file on a 400 that is not the route\'s JSON error', async () => {
+    await writeSpoolBatch(SESSION, prompts(1, 2), { root })
+    stub.reply = { status: 400, body: null, html: '<html><body><h1>400 Bad Request</h1></body></html>' }
+    expect(await drainSpool({ env })).toMatchObject({ dead: 0, remaining: 1, stopped: 'retry_later' })
+
+    writeFileSync(join(root, '.state.json'), JSON.stringify({ ...(await loadSpoolState(root)), next_attempt_at: null }))
+    stub.reply = { status: 400, body: { message: 'bad request' } }
+    expect(await drainSpool({ env })).toMatchObject({ dead: 0, remaining: 1, stopped: 'retry_later' })
+    expect(deadLetters()).toEqual([])
+    expect(batchFiles(sessionDir())).toHaveLength(1)
+  })
+
+  it('keeps a one-event file answered 413 by a proxy page', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    stub.reply = { status: 413, body: null, html: '<html><body><h1>413 Request Entity Too Large</h1></body></html>' }
+    expect(await drainSpool({ env })).toMatchObject({ dead: 0, remaining: 1, stopped: 'retry_later' })
+    expect(deadLetters()).toEqual([])
+  })
+
   it('splits a file answered 413 into two halves and sends both', async () => {
     await writeSpoolBatch(SESSION, prompts(1, 4), { root })
     stub.reply = (request) => (request.body.events.length > 2 ? { status: 413, body: { error: 'too large' } } : acceptAll(request))

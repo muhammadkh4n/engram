@@ -1,14 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from '../../src/ingest/private-files.js'
 import { captureClientInfo, sessionFileName } from '../../src/capture/events.js'
 import { eventUuidFromParts } from '../../src/capture/event-uuid.js'
 import {
+  acquireFileLease,
   cursorRoot,
   emptyCursor,
   loadCursor,
+  READER_LOCK_STALE_MS,
   saveCursor,
   type TranscriptCursor,
   withReaderLock,
@@ -26,8 +28,23 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   rmSync(home, { recursive: true, force: true })
 })
+
+// Only the renewal interval and the clock are faked: lock files are real, so
+// their I/O completes on real time and `until` polls it with a real setTimeout.
+function fakeRenewalClock(): void {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+}
+
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    if (condition()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  throw new Error('condition not met')
+}
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve = () => {}
@@ -116,6 +133,59 @@ describe('withReaderLock', () => {
     expect(existsSync(join(root, `${SESSION}.lock`))).toBe(false)
   })
 
+  it('keeps the lock through a read longer than its stale age; a second reader touches .again and returns', async () => {
+    fakeRenewalClock()
+    const lock = join(root, `${SESSION}.lock`)
+    const gate = deferred()
+    let reads = 0
+    const holder = withReaderLock(root, SESSION, async () => {
+      reads += 1
+      if (reads === 1) await gate.promise
+      return reads
+    })
+    // The read starts once the lease, and so its renewal timer, exists.
+    await until(() => reads === 1)
+
+    const step = READER_LOCK_STALE_MS / 3
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(step)
+      await until(() => statSync(lock).mtimeMs >= Date.now() - 1)
+    }
+    let ranSecond = false
+    const second = await withReaderLock(
+      root,
+      SESSION,
+      async () => {
+        ranSecond = true
+      },
+      { waitMs: 0 },
+    )
+
+    expect(second).toBeUndefined()
+    expect(ranSecond).toBe(false)
+    expect(existsSync(join(root, `${SESSION}.again`))).toBe(true)
+    gate.resolve()
+    expect(await holder).toBe(2)
+    expect(existsSync(lock)).toBe(false)
+  })
+
+  it('reads no more for .again once its lease is lost', async () => {
+    const lock = join(root, `${SESSION}.lock`)
+    let reads = 0
+    const result = await withReaderLock(root, SESSION, async (lease) => {
+      reads += 1
+      writeFileSync(lock, 'another-holder\n')
+      writeFileSync(join(root, `${SESSION}.again`), '')
+      expect(await lease.renew()).toBe(false)
+      return reads
+    })
+
+    expect(result).toBe(1)
+    expect(reads).toBe(1)
+    expect(existsSync(join(root, `${SESSION}.again`))).toBe(true)
+    expect(readFileSync(lock, 'utf8')).toBe('another-holder\n')
+  })
+
   it('takes over a lock left by a holder that died', async () => {
     mkdirSync(root, { recursive: true })
     const lock = join(root, `${SESSION}.lock`)
@@ -130,6 +200,42 @@ describe('withReaderLock', () => {
     mkdirSync(root, { recursive: true })
     writeFileSync(join(root, `${SESSION}.lock`), 'held\n')
     expect(await withReaderLock(root, SESSION, async () => 'read', { waitMs: 30 })).toBeUndefined()
+  })
+})
+
+describe('acquireFileLease', () => {
+  it('renews the lock every third of its stale age while held, and release removes it', async () => {
+    fakeRenewalClock()
+    mkdirSync(root, { recursive: true })
+    const path = join(root, 'held.lock')
+    const lease = await acquireFileLease(path, { staleMs: 3_000, waitMs: 0 })
+    expect(lease).toBeDefined()
+    const start = Date.now()
+
+    for (let step = 1; step <= 4; step++) {
+      await vi.advanceTimersByTimeAsync(1_000)
+      await until(() => statSync(path).mtimeMs >= start + step * 1_000 - 1)
+    }
+
+    expect(lease!.lost).toBe(false)
+    expect(await acquireFileLease(path, { staleMs: 3_000, waitMs: 0 })).toBeUndefined()
+    await lease!.release()
+    expect(existsSync(path)).toBe(false)
+  })
+
+  it('tells its holder once a renewal finds the lock taken over, and leaves the new holder alone', async () => {
+    fakeRenewalClock()
+    mkdirSync(root, { recursive: true })
+    const path = join(root, 'held.lock')
+    const lease = await acquireFileLease(path, { staleMs: 3_000, waitMs: 0 })
+    writeFileSync(path, 'another-holder\n')
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    await until(() => lease!.lost)
+
+    expect(await lease!.renew()).toBe(false)
+    await lease!.release()
+    expect(readFileSync(path, 'utf8')).toBe('another-holder\n')
   })
 })
 

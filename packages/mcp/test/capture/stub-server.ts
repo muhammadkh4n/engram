@@ -17,6 +17,8 @@ export interface CaptureStubRequest {
 export interface CaptureStubReply {
   status: number
   body: unknown
+  /** Sent as text/html in place of the JSON body, as a proxy's error page is. */
+  html?: string
 }
 
 export type CaptureStubResponder = CaptureStubReply | ((request: CaptureStubRequest) => CaptureStubReply)
@@ -62,6 +64,11 @@ export async function startCaptureStub(): Promise<CaptureStub> {
       stub.received.push(request)
       const answer = () => {
         const reply = typeof stub.reply === 'function' ? stub.reply(request) : stub.reply
+        if (reply.html !== undefined) {
+          res.writeHead(reply.status, { 'content-type': 'text/html' })
+          res.end(reply.html)
+          return
+        }
         res.writeHead(reply.status, { 'content-type': 'application/json' })
         res.end(JSON.stringify(reply.body))
       }
