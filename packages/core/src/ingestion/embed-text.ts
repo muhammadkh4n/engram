@@ -1,3 +1,5 @@
+import { cutWholeChars } from '../text/cut-text.js'
+
 /**
  * Upper bound, in UTF-16 code units, on the text sent to the embedding model
  * for one message. When a message is longer, its head is kept: the opening of
@@ -23,7 +25,7 @@ const utf8Decoder = new TextDecoder()
  * a character boundary. Text within both bounds is returned unchanged.
  */
 export function capEmbedText(text: string): string {
-  const head = text.length > EMBED_MAX_CHARS ? text.slice(0, EMBED_MAX_CHARS) : text
+  const head = cutWholeChars(text, EMBED_MAX_CHARS)
   // One UTF-16 code unit encodes to at most 3 UTF-8 bytes.
   if (head.length * 3 <= EMBED_MAX_UTF8_BYTES) return head
   const bytes = utf8Encoder.encode(head)

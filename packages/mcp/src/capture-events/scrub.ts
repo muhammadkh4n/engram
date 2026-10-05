@@ -9,7 +9,7 @@
  * a secret straddling the cut is still masked whole.
  */
 
-import { scrubSecrets } from '@engram-mem/core'
+import { cutWholeChars, scrubSecrets } from '@engram-mem/core'
 import { USER_PROMPT_TEXT_MAX_CHARS } from './contract.js'
 import type { AnswerQuestion, CaptureEvent, UserAnswerPayload, UserPromptPayload } from './contract.js'
 
@@ -152,9 +152,5 @@ function distinctQuestions(questions: AnswerQuestion[]): AnswerQuestion[] {
 
 function cutPrompt(payload: UserPromptPayload): UserPromptPayload {
   if (payload.text.length <= USER_PROMPT_TEXT_MAX_CHARS) return payload
-  let end = USER_PROMPT_TEXT_MAX_CHARS
-  const last = payload.text.charCodeAt(end - 1)
-  // Never keep the first half of a surrogate pair without its second.
-  if (last >= 0xd800 && last <= 0xdbff) end--
-  return { ...payload, text: payload.text.slice(0, end), truncated: true }
+  return { ...payload, text: cutWholeChars(payload.text, USER_PROMPT_TEXT_MAX_CHARS), truncated: true }
 }

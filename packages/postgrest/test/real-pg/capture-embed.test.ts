@@ -3,6 +3,8 @@
  * the service-role JWT:
  * - an MK utterance and an artifact are pending; an assistant utterance, a
  *   forgotten item and a legacy item are not;
+ * - the pending read returns the head of each search text, never more than
+ *   the embed text builder keeps;
  * - engram_items_set_embeddings writes a row once, and a repeat writes 0;
  * - a forgotten item takes no embedding;
  * - a malformed vector is an invalid argument and writes nothing;
@@ -15,6 +17,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { EMBED_MAX_CHARS, buildTextToEmbed } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '../../src/capture-store.js'
 import { postgrestImage, realPgImage, startRealPg, type PostgrestEndpoint, type RealPg } from './harness.js'
 
@@ -114,6 +117,28 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
       expect(pending.find((p) => p.id === commit)?.searchText).toBe(
         'sample-repo 0123456789ab\nfix: sample service listens on 7070',
       )
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'returns only the head of a long search text, and the head embeds to the same text as the whole',
+    async () => {
+      const ascii = `Sample head. ${'x'.repeat(EMBED_MAX_CHARS * 2)}`
+      const emoji = '🙂'.repeat(EMBED_MAX_CHARS + 500)
+      const [asciiId, emojiId] = (await insertItems([
+        item({ content: 'A long sample prompt.', search_text: ascii }),
+        item({ content: 'A long sample prompt of emoji.', search_text: emoji }),
+      ])) as [string, string]
+
+      const pending = await store.pendingEmbeddings(256, CLAIMANT)
+      const asciiHead = pending.find((p) => p.id === asciiId)!.searchText
+      const emojiHead = pending.find((p) => p.id === emojiId)!.searchText
+      expect(asciiHead).toBe(ascii.slice(0, EMBED_MAX_CHARS))
+      // PostgreSQL counts characters, so an all-astral head is twice as long in UTF-16 units.
+      expect(emojiHead).toBe('🙂'.repeat(EMBED_MAX_CHARS))
+      expect(buildTextToEmbed({ cleanText: asciiHead })).toBe(buildTextToEmbed({ cleanText: ascii }))
+      expect(buildTextToEmbed({ cleanText: emojiHead })).toBe(buildTextToEmbed({ cleanText: emoji }))
     },
     TEST_TIMEOUT_MS,
   )

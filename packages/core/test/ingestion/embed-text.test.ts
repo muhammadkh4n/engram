@@ -209,6 +209,11 @@ describe('capEmbedText — the UTF-8 bound under the model token limit', () => {
     expect(capped).not.toContain('\uFFFD')
   })
 
+  it('drops the first half of a surrogate pair the character cap would split', () => {
+    const split = `${'x'.repeat(EMBED_MAX_CHARS - 1)}🙂`
+    expect(capEmbedText(split)).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+  })
+
   it('applies to every buildTextToEmbed rule', () => {
     const cjk = '語'.repeat(EMBED_MAX_CHARS)
     for (const input of [

@@ -9,7 +9,13 @@
  * returned to the client and logged.
  */
 
-import { CAPTURE_EVENT_TYPES, PostgresTextKeyCollision, toPostgresText, type CaptureEventType } from '@engram-mem/core'
+import {
+  CAPTURE_EVENT_TYPES,
+  PostgresTextKeyCollision,
+  cutWholeChars,
+  toPostgresText,
+  type CaptureEventType,
+} from '@engram-mem/core'
 import {
   ASSISTANT_TOOLS_MAX,
   ASSISTANT_TOOL_NAME_MAX_CHARS,
@@ -478,7 +484,7 @@ function parseUserPrompt(value: unknown, occurredMs: number): UserPromptPayload 
   const p = object(value, 'payload', ['text', 'transcript_line'], ['truncated', 'origin'])
   const text = string(p.text, 'payload.text', { max: Infinity, notBlank: true })
   // Only the head is stored, and the stored text must not be blank either.
-  if (text.length > USER_PROMPT_TEXT_MAX_CHARS && text.slice(0, USER_PROMPT_TEXT_MAX_CHARS).trim().length === 0) {
+  if (text.length > USER_PROMPT_TEXT_MAX_CHARS && cutWholeChars(text, USER_PROMPT_TEXT_MAX_CHARS).trim().length === 0) {
     fail('payload.text', `must not be blank in its first ${USER_PROMPT_TEXT_MAX_CHARS} characters`)
   }
   if (p.truncated !== undefined && p.truncated !== true) fail('payload.truncated', 'may only be true')

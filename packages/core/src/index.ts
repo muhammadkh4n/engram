@@ -54,6 +54,7 @@ export type {
 } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
+export { cutWholeChars } from './text/cut-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {

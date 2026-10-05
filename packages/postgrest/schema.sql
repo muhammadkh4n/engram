@@ -3744,6 +3744,10 @@ DROP FUNCTION IF EXISTS public.engram_items_pending_embedding(integer);
 -- first's claims are committed: two calls never return the same item while
 -- a claim is live. A row some other writer holds locked is skipped rather
 -- than waited on.
+-- search_text comes back cut to its first 6000 characters: the worker embeds
+-- at most 6000 UTF-16 units of it (EMBED_MAX_CHARS) and a character is at
+-- least one unit, so the head holds all that is embedded and a batch of long
+-- items does not carry their whole text over the wire.
 CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer, p_claimant uuid) RETURNS TABLE(id uuid, search_text text)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -3777,9 +3781,9 @@ BEGIN
            embedding_claimed_until = now() + interval '120 seconds'
       FROM candidate c
      WHERE m.id = c.id
-    RETURNING m.id, m.search_text, m.created_at
+    RETURNING m.id, left(m.search_text, 6000) AS head_text, m.created_at
   )
-  SELECT k.id, k.search_text
+  SELECT k.id, k.head_text
     FROM claimed k
    ORDER BY k.created_at, k.id;
 END; $$;

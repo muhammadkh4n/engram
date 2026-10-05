@@ -14,7 +14,13 @@
  * grace, and 1 when a step throws.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { EMBED_MAX_CHARS, EMBEDDING_ATTEMPTS_MAX, EMBEDDING_CLAIM_LEASE_SECONDS, EmbeddingInputError } from '@engram-mem/core'
+import {
+  EMBED_MAX_CHARS,
+  EMBEDDING_ATTEMPTS_MAX,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
+  EmbeddingInputError,
+  findPostgresUnsafeText,
+} from '@engram-mem/core'
 import type { EmbeddingFailure, ItemEmbedding, MaterializeResult, PendingEmbedding } from '@engram-mem/core'
 import {
   WORKER_EMBED_BACKOFF_MAX_MS,
@@ -256,6 +262,29 @@ describe('startCaptureWorker', () => {
     expect(f.logs[0]).toBe('capture worker: processed=0 failed=0 skipped=0 pending=0 dead=0 embedded=31 embed_failed=0')
     expect(f.logs.at(-1)).toContain('embed_failed=1')
     expect(f.logs.join('\n')).not.toContain('plum-orchard')
+  })
+
+  it('records a refusal whose message a 500-character cut would split inside a surrogate pair', async () => {
+    const prefix = "400 Invalid 'input': "
+    const message = `${prefix}${'x'.repeat(499 - prefix.length)}😀 and the rest of the message`
+    expect(message.charCodeAt(499)).toBe(0xd83d)
+    const items = [
+      { id: '00000000-0000-4000-8000-00000000e001', searchText: 'the sample text the model refuses' },
+      { id: '00000000-0000-4000-8000-00000000e002', searchText: 'a sample item that embeds' },
+    ]
+    const f = fakes({
+      pending: async () => items,
+      embedBatch: async (texts) => {
+        if (texts.includes(items[0]!.searchText)) throw new EmbeddingInputError(400, message)
+        return texts.map(() => vector())
+      },
+    })
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+
+    expect(f.failures[0]).toEqual([{ id: items[0]!.id, error: message.slice(0, 499) }])
+    expect(findPostgresUnsafeText(f.failures[0])).toBeNull()
   })
 
   it('counts no refusal against any item when the provider refuses every input, over 10 passes', async () => {
