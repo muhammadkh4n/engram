@@ -4,7 +4,8 @@
  * returns the row count, asks PostgREST for UTC, and turns a refusal into
  * ItemConstraintError without the error's `details`; materialize sends its
  * limit to engram_capture_materialize and checks the result's shape;
- * the embedding reads and writes map rows and refuse a malformed result.
+ * the embedding reads and writes map rows and refuse a malformed result;
+ * embedding failures and their count go to their RPCs.
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
@@ -354,5 +355,49 @@ describe('PostgRestCaptureStore embeddings', () => {
       'setEmbeddings failed (22023): engram_items_set_embeddings: object 1: id must be a uuid string',
     )
     expect((err as Error).message).not.toContain('hunter-two')
+  })
+})
+
+describe('PostgRestCaptureStore embedding failures', () => {
+  const ID = '00000000-0000-4000-8000-00000000f001'
+
+  it('sends failures to engram_items_record_embedding_failures and returns the rows raised', async () => {
+    const { store, calls } = storeWith({ data: 1, error: null })
+    const rows = [{ id: ID, error: "400 Invalid 'input': the sample text cannot be embedded" }]
+    await expect(store.recordEmbeddingFailures(rows)).resolves.toBe(1)
+    expect(calls).toEqual([{ fn: 'engram_items_record_embedding_failures', args: { p_rows: rows } }])
+  })
+
+  it('refuses an empty or oversized batch without calling the RPC, and a count above the rows sent', async () => {
+    const { store, calls } = storeWith({ data: 2, error: null })
+    await expect(store.recordEmbeddingFailures([])).rejects.toThrow('rows must hold 1 to 256 failures')
+    const many = Array.from({ length: 257 }, () => ({ id: ID, error: 'e' }))
+    await expect(store.recordEmbeddingFailures(many)).rejects.toThrow('rows must hold 1 to 256 failures')
+    expect(calls).toEqual([])
+    await expect(store.recordEmbeddingFailures([{ id: ID, error: 'e' }])).rejects.toThrow(
+      'recordEmbeddingFailures failed: the RPC returned no row count',
+    )
+  })
+
+  it('reports a refused call with its code and message only', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: { code: '22023', message: 'engram_items_record_embedding_failures: objects 1 and 2 share an id', details: SECRET_ROW, hint: null },
+    })
+    const err = await store.recordEmbeddingFailures([{ id: ID, error: 'e' }]).catch((e: unknown) => e)
+    expect((err as Error).message).toBe(
+      'recordEmbeddingFailures failed (22023): engram_items_record_embedding_failures: objects 1 and 2 share an id',
+    )
+    expect(sqlstateOf(err)).toBe('22023')
+  })
+
+  it('reads the count from engram_items_embedding_failed_count, as a number or a bigint string', async () => {
+    const asNumber = storeWith({ data: 3, error: null })
+    await expect(asNumber.store.embeddingFailedCount()).resolves.toBe(3)
+    expect(asNumber.calls).toEqual([{ fn: 'engram_items_embedding_failed_count', args: {} }])
+    await expect(storeWith({ data: '4', error: null }).store.embeddingFailedCount()).resolves.toBe(4)
+    await expect(storeWith({ data: -1, error: null }).store.embeddingFailedCount()).rejects.toThrow(
+      'embeddingFailedCount failed: the RPC returned no count',
+    )
   })
 })

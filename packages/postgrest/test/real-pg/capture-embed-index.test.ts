@@ -60,6 +60,7 @@ describe.skipIf(!realPgImage)('the pending-embedding index on real Postgres', ()
         `EXPLAIN SELECT i.id, i.search_text FROM public.memory_items i
           WHERE embedding IS NULL
             AND forgotten_at IS NULL
+            AND embedding_attempts < 5
             AND NOT (class = 'utterance' AND speaker = 'assistant')
             AND class NOT IN ('session_index', 'legacy')
           ORDER BY i.created_at, i.id LIMIT 32;`,

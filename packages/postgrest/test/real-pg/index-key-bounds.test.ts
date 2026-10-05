@@ -365,7 +365,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       'idx_items_class_kind: class': '16 by memory_items_class_check',
       'idx_items_class_kind: kind': '15 by memory_items_kind_check',
       "idx_items_event_key: ((source ->> 'event_key'::text))": '2048 by memory_items_source_check',
-      "idx_items_version_of: ((source ->> 'version_of'::text))": '2048 by memory_items_source_check',
+      "idx_items_version_of: ((source ->> 'version_of'::text))": '2048 by memory_items_version_of_check',
       'idx_items_project: project_id': '100 by memory_items_ids_check',
       'idx_items_session: session_id': '1024 by memory_items_ids_check',
       'memory_projects_id_kind_key: id': '100 by memory_projects_id_check',

@@ -1350,9 +1350,7 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_source_check CHECK (jsonb_typeof(source) = 'object'
         AND (source ->> 'type') IN ('transcript', 'history', 'git', 'ledger', 'register', 'vault', 'legacy', 'ingest_tool', 'extraction')
         AND (NOT (source ? 'event_key') OR (jsonb_typeof(source -> 'event_key') = 'string' AND (source ->> 'event_key') ~ '\S'
-                                            AND char_length(source ->> 'event_key') <= 512))
-        AND (NOT (source ? 'version_of') OR (jsonb_typeof(source -> 'version_of') = 'string' AND (source ->> 'version_of') ~ '\S'
-                                             AND char_length(source ->> 'version_of') <= 512))),
+                                            AND char_length(source ->> 'event_key') <= 512))),
     CONSTRAINT memory_items_text_check CHECK (content ~ '\S' AND search_text ~ '\S' AND (context IS NULL OR context ~ '\S')),
     CONSTRAINT memory_items_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
         AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
@@ -1469,6 +1467,42 @@ END $$;
 --
 
 ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 100, autovacuum_analyze_scale_factor = 0.02);
+
+
+--
+-- Columns and rules memory_items gained after it was first provisioned. CREATE
+-- TABLE IF NOT EXISTS is a no-op on a database that already has the table, so
+-- each is added here, idempotently, and reaches fresh and existing databases
+-- alike.
+-- - embedding_attempts and embedding_error: the capture worker raises the
+--   count each time the embedding provider refuses an item's own text (HTTP
+--   400 or 422) and keeps the provider's message, at most 500 characters. At
+--   5 attempts the item leaves the pending set (engram_items_pending_embedding),
+--   so one text the model can never take does not stop embedding for every
+--   newer item; engram_items_embedding_failed_count reports how many left.
+-- - memory_items_version_of_check bounds source.version_of as
+--   memory_items_source_check bounds source.event_key: a non-blank string of
+--   at most 512 characters, so every idx_items_version_of key fits a btree
+--   index row.
+-- Each constraint is added only when pg_constraint lacks it; a bare ADD
+-- CONSTRAINT fails on re-apply.
+--
+
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_attempts smallint DEFAULT 0 NOT NULL;
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_error text;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_version_of_check' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE ONLY public.memory_items
+      ADD CONSTRAINT memory_items_version_of_check CHECK (NOT (source ? 'version_of') OR (jsonb_typeof(source -> 'version_of') = 'string'
+        AND (source ->> 'version_of') ~ '\S' AND char_length(source ->> 'version_of') <= 512));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_embedding_attempts_check' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE ONLY public.memory_items
+      ADD CONSTRAINT memory_items_embedding_attempts_check CHECK (embedding_attempts BETWEEN 0 AND 5
+        AND (embedding_error IS NULL OR (embedding_error ~ '\S' AND char_length(embedding_error) <= 500)));
+  END IF;
+END $$;
 
 
 --
@@ -1973,8 +2007,9 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 
 -- idx_items_version_of finds the current version of an item chain (a ledger
 -- decision or register entry) when capture materializes a new version.
--- memory_items_source_check bounds source.version_of at 512 characters, as it
--- bounds source.event_key, so every key fits a btree index row.
+-- memory_items_version_of_check bounds source.version_of at 512 characters,
+-- as memory_items_source_check bounds source.event_key, so every key fits a
+-- btree index row.
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
@@ -1982,8 +2017,21 @@ CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btr
 -- function's WHERE, word for word, so it holds only the backlog embedding
 -- drains: assistant utterances, session indexes and legacy rows are never
 -- embedded by the worker, and an index that held them would be walked whole
--- on every idle call.
-CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND NOT (class = 'utterance' AND speaker = 'assistant') AND class NOT IN ('session_index', 'legacy'));
+-- on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
+-- whatever its predicate, so an index built before the embedding_attempts
+-- clause is dropped first and rebuilt with it; otherwise the planner could no
+-- longer match it to the function and every call would scan the table.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1
+               FROM pg_catalog.pg_index x
+               JOIN pg_catalog.pg_class c ON c.oid = x.indexrelid
+              WHERE c.relname = 'idx_items_pending_embedding'
+                AND c.relnamespace = 'public'::regnamespace
+                AND pg_catalog.pg_get_expr(x.indpred, x.indrelid) NOT LIKE '%(embedding_attempts < 5)%') THEN
+    DROP INDEX public.idx_items_pending_embedding;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class NOT IN ('session_index', 'legacy'));
 
 
 --
@@ -3484,8 +3532,9 @@ END; $$;
 --
 
 -- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
--- no embedding, not forgotten, not an assistant utterance, and not a
--- session_index or legacy item. Assistant turns are trust 3 and never ranked
+-- no embedding, not forgotten, fewer than 5 refused embedding attempts, not
+-- an assistant utterance, and not a session_index or legacy item. Assistant
+-- turns are trust 3 and never ranked
 -- by vector; session indexes and legacy rows are embedded by their own
 -- writers or not at all. Read only; idx_items_pending_embedding serves the
 -- order, and its predicate repeats this WHERE word for word so the planner
@@ -3506,6 +3555,7 @@ BEGIN
     FROM public.memory_items i
    WHERE embedding IS NULL
      AND forgotten_at IS NULL
+     AND embedding_attempts < 5
      AND NOT (class = 'utterance' AND speaker = 'assistant')
      AND class NOT IN ('session_index', 'legacy')
    ORDER BY i.created_at, i.id
@@ -3602,6 +3652,109 @@ BEGIN
   GET DIAGNOSTICS v_written = ROW_COUNT;
   RETURN v_written;
 END; $$;
+
+
+--
+-- Name: engram_items_record_embedding_failures(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Records 1 to 256 input-specific embedding failures, each {id, error}: a
+-- uuid and the provider's non-blank message, every id distinct. Each item
+-- still pending (no embedding, not forgotten, fewer than 5 attempts) has
+-- embedding_attempts raised by one and embedding_error set to the message cut
+-- to 500 characters; any other row is left as it is. Returns the rows raised.
+-- It takes the forget advisory key exclusively, then locks the rows FOR NO
+-- KEY UPDATE in id order, as engram_items_set_embeddings does.
+CREATE OR REPLACE FUNCTION public.engram_items_record_embedding_failures(p_rows jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_count integer;
+  v_problem text;
+  v_raised integer;
+BEGIN
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_record_embedding_failures: p_rows must be a JSON array';
+  END IF;
+  v_count := jsonb_array_length(p_rows);
+  IF v_count < 1 OR v_count > 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_items_record_embedding_failures: p_rows holds %s objects, not 1 to 256', v_count);
+  END IF;
+
+  SELECT p.reason INTO v_problem
+    FROM (
+      SELECT t.n,
+             CASE
+               WHEN jsonb_typeof(t.e) <> 'object' THEN format('object %s is not a JSON object', t.n)
+               WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.e) AS k(key) WHERE k.key NOT IN ('id', 'error')) THEN
+                 format('object %s has a key other than id and error', t.n)
+               WHEN jsonb_typeof(t.e -> 'id') IS DISTINCT FROM 'string' OR NOT pg_input_is_valid(t.e ->> 'id', 'uuid') THEN
+                 format('object %s: id must be a uuid string', t.n)
+               WHEN jsonb_typeof(t.e -> 'error') IS DISTINCT FROM 'string' OR left(t.e ->> 'error', 500) !~ '\S' THEN
+                 format('object %s: error must be a string that is not blank in its first 500 characters', t.n)
+             END AS reason
+        FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)
+    ) p
+   WHERE p.reason IS NOT NULL
+   ORDER BY p.n
+   LIMIT 1;
+
+  IF v_problem IS NULL THEN
+    WITH sent AS (
+      SELECT t.n, first_value(t.n) OVER (PARTITION BY (t.e ->> 'id')::uuid ORDER BY t.n) AS first_n
+        FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)
+    )
+    SELECT format('objects %s and %s share an id', s.first_n, s.n) INTO v_problem
+      FROM sent s
+     WHERE s.n > s.first_n
+     ORDER BY s.n
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_record_embedding_failures: ' || v_problem;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  PERFORM 1
+     FROM public.memory_items i
+    WHERE i.id IN (SELECT (t.e ->> 'id')::uuid FROM jsonb_array_elements(p_rows) AS t(e))
+    ORDER BY i.id
+      FOR NO KEY UPDATE;
+  UPDATE public.memory_items m
+     SET embedding_attempts = m.embedding_attempts + 1,
+         embedding_error = left(r.e ->> 'error', 500)
+    FROM jsonb_array_elements(p_rows) AS r(e)
+   WHERE m.id = (r.e ->> 'id')::uuid
+     AND m.embedding IS NULL
+     AND m.forgotten_at IS NULL
+     AND m.embedding_attempts < 5;
+  GET DIAGNOSTICS v_raised = ROW_COUNT;
+  RETURN v_raised;
+END; $$;
+
+
+--
+-- Name: engram_items_embedding_failed_count(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- How many items left the pending set after 5 refused embedding attempts and
+-- still have no embedding, forgotten items excluded. Read only; capture health
+-- reports it.
+CREATE OR REPLACE FUNCTION public.engram_items_embedding_failed_count() RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT count(*)
+    FROM public.memory_items i
+   WHERE i.embedding IS NULL
+     AND i.forgotten_at IS NULL
+     AND i.embedding_attempts >= 5;
+$$;
 
 
 --
@@ -4006,6 +4159,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -4057,6 +4212,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -4098,6 +4255,8 @@ GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_materialize(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;

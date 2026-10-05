@@ -2,6 +2,7 @@ import { PostgrestClient } from '@supabase/postgrest-js'
 import { EMBEDDING_BATCH_MAX, ItemConstraintError, MATERIALIZE_LIMIT_MAX } from '@engram-mem/core'
 import type {
   CaptureStore,
+  EmbeddingFailure,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
@@ -142,6 +143,30 @@ export class PostgRestCaptureStore implements CaptureStore {
       throw new Error('setEmbeddings failed: the RPC returned no row count')
     }
     return written
+  }
+
+  async recordEmbeddingFailures(rows: readonly EmbeddingFailure[]): Promise<number> {
+    if (rows.length < 1 || rows.length > EMBEDDING_BATCH_MAX) {
+      throw new Error(`recordEmbeddingFailures: rows must hold 1 to ${EMBEDDING_BATCH_MAX} failures`)
+    }
+    const pRows = rows.map((row) => ({ id: row.id, error: row.error }))
+    const { data, error } = await this.client.rpc('engram_items_record_embedding_failures', { p_rows: pRows })
+    if (error) throw toStoreError('recordEmbeddingFailures', error)
+    const raised = typeof data === 'string' ? Number(data) : data
+    if (typeof raised !== 'number' || !Number.isInteger(raised) || raised < 0 || raised > rows.length) {
+      throw new Error('recordEmbeddingFailures failed: the RPC returned no row count')
+    }
+    return raised
+  }
+
+  async embeddingFailedCount(): Promise<number> {
+    const { data, error } = await this.client.rpc('engram_items_embedding_failed_count', {})
+    if (error) throw toStoreError('embeddingFailedCount', error)
+    const count = typeof data === 'string' ? Number(data) : data
+    if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
+      throw new Error('embeddingFailedCount failed: the RPC returned no count')
+    }
+    return count
   }
 
   async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {

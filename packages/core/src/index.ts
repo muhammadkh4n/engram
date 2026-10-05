@@ -30,10 +30,18 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
-export { EMBEDDING_BATCH_MAX, MATERIALIZE_LIMIT_MAX, SCAN_TARGETS, sqlstateOf } from './items/capture-store.js'
+export {
+  EMBEDDING_ATTEMPTS_MAX,
+  EMBEDDING_BATCH_MAX,
+  EMBEDDING_ERROR_MAX_CHARS,
+  MATERIALIZE_LIMIT_MAX,
+  SCAN_TARGETS,
+  sqlstateOf,
+} from './items/capture-store.js'
 export type {
   CaptureSecretHit,
   CaptureStore,
+  EmbeddingFailure,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
@@ -92,7 +100,15 @@ export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
 export { parseContent } from './ingestion/content-parser.js'
 export type { ParsedContent, ParsedPart } from './ingestion/content-parser.js'
-export { buildTextToEmbed, EMBED_MAX_CHARS, EMBED_CONTEXT_MAX_CHARS, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
+export {
+  buildTextToEmbed,
+  capEmbedText,
+  EMBED_MAX_CHARS,
+  EMBED_MAX_UTF8_BYTES,
+  EMBED_CONTEXT_MAX_CHARS,
+  EMBED_TEXT_VERSION,
+} from './ingestion/embed-text.js'
+export { EmbeddingInputError, isEmbeddingInputError } from './ingestion/embedding-input-error.js'
 export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'

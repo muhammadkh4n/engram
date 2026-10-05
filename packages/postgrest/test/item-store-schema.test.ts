@@ -472,6 +472,7 @@ describe('the pending-embedding index', () => {
     for (const clause of [
       'embedding IS NULL',
       'forgotten_at IS NULL',
+      'embedding_attempts < 5',
       "NOT (class = 'utterance' AND speaker = 'assistant')",
       "class NOT IN ('session_index', 'legacy')",
     ]) {

@@ -5,7 +5,10 @@
  *   forgotten item and a legacy item are not;
  * - engram_items_set_embeddings writes a row once, and a repeat writes 0;
  * - a forgotten item takes no embedding;
- * - a malformed vector is an invalid argument and writes nothing.
+ * - a malformed vector is an invalid argument and writes nothing;
+ * - each recorded failure raises an item's attempt count and keeps the error
+ *   cut to 500 characters; at 5 the item leaves the pending set and is
+ *   counted; a forgotten or embedded item is not raised.
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -162,6 +165,75 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
       ).rejects.toThrow('setEmbeddings failed (22023): engram_items_set_embeddings: objects 1 and 2 share an id')
       await expect(store.pendingEmbeddings(0)).rejects.toThrow('limit must be an integer from 1 to 256')
       expect(await pendingIds()).toContain(id)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'raises the attempt count per failure, keeps the error cut to 500 characters, and drops the item at 5',
+    async () => {
+      const [id, other] = (await insertItems([
+        item({ content: 'A sample prompt the model refuses.' }),
+        item({ content: 'A sample prompt the model takes.' }),
+      ])) as [string, string]
+      const before = await store.embeddingFailedCount()
+      const longError = `400 Invalid 'input': ${'x'.repeat(600)}`
+
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await expect(store.recordEmbeddingFailures([{ id, error: longError }])).resolves.toBe(1)
+        expect(await pendingIds()).toContain(id)
+      }
+      await expect(store.embeddingFailedCount()).resolves.toBe(before)
+      await expect(store.recordEmbeddingFailures([{ id, error: '400 Invalid input: the fifth refusal' }])).resolves.toBe(1)
+      const ids = await pendingIds()
+      expect(ids).not.toContain(id)
+      expect(ids).toContain(other)
+      await expect(store.embeddingFailedCount()).resolves.toBe(before + 1)
+      await expect(store.recordEmbeddingFailures([{ id, error: 'a sixth refusal' }])).resolves.toBe(0)
+
+      expect(
+        await pg.psql(`SELECT embedding_attempts || ' ' || embedding_error FROM public.memory_items WHERE id = '${id}';`),
+      ).toBe('5 400 Invalid input: the fifth refusal')
+      const [cut] = (await insertItems([item({ content: 'A sample prompt with a long refusal.' })])) as [string]
+      await store.recordEmbeddingFailures([{ id: cut, error: longError }])
+      expect(
+        await pg.psql(`SELECT char_length(embedding_error) FROM public.memory_items WHERE id = '${cut}';`),
+      ).toBe('500')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'raises no forgotten or embedded item, and refuses a malformed failure or a repeated id',
+    async () => {
+      const [gone, done] = (await insertItems([
+        item({ content: 'A refused sample prompt to forget.' }),
+        item({ content: 'A refused sample prompt already embedded.' }),
+      ])) as [string, string]
+      await forget(gone)
+      await store.setEmbeddings([{ id: done, embedding: vector(0.3), model: MODEL }])
+      await expect(
+        store.recordEmbeddingFailures([
+          { id: gone, error: '400 refused' },
+          { id: done, error: '400 refused' },
+        ]),
+      ).resolves.toBe(0)
+      expect(
+        await pg.psql(`SELECT sum(embedding_attempts) FROM public.memory_items WHERE id IN ('${gone}', '${done}');`),
+      ).toBe('0')
+
+      await expect(store.recordEmbeddingFailures([{ id: 'not-a-uuid', error: '400 refused' }])).rejects.toThrow(
+        'recordEmbeddingFailures failed (22023): engram_items_record_embedding_failures: object 1: id must be a uuid string',
+      )
+      await expect(store.recordEmbeddingFailures([{ id: done, error: ' \n' }])).rejects.toThrow(
+        'engram_items_record_embedding_failures: object 1: error must be a string that is not blank in its first 500 characters',
+      )
+      await expect(
+        store.recordEmbeddingFailures([
+          { id: done, error: '400 refused' },
+          { id: done, error: '400 refused' },
+        ]),
+      ).rejects.toThrow('engram_items_record_embedding_failures: objects 1 and 2 share an id')
     },
     TEST_TIMEOUT_MS,
   )
