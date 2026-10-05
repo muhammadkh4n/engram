@@ -30,11 +30,12 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
-export { SCAN_TARGETS } from './items/capture-store.js'
+export { MATERIALIZE_LIMIT_MAX, SCAN_TARGETS } from './items/capture-store.js'
 export type {
   CaptureSecretHit,
   CaptureStore,
   IngestedEvent,
+  MaterializeResult,
   ProjectRow,
   ScanRow,
   ScanTarget,

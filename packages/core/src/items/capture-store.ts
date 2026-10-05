@@ -47,6 +47,21 @@ export interface IngestedEvent {
   status: 'accepted' | 'duplicate'
 }
 
+/** The largest batch one materialize call takes. */
+export const MATERIALIZE_LIMIT_MAX = 1000
+
+/**
+ * What one materialize call did. `locked: false` means another call held the
+ * materialize lock and this one touched nothing. Otherwise `processed`
+ * counts the events this call marked processed (`skipped` included: events
+ * that created nothing because their origin item is missing), `failed` the
+ * events whose attempt failed; `pending` (events still to run) and `dead`
+ * (events out of attempts) count the whole table.
+ */
+export type MaterializeResult =
+  | { locked: false }
+  | { locked: true; processed: number; failed: number; skipped: number; pending: number; dead: number }
+
 /** The tables the stored-secret scan reads. */
 export const SCAN_TARGETS = ['memory_items', 'memory_capture_events'] as const
 export type ScanTarget = (typeof SCAN_TARGETS)[number]
@@ -65,10 +80,10 @@ export interface ScanRow {
 
 /**
  * Server-side storage for capture: the project registry rows the route checks
- * event scope against, and the paged read of stored text the stored-secret
- * scan runs over. The database applies the table rules, so an
- * implementation forwards writes and reports a refused rule as
- * `ItemConstraintError`.
+ * event scope against, the stored events and their materialization into
+ * items, and the paged read of stored text the stored-secret scan runs over.
+ * The database applies the table rules, so an implementation forwards writes
+ * and reports a refused rule as `ItemConstraintError`.
  */
 export interface CaptureStore {
   /**
@@ -85,6 +100,13 @@ export interface CaptureStore {
    * earlier one, reads `duplicate` with the stored row's id.
    */
   ingestEvents(events: readonly StoredEvent[]): Promise<IngestedEvent[]>
+
+  /**
+   * Materializes up to `limit` (1 to MATERIALIZE_LIMIT_MAX) stored events
+   * into items, live sessions before backfill and each session in event-time
+   * order, under a lock that lets one call run at a time.
+   */
+  materialize(limit: number): Promise<MaterializeResult>
 
   /**
    * Up to `limit` rows of `target` with an id above `afterId` (every row when
