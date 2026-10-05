@@ -217,6 +217,39 @@ describe('parseCaptureEventsRequest — user_answer', () => {
     expectValid(event)
   })
 
+  it('accepts a 1,000,000-char response marked truncated', () => {
+    const { event } = expectValid(withPayload('user_answer', { response: 'r'.repeat(USER_PROMPT_TEXT_MAX_CHARS), truncated: true }))
+    const payload = event.payload as { response: string; truncated?: boolean }
+    expect(payload.response).toHaveLength(USER_PROMPT_TEXT_MAX_CHARS)
+    expect(payload.truncated).toBe(true)
+  })
+
+  it('rejects a response, an answer or a note of 1,000,001 chars', () => {
+    const over = 'x'.repeat(USER_PROMPT_TEXT_MAX_CHARS + 1)
+    expect(expectRejected(withPayload('user_answer', { response: over })).reason).toBe(
+      `payload.response exceeds ${USER_PROMPT_TEXT_MAX_CHARS} characters`,
+    )
+    expect(expectRejected(withPayload('user_answer', { answers: { [question]: over } })).reason).toBe(
+      `payload.answers value 0 exceeds ${USER_PROMPT_TEXT_MAX_CHARS} characters`,
+    )
+    expect(expectRejected(withPayload('user_answer', { notes: { [question]: over } })).reason).toBe(
+      `payload.notes value 0 exceeds ${USER_PROMPT_TEXT_MAX_CHARS} characters`,
+    )
+  })
+
+  it('accepts an Other answer of 300,000 chars and a note over the free-text cap', () => {
+    const answer = 'o'.repeat(300_000)
+    const note = 'n'.repeat(CAPTURE_FREE_TEXT_MAX_CHARS + 1)
+    const { event } = expectValid(withPayload('user_answer', { answers: { [question]: answer }, notes: { [question]: note } }))
+    const payload = event.payload as { answers: Record<string, string>; truncated?: boolean }
+    expect(payload.answers[question]).toBe(answer)
+    expect(payload).not.toHaveProperty('truncated')
+  })
+
+  it('rejects truncated: false', () => {
+    expect(expectRejected(withPayload('user_answer', { truncated: false })).reason).toBe('payload.truncated may only be true')
+  })
+
   it('keeps a __proto__ question key as an own answer', () => {
     const questions = [{ question: '__proto__', header: '', options: [], multiSelect: false }]
     const answers = JSON.parse('{"__proto__": "yes"}') as Record<string, unknown>

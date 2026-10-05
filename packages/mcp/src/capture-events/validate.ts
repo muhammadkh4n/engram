@@ -517,13 +517,13 @@ function parseQuestionMap(value: unknown, path: string, questionTexts: Set<strin
   if (!isPlainObject(value)) fail(path, 'must be an object')
   const entries = Object.keys(value).map((key, i): [string, string] => {
     if (!questionTexts.has(key)) fail(path, 'has a key that names no question')
-    return [key, string(value[key], `${path} value ${i}`)]
+    return [key, string(value[key], `${path} value ${i}`, { max: USER_PROMPT_TEXT_MAX_CHARS })]
   })
   return Object.fromEntries(entries)
 }
 
 function parseUserAnswer(value: unknown): UserAnswerPayload {
-  const p = object(value, 'payload', ['questions', 'answers', 'transcript_line'], ['notes', 'response'])
+  const p = object(value, 'payload', ['questions', 'answers', 'transcript_line'], ['notes', 'response', 'truncated'])
   const questions = array(p.questions, 'payload.questions', USER_ANSWER_QUESTIONS_MIN, USER_ANSWER_QUESTIONS_MAX).map(
     (v, i) => parseQuestion(v, `payload.questions[${i}]`),
   )
@@ -534,7 +534,11 @@ function parseUserAnswer(value: unknown): UserAnswerPayload {
   })
   const answers = parseQuestionMap(p.answers, 'payload.answers', texts)
   const notes = p.notes === undefined ? undefined : parseQuestionMap(p.notes, 'payload.notes', texts)
-  const response = p.response === undefined ? undefined : string(p.response, 'payload.response', { notBlank: true })
+  const response =
+    p.response === undefined
+      ? undefined
+      : string(p.response, 'payload.response', { notBlank: true, max: USER_PROMPT_TEXT_MAX_CHARS })
+  if (p.truncated !== undefined && p.truncated !== true) fail('payload.truncated', 'may only be true')
   const transcriptLine = integer(p.transcript_line, 'payload.transcript_line', 1)
   const said = [...Object.values(answers), ...Object.values(notes ?? {}), response ?? '']
   if (!said.some((s) => s.trim().length > 0)) fail('payload', 'has no answer, note or response that is not blank')
@@ -543,6 +547,7 @@ function parseUserAnswer(value: unknown): UserAnswerPayload {
     answers,
     ...(notes ? { notes } : {}),
     ...(response !== undefined ? { response } : {}),
+    ...(p.truncated === true ? { truncated: true as const } : {}),
     transcript_line: transcriptLine,
   }
 }

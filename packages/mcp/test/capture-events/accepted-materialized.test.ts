@@ -2,8 +2,9 @@
  * Accepted means materialized, on real Postgres behind PostgREST: a 500-event
  * batch of edge cases (U+0000, lone surrogates, a valid pair, characters that
  * look like space, whitespace-only optional strings, every free-text field at
- * its maximum, non-ASCII keys, the widest zone offsets) goes through the route
- * with a real PostgRestCaptureStore. Every event must be answered, every
+ * its maximum, a dialog response at the 1,000,000-char cap on the user's words,
+ * non-ASCII keys, the widest zone offsets) goes through the route with a real
+ * PostgRestCaptureStore. Every event must be answered, every
  * accepted one stored and materialized, none dead, and a replay of the batch
  * reads duplicate throughout.
  */
@@ -13,7 +14,7 @@ import type { CaptureEventType, SecretRegistryStatus } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { parseProjectRegistry, registryRows, type ProjectRegistry } from '../../src/capture-events/project-registry.js'
 import { runCaptureEventsRequest, type CaptureEventsRouteDeps } from '../../src/capture-events/route.js'
-import { CAPTURE_EVENTS_MAX, CAPTURE_FREE_TEXT_MAX_CHARS } from '../../src/capture-events/contract.js'
+import { CAPTURE_EVENTS_MAX, CAPTURE_FREE_TEXT_MAX_CHARS, USER_PROMPT_TEXT_MAX_CHARS } from '../../src/capture-events/contract.js'
 import { postgrestImage, realPgImage, startRealPg, type RealPg } from '../../../postgrest/test/real-pg/harness.js'
 import { RECEIVED_AT, envelope, validEvent, type FixtureEvent } from './fixtures.js'
 
@@ -69,9 +70,10 @@ function corpus(): FixtureEvent[] {
         { question: 'Which\u0000 timer?', header: '', options: [], multiSelect: false },
         { question: bigQuestion, header: long('h', 200), options: [], multiSelect: false },
       ],
-      answers: { 'Какой store выбрать? 日本語': 'Postgres', 'Which\u0000 timer?': '  ', [bigQuestion]: long('a', MAX) },
+      answers: { 'Какой store выбрать? 日本語': 'Postgres', 'Which\u0000 timer?': '  ', [bigQuestion]: long('a', 300_000) },
       notes: { 'Which\u0000 timer?': '\t' },
-      response: undefined,
+      response: long('r', USER_PROMPT_TEXT_MAX_CHARS),
+      truncated: true,
     }),
     edge('assistant_turn', {
       text: long('t', MAX),
@@ -222,6 +224,11 @@ describe.skipIf(!realPgImage || !postgrestImage)('every accepted capture event i
       expect(await content('edge-3')).toBe(`${R} low surrogate`)
       expect(await content('edge-4')).toBe('a valid pair 😀')
       expect((await content('edge-8')).length).toBe(1_000_000)
+      const answer = await pg.psql(
+        `SELECT length(i.content) || ' ' || (i.source -> 'truncated')::text FROM public.memory_items i
+           JOIN public.memory_capture_events e ON i.source ->> 'event_id' = e.id::text WHERE e.event_uuid = 'edge-10';`,
+      )
+      expect(answer).toBe(`${'Postgres'.length + 2 + 300_000 + 2 + USER_PROMPT_TEXT_MAX_CHARS} true`)
       expect(await count(`SELECT count(*) FROM public.memory_items WHERE retired_at IS NOT NULL`)).toBe(1)
 
       const replay = await runCaptureEventsRequest(deps, envelope(corpus()))

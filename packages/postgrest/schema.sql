@@ -3453,7 +3453,7 @@ BEGIN
                 UNION ALL
                 SELECT 2147483647, CASE WHEN (p ->> 'response') ~ '\S' THEN 'Response: ' || (p ->> 'response') END) AS b
          WHERE b.block <> '';
-        v_source := jsonb_build_object('type', 'transcript', 'line', p -> 'transcript_line');
+        v_source := jsonb_build_object('type', 'transcript', 'line', p -> 'transcript_line', 'truncated', p -> 'truncated');
 
       WHEN 'assistant_turn' THEN
         v_class := 'utterance';

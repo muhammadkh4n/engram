@@ -131,6 +131,7 @@ async function scrubAnswer(payload: UserAnswerPayload, scrub: Scrub): Promise<Us
   }
   if (payload.notes !== undefined) out.notes = await rekey(payload.notes, 'notes')
   if (payload.response !== undefined) out.response = await scrub(payload.response, 'payload.response')
+  if (payload.truncated === true) out.truncated = true
   return out
 }
 
