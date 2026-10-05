@@ -156,6 +156,28 @@ describe('spoolTranscript spools only events the route accepts', () => {
     expect(event.payload).toEqual({ text: 'p'.repeat(USER_PROMPT_TEXT_MAX_CHARS - 5), truncated: true, transcript_line: 1 })
   })
 
+  it.each([USER_PROMPT_TEXT_MAX_CHARS - 1, USER_PROMPT_TEXT_MAX_CHARS])(
+    'spools a %i-character prompt unchanged and not truncated',
+    async (length) => {
+      const prompt = 'u'.repeat(length)
+      const path = writeTranscript(transcripts, SESSION, [humanPrompt(uuid(1), at(1), prompt)])
+
+      await spoolTranscript(path, { env })
+
+      expect(spooled().map((e) => e.payload)).toEqual([{ text: prompt, transcript_line: 1 }])
+    },
+  )
+
+  it('spools a prompt one character over the cap as exactly its first 1,000,000 characters, truncated', async () => {
+    const head = 'v'.repeat(USER_PROMPT_TEXT_MAX_CHARS)
+    const path = writeTranscript(transcripts, SESSION, [humanPrompt(uuid(1), at(1), `${head}w`)])
+
+    await spoolTranscript(path, { env })
+
+    expect(spooled().map((e) => e.payload)).toEqual([{ text: head, truncated: true, transcript_line: 1 }])
+    expect(routeRejections(spooled())).toEqual([])
+  })
+
   it('never cuts a prompt inside a surrogate pair', async () => {
     const path = writeTranscript(transcripts, SESSION, [
       humanPrompt(uuid(1), at(1), `${'c'.repeat(USER_PROMPT_TEXT_MAX_CHARS - 1)}\u{1F600}tail`),
@@ -285,6 +307,26 @@ describe('readyForRoute', () => {
     project: { id: null, workspace: null, repo_root: null, branch: null, worktree: null },
     plan_dirs: [],
   }
+
+  const promptEvent = (text: string): CaptureEvent =>
+    ({ ...base, type: 'user_prompt', payload: { text, transcript_line: 1 } }) as CaptureEvent
+
+  it.each([USER_PROMPT_TEXT_MAX_CHARS - 1, USER_PROMPT_TEXT_MAX_CHARS])(
+    'passes a %i-character prompt through unchanged and not truncated',
+    (length) => {
+      const event = promptEvent('u'.repeat(length))
+
+      expect(readyForRoute(event, { now: new Date(), log: () => {} })).toEqual({ ok: true, event })
+    },
+  )
+
+  it('cuts a prompt one character over the cap to exactly its first 1,000,000 characters and marks it truncated', () => {
+    const head = 'v'.repeat(USER_PROMPT_TEXT_MAX_CHARS)
+
+    const check = readyForRoute(promptEvent(`${head}w`), { now: new Date(), log: () => {} })
+
+    expect(check).toEqual({ ok: true, event: { ...promptEvent(head), payload: { text: head, truncated: true, transcript_line: 1 } } })
+  })
 
   it('drops a half placeholder left at the end of a prompt the scrubber already cut', () => {
     const text = `${'p'.repeat(USER_PROMPT_TEXT_MAX_CHARS - 12)}[REDACTED:FI`

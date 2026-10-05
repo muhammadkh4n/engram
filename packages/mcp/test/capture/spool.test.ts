@@ -19,6 +19,8 @@ const PERMISSION_BITS = constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWX
 const SESSION = '00000000-0000-4000-8000-000000009100'
 const TOKEN = 'test-capture-token'
 const SECRET = 'zr4-dead-letter-secret-8812'
+// A quote, a backslash and a tab: inside a JSON line the value appears only in its escaped spelling.
+const ESCAPED_SECRET = 'qk7"dead\\letter\tvalue-3390'
 
 // The secret registry is built once per process from process.env, on the
 // first scrub, so its source must be in place before any test runs.
@@ -26,7 +28,7 @@ const registryDir = mkdtempSync(join(tmpdir(), 'engram-spool-registry-'))
 const savedEnv = { SOURCES: process.env.ENGRAM_SECRET_SOURCES_FILE, CACHE: process.env.XDG_CACHE_HOME }
 
 beforeAll(() => {
-  writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ FIXTURE_SECRET: SECRET }))
+  writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ FIXTURE_SECRET: SECRET, FIXTURE_ESCAPED_SECRET: ESCAPED_SECRET }))
   writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
   process.env.ENGRAM_SECRET_SOURCES_FILE = join(registryDir, 'sources.json')
   process.env.XDG_CACHE_HOME = join(registryDir, 'cache')
@@ -338,6 +340,25 @@ describe('drainSpool', () => {
     expect(letter!.event).toContain('use the key [')
     expect(letter!.event).not.toContain(SECRET)
     expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(SECRET)
+  })
+
+  it('masks a registered value holding a quote, a backslash and a tab in a truncated line', async () => {
+    const line = JSON.stringify({ ...prompt(1), payload: { text: `the replica key is ${ESCAPED_SECRET} today`, transcript_line: 1 } })
+    const escaped = JSON.stringify(ESCAPED_SECRET).slice(1, -1)
+    expect(line).toContain(escaped)
+    const cut = line.slice(0, line.indexOf(escaped) + escaped.length + 3)
+    const [path] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    writeFileSync(path!, `${cut}\n${readFileSync(path!, 'utf8')}`)
+
+    const result = await drainSpool({ env })
+
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
+    const [letter] = deadLetters() as unknown as Array<{ reason: string; event: string }>
+    expect(letter!.reason).toBe('invalid_json')
+    expect(letter!.event).toContain('the replica key is [')
+    expect(letter!.event).not.toContain(escaped)
+    const written = readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')
+    expect(written).not.toContain(JSON.stringify(escaped).slice(1, -1))
   })
 
   it('masks a registered value in a line scrubbing cannot walk before dead-lettering it', async () => {
