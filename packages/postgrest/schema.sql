@@ -2992,6 +2992,122 @@ END; $$;
 
 
 --
+-- Name: engram_capture_ingest(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores capture events idempotently. p_events is a JSON array of 1 to 500
+-- objects with exactly the keys session_id, event_uuid, type, occurred_at,
+-- cwd, project, plan_dirs, client, payload, scrub and hits: session_id,
+-- event_uuid, type and occurred_at strings, cwd a string or null, project,
+-- client, payload and scrub objects, plan_dirs an array of strings, hits an
+-- array of objects with exactly field, detector and secret_name, and
+-- occurred_at an RFC 3339 timestamp with an offset. Each event
+-- is inserted unless its (session_id, event_uuid) is already stored, from an
+-- earlier call or earlier in this one; only a newly inserted event gets its
+-- hits as memory_secret_hits rows. Returns one row per input, in input order
+-- (ord from 1): the stored row's id and 'accepted' when this call inserted
+-- it, 'duplicate' otherwise. The whole call is one transaction. A malformed
+-- argument is an invalid argument (22023); a value the table refuses raises
+-- its constraint's error (23514).
+CREATE OR REPLACE FUNCTION public.engram_capture_ingest(p_events jsonb)
+    RETURNS TABLE(ord integer, event_id bigint, status text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_event jsonb;
+  v_ord bigint;
+  v_occurred timestamp with time zone;
+  v_id bigint;
+BEGIN
+  IF p_events IS NULL OR jsonb_typeof(p_events) IS DISTINCT FROM 'array'
+     OR jsonb_array_length(p_events) NOT BETWEEN 1 AND 500 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_capture_ingest: p_events must be a JSON array of 1 to 500 events';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(p_events) AS e(r)
+     WHERE CASE
+             WHEN jsonb_typeof(e.r) IS DISTINCT FROM 'object' THEN true
+             ELSE (SELECT count(*) FROM jsonb_object_keys(e.r)) <> 11
+               OR EXISTS (
+                    SELECT 1 FROM jsonb_object_keys(e.r) AS k(key)
+                     WHERE k.key NOT IN ('session_id', 'event_uuid', 'type', 'occurred_at', 'cwd', 'project',
+                                         'plan_dirs', 'client', 'payload', 'scrub', 'hits'))
+               OR jsonb_typeof(e.r -> 'session_id') IS DISTINCT FROM 'string'
+               OR jsonb_typeof(e.r -> 'event_uuid') IS DISTINCT FROM 'string'
+               OR jsonb_typeof(e.r -> 'type') IS DISTINCT FROM 'string'
+               OR jsonb_typeof(e.r -> 'occurred_at') IS DISTINCT FROM 'string'
+               OR coalesce(jsonb_typeof(e.r -> 'cwd'), 'missing') NOT IN ('string', 'null')
+               OR jsonb_typeof(e.r -> 'project') IS DISTINCT FROM 'object'
+               OR jsonb_typeof(e.r -> 'client') IS DISTINCT FROM 'object'
+               OR jsonb_typeof(e.r -> 'payload') IS DISTINCT FROM 'object'
+               OR jsonb_typeof(e.r -> 'scrub') IS DISTINCT FROM 'object'
+               OR jsonb_typeof(e.r -> 'plan_dirs') IS DISTINCT FROM 'array'
+               OR jsonb_typeof(e.r -> 'hits') IS DISTINCT FROM 'array'
+               OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(e.r -> 'plan_dirs') AS d(v)
+                     WHERE jsonb_typeof(d.v) IS DISTINCT FROM 'string')
+               OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(e.r -> 'hits') AS h(v)
+                     WHERE jsonb_typeof(h.v) IS DISTINCT FROM 'object'
+                        OR (SELECT count(*) FROM jsonb_object_keys(h.v)) <> 3
+                        OR jsonb_typeof(h.v -> 'field') IS DISTINCT FROM 'string'
+                        OR jsonb_typeof(h.v -> 'detector') IS DISTINCT FROM 'string'
+                        OR coalesce(jsonb_typeof(h.v -> 'secret_name'), 'missing') NOT IN ('string', 'null'))
+           END
+  ) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_capture_ingest: every event must be an object with exactly session_id, event_uuid, type, occurred_at, cwd, project, plan_dirs, client, payload, scrub and hits, of their types';
+  END IF;
+
+  FOR v_event, v_ord IN SELECT e.r, e.n FROM jsonb_array_elements(p_events) WITH ORDINALITY AS e(r, n) ORDER BY e.n
+  LOOP
+    -- RFC 3339 with an offset only: the cast alone also takes words such as
+    -- 'yesterday' and times with no zone, read in the session's TimeZone.
+    IF (v_event ->> 'occurred_at') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$' THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = format('engram_capture_ingest: event %s has an occurred_at that is not a timestamp', v_ord);
+    END IF;
+    BEGIN
+      v_occurred := (v_event ->> 'occurred_at')::timestamp with time zone;
+    EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR invalid_time_zone_displacement_value THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = format('engram_capture_ingest: event %s has an occurred_at that is not a timestamp', v_ord);
+    END;
+
+    v_id := NULL;
+    INSERT INTO public.memory_capture_events AS c
+           (session_id, event_uuid, type, occurred_at, cwd, project, plan_dirs, client, payload, scrub)
+    VALUES (v_event ->> 'session_id', v_event ->> 'event_uuid', v_event ->> 'type', v_occurred,
+            v_event ->> 'cwd', v_event -> 'project',
+            ARRAY(SELECT d.v FROM jsonb_array_elements_text(v_event -> 'plan_dirs') WITH ORDINALITY AS d(v, n)
+                   ORDER BY d.n),
+            v_event -> 'client', v_event -> 'payload', v_event -> 'scrub')
+    ON CONFLICT (session_id, event_uuid) DO NOTHING
+    RETURNING c.id INTO v_id;
+
+    IF v_id IS NOT NULL THEN
+      INSERT INTO public.memory_secret_hits (target_table, target_id, field, detector, secret_name)
+      SELECT 'memory_capture_events', v_id::text, h.v ->> 'field', h.v ->> 'detector', h.v ->> 'secret_name'
+        FROM jsonb_array_elements(v_event -> 'hits') WITH ORDINALITY AS h(v, n)
+       ORDER BY h.n;
+      ord := v_ord; event_id := v_id; status := 'accepted';
+    ELSE
+      -- The conflicting row is committed or was written earlier in this
+      -- call: ON CONFLICT waits for a concurrent insert of the key to finish.
+      SELECT c.id INTO v_id
+        FROM public.memory_capture_events c
+       WHERE c.session_id = v_event ->> 'session_id' AND c.event_uuid = v_event ->> 'event_uuid';
+      ord := v_ord; event_id := v_id; status := 'duplicate';
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3389,6 +3505,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -3436,6 +3553,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -3473,6 +3591,7 @@ GRANT EXECUTE ON FUNCTION public.engram_insert_items(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_invariant_counts() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
