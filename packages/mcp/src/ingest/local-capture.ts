@@ -3,9 +3,9 @@
  * classifier, the PostgREST store and the optional graph from this machine's
  * env and runs the capture pipeline here.
  *
- * engram-ingest, session-summary and pre-compact load this module with a
- * dynamic import only when ENGRAM_SERVER_URL is unset, so a hook posting to
- * the server never loads a model or store client.
+ * engram-ingest loads this module with a dynamic import only when
+ * ENGRAM_SERVER_URL is unset, so a hook posting to the server never loads a
+ * model or store client.
  */
 
 import { createMemory } from '@engram-mem/core'
@@ -15,11 +15,9 @@ import { openaiIntelligence, DEFAULT_CHAT_MODEL } from '@engram-mem/openai'
 import { tryCreateGraph } from '../graph-helper.js'
 import {
   runCapture,
-  runDerivedCapture,
   type CaptureDeps,
   type CaptureInput,
   type CaptureOutcome,
-  type DerivedCaptureInput,
   type RejectedCapture,
 } from './capture.js'
 
@@ -63,23 +61,6 @@ export async function runLocalCapture(input: CaptureInput, options: LocalCapture
     }
     return runCapture(deps, input)
   })
-}
-
-export interface LocalDerivedCaptureOptions {
-  env: LocalEnv
-  logPrefix: string
-  log?: (line: string) => void
-}
-
-/** Digests a transcript excerpt with this machine's chat model and stores the digest. */
-export async function runLocalDerivedCapture(
-  input: DerivedCaptureInput,
-  options: LocalDerivedCaptureOptions,
-): Promise<LocalCaptureResult> {
-  // The digest is stored ungated, so the salience threshold is never read.
-  return withLocalDeps(true, { ...options, classifierModel: null, threshold: 1 }, (deps) =>
-    runDerivedCapture(deps, input),
-  )
 }
 
 async function withLocalDeps(
