@@ -3,7 +3,8 @@
  * the camelCase rows as snake_case objects to engram_sync_projects in order,
  * returns the row count, asks PostgREST for UTC, and turns a refusal into
  * ItemConstraintError without the error's `details`; materialize sends its
- * limit to engram_capture_materialize and checks the result's shape.
+ * limit to engram_capture_materialize and checks the result's shape;
+ * the embedding reads and writes map rows and refuse a malformed result.
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
@@ -251,6 +252,58 @@ describe('PostgRestCaptureStore.materialize', () => {
     const err = await store.materialize(5).catch((e: unknown) => e)
     expect((err as Error).message).toBe(
       'materialize failed (22023): engram_capture_materialize: p_limit must be from 1 to 1000',
+    )
+    expect((err as Error).message).not.toContain('hunter-two')
+  })
+})
+
+describe('PostgRestCaptureStore embeddings', () => {
+  const ID = '00000000-0000-4000-8000-0000000000a1'
+  const VECTOR = Array.from({ length: 1536 }, (_, i) => i / 1536)
+
+  it('reads pending items from engram_items_pending_embedding as camelCase rows', async () => {
+    const { store, calls } = storeWith({ data: [{ id: ID, search_text: 'sample text' }], error: null })
+    await expect(store.pendingEmbeddings(32)).resolves.toEqual([{ id: ID, searchText: 'sample text' }])
+    expect(calls).toEqual([{ fn: 'engram_items_pending_embedding', args: { p_limit: 32 } }])
+  })
+
+  it('refuses a pending limit outside 1 to 256 without calling the RPC', async () => {
+    const { store, calls } = storeWith({ data: [], error: null })
+    for (const limit of [0, 257, 1.5]) {
+      await expect(store.pendingEmbeddings(limit)).rejects.toThrow('limit must be an integer from 1 to 256')
+    }
+    expect(calls).toEqual([])
+  })
+
+  it('refuses a pending row without a string id and search_text', async () => {
+    const { store } = storeWith({ data: [{ id: ID, search_text: null }], error: null })
+    await expect(store.pendingEmbeddings(1)).rejects.toThrow('pendingEmbeddings failed: the RPC returned an unexpected row')
+  })
+
+  it('sends embeddings to engram_items_set_embeddings and returns the rows written', async () => {
+    const { store, calls } = storeWith({ data: 1, error: null })
+    const rows = [{ id: ID, embedding: VECTOR, model: 'sample-model:1536:v2' }]
+    await expect(store.setEmbeddings(rows)).resolves.toBe(1)
+    expect(calls).toEqual([{ fn: 'engram_items_set_embeddings', args: { p_rows: rows } }])
+  })
+
+  it('refuses an empty or oversized batch, and a count above the rows sent', async () => {
+    const { store, calls } = storeWith({ data: 2, error: null })
+    await expect(store.setEmbeddings([])).rejects.toThrow('rows must hold 1 to 256 embeddings')
+    expect(calls).toEqual([])
+    await expect(store.setEmbeddings([{ id: ID, embedding: VECTOR, model: 'm' }])).rejects.toThrow(
+      'setEmbeddings failed: the RPC returned no row count',
+    )
+  })
+
+  it('reports a refused batch with its code and message only', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: { code: '22023', message: 'engram_items_set_embeddings: object 1: id must be a uuid string', details: SECRET_ROW, hint: null },
+    })
+    const err = await store.setEmbeddings([{ id: 'x', embedding: VECTOR, model: 'm' }]).catch((e: unknown) => e)
+    expect((err as Error).message).toBe(
+      'setEmbeddings failed (22023): engram_items_set_embeddings: object 1: id must be a uuid string',
     )
     expect((err as Error).message).not.toContain('hunter-two')
   })

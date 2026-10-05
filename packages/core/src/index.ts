@@ -30,12 +30,14 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
-export { MATERIALIZE_LIMIT_MAX, SCAN_TARGETS } from './items/capture-store.js'
+export { EMBEDDING_BATCH_MAX, MATERIALIZE_LIMIT_MAX, SCAN_TARGETS } from './items/capture-store.js'
 export type {
   CaptureSecretHit,
   CaptureStore,
   IngestedEvent,
+  ItemEmbedding,
   MaterializeResult,
+  PendingEmbedding,
   ProjectRow,
   ScanRow,
   ScanTarget,

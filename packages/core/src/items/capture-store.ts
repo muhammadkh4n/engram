@@ -62,6 +62,23 @@ export type MaterializeResult =
   | { locked: false }
   | { locked: true; processed: number; failed: number; skipped: number; pending: number; dead: number }
 
+/** The largest batch one pending-embedding read or embedding write takes. */
+export const EMBEDDING_BATCH_MAX = 256
+
+/** An item that still needs a vector: its id and the text to embed it from. */
+export interface PendingEmbedding {
+  id: string
+  searchText: string
+}
+
+/** One vector to store on an item, with the model string that produced it. */
+export interface ItemEmbedding {
+  id: string
+  embedding: number[]
+  /** `<model>:<dimensions>:v<embed text version>`. */
+  model: string
+}
+
 /** The tables the stored-secret scan reads. */
 export const SCAN_TARGETS = ['memory_items', 'memory_capture_events'] as const
 export type ScanTarget = (typeof SCAN_TARGETS)[number]
@@ -107,6 +124,20 @@ export interface CaptureStore {
    * order, under a lock that lets one call run at a time.
    */
   materialize(limit: number): Promise<MaterializeResult>
+
+  /**
+   * Up to `limit` (1 to EMBEDDING_BATCH_MAX) items that still need an
+   * embedding, oldest first: no embedding, not forgotten, not an assistant
+   * utterance, and not a session_index or legacy item.
+   */
+  pendingEmbeddings(limit: number): Promise<PendingEmbedding[]>
+
+  /**
+   * Stores 1 to EMBEDDING_BATCH_MAX embeddings, each on an item that has none
+   * and is not forgotten; any other row is left as it is. Returns how many
+   * rows were written, so a repeat returns 0.
+   */
+  setEmbeddings(rows: readonly ItemEmbedding[]): Promise<number>
 
   /**
    * Up to `limit` rows of `target` with an id above `afterId` (every row when

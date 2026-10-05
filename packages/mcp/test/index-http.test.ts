@@ -57,6 +57,7 @@ describe('captureEventsConfigFromEnv', () => {
     expect([...config!.registry.projects.keys()]).toEqual(['sample-repo'])
     expect(config!.supabaseUrl).toBe('http://127.0.0.1:3000')
     expect(config!.supabaseKey).toBe('test-service-key')
+    expect(config!.openaiApiKey).toBe('test-openai-key')
   })
 
   it.each([
