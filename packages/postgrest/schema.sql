@@ -558,6 +558,43 @@ END; $$;
 
 
 --
+-- Name: engram_norm_quote(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The quote rule: when an mk_statement counts as an exact quote of what was
+-- said. normalizeQuote in @engram-mem/core runs the same four steps, and both
+-- are tested against packages/core/src/items/quote.cases.json:
+-- (1) Unicode NFC; (2) the curly single quotes U+2018-U+201B become ' and the
+-- curly double quotes U+201C-U+201F become "; (3) each run of tab, LF, VT,
+-- FF, CR, space, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F,
+-- U+205F or U+3000 becomes one space; (4) leading and trailing spaces are
+-- removed. btrim strips only U+0020, so a zero-width U+FEFF at the edge stays.
+-- Case, dashes and zero-width characters stay: they can change what was said.
+-- A quote occurs in a text when it normalizes to a non-empty substring of the
+-- normalized text.
+--
+-- Every function is pg_catalog-qualified, so no search_path, the empty one
+-- this file runs with included, changes what a name resolves to; there is no
+-- SET clause, so the planner can inline it. The literals are E'' strings,
+-- whose escapes mean the same whatever standard_conforming_strings is (VT is
+-- written \x0B: E'' strings have no \v). normalize needs a UTF8 database.
+CREATE OR REPLACE FUNCTION public.engram_norm_quote(p_text text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT pg_catalog.btrim(
+    pg_catalog.regexp_replace(
+      pg_catalog.translate(
+        pg_catalog.normalize(p_text, 'NFC'),
+        E'\u2018\u2019\u201A\u201B\u201C\u201D\u201E\u201F',
+        E'\x27\x27\x27\x27\x22\x22\x22\x22'),
+      E'[\t\n\x0B\f\r \u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+',
+      ' ',
+      'g'),
+    ' ')
+$$;
+
+
+--
 -- Name: engram_text_boost(text, integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1868,6 +1905,278 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 
 
 --
+-- Item store triggers. The CHECKs on memory_items see one row at a time; the
+-- rules below need other rows or the previous version of a row, so triggers
+-- hold them, for every writer: the RPCs and a direct PostgREST request alike.
+-- A refusal raises SQLSTATE 23514 (check_violation) with the message
+-- "<trigger name>: <reason>" and never quotes row data.
+--
+-- memory_items_lineage and memory_items_supersession are constraint triggers
+-- deferred to commit, so a statement and the utterance it quotes may be
+-- inserted in either order within one transaction. A caller that must fail
+-- one unit of work without failing its transaction runs
+-- SET CONSTRAINTS ALL IMMEDIATE at the end of the unit. Both lock the rows
+-- they read FOR SHARE, which conflicts with the row lock an UPDATE takes: a
+-- concurrent forget of one of those rows either waits for this commit, and
+-- its cascade then sees the new item, or makes this check wait for the forget
+-- to commit and then see the row forgotten. Either way no live item is left
+-- pointing at a forgotten one.
+--
+-- A constraint trigger has no CREATE OR REPLACE, so every trigger here is
+-- dropped and created again on each apply.
+--
+
+--
+-- Name: memory_items_before_insert(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- content_hash and created_at belong to the database: whatever a writer sends
+-- is replaced, so the hash always matches the stored content.
+CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  NEW.content_hash := encode(sha256(convert_to(NEW.content, 'UTF8')), 'hex');
+  NEW.created_at := now();
+  RETURN NEW;
+END; $$;
+
+
+--
+-- Name: memory_items_before_update(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- What was said never changes after insert: who said it and when, its text,
+-- its source, lineage and extraction run. A changed fact is a new item that
+-- supersedes the old one. Forgetting is permanent: forgotten_at is never
+-- cleared, and once it is set neither it nor forgotten_reason changes. The
+-- embedding, supersession, restatement, retirement, register, scope and
+-- subject columns stay writable.
+CREATE OR REPLACE FUNCTION public.memory_items_before_update() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_changed text[];
+BEGIN
+  v_changed := array_remove(ARRAY[
+    CASE WHEN NEW.id IS DISTINCT FROM OLD.id THEN 'id' END,
+    CASE WHEN NEW.class IS DISTINCT FROM OLD.class THEN 'class' END,
+    CASE WHEN NEW.kind IS DISTINCT FROM OLD.kind THEN 'kind' END,
+    CASE WHEN NEW.speaker IS DISTINCT FROM OLD.speaker THEN 'speaker' END,
+    CASE WHEN NEW.trust IS DISTINCT FROM OLD.trust THEN 'trust' END,
+    CASE WHEN NEW.session_id IS DISTINCT FROM OLD.session_id THEN 'session_id' END,
+    CASE WHEN NEW.content IS DISTINCT FROM OLD.content THEN 'content' END,
+    CASE WHEN NEW.context IS DISTINCT FROM OLD.context THEN 'context' END,
+    CASE WHEN NEW.search_text IS DISTINCT FROM OLD.search_text THEN 'search_text' END,
+    CASE WHEN NEW.occurred_at IS DISTINCT FROM OLD.occurred_at THEN 'occurred_at' END,
+    CASE WHEN NEW.source IS DISTINCT FROM OLD.source THEN 'source' END,
+    CASE WHEN NEW.lineage IS DISTINCT FROM OLD.lineage THEN 'lineage' END,
+    CASE WHEN NEW.content_hash IS DISTINCT FROM OLD.content_hash THEN 'content_hash' END,
+    CASE WHEN NEW.extraction_run_id IS DISTINCT FROM OLD.extraction_run_id THEN 'extraction_run_id' END,
+    CASE WHEN NEW.created_at IS DISTINCT FROM OLD.created_at THEN 'created_at' END
+  ]::text[], NULL);
+  IF cardinality(v_changed) > 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: %s cannot change after insert', TG_NAME, array_to_string(v_changed, ', '));
+  END IF;
+  IF OLD.forgotten_at IS NOT NULL AND NEW.forgotten_at IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: forgotten_at cannot be cleared', TG_NAME);
+  END IF;
+  IF OLD.forgotten_at IS NOT NULL
+     AND (NEW.forgotten_at IS DISTINCT FROM OLD.forgotten_at OR NEW.forgotten_reason IS DISTINCT FROM OLD.forgotten_reason) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: forgotten_at and forgotten_reason are set once', TG_NAME);
+  END IF;
+  RETURN NEW;
+END; $$;
+
+
+--
+-- Name: memory_items_lineage(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Lineage names the items an item was derived from. At commit each of them
+-- must exist and not be forgotten, and an mk_statement's content must occur,
+-- under the quote rule (engram_norm_quote), in an utterance spoken by MK among
+-- them: nothing is stored as MK's word unless MK said it. The lineage rows
+-- stay locked FOR SHARE until the transaction ends.
+CREATE OR REPLACE FUNCTION public.memory_items_lineage() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_row record;
+  v_found integer := 0;
+  v_quote text;
+  v_quoted boolean := false;
+BEGIN
+  IF NEW.class = 'mk_statement' THEN
+    v_quote := public.engram_norm_quote(NEW.content);
+  END IF;
+  FOR v_row IN
+    SELECT i.class, i.speaker, i.content, i.forgotten_at
+      FROM public.memory_items i
+     WHERE i.id = ANY (NEW.lineage)
+       FOR SHARE
+  LOOP
+    v_found := v_found + 1;
+    IF v_row.forgotten_at IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('%s: lineage contains a forgotten item', TG_NAME);
+    END IF;
+    IF v_quote <> '' AND NOT v_quoted AND v_row.class = 'utterance' AND v_row.speaker = 'mk'
+       AND strpos(public.engram_norm_quote(v_row.content), v_quote) > 0 THEN
+      v_quoted := true;
+    END IF;
+  END LOOP;
+  IF v_found < (SELECT count(DISTINCT l.id) FROM unnest(NEW.lineage) AS l(id)) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: lineage names an item that does not exist', TG_NAME);
+  END IF;
+  IF NEW.class = 'mk_statement' AND NOT v_quoted THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: the quote does not occur in an mk utterance of its lineage', TG_NAME);
+  END IF;
+  RETURN NULL;
+END; $$;
+
+
+--
+-- Name: memory_items_supersession(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- At commit, a live item's superseded_by must name an item of the same class
+-- that is not forgotten and occurred strictly later; strictly later event
+-- times along a chain also rule out a cycle. The row's current pointer is
+-- checked rather than the one this event saw, because the forget cascade may
+-- have moved it since. A forgotten item keeps the pointer it had when it was
+-- forgotten. The target row stays locked FOR SHARE until the transaction ends.
+CREATE OR REPLACE FUNCTION public.memory_items_supersession() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_item record;
+  v_target record;
+BEGIN
+  SELECT i.class, i.occurred_at, i.superseded_by, i.forgotten_at INTO v_item
+    FROM public.memory_items i
+   WHERE i.id = NEW.id;
+  IF NOT FOUND OR v_item.superseded_by IS NULL OR v_item.forgotten_at IS NOT NULL THEN
+    RETURN NULL;
+  END IF;
+  SELECT t.class, t.occurred_at, t.forgotten_at INTO v_target
+    FROM public.memory_items t
+   WHERE t.id = v_item.superseded_by
+     FOR SHARE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: superseded_by names an item that does not exist', TG_NAME);
+  ELSIF v_target.class <> v_item.class THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: superseded_by names an item of another class', TG_NAME);
+  ELSIF v_target.forgotten_at IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: superseded_by names a forgotten item', TG_NAME);
+  ELSIF v_target.occurred_at <= v_item.occurred_at THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: superseded_by names an item that did not occur later', TG_NAME);
+  END IF;
+  RETURN NULL;
+END; $$;
+
+
+--
+-- Name: memory_items_forget_cascade(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Runs when forgotten_at goes from NULL to set, by any writer:
+-- (a) every live item derived from this one, directly or through other live
+--     items, is forgotten in one UPDATE with the same forgotten_at and the
+--     reason "lineage: <id> forgotten", naming this item. Those updates fire
+--     this trigger again, and it finds nothing live below them, so triggers
+--     nest one level deep whatever the depth of the lineage. UNION, not
+--     UNION ALL, ends the walk on a lineage cycle.
+-- (b) every live item this one superseded is re-pointed to the nearest live
+--     item further along the superseded_by chain, read now, with valid_to =
+--     that item's occurred_at; when none remains it is restored (superseded_by
+--     and valid_to cleared). The walk stops at an id it has already seen, so
+--     a cycle not yet refused at commit cannot loop it.
+CREATE OR REPLACE FUNCTION public.memory_items_forget_cascade() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_next uuid := NEW.superseded_by;
+  v_seen uuid[] := ARRAY[NEW.id];
+  v_step record;
+  v_successor uuid;
+  v_successor_at timestamp with time zone;
+BEGIN
+  WITH RECURSIVE below(id) AS (
+    SELECT i.id
+      FROM public.memory_items i
+     WHERE i.lineage @> ARRAY[NEW.id] AND i.forgotten_at IS NULL
+    UNION
+    SELECT i.id
+      FROM below b
+      JOIN public.memory_items i ON i.lineage @> ARRAY[b.id]
+     WHERE i.forgotten_at IS NULL
+  )
+  UPDATE public.memory_items m
+     SET forgotten_at = NEW.forgotten_at,
+         forgotten_reason = format('lineage: %s forgotten', NEW.id)
+    FROM below b
+   WHERE m.id = b.id AND m.forgotten_at IS NULL;
+
+  WHILE v_next IS NOT NULL AND NOT v_next = ANY (v_seen) LOOP
+    SELECT i.superseded_by, i.occurred_at, i.forgotten_at INTO v_step
+      FROM public.memory_items i
+     WHERE i.id = v_next;
+    EXIT WHEN NOT FOUND;
+    IF v_step.forgotten_at IS NULL THEN
+      v_successor := v_next;
+      v_successor_at := v_step.occurred_at;
+      EXIT;
+    END IF;
+    v_seen := v_seen || v_next;
+    v_next := v_step.superseded_by;
+  END LOOP;
+
+  UPDATE public.memory_items
+     SET superseded_by = v_successor, valid_to = v_successor_at
+   WHERE superseded_by = NEW.id AND forgotten_at IS NULL;
+  RETURN NULL;
+END; $$;
+
+
+--
+-- Name: memory_items triggers; Type: TRIGGER; Schema: public; Owner: -
+--
+-- The WHEN clauses skip rows a trigger has nothing to check: an item with no
+-- lineage or no superseded_by, an UPDATE that does not newly forget.
+--
+
+DROP TRIGGER IF EXISTS memory_items_before_insert ON public.memory_items;
+CREATE TRIGGER memory_items_before_insert BEFORE INSERT ON public.memory_items FOR EACH ROW EXECUTE FUNCTION public.memory_items_before_insert();
+
+DROP TRIGGER IF EXISTS memory_items_before_update ON public.memory_items;
+CREATE TRIGGER memory_items_before_update BEFORE UPDATE ON public.memory_items FOR EACH ROW EXECUTE FUNCTION public.memory_items_before_update();
+
+DROP TRIGGER IF EXISTS memory_items_lineage ON public.memory_items;
+CREATE CONSTRAINT TRIGGER memory_items_lineage AFTER INSERT ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (cardinality(NEW.lineage) > 0) EXECUTE FUNCTION public.memory_items_lineage();
+
+DROP TRIGGER IF EXISTS memory_items_supersession ON public.memory_items;
+CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER INSERT OR UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();
+
+DROP TRIGGER IF EXISTS memory_items_forget_cascade ON public.memory_items;
+CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON public.memory_items FOR EACH ROW WHEN (OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL) EXECUTE FUNCTION public.memory_items_forget_cascade();
+
+
+--
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -2160,8 +2469,12 @@ $smoke$;
 -- re-created above lose their grants on every apply, so this section runs
 -- after the last function definition and re-applying the file restores it.
 --
--- Every function below is an RPC endpoint and gets the service_role grant;
--- this file defines no trigger functions. engram_episode_kind is read by the
+-- Every function below except the memory_items_* trigger functions is an RPC
+-- endpoint and gets the service_role grant. The trigger functions are revoked
+-- and granted to no role: PostgreSQL checks EXECUTE on a trigger function only
+-- when CREATE TRIGGER binds it, never when the trigger fires, so every
+-- writer's INSERT and UPDATE still runs them, and a grant would only make them
+-- callable by name. engram_episode_kind is read by the
 -- search functions and by idx_episodes_kind, and an INSERT into
 -- memory_episodes evaluates it as the inserting role, so service_role needs
 -- its grant to write episodes. match_episodes and match_digests
@@ -2179,12 +2492,18 @@ REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precis
 REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -2206,12 +2525,18 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -2228,6 +2553,7 @@ GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precisi
 GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_norm_quote(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) TO service_role;

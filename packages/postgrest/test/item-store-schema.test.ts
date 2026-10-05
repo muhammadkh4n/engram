@@ -202,6 +202,119 @@ describe('item store tables are reachable only through their own grants', () => 
   })
 })
 
+const TRIGGERS = [
+  [
+    'memory_items_before_insert',
+    'CREATE TRIGGER memory_items_before_insert BEFORE INSERT ON public.memory_items FOR EACH ROW EXECUTE FUNCTION public.memory_items_before_insert();',
+  ],
+  [
+    'memory_items_before_update',
+    'CREATE TRIGGER memory_items_before_update BEFORE UPDATE ON public.memory_items FOR EACH ROW EXECUTE FUNCTION public.memory_items_before_update();',
+  ],
+  [
+    'memory_items_lineage',
+    'CREATE CONSTRAINT TRIGGER memory_items_lineage AFTER INSERT ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (cardinality(NEW.lineage) > 0) EXECUTE FUNCTION public.memory_items_lineage();',
+  ],
+  [
+    'memory_items_supersession',
+    'CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER INSERT OR UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();',
+  ],
+  [
+    'memory_items_forget_cascade',
+    'CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON public.memory_items FOR EACH ROW WHEN (OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL) EXECUTE FUNCTION public.memory_items_forget_cascade();',
+  ],
+] as const
+
+const TRIGGER_NAMES = TRIGGERS.map(([name]) => name)
+
+/** The body of a function definition, from its CREATE to the closing `$$;`. */
+function functionDefinition(name: string): string {
+  const start = schema.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`)
+  if (start < 0) throw new Error(`function public.${name} not found`)
+  const end = schema.indexOf('$$;', start)
+  return schema.slice(start, end + 3)
+}
+
+describe('memory_items triggers', () => {
+  it.each(TRIGGERS)('%s is dropped and created again on every apply', (name, create) => {
+    expect(squash(schema)).toContain(`DROP TRIGGER IF EXISTS ${name} ON public.memory_items; ${create}`)
+  })
+
+  it('creates exactly these triggers, each once', () => {
+    const created = [...schema.matchAll(/^CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
+    expect(created).toEqual(TRIGGER_NAMES)
+  })
+
+  it.each(TRIGGER_NAMES)('%s runs a SECURITY DEFINER plpgsql function with a fixed search_path', (name) => {
+    expect(squash(functionDefinition(name))).toMatch(
+      new RegExp(
+        `^CREATE OR REPLACE FUNCTION public\\.${name}\\(\\) RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS \\$\\$`,
+      ),
+    )
+  })
+
+  /** The triggers that refuse writes; the other two only fill or cascade. */
+  const REFUSING = ['memory_items_before_update', 'memory_items_lineage', 'memory_items_supersession'] as const
+
+  it.each(REFUSING)('%s refuses with check_violation and its own name, never row data', (name) => {
+    const body = functionDefinition(name)
+    const raises = [...body.matchAll(/RAISE EXCEPTION([\s\S]*?);/g)].map((m) => squash(m[1]!))
+    expect(raises.length).toBeGreaterThan(0)
+    for (const raise of raises) {
+      // The only interpolation besides the trigger name is the list of column names.
+      expect(raise).toMatch(
+        /^USING ERRCODE = 'check_violation', MESSAGE = format\('%s: (?:[^%']+', TG_NAME|%s cannot change after insert', TG_NAME, array_to_string\(v_changed, ', '\))\)$/,
+      )
+    }
+  })
+
+  it('defines the trigger functions and triggers after the item store tables and before row security', () => {
+    const lastTable = schema.indexOf('CREATE TABLE IF NOT EXISTS public.memory_secret_hits')
+    const firstFunction = Math.min(...TRIGGER_NAMES.map((n) => schema.indexOf(`CREATE OR REPLACE FUNCTION public.${n}(`)))
+    const lastTrigger = Math.max(...TRIGGER_NAMES.map((n) => schema.indexOf(`TRIGGER ${n} `)))
+    const firstRowSecurity = schema.indexOf('ENABLE ROW LEVEL SECURITY;')
+    expect(lastTable).toBeGreaterThan(0)
+    expect(firstFunction).toBeGreaterThan(lastTable)
+    expect(lastTrigger).toBeGreaterThan(firstFunction)
+    expect(firstRowSecurity).toBeGreaterThan(lastTrigger)
+  })
+
+  it('grants no role EXECUTE on a trigger function', () => {
+    for (const name of TRIGGER_NAMES) {
+      expect(schema).toContain(`REVOKE EXECUTE ON FUNCTION public.${name}() FROM PUBLIC;`)
+      expect(schema).not.toMatch(new RegExp(`GRANT [^;]*public\\.${name}\\(`))
+    }
+    expect(schema).not.toContain('this file defines no trigger functions')
+  })
+})
+
+describe('engram_norm_quote', () => {
+  const definition = squash(functionDefinition('engram_norm_quote'))
+
+  it('is an inlinable, immutable, parallel-safe SQL function', () => {
+    expect(definition).toMatch(
+      /^CREATE OR REPLACE FUNCTION public\.engram_norm_quote\(p_text text\) RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS \$\$/,
+    )
+    expect(definition).not.toMatch(/\bSET\b/)
+  })
+
+  it('calls pg_catalog functions only, each schema-qualified', () => {
+    const calls = [...definition.matchAll(/([\w.]+)\s*\(/g)]
+      .map((m) => m[1])
+      .filter((name) => name !== 'public.engram_norm_quote')
+    expect(calls).toEqual([
+      'pg_catalog.btrim',
+      'pg_catalog.regexp_replace',
+      'pg_catalog.translate',
+      'pg_catalog.normalize',
+    ])
+  })
+
+  it('is written in ASCII, every special character as an escape', () => {
+    expect(functionDefinition('engram_norm_quote')).toMatch(/^[\x09\x0a\x20-\x7e]*$/)
+  })
+})
+
 describe('turbo passes the real-Postgres image variables to tests', () => {
   it('lists both image variables in the test task env', () => {
     expect(turbo.tasks.test?.env).toEqual(
