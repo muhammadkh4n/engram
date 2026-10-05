@@ -96,7 +96,7 @@ function clip(text: string, max: number): [string, boolean] {
 function jsonUnit(text: string, i: number): [bytes: number, width: number] {
   const c = text.charCodeAt(i)
   if (c === 0x22 || c === 0x5c || c === 0x08 || c === 0x09 || c === 0x0a || c === 0x0c || c === 0x0d) return [2, 1]
-  if (c < 0x20) return [6, 1]
+  if (c <= 0x1f) return [6, 1]
   if (c < 0x80) return [1, 1]
   if (c < 0x800) return [2, 1]
   if (isHighSurrogate(c) && isLowSurrogate(text.charCodeAt(i + 1))) return [4, 2]
