@@ -459,3 +459,26 @@ describe('valid_to is derived from superseded_by', () => {
     },
   )
 })
+
+describe('the pending-embedding index', () => {
+  it('holds exactly the rows engram_items_pending_embedding selects: the predicates match word for word', () => {
+    const index = schema.match(
+      /CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public\.memory_items USING btree \(created_at, id\) WHERE \((.*)\);/,
+    )
+    if (!index) throw new Error('idx_items_pending_embedding not found')
+    const fn = schema.match(
+      /FUNCTION public\.engram_items_pending_embedding\(p_limit integer DEFAULT 32\)[\s\S]*?FROM public\.memory_items i\s+WHERE ([\s\S]*?)\s+ORDER BY i\.created_at, i\.id/,
+    )
+    if (!fn) throw new Error('engram_items_pending_embedding WHERE not found')
+    const predicate = squash(index[1]!)
+    expect(squash(fn[1]!)).toBe(predicate)
+    for (const clause of [
+      'embedding IS NULL',
+      'forgotten_at IS NULL',
+      "NOT (class = 'utterance' AND speaker = 'assistant')",
+      "class NOT IN ('session_index', 'legacy')",
+    ]) {
+      expect(predicate).toContain(clause)
+    }
+  })
+})

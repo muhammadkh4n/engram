@@ -234,6 +234,10 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
       const expansion = pathCache.expand(pattern, source.exclude)
       expansion.watched.forEach((p) => watched.add(p))
       if (expansion.truncated) logOnce(`${source.path}: glob walk stopped early; narrow the pattern`)
+      for (const { path, code } of expansion.unreadable) {
+        logOnce(`${path}: unreadable (${code}); the files under it are not registered`)
+        unreadable.push(path)
+      }
       const unnamed: string[] = []
       const values = expansion.files.flatMap((file) => {
         watched.add(file)
@@ -310,7 +314,10 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
     }
     if (t - checkedAt < RECHECK_INTERVAL_MS) return snapshot
     checkedAt = t
-    const stale = [...snapshot.mtimes].some(([path, mtime]) => mtimeOf(path) !== mtime)
+    // A permission fix changes ctime, never mtime: a registry that could not
+    // read a path re-reads at every recheck until it can.
+    const stale =
+      snapshot.status.unreadable.length > 0 || [...snapshot.mtimes].some(([path, mtime]) => mtimeOf(path) !== mtime)
     if (stale) snapshot = build()
     return snapshot
   }

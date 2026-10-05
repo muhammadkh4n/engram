@@ -529,6 +529,31 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
   )
 
   it(
+    'keeps the answer to a question named __proto__',
+    async () => {
+      const [eventId] = (await ingest([
+        event(
+          'sess-proto',
+          'user_answer',
+          {
+            questions: [{ question: '__proto__', header: '', options: [{ label: 'keep it', description: '' }], multiSelect: false }],
+            answers: JSON.parse('{"__proto__": "keep it"}') as Record<string, string>,
+            notes: JSON.parse('{"__proto__": "and say why"}') as Record<string, string>,
+            transcript_line: 30,
+          },
+          { occurredAt: at(1) },
+        ),
+      ])) as [string]
+
+      await expect(store.materialize(200)).resolves.toEqual(counts(1, 0, 0, 0, 0))
+      const row = await itemOf(eventId)
+      expect(row.content).toBe('keep it\nand say why')
+      expect(row.search_text).toBe('Q: __proto__\nA: keep it\nNote: and say why')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
     'records history and legacy origins, and skips a prompt whose legacy item is missing',
     async () => {
       const [legacyId] = (await insertItems([

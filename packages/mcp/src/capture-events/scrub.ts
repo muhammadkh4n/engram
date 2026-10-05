@@ -94,11 +94,11 @@ async function scrubValue(value: unknown, path: string, scrub: Scrub): Promise<u
     return out
   }
   if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {}
+    const entries: Array<[string, unknown]> = []
     for (const [key, inner] of Object.entries(value)) {
-      out[key] = PAYLOAD_IDENTIFIER_KEYS.has(key) ? inner : await scrubValue(inner, `${path}.${key}`, scrub)
+      entries.push([key, PAYLOAD_IDENTIFIER_KEYS.has(key) ? inner : await scrubValue(inner, `${path}.${key}`, scrub)])
     }
-    return out
+    return Object.fromEntries(entries)
   }
   return value
 }
@@ -113,14 +113,16 @@ async function scrubAnswer(payload: UserAnswerPayload, scrub: Scrub): Promise<Us
     (await scrubValue(payload.questions, 'payload.questions', scrub)) as AnswerQuestion[],
   )
   const position = new Map(payload.questions.map((q, i) => [q.question, i]))
+  // Built with fromEntries: bracket assignment of a `__proto__` key on `{}`
+  // would set the prototype and drop the answer.
   const rekey = async (map: Record<string, string>, name: 'answers' | 'notes'): Promise<Record<string, string>> => {
-    const out: Record<string, string> = {}
+    const entries: Array<[string, string]> = []
     for (const [key, value] of Object.entries(map)) {
       // Validation refuses a key naming no question, so the lookup always hits.
       const i = position.get(key) ?? 0
-      out[questions[i]!.question] = await scrub(value, `payload.${name}[questions[${i}]]`)
+      entries.push([questions[i]!.question, await scrub(value, `payload.${name}[questions[${i}]]`)])
     }
-    return out
+    return Object.fromEntries(entries)
   }
   const out: UserAnswerPayload = {
     questions,

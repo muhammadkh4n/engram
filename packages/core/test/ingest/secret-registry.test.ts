@@ -615,3 +615,80 @@ describe('given values and status()', () => {
     expect(JSON.stringify(registry.status())).not.toContain(ALNUM)
   })
 })
+
+// A mode-000 directory is still readable by root.
+describe.skipIf(process.getuid?.() === 0)('unreadable directories under a source', () => {
+  const locked: string[] = []
+
+  /** Creates `rel` as a directory and takes every permission away from it until the test ends. */
+  function lock(rel: string): string {
+    const path = join(dir, rel)
+    mkdirSync(path, { recursive: true })
+    chmodSync(path, 0o000)
+    locked.push(path)
+    return path
+  }
+
+  afterEach(() => {
+    for (const path of locked.splice(0)) chmodSync(path, 0o755)
+  })
+
+  it('lists a source directory at mode 000 as unreadable, for a glob and for a literal path under it', () => {
+    write('secrets/app.env', `API_TOKEN=open-${ALNUM}\n`)
+    write('locked/app.env', `API_TOKEN=locked-${ALNUM}\n`)
+    const lockedDir = lock('locked')
+    const registry = registryFor([
+      { path: 'secrets/*.env', format: 'dotenv' },
+      { path: 'locked/*.env', format: 'dotenv' },
+      { path: 'locked/db_password', format: 'value' },
+    ])
+    const status = registry.status()
+    expect(status.configured).toBe(true)
+    expect(status.unreadable).toEqual([lockedDir, join(lockedDir, 'db_password')])
+    expect(isKnown(registry, `open-${ALNUM}`)).toBe(true)
+    expect(logs.join('\n')).toContain(`${lockedDir}: unreadable (EACCES)`)
+  })
+
+  it('a missing source directory changes nothing', () => {
+    write('secrets/app.env', `API_TOKEN=open-${ALNUM}\n`)
+    write('plain-file', 'not a directory\n')
+    const registry = registryFor([
+      { path: 'secrets/*.env', format: 'dotenv' },
+      { path: 'absent/*.env', format: 'dotenv' },
+      { path: 'absent/**/.env', format: 'dotenv' },
+      { path: 'absent/db_password', format: 'value' },
+      { path: 'plain-file/*.env', format: 'dotenv' },
+      { path: 'plain-file/db_password', format: 'value' },
+    ])
+    expect(registry.status()).toEqual({ configured: true, unreadable: [], values: 1 })
+  })
+
+  it('a ** walk that meets one unreadable subdirectory lists it and keeps its siblings', () => {
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    write('projects/beta/deep/.env', `API_TOKEN=beta-${ALNUM}\n`)
+    const lockedDir = lock('projects/gamma')
+    const registry = registryFor([{ path: 'projects/**/.env', format: 'dotenv' }])
+    expect(registry.status().unreadable).toEqual([lockedDir])
+    expect(isKnown(registry, `alpha-${ALNUM}`)).toBe(true)
+    expect(isKnown(registry, `beta-${ALNUM}`)).toBe(true)
+  })
+
+  it('recovers at the next recheck once the directory is readable again, through the path cache too', () => {
+    let t = 0
+    write('locked/app.env', `API_TOKEN=locked-${ALNUM}\n`)
+    const lockedDir = lock('locked')
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'locked/*.env', format: 'dotenv' }] }))
+    const registry = createSecretRegistry({
+      configPath,
+      pathCacheFile: join(dir, 'cache', 'paths.json'),
+      log: (line) => logs.push(line),
+      now: () => t,
+    })
+    expect(registry.status().unreadable).toEqual([lockedDir])
+    // chmod changes a directory's ctime, never its mtime: recovery cannot wait for an mtime change.
+    chmodSync(lockedDir, 0o755)
+    t += 60_000
+    expect(registry.status().unreadable).toEqual([])
+    expect(isKnown(registry, `locked-${ALNUM}`)).toBe(true)
+  })
+})

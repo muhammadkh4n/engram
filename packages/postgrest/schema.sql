@@ -1983,9 +1983,12 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
--- first read of items still waiting for a vector; the predicate keeps it to
--- that backlog, which embedding drains.
-CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL);
+-- first read of items still waiting for a vector. Its predicate is that
+-- function's WHERE, word for word, so it holds only the backlog embedding
+-- drains: assistant utterances, session indexes and legacy rows are never
+-- embedded by the worker, and an index that held them would be walked whole
+-- on every idle call.
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND NOT (class = 'utterance' AND speaker = 'assistant') AND class NOT IN ('session_index', 'legacy'));
 
 
 --
@@ -3587,7 +3590,10 @@ END; $$;
 -- session_index or legacy item. Assistant turns are trust 3 and never ranked
 -- by vector; session indexes and legacy rows are embedded by their own
 -- writers or not at all. Read only; idx_items_pending_embedding serves the
--- order.
+-- order, and its predicate repeats this WHERE word for word so the planner
+-- proves the match and the index holds no row this function skips. The WHERE
+-- columns are unqualified to keep that text identical; none of them is an
+-- output column name.
 CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer DEFAULT 32) RETURNS TABLE(id uuid, search_text text)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
@@ -3600,10 +3606,10 @@ BEGIN
   RETURN QUERY
   SELECT i.id, i.search_text
     FROM public.memory_items i
-   WHERE i.embedding IS NULL
-     AND i.forgotten_at IS NULL
-     AND NOT (i.class = 'utterance' AND i.speaker = 'assistant')
-     AND i.class NOT IN ('session_index', 'legacy')
+   WHERE embedding IS NULL
+     AND forgotten_at IS NULL
+     AND NOT (class = 'utterance' AND speaker = 'assistant')
+     AND class NOT IN ('session_index', 'legacy')
    ORDER BY i.created_at, i.id
    LIMIT p_limit;
 END; $$;

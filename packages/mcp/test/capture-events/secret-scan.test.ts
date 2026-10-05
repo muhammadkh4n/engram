@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -92,6 +92,36 @@ describe('engram-secret-scan', () => {
     expect(reads).toEqual([])
     expect(out).toEqual([])
     expect(err.join('\n')).toContain(configDir)
+  })
+
+  // A mode-000 directory is still readable by root.
+  it.skipIf(process.getuid?.() === 0)('refuses a registry whose source directory is unreadable, naming it', async () => {
+    writeFileSync(join(dir, 'secrets.json'), JSON.stringify({ DEPLOY_TOKEN: VALUE }))
+    const lockedDir = join(dir, 'locked')
+    mkdirSync(lockedDir)
+    writeFileSync(join(lockedDir, 'app.env'), `API_TOKEN=${VALUE}-locked\n`)
+    chmodSync(lockedDir, 0o000)
+    try {
+      writeFileSync(
+        join(dir, 'sources.json'),
+        JSON.stringify({
+          sources: [
+            { path: 'secrets.json', format: 'json-keys' },
+            { path: 'locked/*.env', format: 'dotenv' },
+          ],
+        }),
+      )
+      const reg = createSecretRegistry({ configPath: join(dir, 'sources.json'), log: () => {} })
+      expect(reg.status().values).toBeGreaterThan(0)
+      const { store, reads } = fakeStore({ memory_items: [{ id: ITEM_ID, texts: [VALUE] }] })
+      const { code, out, err } = await run(store, reg)
+      expect(code).toBe(1)
+      expect(reads).toEqual([])
+      expect(out).toEqual([])
+      expect(err.join('\n')).toContain(lockedDir)
+    } finally {
+      chmodSync(lockedDir, 0o755)
+    }
   })
 
   it('refuses a registry with no configuration, or one holding no value', async () => {

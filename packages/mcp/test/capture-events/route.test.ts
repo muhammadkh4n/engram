@@ -8,7 +8,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
-import { resetDefaultSecretRegistry } from '@engram-mem/core'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createSecretRegistry, resetDefaultSecretRegistry } from '@engram-mem/core'
 import type { IngestedEvent, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
 import { parseProjectRegistry, type ProjectRegistry } from '../../src/capture-events/project-registry.js'
 import { runCaptureEventsRequest, type CaptureEventsRouteDeps } from '../../src/capture-events/route.js'
@@ -218,6 +221,29 @@ describe('runCaptureEventsRequest', () => {
       'capture events: the secret registry recovered',
     ])
     expect(h.stored).toHaveLength(1)
+  })
+
+  // A mode-000 directory is still readable by root.
+  it.skipIf(process.getuid?.() === 0)('answers 503 while a source directory of the secret registry is unreadable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engram-capture-route-'))
+    const lockedDir = join(dir, 'locked')
+    mkdirSync(lockedDir)
+    writeFileSync(join(lockedDir, 'app.env'), `API_TOKEN=${TOKEN}-locked\n`)
+    chmodSync(lockedDir, 0o000)
+    try {
+      writeFileSync(join(dir, 'sources.json'), JSON.stringify({ sources: [{ path: 'locked/*.env', format: 'dotenv' }] }))
+      const secrets = createSecretRegistry({ configPath: join(dir, 'sources.json'), log: () => {} })
+      const h = harness({ status: () => secrets.status() })
+      const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('user_prompt')]))
+      expect(res).toEqual({ status: 503, body: { error: expect.any(String), retryable: true } })
+      expect(h.stored).toHaveLength(0)
+      expect(h.logs).toEqual([
+        `capture events refused until the secret registry recovers: the secret registry could not read: ${lockedDir}`,
+      ])
+    } finally {
+      chmodSync(lockedDir, 0o755)
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('answers a store failure with a retryable 500, logging code and message only', async () => {
