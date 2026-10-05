@@ -8,7 +8,9 @@
  *   and nothing from the call is stored;
  * - reads hide forgotten items unless asked, and return embeddings as numbers;
  * - forget, retire, unretire, supersede and the invariant counts round-trip;
- * - the table is closed to a request without a token.
+ * - the table is closed to a request without a token, and to a direct write
+ *   with the service-role token: writes go through the RPCs only;
+ * - times at both ends of years 1 to 9999 read back as the same instants.
  */
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -271,5 +273,49 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     const res = await fetch(`${endpoint.url}/memory_items?select=id`)
 
     expect(res.status).toBe(401)
+  }, TEST_TIMEOUT_MS)
+
+  it('refuses a direct POST, PATCH or DELETE on the item tables with the service-role token', async () => {
+    const item = commit('chore: only the RPCs write', 0)
+    await store.insertItems([item])
+    const headers = { Authorization: `Bearer ${endpoint.serviceJwt}`, 'Content-Type': 'application/json' }
+    const direct = commit('chore: written past the RPCs', 0)
+    const responses = await Promise.all([
+      fetch(`${endpoint.url}/memory_items`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          id: direct.id, class: 'artifact', kind: 'commit', speaker: 'artifact', trust: 1, content: direct.content,
+          search_text: direct.content, occurred_at: at(0).toISOString(), source: direct.source,
+        }),
+      }),
+      fetch(`${endpoint.url}/memory_items?id=eq.${item.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ retired_at: at(5).toISOString(), retired_reason: 'tst: retired past the RPC' }),
+      }),
+      fetch(`${endpoint.url}/memory_items?id=eq.${item.id}`, { method: 'DELETE', headers }),
+      fetch(`${endpoint.url}/memory_subjects`, { method: 'POST', headers, body: JSON.stringify({ label: 'tst direct subject' }) }),
+    ])
+
+    for (const res of responses) {
+      expect(res.status).toBe(403)
+      expect(((await res.json()) as { code: string }).code).toBe('42501')
+    }
+    expect(await storedCount([direct.id])).toBe(0)
+    const [stored] = await store.getItems([item.id!])
+    expect(stored!.retiredAt).toBeNull()
+  }, TEST_TIMEOUT_MS)
+
+  it('reads times at both ends of years 1 to 9999 back as the same instants', async () => {
+    const item = commit('chore: the first commit of the calendar', 0, { occurredAt: new Date('0001-01-01T00:00:00Z') })
+    await store.insertItems([item])
+    await pg.psql(`UPDATE public.memory_items SET retired_at = '9999-12-31T23:59:59.999Z', retired_reason = 'tst: retired at the end'
+      WHERE id = '${item.id}';`)
+
+    const [stored] = await store.getItems([item.id!])
+
+    expect(stored!.occurredAt.toISOString()).toBe('0001-01-01T00:00:00.000Z')
+    expect(stored!.retiredAt!.toISOString()).toBe('9999-12-31T23:59:59.999Z')
   }, TEST_TIMEOUT_MS)
 })

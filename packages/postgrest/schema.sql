@@ -595,22 +595,43 @@ $$;
 
 
 --
--- Name: engram_all_finite(timestamp with time zone[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_time_in_range(timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- True when every element of the array is a finite time: no infinity, no
--- -infinity and no NULL. isfinite(NULL) is NULL, so a NULL element is named
--- explicitly; a reader converting restated_at would otherwise meet a
--- restatement with no time. A CHECK
--- constraint cannot hold a subquery, so memory_items_finite_check reaches the
--- restated_at elements through this function. It must exist before the
--- tables whose CHECKs call it. pg_catalog-qualified and without a SET clause,
--- like engram_norm_quote.
-CREATE OR REPLACE FUNCTION public.engram_all_finite(p_times timestamp with time zone[]) RETURNS boolean
+-- True when the time is NULL or lies in years 1 to 9999 AD, in UTC:
+-- 0001-01-01T00:00:00Z inclusive to 10000-01-01T00:00:00Z exclusive.
+-- PostgreSQL stores 4713 BC to 294276 AD and the infinities, but to_json
+-- writes a BC time with a trailing " BC" and a later year with five digits,
+-- and neither is an ISO-8601 string a JSON reader can parse; infinity and
+-- -infinity fall outside the range too, so this check is also the finite
+-- check. Every timestamptz column of the item store tables carries it in a
+-- CHECK. NULL passes, so a nullable column needs no separate guard. The
+-- bounds carry an explicit offset, so neither TimeZone nor DateStyle changes
+-- what they mean. It must exist before the tables whose CHECKs call it.
+-- pg_catalog-qualified and without a SET clause, like engram_norm_quote.
+CREATE OR REPLACE FUNCTION public.engram_time_in_range(p_time timestamp with time zone) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT p_time IS NULL
+      OR (p_time OPERATOR(pg_catalog.>=) '0001-01-01 00:00:00+00'::pg_catalog.timestamptz
+          AND p_time OPERATOR(pg_catalog.<) '10000-01-01 00:00:00+00'::pg_catalog.timestamptz)
+$$;
+
+
+--
+-- Name: engram_times_in_range(timestamp with time zone[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- True when every element of the array is a time engram_time_in_range
+-- accepts and none is NULL: a reader converting restated_at would otherwise
+-- meet a restatement with no time. A CHECK constraint cannot hold a
+-- subquery, so memory_items_finite_check reaches the restated_at elements
+-- through this function.
+CREATE OR REPLACE FUNCTION public.engram_times_in_range(p_times timestamp with time zone[]) RETURNS boolean
     LANGUAGE sql IMMUTABLE PARALLEL SAFE
     AS $$
   SELECT NOT EXISTS (
-    SELECT 1 FROM pg_catalog.unnest(p_times) AS t(v) WHERE t.v IS NULL OR NOT pg_catalog.isfinite(t.v))
+    SELECT 1 FROM pg_catalog.unnest(p_times) AS t(v) WHERE t.v IS NULL OR NOT public.engram_time_in_range(t.v))
 $$;
 
 
@@ -1182,7 +1203,8 @@ CREATE TABLE IF NOT EXISTS public.memory_subjects (
     label text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT memory_subjects_project_id_check CHECK (project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'),
-    CONSTRAINT memory_subjects_label_check CHECK (label ~ '\S' AND char_length(label) <= 200)
+    CONSTRAINT memory_subjects_label_check CHECK (label ~ '\S' AND char_length(label) <= 200),
+    CONSTRAINT memory_subjects_finite_check CHECK (public.engram_time_in_range(created_at))
 );
 
 
@@ -1203,7 +1225,9 @@ CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
     error text,
     CONSTRAINT memory_extraction_runs_session_id_check CHECK (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256),
     CONSTRAINT memory_extraction_runs_extractor_version_check CHECK (extractor_version ~ '\S' AND char_length(extractor_version) <= 64),
-    CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed'))
+    CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed')),
+    CONSTRAINT memory_extraction_runs_finite_check CHECK (public.engram_time_in_range(started_at)
+        AND public.engram_time_in_range(finished_at))
 );
 
 
@@ -1230,6 +1254,7 @@ CREATE TABLE IF NOT EXISTS public.memory_projects (
     CONSTRAINT memory_projects_workspace_check CHECK (kind = 'project' OR workspace_id IS NULL),
     CONSTRAINT memory_projects_vault_folder_check CHECK (vault_folder IS NULL OR char_length(vault_folder) <= 200),
     CONSTRAINT memory_projects_register_prefix_check CHECK (register_prefix IS NULL OR register_prefix ~ '^[A-Z]{2,6}$'),
+    CONSTRAINT memory_projects_finite_check CHECK (public.engram_time_in_range(updated_at)),
     CONSTRAINT memory_projects_id_kind_key UNIQUE (id, kind),
     CONSTRAINT memory_projects_workspace_fkey FOREIGN KEY (workspace_id, workspace_kind) REFERENCES public.memory_projects (id, kind)
 );
@@ -1338,11 +1363,12 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
         AND (register_ref IS NULL OR register_ref ~ '^(R-[A-Z]{2,6}-[0-9]+|plan:[a-z0-9][a-z0-9-]{0,79}/[A-Za-z0-9][A-Za-z0-9._-]{0,39})$')),
     CONSTRAINT memory_items_mk_decision_check CHECK (NOT (class = 'artifact' AND kind = 'ledger_decision' AND (source ->> 'by') IS NOT DISTINCT FROM 'mk')
         OR (coalesce(source ->> 'quote', '') ~ '\S' AND coalesce(source ->> 'quote_source', '') ~ '\S')),
-    CONSTRAINT memory_items_finite_check CHECK (isfinite(occurred_at)
-        AND (valid_to IS NULL OR isfinite(valid_to))
-        AND (retired_at IS NULL OR isfinite(retired_at))
-        AND (forgotten_at IS NULL OR isfinite(forgotten_at))
-        AND public.engram_all_finite(restated_at))
+    CONSTRAINT memory_items_finite_check CHECK (public.engram_time_in_range(occurred_at)
+        AND public.engram_time_in_range(valid_to)
+        AND public.engram_time_in_range(retired_at)
+        AND public.engram_time_in_range(forgotten_at)
+        AND public.engram_time_in_range(created_at)
+        AND public.engram_times_in_range(restated_at))
 );
 
 
@@ -1389,7 +1415,9 @@ CREATE TABLE IF NOT EXISTS public.memory_capture_events (
     CONSTRAINT memory_capture_events_type_check CHECK (type IN ('user_prompt', 'user_answer', 'assistant_turn', 'session_start', 'session_end', 'pre_compact', 'git_commit', 'ledger_decision', 'ledger_ruling', 'briefing_shown', 'register_entry', 'candidate_status')),
     CONSTRAINT memory_capture_events_payload_check CHECK (jsonb_typeof(payload) = 'object'),
     CONSTRAINT memory_capture_events_attempts_check CHECK (attempts >= 0),
-    CONSTRAINT memory_capture_events_finite_check CHECK (isfinite(occurred_at))
+    CONSTRAINT memory_capture_events_finite_check CHECK (public.engram_time_in_range(occurred_at)
+        AND public.engram_time_in_range(received_at)
+        AND public.engram_time_in_range(processed_at))
 );
 
 
@@ -1409,7 +1437,8 @@ CREATE TABLE IF NOT EXISTS public.memory_secret_hits (
     detector text NOT NULL,
     secret_name text,
     CONSTRAINT memory_secret_hits_target_table_check CHECK (target_table IN ('memory_capture_events', 'memory_items')),
-    CONSTRAINT memory_secret_hits_text_check CHECK (target_id ~ '\S' AND field ~ '\S' AND detector ~ '\S' AND (secret_name IS NULL OR secret_name ~ '\S'))
+    CONSTRAINT memory_secret_hits_text_check CHECK (target_id ~ '\S' AND field ~ '\S' AND detector ~ '\S' AND (secret_name IS NULL OR secret_name ~ '\S')),
+    CONSTRAINT memory_secret_hits_finite_check CHECK (public.engram_time_in_range(found_at))
 );
 
 
@@ -1944,7 +1973,7 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 --
 -- Item store triggers. The CHECKs on memory_items see one row at a time; the
 -- rules below need other rows or the previous version of a row, so triggers
--- hold them, for every writer: the RPCs and a direct PostgREST request alike.
+-- hold them, for every writer: the RPCs and the owner's direct writes alike.
 -- A refusal raises SQLSTATE 23514 (check_violation) with the message
 -- "<trigger name>: <reason>" and never quotes row data.
 --
@@ -1967,12 +1996,17 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- Name: memory_items_before_insert(); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- Every item is born live and unsuperseded, whoever writes it: a new row
+-- carrying superseded_by, retired_at, retired_reason, forgotten_at,
+-- forgotten_reason or a restatement is refused. Each of those is reached
+-- through a later write that the RPCs and memory_items_before_update check
+-- (a forget takes the forget lock and cascades, a supersession needs a live,
+-- later successor); a row inserted already forgotten would skip the cascade
+-- and the lineage check both.
 -- content_hash, created_at and valid_to belong to the database: whatever a
--- writer sends is replaced, so the hash always matches the stored content and
--- valid_to is the successor's occurred_at while superseded_by is set, else
--- NULL. occurred_at never changes after insert, so that value cannot go stale.
--- A superseded_by naming no stored item leaves valid_to NULL, which
--- memory_items_supersession_check refuses at once.
+-- writer sends is replaced, so the hash always matches the stored content.
+-- valid_to is the successor's occurred_at while superseded_by is set, and a
+-- new row has no successor, so it starts NULL.
 -- A row with lineage takes the forget lock (7308892986227385959) shared
 -- before it is written, as engram_insert_items and engram_supersede_item do:
 -- its lineage check locks those rows FOR SHARE, in no fixed order, while a
@@ -1983,13 +2017,27 @@ CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
+DECLARE
+  v_set text[];
 BEGIN
+  v_set := array_remove(ARRAY[
+    CASE WHEN NEW.superseded_by IS NOT NULL THEN 'superseded_by' END,
+    CASE WHEN NEW.retired_at IS NOT NULL THEN 'retired_at' END,
+    CASE WHEN NEW.retired_reason IS NOT NULL THEN 'retired_reason' END,
+    CASE WHEN NEW.forgotten_at IS NOT NULL THEN 'forgotten_at' END,
+    CASE WHEN NEW.forgotten_reason IS NOT NULL THEN 'forgotten_reason' END,
+    CASE WHEN cardinality(NEW.restated_at) > 0 THEN 'restated_at' END
+  ]::text[], NULL);
+  IF cardinality(v_set) > 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: a new item cannot carry %s', TG_NAME, array_to_string(v_set, ', '));
+  END IF;
   IF cardinality(NEW.lineage) > 0 THEN
     PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
   END IF;
   NEW.content_hash := encode(sha256(convert_to(NEW.content, 'UTF8')), 'hex');
   NEW.created_at := now();
-  NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);
+  NEW.valid_to := NULL;
   RETURN NEW;
 END; $$;
 
@@ -2003,17 +2051,18 @@ END; $$;
 -- supersedes the old one. Forgetting is permanent: forgotten_at is never
 -- cleared, and once it is set neither it nor forgotten_reason changes. The
 -- embedding, restatement, register, scope and subject columns stay writable.
--- The lifecycle columns follow the same rules for a direct write as for the
--- RPCs, because service_role may UPDATE the table:
+-- service_role may only SELECT these tables and writes through the engram_*
+-- RPCs, but the owner (a maintenance session, a later migration) writes
+-- directly, so the lifecycle columns follow the same rules for every writer:
 -- - superseded_by goes from NULL to an item only when that item exists, is
 --   not forgotten, has the same class and occurred strictly later (pointing
 --   at itself is left to memory_items_supersession_check).
--- - superseded_by moves from one item to another, or back to NULL, only when
---   the item it named is forgotten and the change comes from inside a trigger:
---   the forget cascade handing the supersession to the next live successor.
---   No other trigger updates memory_items, and a PostgREST client cannot add
---   one, so pg_trigger_depth() > 1 identifies the cascade; a session setting
---   could be set by any SQL client.
+-- - superseded_by moves from an item X to another valid successor, or back
+--   to NULL, only when X is no longer live: forgotten (the forget cascade
+--   hands the supersession to the next live successor) or retired (a writer
+--   that retires a successor may restore or re-point what it superseded).
+--   The rule reads X's state, not who is writing: while X is live the
+--   supersession stands, and only a forget or a retirement of X releases it.
 -- - a forgotten item's superseded_by, retired_at and retired_reason never
 --   change again, and superseded_by does not change in the UPDATE that
 --   forgets an item.
@@ -2090,11 +2139,10 @@ BEGIN
         MESSAGE = format('%s: superseded_by cannot change on an item being forgotten', TG_NAME);
     END IF;
     IF OLD.superseded_by IS NOT NULL
-       AND (pg_trigger_depth() < 2
-            OR NOT EXISTS (SELECT 1 FROM public.memory_items s
-                            WHERE s.id = OLD.superseded_by AND s.forgotten_at IS NOT NULL)) THEN
+       AND EXISTS (SELECT 1 FROM public.memory_items s
+                    WHERE s.id = OLD.superseded_by AND s.forgotten_at IS NULL AND s.retired_at IS NULL) THEN
       RAISE EXCEPTION USING ERRCODE = 'check_violation',
-        MESSAGE = format('%s: superseded_by is replaced or cleared only by the forget cascade', TG_NAME);
+        MESSAGE = format('%s: superseded_by is replaced or cleared only once the item it names is forgotten or retired', TG_NAME);
     END IF;
     IF NEW.superseded_by IS NOT NULL AND NEW.superseded_by <> NEW.id THEN
       SELECT t.class, t.occurred_at, t.forgotten_at INTO v_target
@@ -2194,7 +2242,8 @@ END; $$;
 -- the event: the forget cascade may have moved the pointer since, and a row
 -- forgotten in the same transaction asserts nothing (it keeps the pointer it
 -- had when it was forgotten). The target row stays locked FOR SHARE until the
--- transaction ends.
+-- transaction ends. It fires on an UPDATE of superseded_by only:
+-- memory_items_before_insert refuses a new row that carries one.
 CREATE OR REPLACE FUNCTION public.memory_items_supersession() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2310,18 +2359,20 @@ DROP TRIGGER IF EXISTS memory_items_lineage ON public.memory_items;
 CREATE CONSTRAINT TRIGGER memory_items_lineage AFTER INSERT ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (cardinality(NEW.lineage) > 0) EXECUTE FUNCTION public.memory_items_lineage();
 
 DROP TRIGGER IF EXISTS memory_items_supersession ON public.memory_items;
-CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER INSERT OR UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();
+CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();
 
 DROP TRIGGER IF EXISTS memory_items_forget_cascade ON public.memory_items;
 CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON public.memory_items FOR EACH ROW WHEN (OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL) EXECUTE FUNCTION public.memory_items_forget_cascade();
 
 
 --
--- Item store RPCs. Writers go through these instead of plain table writes
--- where a write needs more than one statement or must be idempotent: PostgREST
--- runs each request as one transaction, and its on_conflict names columns,
--- not the expression index on source->>'event_key'. Each is SECURITY DEFINER
--- with a fixed search_path and executable by service_role only. An invalid
+-- Item store RPCs, the only way service_role writes the item store: it may
+-- SELECT the tables and nothing more (see the privileges section). Each write
+-- that needs more than one statement or must be idempotent is one call:
+-- PostgREST runs each request as one transaction, and its on_conflict names
+-- columns, not the expression index on source->>'event_key'. Each is SECURITY
+-- DEFINER with a fixed search_path, runs as the owner and is executable by
+-- service_role only. An invalid
 -- argument raises SQLSTATE 22023 (invalid_parameter_value) and a refused rule
 -- 23514 (check_violation), both with the message "<function name>: <reason>",
 -- which names keys and positions but never quotes a value. The triggers above
@@ -2346,7 +2397,9 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- offset-less time, 'now', a US date) would store a time the sender did not
 -- mean, and 'infinity' is no event time. It may lie at most 10 minutes past
 -- now(), the clock skew a capture client is allowed; a later time is a wrong
--- clock, not an event. source.event_key holds at most 512 characters, the
+-- clock, not an event. The four-digit year and that limit keep it below year
+-- 10000; a year-1 time with a positive offset is still 1 BC in UTC, which
+-- engram_time_in_range refuses, so that is reported by position too. source.event_key holds at most 512 characters, the
 -- bound that keeps it inside a unique btree index row; a longer key is
 -- refused here by position instead of failing the index. An object whose
 -- source.event_key is already stored, or
@@ -2415,6 +2468,9 @@ BEGIN
                WHEN f.col = 'occurred_at'
                     AND (f.value #>> '{}')::timestamptz > now() + interval '10 minutes' THEN
                  format('object %s: occurred_at is more than 10 minutes ahead of now', f.n)
+               WHEN f.col = 'occurred_at'
+                    AND NOT public.engram_time_in_range((f.value #>> '{}')::timestamptz) THEN
+                 format('object %s: occurred_at is before year 1 in UTC', f.n)
                WHEN f.col = 'embedding'
                     AND (jsonb_array_length(f.value) <> 1536
                          OR EXISTS (SELECT 1 FROM jsonb_array_elements(f.value) AS x(v)
@@ -3103,12 +3159,15 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- production database's default privileges give service_role every table
 -- privilege, DELETE and TRUNCATE included, and UPDATE on sequences. So all
 -- privileges are revoked from PUBLIC, service_role, anon and authenticated
--- first, then service_role gets back what the item store needs: SELECT, INSERT
--- and UPDATE (memory_item_entities and memory_secret_hits are append-only:
--- SELECT and INSERT), and USAGE and SELECT on the two id sequences. Items are
--- never deleted through the API: forgetting is a tombstone, so only the owner
--- can DELETE or TRUNCATE. Re-applying the file repeats the revoke, so a grant
--- added by hand does not survive the next apply.
+-- first, then service_role gets back SELECT and nothing else: no INSERT,
+-- UPDATE, DELETE or TRUNCATE on the tables and nothing on the two id
+-- sequences. Every write goes through the engram_* RPCs, which run as the
+-- owner, so the rules each RPC applies (idempotent inserts, forgets that
+-- cascade under one lock order, supersession only to a later live item) hold
+-- for every API write instead of being repeated for direct table writes.
+-- Items are never deleted: forgetting is a tombstone. Re-applying the file
+-- repeats the revoke, so a grant added by hand does not survive the next
+-- apply.
 --
 
 REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
@@ -3130,15 +3189,13 @@ BEGIN
 END
 $$;
 
-GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_subjects TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_extraction_runs TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_projects TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_items TO service_role;
-GRANT SELECT, INSERT ON TABLE public.memory_item_entities TO service_role;
-GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_capture_events TO service_role;
-GRANT SELECT, INSERT ON TABLE public.memory_secret_hits TO service_role;
-GRANT USAGE, SELECT ON SEQUENCE public.memory_capture_events_id_seq TO service_role;
-GRANT USAGE, SELECT ON SEQUENCE public.memory_secret_hits_id_seq TO service_role;
+GRANT SELECT ON TABLE public.memory_subjects TO service_role;
+GRANT SELECT ON TABLE public.memory_extraction_runs TO service_role;
+GRANT SELECT ON TABLE public.memory_projects TO service_role;
+GRANT SELECT ON TABLE public.memory_items TO service_role;
+GRANT SELECT ON TABLE public.memory_item_entities TO service_role;
+GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
+GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 
 
 --
@@ -3224,7 +3281,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM PUBLIC;
@@ -3269,7 +3327,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM %I', role_name);
@@ -3304,7 +3363,8 @@ GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_norm_quote(text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) TO service_role;

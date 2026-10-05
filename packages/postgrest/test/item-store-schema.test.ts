@@ -4,7 +4,8 @@
  * exports, so a value the types allow is never refused by the database and
  * the reverse. Every table must be closed to the API roles except through
  * its own grants: row-level security with the service_role policy, all
- * privileges revoked, then a grant that never includes DELETE or TRUNCATE.
+ * privileges revoked, then SELECT alone for service_role, which writes
+ * through the item RPCs only.
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -33,9 +34,6 @@ const ITEM_TABLES = [
   'memory_capture_events',
   'memory_secret_hits',
 ] as const
-
-/** Tables written once and never updated through the API. */
-const APPEND_ONLY = new Set<string>(['memory_item_entities', 'memory_secret_hits'])
 
 function squash(sql: string): string {
   return sql.replace(/\s+/g, ' ').trim()
@@ -178,29 +176,26 @@ describe('item store tables are reachable only through their own grants', () => 
     expect(section).toContain("FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]")
   })
 
-  it.each(ITEM_TABLES)('%s: service_role gets exactly its grant', (table) => {
+  it.each(ITEM_TABLES)('%s: service_role gets SELECT and nothing else', (table) => {
     const grants = [...schema.matchAll(new RegExp(`^GRANT (.+) ON TABLE public\\.${table} TO (\\w+);$`, 'gm'))]
-    expect(grants.map((g) => [g[1], g[2]])).toEqual([
-      [APPEND_ONLY.has(table) ? 'SELECT, INSERT' : 'SELECT, INSERT, UPDATE', 'service_role'],
-    ])
+    expect(grants.map((g) => [g[1], g[2]])).toEqual([['SELECT', 'service_role']])
   })
 
-  it.each(ITEM_TABLES)('%s: no statement grants DELETE, TRUNCATE or ALL', (table) => {
+  it.each(ITEM_TABLES)('%s: no statement grants INSERT, UPDATE, DELETE, TRUNCATE or ALL', (table) => {
     const grants = schema
       .split(';')
       .map(squash)
       .filter((stmt) => /^GRANT\b/.test(stmt) && new RegExp(`public\\.${table}\\b`).test(stmt))
     expect(grants.length).toBeGreaterThan(0)
-    for (const stmt of grants) expect(stmt).not.toMatch(/\b(DELETE|TRUNCATE|ALL)\b/)
+    for (const stmt of grants) expect(stmt).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALL)\b/)
   })
 
-  it('grants service_role USAGE and SELECT on the two id sequences, after revoking all', () => {
+  it('revokes all on the two id sequences and grants nothing back', () => {
     const section = privilegeSection()
     expect(section).toContain(
       'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;',
     )
-    expect(section).toContain('GRANT USAGE, SELECT ON SEQUENCE public.memory_capture_events_id_seq TO service_role;')
-    expect(section).toContain('GRANT USAGE, SELECT ON SEQUENCE public.memory_secret_hits_id_seq TO service_role;')
+    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|secret_hits)_id_seq/)
   })
 })
 
@@ -219,7 +214,7 @@ const TRIGGERS = [
   ],
   [
     'memory_items_supersession',
-    'CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER INSERT OR UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();',
+    'CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER UPDATE OF superseded_by ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.superseded_by IS NOT NULL) EXECUTE FUNCTION public.memory_items_supersession();',
   ],
   [
     'memory_items_forget_cascade',
@@ -447,8 +442,8 @@ describe('valid_to is derived from superseded_by', () => {
     )
   })
 
-  it('derives it on every insert, and on an update that touches either column', () => {
-    expect(squash(functionDefinition('memory_items_before_insert'))).toContain(DERIVE)
+  it('starts it NULL on every insert, and derives it on an update that touches either column', () => {
+    expect(squash(functionDefinition('memory_items_before_insert'))).toContain('NEW.valid_to := NULL;')
     expect(squash(functionDefinition('memory_items_before_update'))).toContain(
       `IF NEW.superseded_by IS DISTINCT FROM OLD.superseded_by OR NEW.valid_to IS DISTINCT FROM OLD.valid_to THEN ${DERIVE} END IF;`,
     )

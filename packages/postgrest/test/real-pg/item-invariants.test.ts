@@ -154,8 +154,11 @@ function artifact(content: string, overrides: Partial<Item> = {}): Item {
   }
 }
 
-/** One INSERT; content_hash and created_at are sent only when the item names them. */
-function insert(item: Item): string {
+/**
+ * One INSERT; content_hash and created_at are sent only when the item names
+ * them, and `extra` adds columns as SQL expressions.
+ */
+function insert(item: Item, extra: Record<string, string> = {}): string {
   const columns: Array<[string, string]> = [
     ['id', `'${item.id}'`],
     ['class', `'${item.class}'`],
@@ -174,6 +177,7 @@ function insert(item: Item): string {
   ]
   if (item.contentHash !== undefined) columns.push(['content_hash', `'${item.contentHash}'`])
   if (item.createdAt !== undefined) columns.push(['created_at', `'${item.createdAt}'`])
+  columns.push(...Object.entries(extra))
   return `INSERT INTO public.memory_items (${columns.map(([c]) => c).join(', ')})
     VALUES (${columns.map(([, v]) => v).join(', ')});`
 }
@@ -547,6 +551,31 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       )
       expect(await column(u.id, `forgotten_at = '2026-02-01T00:00:00Z' AND forgotten_reason = 'tst: forgotten by hand'`)).toBe('t')
     }, TEST_TIMEOUT_MS)
+
+    describe('an INSERT of a row that is not born live and unsuperseded', () => {
+      it('a forgotten mk_statement whose lineage names a missing id, refused before any lineage check', async () => {
+        const s = statement('Ship the hotfix tonight.', [newId()])
+        await expectCheckViolation(
+          insert(s, { forgotten_at: `'2026-02-01T00:00:00Z'`, forgotten_reason: `'tst: born forgotten'` }),
+          /memory_items_before_insert: a new item cannot carry forgotten_at, forgotten_reason/,
+        )
+        expect(await rowCount(s.id)).toBe(0)
+      }, TEST_TIMEOUT_MS)
+
+      it.each([
+        ['superseded_by', (successor: string) => ({ superseded_by: `'${successor}'` }), /cannot carry superseded_by$/m],
+        ['retired_at and retired_reason', () => ({ retired_at: `'2026-02-01T00:00:00Z'`, retired_reason: `'tst: born retired'` }), /cannot carry retired_at, retired_reason$/m],
+        ['a restatement', () => ({ restated_at: `ARRAY['${at(5)}']::timestamptz[]` }), /cannot carry restated_at$/m],
+        ['forgotten_at alone', () => ({ forgotten_at: `'2026-02-01T00:00:00Z'` }), /cannot carry forgotten_at$/m],
+      ])('%s', async (_label, extra, reason) => {
+        const successor = artifact('chore: the later commit', { occurredAt: at(30) })
+        await commit(successor)
+        const a = artifact('chore: the earlier commit', { occurredAt: at(10) })
+        const message = await expectCheckViolation(insert(a, extra(successor.id)), /memory_items_before_insert: a new item cannot carry /)
+        expect(message).toMatch(reason)
+        expect(await rowCount(a.id)).toBe(0)
+      }, TEST_TIMEOUT_MS)
+    })
   })
 
   describe('accepts', () => {
@@ -613,9 +642,13 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await pg.psql(`SELECT workspace_id FROM public.memory_projects WHERE id = 'tst-inv-proj-ok'`)).toBe('tst-inv-ws-ok')
     }, TEST_TIMEOUT_MS)
 
-    it('a service_role insert, whose triggers run without any EXECUTE grant on them', async () => {
+    it('a service_role insert through engram_insert_items, whose triggers run without any EXECUTE grant on them', async () => {
       const u = mkUtterance('Written by the service role.')
-      await pg.psqlAs('service_role', insert(u))
+      const object = {
+        id: u.id, class: u.class, kind: u.kind, speaker: u.speaker, trust: u.trust,
+        content: u.content, search_text: u.content, occurred_at: u.occurredAt, source: u.source,
+      }
+      await pg.psqlAs('service_role', `SELECT count(*) FROM public.engram_insert_items(${text(JSON.stringify([object]))}::jsonb);`)
       expect(await column(u.id, 'content_hash')).toBe(sha256Hex('Written by the service role.'))
       const executable = await pg.psql(`
         SELECT count(*) FROM pg_proc p, unnest(ARRAY['PUBLIC', 'anon', 'authenticated', 'service_role']) AS r(role)
@@ -784,53 +817,66 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
     }, TEST_TIMEOUT_MS)
   })
 
-  describe('the item lifecycle under a direct service_role UPDATE', () => {
-    const asService = (sql: string) => pg.psqlAs('service_role', sql)
+  // service_role may not write the table at all; the owner can, so the triggers still hold the lifecycle.
+  describe('the item lifecycle under a direct UPDATE by the owner', () => {
+    const asOwner = (sql: string) => pg.psql(sql)
 
-    async function expectServiceRefusal(sql: string, reason: RegExp): Promise<void> {
-      let message: string | undefined
-      try {
-        await asService(`\\set VERBOSITY verbose\n${sql}`)
-      } catch (error) {
-        message = (error as Error).message
-      }
-      expect(message, 'the write was accepted').toBeDefined()
-      expect(message).toMatch(/ERROR:\s+23514: /)
-      expect(message).toMatch(reason)
+    async function expectOwnerRefusal(sql: string, reason: RegExp): Promise<void> {
+      await expectCheckViolation(sql, reason)
     }
 
     function pointSql(id: string, target: string | null): string {
       return `UPDATE public.memory_items SET superseded_by = ${target === null ? 'NULL' : `'${target}'`} WHERE id = '${id}';`
     }
 
-    const REPLACED_OUTSIDE_CASCADE = /memory_items_before_update: superseded_by is replaced or cleared only by the forget cascade/
+    const SUCCESSOR_STILL_LIVE =
+      /memory_items_before_update: superseded_by is replaced or cleared only once the item it names is forgotten or retired/
     const FORGOTTEN_LIFECYCLE = /memory_items_before_update: a forgotten item keeps its superseded_by, retired_at and retired_reason/
 
     it('points a live item at a live, later successor of its class', async () => {
       const a = artifact('build: cache off', { occurredAt: at(10) })
       const b = artifact('build: cache on', { occurredAt: at(20) })
       await commit(a, b)
-      await asService(pointSql(a.id, b.id))
+      await asOwner(pointSql(a.id, b.id))
       expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${b.occurredAt}')`)).toBe(`${b.id}|true`)
     }, TEST_TIMEOUT_MS)
 
-    it('refuses re-pointing a superseded item to another successor', async () => {
+    it('refuses re-pointing an item to another successor while its successor is live', async () => {
       const a = artifact('ops: one replica', { occurredAt: at(10) })
       const b = artifact('ops: two replicas', { occurredAt: at(20) })
       const c = artifact('ops: three replicas', { occurredAt: at(30) })
       await commit(a, b, c)
-      await asService(pointSql(a.id, b.id))
-      await expectServiceRefusal(pointSql(a.id, c.id), REPLACED_OUTSIDE_CASCADE)
+      await asOwner(pointSql(a.id, b.id))
+      await expectOwnerRefusal(pointSql(a.id, c.id), SUCCESSOR_STILL_LIVE)
       expect(await column(a.id, 'superseded_by')).toBe(b.id)
     }, TEST_TIMEOUT_MS)
 
-    it('refuses clearing superseded_by on a superseded item', async () => {
+    it('refuses clearing superseded_by while the successor is live', async () => {
       const a = artifact('ops: nightly backup', { occurredAt: at(10) })
       const b = artifact('ops: hourly backup', { occurredAt: at(20) })
       await commit(a, b)
-      await asService(pointSql(a.id, b.id))
-      await expectServiceRefusal(pointSql(a.id, null), REPLACED_OUTSIDE_CASCADE)
+      await asOwner(pointSql(a.id, b.id))
+      await expectOwnerRefusal(pointSql(a.id, null), SUCCESSOR_STILL_LIVE)
       expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${b.occurredAt}')`)).toBe(`${b.id}|true`)
+    }, TEST_TIMEOUT_MS)
+
+    it('re-points an item to a valid successor, or clears it, once its successor is retired', async () => {
+      const a = artifact('ops: weekly restore drill', { occurredAt: at(10) })
+      const b = artifact('ops: daily restore drill', { occurredAt: at(20) })
+      const c = artifact('ops: hourly restore drill', { occurredAt: at(30) })
+      const earlier = artifact('ops: monthly restore drill', { occurredAt: at(5) })
+      await commit(a, b, c, earlier)
+      await asOwner(pointSql(a.id, b.id))
+      await asOwner(`UPDATE public.memory_items SET retired_at = '2026-02-01T00:00:00Z', retired_reason = 'tst: daily drill dropped' WHERE id = '${b.id}';`)
+
+      await expectOwnerRefusal(pointSql(a.id, earlier.id), /memory_items_before_update: superseded_by names an item that did not occur later/)
+      await asOwner(pointSql(a.id, c.id))
+      expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${c.occurredAt}')`)).toBe(`${c.id}|true`)
+
+      await expectOwnerRefusal(pointSql(a.id, null), SUCCESSOR_STILL_LIVE)
+      await asOwner(`UPDATE public.memory_items SET retired_at = '2026-02-02T00:00:00Z', retired_reason = 'tst: hourly drill dropped' WHERE id = '${c.id}';`)
+      await asOwner(pointSql(a.id, null))
+      expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || coalesce(valid_to::text, 'none')`)).toBe('none|none')
     }, TEST_TIMEOUT_MS)
 
     it('refuses changing superseded_by on a forgotten item', async () => {
@@ -839,12 +885,12 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const c = artifact('docs: newest runbook', { occurredAt: at(30) })
       const d = artifact('docs: lone runbook', { occurredAt: at(10) })
       await commit(a, b, c, d)
-      await asService(pointSql(a.id, b.id))
-      await asService(forgetSql(a.id, 'tst: forgotten while superseded'))
-      await asService(forgetSql(d.id, 'tst: forgotten while current'))
-      await expectServiceRefusal(pointSql(a.id, c.id), FORGOTTEN_LIFECYCLE)
-      await expectServiceRefusal(pointSql(a.id, null), FORGOTTEN_LIFECYCLE)
-      await expectServiceRefusal(pointSql(d.id, c.id), FORGOTTEN_LIFECYCLE)
+      await asOwner(pointSql(a.id, b.id))
+      await asOwner(forgetSql(a.id, 'tst: forgotten while superseded'))
+      await asOwner(forgetSql(d.id, 'tst: forgotten while current'))
+      await expectOwnerRefusal(pointSql(a.id, c.id), FORGOTTEN_LIFECYCLE)
+      await expectOwnerRefusal(pointSql(a.id, null), FORGOTTEN_LIFECYCLE)
+      await expectOwnerRefusal(pointSql(d.id, c.id), FORGOTTEN_LIFECYCLE)
       expect(await column(a.id, 'superseded_by')).toBe(b.id)
       expect(await column(d.id, `coalesce(superseded_by::text, 'none')`)).toBe('none')
     }, TEST_TIMEOUT_MS)
@@ -853,18 +899,18 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const retired = artifact('chore: retired then forgotten', { occurredAt: at(10) })
       const live = artifact('chore: forgotten while live', { occurredAt: at(10) })
       await commit(retired, live)
-      await asService(`UPDATE public.memory_items SET retired_at = '2026-02-01T00:00:00Z', retired_reason = 'tst: stale' WHERE id = '${retired.id}';`)
-      await asService(forgetSql(retired.id, 'tst: forgotten after retiring'))
-      await asService(forgetSql(live.id, 'tst: forgotten unretired'))
-      await expectServiceRefusal(
+      await asOwner(`UPDATE public.memory_items SET retired_at = '2026-02-01T00:00:00Z', retired_reason = 'tst: stale' WHERE id = '${retired.id}';`)
+      await asOwner(forgetSql(retired.id, 'tst: forgotten after retiring'))
+      await asOwner(forgetSql(live.id, 'tst: forgotten unretired'))
+      await expectOwnerRefusal(
         `UPDATE public.memory_items SET retired_at = NULL, retired_reason = NULL WHERE id = '${retired.id}';`,
         FORGOTTEN_LIFECYCLE,
       )
-      await expectServiceRefusal(
+      await expectOwnerRefusal(
         `UPDATE public.memory_items SET retired_reason = 'tst: restated' WHERE id = '${retired.id}';`,
         FORGOTTEN_LIFECYCLE,
       )
-      await expectServiceRefusal(
+      await expectOwnerRefusal(
         `UPDATE public.memory_items SET retired_at = '2026-03-01T00:00:00Z', retired_reason = 'tst: late' WHERE id = '${live.id}';`,
         FORGOTTEN_LIFECYCLE,
       )
@@ -877,8 +923,8 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const child = observation('The runner forgotten by hand built the release.', [u.id])
       await commit(u, child)
       const NOT_UNDER_LOCK = /memory_items_before_update: forgotten_at is set only while the transaction holds the forget lock exclusively/
-      await expectServiceRefusal(bareForgetSql(u.id, 'tst: no lock'), NOT_UNDER_LOCK)
-      await expectServiceRefusal(
+      await expectOwnerRefusal(bareForgetSql(u.id, 'tst: no lock'), NOT_UNDER_LOCK)
+      await expectOwnerRefusal(
         `DO $shared$ BEGIN PERFORM pg_advisory_xact_lock_shared(${FORGET_LOCK_KEY}); ${bareForgetSql(u.id, 'tst: shared lock')} END $shared$;`,
         NOT_UNDER_LOCK,
       )
@@ -890,7 +936,7 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const a = artifact('ci: one runner', { occurredAt: at(10) })
       const b = artifact('ci: two runners', { occurredAt: at(20) })
       await commit(a, b)
-      await expectServiceRefusal(
+      await expectOwnerRefusal(
         underForgetLock(
           `UPDATE public.memory_items SET superseded_by = '${b.id}', forgotten_at = '2026-02-01T00:00:00Z', forgotten_reason = 'tst: both at once' WHERE id = '${a.id}';`,
         ),
@@ -904,13 +950,13 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const b = artifact('deps: lockfile v2', { occurredAt: at(20) })
       const c = artifact('deps: lockfile v3', { occurredAt: at(30) })
       await commit(a, b, c)
-      await asService(pointSql(a.id, b.id))
-      await asService(pointSql(b.id, c.id))
+      await asOwner(pointSql(a.id, b.id))
+      await asOwner(pointSql(b.id, c.id))
 
-      await asService(forgetSql(b.id, 'tst: v2 was never released'))
+      await asOwner(forgetSql(b.id, 'tst: v2 was never released'))
       expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${c.occurredAt}')`)).toBe(`${c.id}|true`)
 
-      await asService(forgetSql(c.id, 'tst: v3 was reverted'))
+      await asOwner(forgetSql(c.id, 'tst: v3 was reverted'))
       expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || coalesce(valid_to::text, 'none')`)).toBe(
         'none|none',
       )

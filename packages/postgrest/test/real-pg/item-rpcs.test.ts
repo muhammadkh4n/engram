@@ -346,6 +346,21 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await insertItems([skewed])).toEqual([{ ord: 1, id: skewed.id, inserted: true }])
     }, TEST_TIMEOUT_MS)
 
+    it('refuses by position an occurred_at in year 1 whose offset puts it in 1 BC, and a five-digit year', async () => {
+      const early = utterance('A prompt from before the epoch of the calendar.', { occurred_at: '0001-01-01T00:30:00+01:00' })
+      expect(await insertRefusal([utterance('On time.'), early])).toMatch(
+        /ERROR:\s+22023: engram_insert_items: object 2: occurred_at is before year 1 in UTC/,
+      )
+      const late = utterance('A prompt from year 12000.', { occurred_at: '12000-01-01T00:00:00Z' })
+      expect(await insertRefusal([late])).toMatch(
+        /ERROR:\s+22023: engram_insert_items: object 1: occurred_at must be ISO-8601 with Z or an offset/,
+      )
+      expect(await rowCount([early.id, late.id])).toBe(0)
+
+      const first = utterance('A prompt at the first instant of year 1.', { occurred_at: '0001-01-01T00:00:00Z' })
+      expect(await insertItems([first])).toEqual([{ ord: 1, id: first.id, inserted: true }])
+    }, TEST_TIMEOUT_MS)
+
     it('refuses a source.event_key longer than 512 characters by position, without quoting it', async () => {
       const long = artifact('chore: an overlong key', 0, { source: { type: 'git', event_key: `git:${'k'.repeat(509)}` } })
       const message = await insertRefusal([utterance('A short key.'), long])
@@ -808,29 +823,30 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       ).toEqual({ ends_at_successor: true })
     }, TEST_TIMEOUT_MS)
 
-    it('a direct UPDATE of valid_to cannot diverge from superseded_by', async () => {
+    it("the owner's direct UPDATE of valid_to cannot diverge from superseded_by", async () => {
       const a = artifact('perf: first pool size', 0)
       const b = artifact('perf: second pool size', 10)
       const c = artifact('perf: third pool size', 20)
       await insertItems([a, b, c])
-      const asService = (sql: string) => pg.psqlAs('service_role', sql)
+      // service_role cannot UPDATE the table; the owner can, and the triggers hold valid_to for it too.
+      const asOwner = (sql: string) => pg.psql(sql)
 
-      await asService(`UPDATE public.memory_items SET valid_to = '${at(5)}' WHERE id = '${a.id}';`)
+      await asOwner(`UPDATE public.memory_items SET valid_to = '${at(5)}' WHERE id = '${a.id}';`)
       expect(await row(a.id, 'valid_to')).toEqual({ valid_to: null })
 
-      await asService(`UPDATE public.memory_items SET superseded_by = '${b.id}', valid_to = '${at(40)}' WHERE id = '${a.id}';`)
+      await asOwner(`UPDATE public.memory_items SET superseded_by = '${b.id}', valid_to = '${at(40)}' WHERE id = '${a.id}';`)
       expect(await row(a.id, `valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({ ends_at_b: true })
 
-      await asService(`UPDATE public.memory_items SET valid_to = NULL WHERE id = '${a.id}';`)
-      await asService(`UPDATE public.memory_items SET valid_to = '${c.occurred_at}' WHERE id = '${a.id}';`)
+      await asOwner(`UPDATE public.memory_items SET valid_to = NULL WHERE id = '${a.id}';`)
+      await asOwner(`UPDATE public.memory_items SET valid_to = '${c.occurred_at}' WHERE id = '${a.id}';`)
       expect(await row(a.id, `superseded_by, valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({
         superseded_by: b.id,
         ends_at_b: true,
       })
 
-      // Clearing a live successor is the forget cascade's alone, so valid_to keeps following b.
-      expect(await refusal(`UPDATE public.memory_items SET superseded_by = NULL WHERE id = '${a.id}';`)).toMatch(
-        /ERROR:\s+23514: memory_items_before_update: superseded_by is replaced or cleared only by the forget cascade/,
+      // b is live, so the supersession stands and valid_to keeps following b.
+      await expect(asOwner(`\\set VERBOSITY verbose\nUPDATE public.memory_items SET superseded_by = NULL WHERE id = '${a.id}';`)).rejects.toThrow(
+        /ERROR:\s+23514: memory_items_before_update: superseded_by is replaced or cleared only once the item it names is forgotten or retired/,
       )
       expect(await row(a.id, `superseded_by, valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({
         superseded_by: b.id,

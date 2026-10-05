@@ -99,24 +99,60 @@ describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => 
     )
   }, TEST_TIMEOUT_MS)
 
-  it('lets service_role insert and read items but not delete them, and refuses anon', async () => {
+  it('lets service_role read items and write them through an RPC, and refuses anon', async () => {
     const id = '01920000-0000-7000-8000-000000000002'
+    const object = {
+      id, class: 'utterance', kind: 'user_prompt', speaker: 'mk', trust: 0, project_id: 'tst-project',
+      session_id: 'tst-session', content: 'Inserted by the service role.', search_text: 'Inserted by the service role.',
+      occurred_at: '2026-01-02T03:04:05Z', source: { type: 'transcript', event_key: 'capture:tst-session:2' },
+    }
     expect(
-      await pg.psqlAs('service_role', `${utteranceInsert(id, 'Inserted by the service role.', 'capture:tst-session:2')} RETURNING kind`),
-    ).toBe('user_prompt')
+      await pg.psqlAs('service_role', `SELECT inserted FROM public.engram_insert_items('${JSON.stringify([object])}'::jsonb)`),
+    ).toBe('t')
     expect(await pg.psqlAs('service_role', `SELECT content FROM public.memory_items WHERE id = '${id}'`)).toBe(
       'Inserted by the service role.',
-    )
-    await expect(pg.psqlAs('service_role', `DELETE FROM public.memory_items WHERE id = '${id}'`)).rejects.toThrow(
-      /permission denied for table memory_items/,
-    )
-    await expect(pg.psqlAs('service_role', 'TRUNCATE public.memory_items')).rejects.toThrow(
-      /permission denied for table memory_items/,
     )
     await expect(pg.psqlAs('anon', 'SELECT count(*) FROM public.memory_items')).rejects.toThrow(
       /permission denied for table memory_items/,
     )
     expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = '${id}'`)).toBe('1')
+  }, TEST_TIMEOUT_MS)
+
+  it.each([
+    ['memory_subjects', 'label'],
+    ['memory_extraction_runs', 'status'],
+    ['memory_projects', 'kind'],
+    ['memory_items', 'content'],
+    ['memory_item_entities', 'entity'],
+    ['memory_capture_events', 'attempts'],
+    ['memory_secret_hits', 'field'],
+  ])('refuses service_role INSERT, UPDATE, DELETE and TRUNCATE on %s, and lets it SELECT', async (table, column) => {
+    const denied = new RegExp(`permission denied for table ${table}`)
+    for (const sql of [
+      `INSERT INTO public.${table} DEFAULT VALUES`,
+      `UPDATE public.${table} SET ${column} = ${column}`,
+      `DELETE FROM public.${table}`,
+      `TRUNCATE public.${table}`,
+    ]) {
+      await expect(pg.psqlAs('service_role', sql), sql).rejects.toThrow(denied)
+    }
+    expect(Number(await pg.psqlAs('service_role', `SELECT count(*) FROM public.${table}`))).toBeGreaterThanOrEqual(0)
+    expect(
+      await pg.psql(`SELECT concat_ws(',', has_table_privilege('service_role', 'public.${table}', 'SELECT'),
+        has_table_privilege('service_role', 'public.${table}', 'INSERT'), has_table_privilege('service_role', 'public.${table}', 'UPDATE'),
+        has_table_privilege('service_role', 'public.${table}', 'DELETE'), has_table_privilege('service_role', 'public.${table}', 'TRUNCATE'))`),
+    ).toBe('t,f,f,f,f')
+  }, TEST_TIMEOUT_MS)
+
+  it('gives service_role nothing on the two id sequences', async () => {
+    for (const sequence of ['memory_capture_events_id_seq', 'memory_secret_hits_id_seq']) {
+      await expect(pg.psqlAs('service_role', `SELECT nextval('public.${sequence}')`)).rejects.toThrow(
+        new RegExp(`permission denied for sequence ${sequence}`),
+      )
+      expect(
+        await pg.psql(`SELECT has_sequence_privilege('service_role', 'public.${sequence}', 'USAGE, SELECT, UPDATE')`),
+      ).toBe('f')
+    }
   }, TEST_TIMEOUT_MS)
 
   it('ends with the same trigger function privileges after a re-apply over a service_role grant', async () => {

@@ -177,24 +177,31 @@ function literalBound(values: string[]): Bound {
 
 /**
  * The longest string a fully anchored regex of printable-ASCII atoms can
- * match: `^[A-Z][a-z0-9-]{0,99}$` and the like. Anything else (escapes,
- * alternation, unbounded repeats, non-ASCII) is not a bound.
+ * match: `^[A-Z][a-z0-9-]{0,99}$` and the like, with a bounded repeat at
+ * most. A literal or a class of ASCII characters matches one byte per
+ * character; a negated class (`[^,]`) or `.` matches any character, up to
+ * four bytes in UTF-8. Anything else (escapes, alternation, unbounded
+ * repeats, non-ASCII) is not a bound.
  */
 function regexBound(pattern: string): Bound | undefined {
   const m = pattern.match(/^\^(.*)\$$/)
   if (!m) return undefined
-  const atom = /(\[[ -\[^-~]+\]|[A-Za-z0-9_-])(?:\{(\d+)(?:,(\d+))?\})?/y
+  const atom = /(\[[ -\[^-~]+\]|[A-Za-z0-9_-]|\.)(?:\{(\d+)(?:,(\d+))?\})?/y
   const body = m[1]!
-  let length = 0
+  let chars = 0
+  let bytes = 0
   let at = 0
   while (at < body.length) {
     atom.lastIndex = at
     const a = atom.exec(body)
     if (!a) return undefined
-    length += Number(a[3] ?? a[2] ?? 1)
+    const count = Number(a[3] ?? a[2] ?? 1)
+    const anyCharacter = a[1] === '.' || a[1]!.startsWith('[^')
+    chars += count
+    bytes += count * (anyCharacter ? MAX_BYTES_PER_CHAR : 1)
     at = atom.lastIndex
   }
-  return { chars: length, bytes: length }
+  return { chars, bytes }
 }
 
 /** The key whose NULL an expression asserts: `x IS NULL`, or `NOT (c ? 'k')` for the key `c ->> 'k'`. */
@@ -397,5 +404,26 @@ describe('reading a bound from a CHECK expression', () => {
     expect(boundIn("(id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'::text)", 'id')).toEqual({ chars: 100, bytes: 100 })
     expect(boundIn("(register_prefix ~ '^[A-Z]{2,6}$'::text)", 'register_prefix')).toEqual({ chars: 6, bytes: 6 })
     expect(boundIn("CASE k WHEN 'a'::text THEN (session_id = 'abc'::text) ELSE true END", 'session_id')).toBeUndefined()
+  })
+
+  it('counts a negated class or a dot as four bytes, since each matches any character', () => {
+    expect(boundIn("(cwd ~ '^[^,]{0,700}$'::text)", 'cwd')).toEqual({ chars: 700, bytes: 2800 })
+    expect(boundIn("(cwd ~ '^.{0,10}$'::text)", 'cwd')).toEqual({ chars: 10, bytes: 40 })
+    expect(boundIn("(cwd ~ '^[a-z][^/]{0,9}$'::text)", 'cwd')).toEqual({ chars: 10, bytes: 37 })
+    expect(boundIn("(cwd ~ '^[a-z^]{0,9}$'::text)", 'cwd')).toEqual({ chars: 9, bytes: 9 })
+  })
+
+  it("fails an index whose key '^[^,]{0,700}$' bounds, over the btree row limit", () => {
+    const checks: CheckDef[] = [{ table: 't', name: 't_cwd_check', def: "CHECK ((cwd ~ '^[^,]{0,700}$'::text))" }]
+    const found = keyBound('cwd', checks)
+    expect(found).toEqual({ bound: { chars: 700, bytes: 2800 }, checks: ['t_cwd_check'] })
+    const report: IndexReport = {
+      index: 'tst_cwd',
+      table: 't',
+      maxRowBytes: INDEX_TUPLE_HEADER + found!.bound.bytes + COLUMN_SLACK,
+      keys: [{ key: 'cwd', bytes: found!.bound.bytes, checks: found!.checks }],
+      unbounded: [],
+    }
+    expect(violations([report])).toEqual([`tst_cwd on t: a row may take 2816 bytes, over ${BTREE_ROW_LIMIT}`])
   })
 })
