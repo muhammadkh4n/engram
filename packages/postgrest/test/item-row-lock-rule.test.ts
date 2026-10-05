@@ -11,7 +11,8 @@
  *   exclusively, at transaction level, before its first row lock;
  * - every writer that adds rows carrying lineage takes the key shared before
  *   the INSERT, so it runs beside other inserts and never beside a function
- *   that locks rows;
+ *   that locks rows; a function that also locks rows holds the key
+ *   exclusively, which covers its inserts as well;
  * - a trigger function that locks rows runs inside a statement that already
  *   holds the key, and the test checks how for each one. A trigger function
  *   the test does not know fails until its cover is decided and listed here.
@@ -168,13 +169,14 @@ describe('the forget advisory key orders every row lock on memory_items', () => 
     },
   )
 
-  it('every function that inserts memory_items takes the key shared before the INSERT', () => {
+  it('every function that inserts memory_items takes the key before the INSERT, shared or as a row locker', () => {
     const inserters = all.filter((f) => INSERT.test(f.body))
     expect(inserters.map((f) => f.name)).toContain('engram_insert_items')
     for (const f of inserters) {
-      const sharedAt = f.body.indexOf(SHARED)
-      expect(sharedAt, `${f.name} never takes ${SHARED}`).toBeGreaterThanOrEqual(0)
-      expect(sharedAt, `${f.name} inserts before taking ${SHARED}`).toBeLessThan(f.body.search(INSERT))
+      const key = lockers.includes(f) ? EXCLUSIVE : SHARED
+      const keyAt = f.body.indexOf(key)
+      expect(keyAt, `${f.name} never takes ${key}`).toBeGreaterThanOrEqual(0)
+      expect(keyAt, `${f.name} inserts before taking ${key}`).toBeLessThan(f.body.search(INSERT))
     }
   })
 

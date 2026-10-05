@@ -1350,7 +1350,9 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_source_check CHECK (jsonb_typeof(source) = 'object'
         AND (source ->> 'type') IN ('transcript', 'history', 'git', 'ledger', 'register', 'vault', 'legacy', 'ingest_tool', 'extraction')
         AND (NOT (source ? 'event_key') OR (jsonb_typeof(source -> 'event_key') = 'string' AND (source ->> 'event_key') ~ '\S'
-                                            AND char_length(source ->> 'event_key') <= 512))),
+                                            AND char_length(source ->> 'event_key') <= 512))
+        AND (NOT (source ? 'version_of') OR (jsonb_typeof(source -> 'version_of') = 'string' AND (source ->> 'version_of') ~ '\S'
+                                             AND char_length(source ->> 'version_of') <= 512))),
     CONSTRAINT memory_items_text_check CHECK (content ~ '\S' AND search_text ~ '\S' AND (context IS NULL OR context ~ '\S')),
     CONSTRAINT memory_items_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
         AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
@@ -1968,6 +1970,12 @@ CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_e
 CREATE INDEX IF NOT EXISTS idx_capture_events_pending ON public.memory_capture_events USING btree (occurred_at, id) WHERE (processed_at IS NULL);
 CREATE INDEX IF NOT EXISTS idx_capture_events_session ON public.memory_capture_events USING btree (session_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extraction_runs USING btree (session_id, started_at);
+
+-- idx_items_version_of finds the current version of an item chain (a ledger
+-- decision or register entry) when capture materializes a new version.
+-- memory_items_source_check bounds source.version_of at 512 characters, as it
+-- bounds source.event_key, so every key fits a btree index row.
+CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
 
 --
@@ -3108,6 +3116,362 @@ END; $$;
 
 
 --
+-- Name: engram_capture_materialize(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Turns up to p_limit (1 to 1000) stored capture events into items, one event
+-- at a time, and returns what it did as JSON.
+-- One call runs at a time: it first takes the transaction-level advisory lock
+-- hashtextextended('engram.capture.materialize', 0) without waiting, and
+-- without it returns {"locked": false} and touches nothing. PostgREST runs
+-- each request as one transaction, so the lock lasts exactly this call.
+-- Candidates are the events with processed_at NULL and fewer than 3 attempts.
+-- A session is backfill while its earliest candidate carries payload.origin
+-- or was posted by the client 'engram-backfill'; live sessions come first,
+-- then everything by (occurred_at, id). Every event of a session shares its
+-- session's rank, so a backlog never delays live capture and a session's
+-- events always run in event-time order.
+-- Each event runs in its own subtransaction with the deferred constraint
+-- triggers forced at its end (SET CONSTRAINTS ALL IMMEDIATE), so a broken
+-- invariant fails that event alone: attempts goes up by one, error keeps the
+-- first 500 characters of the message (never DETAIL, which can quote row
+-- data), and the session's later events wait for the next call. At 3
+-- attempts the event is dead and no longer holds its session back.
+-- Serialization failures, deadlocks and lock timeouts are not the event's
+-- fault, so they abort the whole call instead of costing an attempt.
+-- Every item takes occurred_at, session_id, project_id and workspace_id from
+-- its event (the project the route resolved), and source keys event_id,
+-- session_id, event_uuid and event_key plus its type's keys; a source key
+-- whose value would be null is left out. event_key is 'capture:<event id>',
+-- 'git:<repo>:<sha>' for a commit, so the same commit captured by two
+-- sessions is one item, and '<version_of>:<sha256 of the payload>' for a
+-- ledger decision or register entry, so a repeated version is one item. An
+-- insert whose event_key is already stored creates nothing.
+-- A ledger decision or register entry is a new version of the item chain
+-- named by source.version_of. The newest live head of that chain (retired
+-- included) is superseded by the new version when the new one occurred
+-- later, and supersedes it when it occurred earlier (a late delivery); equal
+-- times fail the event. The new version takes the head's restated_at
+-- (copied after the insert: a new item carries no restatement). A register
+-- entry whose status is not 'active' is retired, and each entry it lists in
+-- supersedes has its head retired unless already retired.
+-- A prompt recovered from a legacy row takes that item as lineage; when the
+-- item is missing or forgotten the event creates nothing, is marked
+-- processed with error 'origin_not_found' and counts as skipped. A
+-- candidate_status event sets the named mk_statement's register_status and
+-- register_ref and fails when no such statement exists. briefing_shown and
+-- the session markers create nothing.
+-- Rows are locked by UPDATE here (restated_at, register columns) and by the
+-- supersede and retire calls, so before the first event that can do either
+-- the call takes the forget advisory key exclusively, as every function that
+-- locks item rows does; inserts with lineage take it shared in
+-- memory_items_before_insert. It is taken outside the event's subtransaction,
+-- which would release it on a failure.
+-- Returns {"locked": true, "processed", "failed", "skipped", "pending",
+-- "dead"}: processed counts events marked processed by this call, skipped
+-- included; pending (candidates left) and dead (3 attempts) are table-wide.
+CREATE OR REPLACE FUNCTION public.engram_capture_materialize(p_limit integer DEFAULT 200) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_ids bigint[];
+  v_id bigint;
+  e public.memory_capture_events%ROWTYPE;
+  p jsonb;
+  v_keyed boolean := false;
+  v_blocked text[] := '{}'::text[];
+  v_processed integer := 0;
+  v_failed integer := 0;
+  v_skipped integer := 0;
+  v_attempts integer;
+  v_pending bigint;
+  v_dead bigint;
+  v_class text;
+  v_kind text;
+  v_plan text;
+  v_content text;
+  v_context text;
+  v_search text;
+  v_source jsonb;
+  v_lineage uuid[];
+  v_key text;
+  v_version_of text;
+  v_error text;
+  v_new uuid;
+  v_head record;
+  v_superseded text;
+  v_dot text := ' ' || chr(183) || ' ';
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_capture_materialize: p_limit must be from 1 to 1000';
+  END IF;
+  IF NOT pg_try_advisory_xact_lock(hashtextextended('engram.capture.materialize', 0)) THEN
+    RETURN jsonb_build_object('locked', false);
+  END IF;
+
+  v_ids := ARRAY(
+    SELECT c.id
+      FROM (SELECT ev.id, ev.occurred_at,
+                   first_value((ev.payload ? 'origin') OR (ev.client ->> 'name') IS NOT DISTINCT FROM 'engram-backfill')
+                     OVER (PARTITION BY ev.session_id ORDER BY ev.occurred_at, ev.id) AS backfill
+              FROM public.memory_capture_events ev
+             WHERE ev.processed_at IS NULL AND ev.attempts < 3) AS c
+     ORDER BY c.backfill, c.occurred_at, c.id
+     LIMIT p_limit);
+
+  FOREACH v_id IN ARRAY v_ids LOOP
+    SELECT * INTO e FROM public.memory_capture_events c WHERE c.id = v_id;
+    CONTINUE WHEN e.session_id = ANY (v_blocked);
+    IF NOT v_keyed AND e.type IN ('ledger_decision', 'register_entry', 'candidate_status') THEN
+      PERFORM pg_advisory_xact_lock(7308892986227385959);
+      v_keyed := true;
+    END IF;
+
+    BEGIN
+      SET CONSTRAINTS ALL DEFERRED;
+      p := e.payload;
+      v_class := NULL;
+      v_plan := NULL;
+      v_context := NULL;
+      v_lineage := '{}'::uuid[];
+      v_key := 'capture:' || e.id;
+      v_version_of := NULL;
+      v_error := NULL;
+      v_new := NULL;
+
+      CASE e.type
+      WHEN 'user_prompt' THEN
+        v_class := 'utterance';
+        v_kind := 'user_prompt';
+        v_content := p ->> 'text';
+        v_search := v_content;
+        v_source := jsonb_build_object('type', 'transcript', 'line', p -> 'transcript_line', 'truncated', p -> 'truncated');
+        IF jsonb_typeof(p -> 'origin') = 'object' THEN
+          v_source := v_source || jsonb_build_object('type', p -> 'origin' -> 'type', 'origin', p -> 'origin');
+          IF (p -> 'origin' ->> 'type') = 'history' THEN
+            v_source := v_source || jsonb_build_object('line', p -> 'origin' -> 'line');
+          ELSIF (p -> 'origin' ->> 'type') = 'legacy' THEN
+            v_lineage := ARRAY[(p -> 'origin' ->> 'id')::uuid];
+            IF NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = v_lineage[1] AND i.forgotten_at IS NULL) THEN
+              v_error := 'origin_not_found';
+            END IF;
+          END IF;
+        END IF;
+
+      WHEN 'user_answer' THEN
+        v_class := 'utterance';
+        v_kind := 'user_answer';
+        -- MK's words only: per question its answer and note, then the reply.
+        SELECT string_agg(b.block, E'\n\n' ORDER BY b.n) INTO v_content
+          FROM (SELECT q.n, concat_ws(E'\n', CASE WHEN a.answer ~ '\S' THEN a.answer END,
+                                             CASE WHEN a.note ~ '\S' THEN a.note END) AS block
+                  FROM jsonb_array_elements(p -> 'questions') WITH ORDINALITY AS q(v, n)
+                 CROSS JOIN LATERAL (SELECT p -> 'answers' ->> (q.v ->> 'question') AS answer,
+                                            p -> 'notes' ->> (q.v ->> 'question') AS note) AS a
+                UNION ALL
+                SELECT 2147483647, CASE WHEN (p ->> 'response') ~ '\S' THEN p ->> 'response' END) AS b
+         WHERE b.block <> '';
+        -- What was asked: header, question, the options offered.
+        SELECT string_agg(concat_ws(E'\n',
+                 CASE WHEN (q.v ->> 'header') ~ '\S' THEN format('[%s] %s', q.v ->> 'header', q.v ->> 'question')
+                      ELSE q.v ->> 'question' END,
+                 (SELECT string_agg('- ' || (o.v ->> 'label')
+                                      || CASE WHEN (o.v ->> 'description') ~ '\S' THEN ': ' || (o.v ->> 'description') ELSE '' END,
+                                    E'\n' ORDER BY o.n)
+                    FROM jsonb_array_elements(q.v -> 'options') WITH ORDINALITY AS o(v, n)),
+                 CASE WHEN (q.v -> 'multiSelect') = 'true'::jsonb THEN '(multi-select)' END),
+               E'\n\n' ORDER BY q.n) INTO v_context
+          FROM jsonb_array_elements(p -> 'questions') WITH ORDINALITY AS q(v, n);
+        SELECT string_agg(b.block, E'\n\n' ORDER BY b.n) INTO v_search
+          FROM (SELECT q.n, concat_ws(E'\n', 'Q: ' || (q.v ->> 'question'),
+                                             CASE WHEN a.answer ~ '\S' THEN 'A: ' || a.answer END,
+                                             CASE WHEN a.note ~ '\S' THEN 'Note: ' || a.note END) AS block
+                  FROM jsonb_array_elements(p -> 'questions') WITH ORDINALITY AS q(v, n)
+                 CROSS JOIN LATERAL (SELECT p -> 'answers' ->> (q.v ->> 'question') AS answer,
+                                            p -> 'notes' ->> (q.v ->> 'question') AS note) AS a
+                UNION ALL
+                SELECT 2147483647, CASE WHEN (p ->> 'response') ~ '\S' THEN 'Response: ' || (p ->> 'response') END) AS b
+         WHERE b.block <> '';
+        v_source := jsonb_build_object('type', 'transcript', 'line', p -> 'transcript_line');
+
+      WHEN 'assistant_turn' THEN
+        v_class := 'utterance';
+        v_kind := 'assistant_turn';
+        v_content := p ->> 'text';
+        v_search := v_content;
+        v_source := jsonb_build_object('type', 'transcript', 'line', p -> 'transcript_line', 'tools', p -> 'tools');
+
+      WHEN 'git_commit' THEN
+        v_class := 'artifact';
+        v_kind := 'commit';
+        v_content := p ->> 'message';
+        v_search := concat_ws(E'\n', format('%s %s', p ->> 'repo', left(p ->> 'sha', 12)), p ->> 'message',
+                              (SELECT string_agg(f.v, E'\n' ORDER BY f.n)
+                                 FROM jsonb_array_elements_text(p -> 'files') WITH ORDINALITY AS f(v, n)
+                                WHERE f.n <= 200));
+        v_source := jsonb_build_object('type', 'git', 'repo', p -> 'repo', 'sha', p -> 'sha', 'files', p -> 'files');
+        v_key := format('git:%s:%s', p ->> 'repo', p ->> 'sha');
+
+      WHEN 'ledger_decision' THEN
+        v_class := 'artifact';
+        v_kind := 'ledger_decision';
+        v_plan := p ->> 'plan';
+        v_content := p ->> 'ruling';
+        v_context := CASE WHEN (p ->> 'trigger') ~ '\S' THEN p ->> 'trigger' END;
+        v_search := concat_ws(E'\n',
+                              format('%s %s (class %s)', p ->> 'plan', p ->> 'id', p ->> 'class')
+                                || CASE WHEN (p ->> 'trigger') ~ '\S' THEN ': ' || (p ->> 'trigger') ELSE '' END,
+                              p ->> 'ruling',
+                              CASE WHEN (p ->> 'quote') ~ '\S' THEN format('MK: "%s"', p ->> 'quote') END);
+        v_version_of := format('ledger-decision:%s:%s', p ->> 'plan', p ->> 'id');
+        v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
+        v_source := jsonb_build_object('type', 'ledger', 'plan', p -> 'plan', 'decision_id', p -> 'id', 'class', p -> 'class',
+                                       'by', p -> 'by', 'quote', p -> 'quote', 'quote_source', p -> 'source');
+
+      WHEN 'ledger_ruling' THEN
+        v_class := 'artifact';
+        v_kind := 'ledger_ruling';
+        v_plan := p ->> 'plan';
+        v_content := p ->> 'ruling';
+        v_search := concat_ws(E'\n', format('%s %s/%s: %s', p ->> 'plan', p ->> 'phase', p ->> 'task', p ->> 'ruling'),
+                              CASE WHEN (p ->> 'why') ~ '\S' THEN 'Why: ' || (p ->> 'why') END);
+        v_source := jsonb_build_object('type', 'ledger', 'plan', p -> 'plan', 'phase', p -> 'phase', 'task', p -> 'task',
+                                       'why', p -> 'why');
+
+      WHEN 'register_entry' THEN
+        v_class := 'artifact';
+        v_kind := 'ruling_entry';
+        v_content := concat(p ->> 'id', v_dot, p ->> 'status', v_dot, p ->> 'subject', v_dot,
+                            'MK, ', p ->> 'said_at', ': "', p ->> 'quote', '"',
+                            CASE WHEN (p ->> 'question') ~ '\S' THEN v_dot || 'answering: "' || (p ->> 'question') || '"' END);
+        v_context := CASE WHEN (p ->> 'question') ~ '\S' THEN p ->> 'question' END;
+        v_search := concat_ws(E'\n', v_content,
+                              (SELECT string_agg(x.v, ', ' ORDER BY x.n)
+                                 FROM jsonb_array_elements_text(p -> 'applies_to') WITH ORDINALITY AS x(v, n)),
+                              (SELECT string_agg(x.v, ', ' ORDER BY x.n)
+                                 FROM jsonb_array_elements_text(p -> 'triggers') WITH ORDINALITY AS x(v, n)));
+        v_version_of := 'register:' || (p ->> 'id');
+        v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
+        v_source := jsonb_build_object('type', 'register', 'id', p -> 'id', 'status', p -> 'status', 'subject', p -> 'subject',
+                                       'scope', p -> 'scope', 'file', p -> 'file', 'said_at', p -> 'said_at',
+                                       'verified', p -> 'verified', 'applies_to', p -> 'applies_to', 'triggers', p -> 'triggers',
+                                       'supersedes', p -> 'supersedes', 'restated', p -> 'restated');
+
+      WHEN 'candidate_status' THEN
+        PERFORM 1 FROM public.memory_items i
+         WHERE i.id = (p ->> 'item_id')::uuid AND i.class = 'mk_statement';
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = 'engram_capture_materialize: candidate_status names no mk_statement';
+        END IF;
+        UPDATE public.memory_items m
+           SET register_status = p ->> 'status',
+               register_ref = CASE WHEN (p ->> 'status') = 'recorded' THEN p ->> 'register_id' END
+         WHERE m.id = (p ->> 'item_id')::uuid;
+
+      ELSE
+        -- briefing_shown, session_start, session_end, pre_compact: kept as
+        -- events only.
+        NULL;
+      END CASE;
+
+      IF v_class IS NOT NULL AND v_error IS NULL THEN
+        v_source := jsonb_build_object('event_id', e.id::text, 'session_id', e.session_id, 'event_uuid', e.event_uuid,
+                                       'event_key', v_key, 'version_of', v_version_of)
+                    || v_source;
+        v_source := (SELECT jsonb_object_agg(s.key, s.value)
+                       FROM jsonb_each(v_source) AS s(key, value)
+                      WHERE s.value <> 'null'::jsonb);
+        INSERT INTO public.memory_items AS m (
+          class, kind, speaker, trust, project_id, workspace_id, plan_slug, session_id,
+          content, search_text, context, occurred_at, source, lineage)
+        VALUES (v_class, v_kind,
+                CASE WHEN v_class = 'artifact' THEN 'artifact' WHEN v_kind = 'assistant_turn' THEN 'assistant' ELSE 'mk' END,
+                CASE WHEN v_class = 'artifact' THEN 1 WHEN v_kind = 'assistant_turn' THEN 3 ELSE 0 END,
+                e.project ->> 'id', e.project ->> 'workspace', v_plan, e.session_id,
+                v_content, v_search, v_context, e.occurred_at, v_source, v_lineage)
+        ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING
+        RETURNING m.id INTO v_new;
+      END IF;
+
+      IF v_new IS NOT NULL AND v_version_of IS NOT NULL THEN
+        SELECT i.id, i.occurred_at, i.restated_at INTO v_head
+          FROM public.memory_items i
+         WHERE (i.source ? 'version_of') AND (i.source ->> 'version_of') = v_version_of
+           AND i.class = v_class AND i.kind = v_kind
+           AND i.id <> v_new AND i.forgotten_at IS NULL AND i.superseded_by IS NULL
+         ORDER BY i.occurred_at DESC, i.created_at DESC, i.id DESC
+         LIMIT 1;
+        IF FOUND THEN
+          IF cardinality(v_head.restated_at) > 0 THEN
+            UPDATE public.memory_items m SET restated_at = v_head.restated_at WHERE m.id = v_new;
+          END IF;
+          IF e.occurred_at > v_head.occurred_at THEN
+            PERFORM public.engram_supersede_item(v_head.id, v_new);
+          ELSIF e.occurred_at < v_head.occurred_at THEN
+            PERFORM public.engram_supersede_item(v_new, v_head.id);
+          ELSE
+            RAISE EXCEPTION USING ERRCODE = 'check_violation',
+              MESSAGE = 'engram_capture_materialize: another version of this item has the same event time';
+          END IF;
+        END IF;
+
+        IF e.type = 'register_entry' THEN
+          IF (p ->> 'status') <> 'active' THEN
+            PERFORM * FROM public.engram_retire_items(ARRAY[v_new], 'register status: ' || (p ->> 'status'));
+          END IF;
+          FOR v_superseded IN SELECT s.v FROM jsonb_array_elements_text(p -> 'supersedes') AS s(v) LOOP
+            CONTINUE WHEN v_superseded = (p ->> 'id');
+            SELECT i.id, i.retired_at INTO v_head
+              FROM public.memory_items i
+             WHERE (i.source ? 'version_of') AND (i.source ->> 'version_of') = 'register:' || v_superseded
+               AND i.class = 'artifact' AND i.kind = 'ruling_entry'
+               AND i.forgotten_at IS NULL AND i.superseded_by IS NULL
+             ORDER BY i.occurred_at DESC, i.created_at DESC, i.id DESC
+             LIMIT 1;
+            IF FOUND AND v_head.retired_at IS NULL THEN
+              PERFORM * FROM public.engram_retire_items(ARRAY[v_head.id],
+                                                         format('superseded in the register by %s', p ->> 'id'));
+            END IF;
+          END LOOP;
+        END IF;
+      END IF;
+
+      SET CONSTRAINTS ALL IMMEDIATE;
+      UPDATE public.memory_capture_events c
+         SET processed_at = now(), error = v_error
+       WHERE c.id = v_id;
+      v_processed := v_processed + 1;
+      IF v_error IS NOT NULL THEN
+        v_skipped := v_skipped + 1;
+      END IF;
+    EXCEPTION
+      WHEN serialization_failure OR deadlock_detected OR lock_not_available THEN
+        RAISE;
+      WHEN OTHERS THEN
+        UPDATE public.memory_capture_events c
+           SET attempts = c.attempts + 1, error = left(SQLERRM, 500)
+         WHERE c.id = v_id
+        RETURNING c.attempts INTO v_attempts;
+        v_failed := v_failed + 1;
+        IF v_attempts < 3 THEN
+          v_blocked := v_blocked || e.session_id;
+        END IF;
+    END;
+  END LOOP;
+
+  SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)
+    INTO v_pending, v_dead
+    FROM public.memory_capture_events c
+   WHERE c.processed_at IS NULL;
+  RETURN jsonb_build_object('locked', true, 'processed', v_processed, 'failed', v_failed, 'skipped', v_skipped,
+                            'pending', v_pending, 'dead', v_dead);
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3506,6 +3870,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -3554,6 +3919,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -3592,6 +3958,7 @@ GRANT EXECUTE ON FUNCTION public.engram_invariant_counts() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_capture_materialize(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;

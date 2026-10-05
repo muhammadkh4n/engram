@@ -1,6 +1,14 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { ItemConstraintError } from '@engram-mem/core'
-import type { CaptureStore, IngestedEvent, ProjectRow, ScanRow, ScanTarget, StoredEvent } from '@engram-mem/core'
+import { ItemConstraintError, MATERIALIZE_LIMIT_MAX } from '@engram-mem/core'
+import type {
+  CaptureStore,
+  IngestedEvent,
+  MaterializeResult,
+  ProjectRow,
+  ScanRow,
+  ScanTarget,
+  StoredEvent,
+} from '@engram-mem/core'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
 const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
@@ -14,6 +22,8 @@ const SCAN_COLUMNS: Record<ScanTarget, string> = {
   memory_capture_events: 'id,payload,cwd,project,plan_dirs',
 }
 const SCAN_PAGE_MAX = 1000
+/** The counts a locked materialize call returns, each a non-negative integer. */
+const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead'] as const
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -94,6 +104,15 @@ export class PostgRestCaptureStore implements CaptureStore {
     })
   }
 
+  async materialize(limit: number): Promise<MaterializeResult> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MATERIALIZE_LIMIT_MAX) {
+      throw new Error(`materialize: limit must be an integer from 1 to ${MATERIALIZE_LIMIT_MAX}`)
+    }
+    const { data, error } = await this.client.rpc('engram_capture_materialize', { p_limit: limit })
+    if (error) throw toStoreError('materialize', error)
+    return toMaterializeResult(data)
+  }
+
   async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {
     const columns = SCAN_COLUMNS[target]
     if (columns === undefined) throw new Error(`scanPage: unknown target ${String(target)}`)
@@ -110,6 +129,18 @@ export class PostgRestCaptureStore implements CaptureStore {
       texts: target === 'memory_items' ? itemTexts(row) : eventTexts(row),
     }))
   }
+}
+
+function toMaterializeResult(data: unknown): MaterializeResult {
+  const unexpected = new Error('materialize failed: the RPC returned an unexpected result')
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) throw unexpected
+  const row = data as Record<string, unknown>
+  if (row.locked === false) return { locked: false }
+  if (row.locked !== true) throw unexpected
+  const counts = MATERIALIZE_COUNTS.map((name) => row[name])
+  if (!counts.every((n) => typeof n === 'number' && Number.isInteger(n) && n >= 0)) throw unexpected
+  const [processed, failed, skipped, pending, dead] = counts as [number, number, number, number, number]
+  return { locked: true, processed, failed, skipped, pending, dead }
 }
 
 function itemTexts(row: Record<string, unknown>): string[] {

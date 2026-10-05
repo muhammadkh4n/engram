@@ -2,7 +2,8 @@
  * PostgRestCaptureStore against a mock PostgREST client: syncProjects sends
  * the camelCase rows as snake_case objects to engram_sync_projects in order,
  * returns the row count, asks PostgREST for UTC, and turns a refusal into
- * ItemConstraintError without the error's `details`.
+ * ItemConstraintError without the error's `details`; materialize sends its
+ * limit to engram_capture_materialize and checks the result's shape.
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
@@ -204,5 +205,53 @@ describe('PostgRestCaptureStore.scanPage', () => {
     await expect(store.scanPage('memory_items', null, 0)).rejects.toThrow('limit must be an integer from 1 to 1000')
     await expect(store.scanPage('memory_items', null, 1001)).rejects.toThrow('limit must be an integer from 1 to 1000')
     expect(calls).toEqual([])
+  })
+})
+
+describe('PostgRestCaptureStore.materialize', () => {
+  it('calls engram_capture_materialize with p_limit and reads a call that lost the lock', async () => {
+    const { store, calls } = storeWith({ data: { locked: false }, error: null })
+    await expect(store.materialize(200)).resolves.toEqual({ locked: false })
+    expect(calls).toEqual([{ fn: 'engram_capture_materialize', args: { p_limit: 200 } }])
+  })
+
+  it('maps the counts of a call that held the lock', async () => {
+    const counts = { processed: 7, failed: 1, skipped: 2, pending: 40, dead: 3 }
+    const { store, calls } = storeWith({ data: { locked: true, ...counts }, error: null })
+    await expect(store.materialize(1000)).resolves.toEqual({ locked: true, ...counts })
+    expect(calls).toEqual([{ fn: 'engram_capture_materialize', args: { p_limit: 1000 } }])
+  })
+
+  it.each([
+    ['no result', null],
+    ['an array', [{ locked: false }]],
+    ['no lock flag', { processed: 0, failed: 0, skipped: 0, pending: 0, dead: 0 }],
+    ['a missing count', { locked: true, processed: 0, failed: 0, skipped: 0, pending: 0 }],
+    ['a negative count', { locked: true, processed: -1, failed: 0, skipped: 0, pending: 0, dead: 0 }],
+    ['a fractional count', { locked: true, processed: 1.5, failed: 0, skipped: 0, pending: 0, dead: 0 }],
+    ['a count as text', { locked: true, processed: '1', failed: 0, skipped: 0, pending: 0, dead: 0 }],
+  ])('refuses %s', async (_name, data) => {
+    const { store } = storeWith({ data, error: null })
+    await expect(store.materialize(10)).rejects.toThrow('materialize failed: the RPC returned an unexpected result')
+  })
+
+  it('refuses a limit outside 1 to 1000 without calling the RPC', async () => {
+    const { store, calls } = storeWith({ data: { locked: false }, error: null })
+    for (const limit of [0, 1001, 2.5, Number.NaN]) {
+      await expect(store.materialize(limit)).rejects.toThrow('materialize: limit must be an integer from 1 to 1000')
+    }
+    expect(calls).toEqual([])
+  })
+
+  it('reports a failure with its code and message only', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: { code: '22023', message: 'engram_capture_materialize: p_limit must be from 1 to 1000', details: SECRET_ROW, hint: null },
+    })
+    const err = await store.materialize(5).catch((e: unknown) => e)
+    expect((err as Error).message).toBe(
+      'materialize failed (22023): engram_capture_materialize: p_limit must be from 1 to 1000',
+    )
+    expect((err as Error).message).not.toContain('hunter-two')
   })
 })
