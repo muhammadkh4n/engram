@@ -1479,7 +1479,8 @@ ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_fa
 --   400 or 422) and keeps the provider's message, at most 500 characters. At
 --   5 attempts the item leaves the pending set (engram_items_pending_embedding),
 --   so one text the model can never take does not stop embedding for every
---   newer item; engram_items_embedding_failed_count reports how many left.
+--   newer item; engram_items_embedding_failed_count reports how many left,
+--   and engram_items_reset_embedding_failures returns them to the queue.
 -- - memory_items_version_of_check bounds source.version_of as
 --   memory_items_source_check bounds source.event_key: a non-blank string of
 --   at most 512 characters, so every idx_items_version_of key fits a btree
@@ -3758,6 +3759,70 @@ $$;
 
 
 --
+-- Name: engram_items_reset_embedding_failures(uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The recovery step for refusals that turn out not to be the items' own (a
+-- provider or proxy fault, a model change): clears embedding_attempts and
+-- embedding_error so the items are pending again. Given 1 to 256 ids, it
+-- resets each of those items that has a recorded failure; given NULL, every
+-- item engram_items_embedding_failed_count counts (5 attempts, no embedding,
+-- not forgotten). An empty array is refused, so a caller's empty id list
+-- never reads as "every item". Forgotten items are left as they are. Returns
+-- the rows reset. It takes the forget advisory key exclusively, then locks
+-- the rows FOR NO KEY UPDATE in id order, as engram_items_set_embeddings does.
+CREATE OR REPLACE FUNCTION public.engram_items_reset_embedding_failures(p_ids uuid[] DEFAULT NULL) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_reset integer;
+BEGIN
+  IF p_ids IS NOT NULL AND (cardinality(p_ids) < 1 OR cardinality(p_ids) > 256) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_items_reset_embedding_failures: p_ids holds %s ids, not 1 to 256; pass NULL to reset every failed item', cardinality(p_ids));
+  END IF;
+  IF p_ids IS NOT NULL AND array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_reset_embedding_failures: p_ids holds a null id';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  IF p_ids IS NULL THEN
+    PERFORM 1
+       FROM public.memory_items i
+      WHERE i.embedding IS NULL
+        AND i.forgotten_at IS NULL
+        AND i.embedding_attempts >= 5
+      ORDER BY i.id
+        FOR NO KEY UPDATE;
+    UPDATE public.memory_items m
+       SET embedding_attempts = 0,
+           embedding_error = NULL
+     WHERE m.embedding IS NULL
+       AND m.forgotten_at IS NULL
+       AND m.embedding_attempts >= 5;
+  ELSE
+    PERFORM 1
+       FROM public.memory_items i
+      WHERE i.id = ANY (p_ids)
+        AND i.forgotten_at IS NULL
+        AND (i.embedding_attempts > 0 OR i.embedding_error IS NOT NULL)
+      ORDER BY i.id
+        FOR NO KEY UPDATE;
+    UPDATE public.memory_items m
+       SET embedding_attempts = 0,
+           embedding_error = NULL
+     WHERE m.id = ANY (p_ids)
+       AND m.forgotten_at IS NULL
+       AND (m.embedding_attempts > 0 OR m.embedding_error IS NOT NULL);
+  END IF;
+  GET DIAGNOSTICS v_reset = ROW_COUNT;
+  RETURN v_reset;
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4161,6 +4226,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM P
 REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -4214,6 +4280,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -4257,6 +4324,7 @@ GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) TO serv
 GRANT EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;

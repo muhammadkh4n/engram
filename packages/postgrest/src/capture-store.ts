@@ -169,6 +169,24 @@ export class PostgRestCaptureStore implements CaptureStore {
     return count
   }
 
+  async resetEmbeddingFailures(ids?: readonly string[]): Promise<number> {
+    if (ids !== undefined && (ids.length < 1 || ids.length > EMBEDDING_BATCH_MAX)) {
+      throw new Error(
+        `resetEmbeddingFailures: ids must hold 1 to ${EMBEDDING_BATCH_MAX} ids; pass none to reset every failed item`,
+      )
+    }
+    const { data, error } = await this.client.rpc('engram_items_reset_embedding_failures', {
+      p_ids: ids === undefined ? null : [...ids],
+    })
+    if (error) throw toStoreError('resetEmbeddingFailures', error)
+    const reset = typeof data === 'string' ? Number(data) : data
+    const most = ids === undefined ? Number.MAX_SAFE_INTEGER : ids.length
+    if (typeof reset !== 'number' || !Number.isSafeInteger(reset) || reset < 0 || reset > most) {
+      throw new Error('resetEmbeddingFailures failed: the RPC returned no row count')
+    }
+    return reset
+  }
+
   async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {
     const columns = SCAN_COLUMNS[target]
     if (columns === undefined) throw new Error(`scanPage: unknown target ${String(target)}`)

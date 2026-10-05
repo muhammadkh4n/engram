@@ -2,10 +2,12 @@
  * startCaptureWorker and shutdown with a fake store, a fake embedder and fake
  * timers: a tick materializes and then embeds the pending batch only when it
  * held the lock; an embedding failure or a malformed vector leaves the items
- * pending, logs no stored text, and the next tick waits out a doubling
- * backoff; an item the provider refuses on its own (400, 422) is embedded
- * apart from the rest, counted, and leaves the pending set after its fifth
- * failure; a full batch runs the next tick at once; stop waits for a tick in
+ * pending, logs no stored text, and the next embedding pass waits out a
+ * doubling backoff while materialization keeps its interval; an item the
+ * provider refuses on its own (400, 422) is embedded apart from the rest,
+ * counted only in a pass where another item embedded, and leaves the pending
+ * set after its fifth such failure; a pass where every item is refused counts
+ * nothing; a full batch runs the next tick at once; stop waits for a tick in
  * flight up to its grace; shutdown resolves 0 after a clean stop or at the
  * grace, and 1 when a step throws.
  */
@@ -104,6 +106,38 @@ function fakes(over: {
   return { opts, calls, embedded, written, failures, logs }
 }
 
+/**
+ * A pending set kept like the item store keeps it: an item leaves once it has
+ * a vector or EMBEDDING_ATTEMPTS_MAX recorded failures; oldest first.
+ */
+function itemStore(initial: readonly PendingEmbedding[]) {
+  const items = [...initial]
+  const attempts = new Map<string, number>()
+  const embedded = new Set<string>()
+  const pending = (): PendingEmbedding[] =>
+    items.filter((p) => !embedded.has(p.id) && (attempts.get(p.id) ?? 0) < EMBEDDING_ATTEMPTS_MAX).slice(0, 32)
+  return {
+    attempts,
+    pending,
+    add: (item: PendingEmbedding): void => {
+      items.push(item)
+    },
+    record: (rows: readonly EmbeddingFailure[]): number => {
+      rows.forEach((r) => attempts.set(r.id, (attempts.get(r.id) ?? 0) + 1))
+      return rows.length
+    },
+    failedCount: (): number => [...attempts.values()].filter((n) => n >= EMBEDDING_ATTEMPTS_MAX).length,
+    /** Routes the fake store's writes into this pending set. */
+    wire: (f: Fakes): void => {
+      const realSet = f.opts.store.setEmbeddings
+      f.opts.store.setEmbeddings = async (rows) => {
+        rows.forEach((r) => embedded.add(r.id))
+        return realSet(rows)
+      }
+    },
+  }
+}
+
 const PENDING: PendingEmbedding[] = [
   { id: '00000000-0000-4000-8000-00000000c001', searchText: `${PRIVATE_TEXT} ${'x'.repeat(7000)}` },
   { id: '00000000-0000-4000-8000-00000000c002', searchText: 'a short commit line about the sample repo' },
@@ -162,7 +196,7 @@ describe('startCaptureWorker', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(f.written).toEqual([])
     expect(f.logs).toEqual([
-      `capture worker: embedding failed: rate_limit_exceeded: rate limited; next tick in ${2 * WORKER_INTERVAL_MS} ms`,
+      `capture worker: embedding failed: rate_limit_exceeded: rate limited; next embedding pass in ${2 * WORKER_INTERVAL_MS} ms`,
     ])
 
     await vi.advanceTimersByTimeAsync(2 * WORKER_INTERVAL_MS)
@@ -172,52 +206,110 @@ describe('startCaptureWorker', () => {
     expect(f.logs.join('\n')).not.toContain('plum-orchard')
   })
 
-  it('embeds the other 31 of a refused batch on that tick and drops the refused item after its fifth failure', async () => {
-    const items = Array.from({ length: 32 }, (_, i) => ({
+  it('embeds the other 31 of a refused batch on that tick and drops the refused item after five passes with company', async () => {
+    const items = Array.from({ length: 32 + 31 * 5 }, (_, i) => ({
       id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`,
-      searchText: i === 7 ? `${PRIVATE_TEXT} that the model refuses` : `sample item ${i}`,
+      searchText: i === 0 ? `${PRIVATE_TEXT} that the model refuses` : `sample item ${i}`,
     }))
-    const refused = items[7]!
-    const attempts = new Map<string, number>()
-    const vectors = new Set<string>()
+    const refused = items[0]!
+    const store = itemStore(items)
     const f = fakes({
-      pending: async () =>
-        items.filter((p) => !vectors.has(p.id) && (attempts.get(p.id) ?? 0) < EMBEDDING_ATTEMPTS_MAX).slice(0, 32),
+      pending: async () => store.pending(),
       embedBatch: async (texts) => {
         if (texts.includes(refused.searchText)) {
           throw new EmbeddingInputError(400, "400 Invalid 'input': the sample text cannot be embedded")
         }
         return texts.map(() => vector())
       },
-      record: async (rows) => {
-        rows.forEach((r) => attempts.set(r.id, (attempts.get(r.id) ?? 0) + 1))
-        return rows.length
-      },
-      failedCount: async () => [...attempts.values()].filter((n) => n >= EMBEDDING_ATTEMPTS_MAX).length,
+      record: async (rows) => store.record(rows),
+      failedCount: async () => store.failedCount(),
     })
-    const realSet = f.opts.store.setEmbeddings
-    f.opts.store.setEmbeddings = async (rows) => {
-      rows.forEach((r) => vectors.add(r.id))
-      return realSet(rows)
-    }
+    store.wire(f)
 
     const worker = startCaptureWorker(f.opts)
     await vi.advanceTimersByTimeAsync(0)
-    expect(f.written.flat().map((r) => r.id)).toEqual(items.filter((p) => p !== refused).map((p) => p.id))
-    expect(f.failures).toEqual([[{ id: refused.id, error: "400 Invalid 'input': the sample text cannot be embedded" }]])
-
-    for (let tick = 2; tick <= EMBEDDING_ATTEMPTS_MAX; tick++) {
-      await vi.advanceTimersByTimeAsync(WORKER_INTERVAL_MS)
-    }
-    expect(attempts.get(refused.id)).toBe(EMBEDDING_ATTEMPTS_MAX)
-    const embedCalls = f.calls.filter((c) => c === 'embedBatch').length
+    expect(f.written[0]!.map((r) => r.id)).toEqual(items.slice(1, 32).map((p) => p.id))
+    expect(f.failures[0]).toEqual([{ id: refused.id, error: "400 Invalid 'input': the sample text cannot be embedded" }])
 
     await vi.advanceTimersByTimeAsync(WORKER_INTERVAL_MS)
     await worker.stop(1000)
-    expect(f.calls.filter((c) => c === 'embedBatch')).toHaveLength(embedCalls)
+    expect(store.attempts.get(refused.id)).toBe(EMBEDDING_ATTEMPTS_MAX)
+    expect(f.failures).toHaveLength(EMBEDDING_ATTEMPTS_MAX)
+    expect(f.written.flat().map((r) => r.id)).toEqual(items.slice(1).map((p) => p.id))
+    expect(store.pending()).toEqual([])
     expect(f.logs[0]).toBe('capture worker: processed=0 failed=0 skipped=0 pending=0 dead=0 embedded=31 embed_failed=0')
-    expect(f.logs.at(-1)).toBe('capture worker: processed=0 failed=0 skipped=0 pending=0 dead=0 embedded=0 embed_failed=1')
+    expect(f.logs.at(-1)).toContain('embed_failed=1')
     expect(f.logs.join('\n')).not.toContain('plum-orchard')
+  })
+
+  it('counts no refusal against any item when the provider refuses every input, over 10 passes', async () => {
+    const store = itemStore(PENDING)
+    const f = fakes({
+      pending: async () => store.pending(),
+      embedBatch: async () => {
+        throw new EmbeddingInputError(400, '400 Invalid request: every input is refused\nsecond line')
+      },
+      record: async (rows) => store.record(rows),
+    })
+    store.wire(f)
+    const passes = (): number => f.calls.filter((c) => c.startsWith('pendingEmbeddings')).length
+
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    while (passes() < 10) await vi.advanceTimersByTimeAsync(WORKER_INTERVAL_MS)
+    await worker.stop(1000)
+
+    expect(f.calls).not.toContain('recordEmbeddingFailures')
+    expect(f.written).toEqual([])
+    expect(store.pending()).toEqual(PENDING)
+    expect(f.logs.filter((l) => l.startsWith('capture worker: embedding refused'))).toHaveLength(10)
+    expect(f.logs[0]).toBe('capture worker: embedding refused for every item: 400 Invalid request: every input is refused')
+    expect(f.logs.join('\n')).not.toContain('plum-orchard')
+  })
+
+  it('counts nothing against a lone refused item and retries it once it has company', async () => {
+    const lone = { id: '00000000-0000-4000-8000-00000000d001', searchText: 'a sample text the model refuses' }
+    const company = { id: '00000000-0000-4000-8000-00000000d002', searchText: 'a sample text the model takes' }
+    const store = itemStore([lone])
+    const f = fakes({
+      pending: async () => store.pending(),
+      embedBatch: async (texts) => {
+        if (texts.includes(lone.searchText)) throw new EmbeddingInputError(422, '422 Unprocessable input')
+        return texts.map(() => vector())
+      },
+      record: async (rows) => store.record(rows),
+    })
+    store.wire(f)
+
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.calls).not.toContain('recordEmbeddingFailures')
+    expect(f.logs).toEqual(['capture worker: embedding refused for every item: 422 Unprocessable input'])
+
+    store.add(company)
+    await vi.advanceTimersByTimeAsync(2 * WORKER_INTERVAL_MS)
+    await worker.stop(1000)
+    expect(f.written.flat().map((r) => r.id)).toEqual([company.id])
+    expect(f.failures).toEqual([[{ id: lone.id, error: '422 Unprocessable input' }]])
+  })
+
+  it('materializes on every tick while the embedder answers 429; only the embedding step waits out the backoff', async () => {
+    const f = fakes({
+      materialize: async () => counts({ processed: 1 }),
+      pending: async () => PENDING,
+      embedBatch: async () => {
+        throw Object.assign(new Error('429 Too Many Requests'), { status: 429 })
+      },
+    })
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    for (let tick = 1; tick <= 10; tick++) await vi.advanceTimersByTimeAsync(WORKER_INTERVAL_MS)
+    await worker.stop(1000)
+
+    expect(f.calls.filter((c) => c.startsWith('materialize'))).toHaveLength(11)
+    // Passes at 0, 2 and 6 intervals; the next waits until 14.
+    expect(f.calls.filter((c) => c === 'embedBatch')).toHaveLength(3)
+    expect(f.calls).not.toContain('recordEmbeddingFailures')
   })
 
   it('counts nothing for a 503 and waits out a backoff that doubles up to its ceiling', async () => {
@@ -234,7 +326,7 @@ describe('startCaptureWorker', () => {
 
     await vi.advanceTimersByTimeAsync(2 * WORKER_INTERVAL_MS - 1)
     expect(embedCalls()).toBe(1)
-    expect(f.calls.filter((c) => c.startsWith('materialize'))).toHaveLength(1)
+    expect(f.calls.filter((c) => c.startsWith('materialize'))).toHaveLength(2)
     await vi.advanceTimersByTimeAsync(1)
     expect(embedCalls()).toBe(2)
 
@@ -254,9 +346,9 @@ describe('startCaptureWorker', () => {
     expect(f.calls).not.toContain('recordEmbeddingFailures')
     expect(f.written).toEqual([])
     expect(f.logs[0]).toBe(
-      `capture worker: embedding failed: Error: 503 The server is overloaded; next tick in ${2 * WORKER_INTERVAL_MS} ms`,
+      `capture worker: embedding failed: Error: 503 The server is overloaded; next embedding pass in ${2 * WORKER_INTERVAL_MS} ms`,
     )
-    expect(f.logs.at(-1)).toContain(`next tick in ${WORKER_EMBED_BACKOFF_MAX_MS} ms`)
+    expect(f.logs.at(-1)).toContain(`next embedding pass in ${WORKER_EMBED_BACKOFF_MAX_MS} ms`)
   })
 
   it('writes the vectors it got when a transient error cuts the one-at-a-time pass, and backs off', async () => {
@@ -279,7 +371,7 @@ describe('startCaptureWorker', () => {
     expect(f.written.flat().map((r) => r.id)).toEqual([items[0]!.id])
     expect(f.failures).toEqual([[{ id: items[1]!.id, error: '400 Invalid input' }]])
     expect(f.logs).toEqual([
-      `capture worker: embedding failed: TimeoutError: Request timed out; next tick in ${2 * WORKER_INTERVAL_MS} ms`,
+      `capture worker: embedding failed: TimeoutError: Request timed out; next embedding pass in ${2 * WORKER_INTERVAL_MS} ms`,
       'capture worker: processed=0 failed=0 skipped=0 pending=0 dead=0 embedded=1 embed_failed=0',
     ])
   })
@@ -294,7 +386,7 @@ describe('startCaptureWorker', () => {
     await worker.stop(1000)
     expect(f.calls).not.toContain('setEmbeddings')
     expect(f.logs).toEqual([
-      `capture worker: embedding failed: Error: vector 1 has 1535 dimensions, not 1536; next tick in ${2 * WORKER_INTERVAL_MS} ms`,
+      `capture worker: embedding failed: Error: vector 1 has 1535 dimensions, not 1536; next embedding pass in ${2 * WORKER_INTERVAL_MS} ms`,
     ])
   })
 
@@ -308,7 +400,7 @@ describe('startCaptureWorker', () => {
     await worker.stop(1000)
     expect(f.calls).not.toContain('setEmbeddings')
     expect(f.logs).toEqual([
-      `capture worker: embedding failed: Error: vector 1 holds a non-finite value; next tick in ${2 * WORKER_INTERVAL_MS} ms`,
+      `capture worker: embedding failed: Error: vector 1 holds a non-finite value; next embedding pass in ${2 * WORKER_INTERVAL_MS} ms`,
     ])
   })
 

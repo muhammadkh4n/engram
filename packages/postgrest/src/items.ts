@@ -212,10 +212,6 @@ export class PostgRestItemStore implements ItemStore {
 }
 
 /**
- * The uuids of `ids`, refused before any request when there are more than
- * the RPC takes in one call. A malformed id cannot name a row and is dropped.
- */
-/**
  * PostgreSQL refuses U+0000 and unpaired surrogates in text and jsonb, and
  * the refusal fails the whole call; refusing here names the object and the
  * path (never the text) before anything is sent.
@@ -227,6 +223,10 @@ function refuseUnsafeText(operation: string, prefix: string, value: Record<strin
   }
 }
 
+/**
+ * The uuids of `ids`, refused before any request when there are more than
+ * the RPC takes in one call. A malformed id cannot name a row and is dropped.
+ */
 function idsForCall(operation: string, ids: readonly string[]): string[] {
   const pIds = onlyUuids(ids)
   if (pIds.length > MAX_IDS_PER_CALL) {

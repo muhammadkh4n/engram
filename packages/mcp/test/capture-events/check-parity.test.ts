@@ -92,7 +92,7 @@ const PARITY: Record<string, Parity> = {
   'memory_items.memory_items_embedding_attempts_check': {
     def: 'fc551540768d',
     unreachable:
-      'capture writes neither column; engram_items_record_embedding_failures raises the count while it is under 5 and cuts the error to 500 characters',
+      'capture writes neither column; engram_items_record_embedding_failures raises the count while it is under 5 and cuts the error to 500 characters; engram_items_reset_embedding_failures sets them back to 0 and NULL',
   },
   'memory_items.memory_items_embedding_check': {
     def: '74daedc51f0a',
