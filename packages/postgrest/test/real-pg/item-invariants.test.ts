@@ -649,6 +649,37 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       }
     }, TEST_TIMEOUT_MS)
 
+    it('commits one transaction that inserts an utterance, derives from it and forgets it, all forgotten', async () => {
+      const u = mkUtterance('Freeze the schema on Friday.')
+      const s = statement('Freeze the schema on Friday.', [u.id])
+      const o = observation('The schema freezes on Friday.', [s.id])
+
+      await pg.psql(inTransaction(insert(u), insert(s), insert(o), forgetSql(u.id, 'tst: forgotten before commit')))
+
+      expect(await column(u.id, 'forgotten_reason')).toBe('tst: forgotten before commit')
+      for (const below of [s, o]) {
+        expect(await column(below.id, 'forgotten_reason')).toBe(`lineage: ${u.id} forgotten`)
+      }
+    }, TEST_TIMEOUT_MS)
+
+    it('commits one transaction that supersedes an item and forgets either side', async () => {
+      const a = mkUtterance('Deploy from the tag.', { occurredAt: at(10) })
+      const b = mkUtterance('Deploy from the branch.', { occurredAt: at(20) })
+      const c = mkUtterance('Pin the base image.', { occurredAt: at(10) })
+      const d = mkUtterance('Pin the base image digest.', { occurredAt: at(20) })
+
+      await pg.psql(inTransaction(
+        insert(a), insert(b), insert(c), insert(d),
+        `UPDATE public.memory_items SET superseded_by = '${b.id}' WHERE id = '${a.id}';`,
+        `UPDATE public.memory_items SET superseded_by = '${d.id}' WHERE id = '${c.id}';`,
+        forgetSql(b.id, 'tst: successor forgotten before commit'),
+        forgetSql(c.id, 'tst: superseded item forgotten before commit'),
+      ))
+
+      expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || (forgotten_at IS NULL)`)).toBe('none|true')
+      expect(await column(c.id, `superseded_by::text || '|' || (forgotten_at IS NOT NULL)`)).toBe(`${d.id}|true`)
+    }, TEST_TIMEOUT_MS)
+
     it('forgetting the only successor restores the item it superseded', async () => {
       const a = mkUtterance('Release monthly.', { occurredAt: at(10) })
       const b = mkUtterance('Release weekly.', { occurredAt: at(20) })

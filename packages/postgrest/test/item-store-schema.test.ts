@@ -270,6 +270,28 @@ describe('memory_items triggers', () => {
     }
   })
 
+  it('defers only the lineage and supersession checks', () => {
+    const deferred = [...schema.matchAll(/^CREATE CONSTRAINT TRIGGER (\w+) [^;]*\bDEFERRABLE\b[^;]*;$/gm)].map((m) => m[1])
+    expect(deferred).toEqual(['memory_items_lineage', 'memory_items_supersession'])
+  })
+
+  // A deferred check runs at commit, after later statements of the same
+  // transaction may have forgotten the row or moved its pointer. It must judge
+  // the row as it stands then: re-read it by id before anything else, return
+  // when it is gone or forgotten, and read nothing else from the queued event.
+  it.each(['memory_items_lineage', 'memory_items_supersession'])(
+    '%s re-reads its row at commit and lets a forgotten row pass before any refusal',
+    (name) => {
+      const body = squash(functionDefinition(name))
+      const begin = body.indexOf(' BEGIN ')
+      const reread = body.slice(begin).match(
+        /^ BEGIN SELECT [^;]*\bi\.forgotten_at INTO v_item FROM public\.memory_items i WHERE i\.id = NEW\.id; IF NOT FOUND OR (?:[^;]*? OR )?v_item\.forgotten_at IS NOT NULL THEN RETURN NULL; END IF;/,
+      )
+      expect(reread).not.toBeNull()
+      expect([...body.matchAll(/\bNEW\.(\w+)/g)].map((m) => m[1])).toEqual(['id'])
+    },
+  )
+
   it('defines the trigger functions and triggers after the item store tables and before row security', () => {
     const lastTable = schema.indexOf('CREATE TABLE IF NOT EXISTS public.memory_secret_hits')
     const firstFunction = Math.min(...TRIGGER_NAMES.map((n) => schema.indexOf(`CREATE OR REPLACE FUNCTION public.${n}(`)))

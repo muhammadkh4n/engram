@@ -157,6 +157,20 @@ describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => 
     expect(await pg.psql('SELECT count(*) FROM public.memory_extraction_runs')).toBe('0')
   }, TEST_TIMEOUT_MS)
 
+  it('bounds an extraction run session_id to 1..256 characters, refused by name', async () => {
+    const insertRun = (length: number) => `INSERT INTO public.memory_extraction_runs (session_id, extractor_version, status)
+        VALUES (repeat('s', ${length}), 'tst-extractor-1', 'running');`
+    for (const length of [0, 257]) {
+      await expect(pg.psql(insertRun(length))).rejects.toThrow(
+        /violates check constraint "memory_extraction_runs_session_id_check"/,
+      )
+    }
+    expect(await pg.psql('SELECT count(*) FROM public.memory_extraction_runs')).toBe('0')
+    expect(
+      await pg.psql(`BEGIN; ${insertRun(256)} SELECT count(*) FROM public.memory_extraction_runs; ROLLBACK;`),
+    ).toBe('1')
+  }, TEST_TIMEOUT_MS)
+
   it('runs SQL under a role and refuses what that role may not do', async () => {
     const call = `SELECT public.engram_episode_kind('{"source": "git-commit"}'::jsonb, 'session-a')`
     expect(await pg.psqlAs('service_role', call)).toBe('commit')

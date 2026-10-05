@@ -1201,6 +1201,7 @@ CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
     status text NOT NULL,
     stats jsonb DEFAULT '{}'::jsonb NOT NULL,
     error text,
+    CONSTRAINT memory_extraction_runs_session_id_check CHECK (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256),
     CONSTRAINT memory_extraction_runs_extractor_version_check CHECK (extractor_version ~ '\S' AND char_length(extractor_version) <= 64),
     CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed'))
 );
@@ -2130,23 +2131,34 @@ END; $$;
 -- under the quote rule (engram_norm_quote), in an utterance spoken by MK among
 -- them: nothing is stored as MK's word unless MK said it. The lineage rows
 -- stay locked FOR SHARE until the transaction ends.
+-- Like every deferred check here, it judges the row as it stands at commit,
+-- re-read rather than taken from the insert event: a row forgotten earlier in
+-- the same transaction (the forget cascade reaches every row derived from a
+-- forgotten item) asserts nothing, so its lineage is not checked.
 CREATE OR REPLACE FUNCTION public.memory_items_lineage() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 DECLARE
+  v_item record;
   v_row record;
   v_found integer := 0;
   v_quote text;
   v_quoted boolean := false;
 BEGIN
-  IF NEW.class = 'mk_statement' THEN
-    v_quote := public.engram_norm_quote(NEW.content);
+  SELECT i.class, i.content, i.lineage, i.forgotten_at INTO v_item
+    FROM public.memory_items i
+   WHERE i.id = NEW.id;
+  IF NOT FOUND OR v_item.forgotten_at IS NOT NULL THEN
+    RETURN NULL;
+  END IF;
+  IF v_item.class = 'mk_statement' THEN
+    v_quote := public.engram_norm_quote(v_item.content);
   END IF;
   FOR v_row IN
     SELECT i.class, i.speaker, i.content, i.forgotten_at
       FROM public.memory_items i
-     WHERE i.id = ANY (NEW.lineage)
+     WHERE i.id = ANY (v_item.lineage)
        FOR SHARE
   LOOP
     v_found := v_found + 1;
@@ -2159,11 +2171,11 @@ BEGIN
       v_quoted := true;
     END IF;
   END LOOP;
-  IF v_found < (SELECT count(DISTINCT l.id) FROM unnest(NEW.lineage) AS l(id)) THEN
+  IF v_found < (SELECT count(DISTINCT l.id) FROM unnest(v_item.lineage) AS l(id)) THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('%s: lineage names an item that does not exist', TG_NAME);
   END IF;
-  IF NEW.class = 'mk_statement' AND NOT v_quoted THEN
+  IF v_item.class = 'mk_statement' AND NOT v_quoted THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('%s: the quote does not occur in an mk utterance of its lineage', TG_NAME);
   END IF;
@@ -2177,10 +2189,12 @@ END; $$;
 
 -- At commit, a live item's superseded_by must name an item of the same class
 -- that is not forgotten and occurred strictly later; strictly later event
--- times along a chain also rule out a cycle. The row's current pointer is
--- checked rather than the one this event saw, because the forget cascade may
--- have moved it since. A forgotten item keeps the pointer it had when it was
--- forgotten. The target row stays locked FOR SHARE until the transaction ends.
+-- times along a chain also rule out a cycle. Like every deferred check here,
+-- it judges the row as it stands at commit, re-read rather than taken from
+-- the event: the forget cascade may have moved the pointer since, and a row
+-- forgotten in the same transaction asserts nothing (it keeps the pointer it
+-- had when it was forgotten). The target row stays locked FOR SHARE until the
+-- transaction ends.
 CREATE OR REPLACE FUNCTION public.memory_items_supersession() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
