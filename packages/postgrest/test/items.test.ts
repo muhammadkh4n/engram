@@ -460,6 +460,80 @@ describe('PostgRestItemStore write RPCs', () => {
   })
 })
 
+describe('PostgRestItemStore retries of a rolled-back forget or supersede', () => {
+  function pgError(code: string, message: string): PgError {
+    return { code, message, details: null, hint: null }
+  }
+
+  /** Answers each call with the next result in order. */
+  function sequence(...results: Result[]): () => Result {
+    let call = 0
+    return () => results[Math.min(call++, results.length - 1)]!
+  }
+
+  it('retries a forget that hit a deadlock once and returns its effects', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('40P01', 'deadlock detected') },
+        { data: [{ item_id: ID_A, effect: 'forgotten', via: null }], error: null },
+      ),
+    })
+
+    const effects = await storeWith(client).forgetItems([ID_A], 'said by mistake')
+
+    expect(effects).toEqual([{ itemId: ID_A, effect: 'forgotten', via: null }])
+    expect(rpcCalls).toEqual([
+      { fn: 'engram_forget_items', args: { p_ids: [ID_A], p_reason: 'said by mistake' } },
+      { fn: 'engram_forget_items', args: { p_ids: [ID_A], p_reason: 'said by mistake' } },
+    ])
+  })
+
+  it('retries a supersede that hit a serialization failure and returns its answer', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('40001', 'could not serialize access due to concurrent update') },
+        { data: true, error: null },
+      ),
+    })
+
+    await expect(storeWith(client).supersedeItem(ID_A, ID_B)).resolves.toBe(true)
+    expect(rpcCalls).toHaveLength(2)
+  })
+
+  it('stops after three attempts and surfaces the last error', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('40P01', 'deadlock detected (first)') },
+        { data: null, error: pgError('40001', 'could not serialize access (second)') },
+        { data: null, error: pgError('40P01', 'deadlock detected (third)') },
+        { data: [], error: null },
+      ),
+    })
+
+    await expect(storeWith(client).forgetItems([ID_A], 'said by mistake')).rejects.toThrow(
+      'forgetItems failed (40P01): deadlock detected (third)',
+    )
+    expect(rpcCalls).toHaveLength(3)
+  })
+
+  it('does not retry a refused rule, or the other write RPCs', async () => {
+    const refused = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('23514', 'engram_supersede_item: p_new did not occur later than p_old') },
+        { data: true, error: null },
+      ),
+    })
+    await expect(storeWith(refused.client).supersedeItem(ID_A, ID_B)).rejects.toSatisfy(isItemConstraintError)
+    expect(refused.rpcCalls).toHaveLength(1)
+
+    const retire = mockClient({
+      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: [ID_A], error: null }),
+    })
+    await expect(storeWith(retire.client).retireItems([ID_A], 'stale')).rejects.toThrow('retireItems failed (40P01)')
+    expect(retire.rpcCalls).toHaveLength(1)
+  })
+})
+
 describe('PostgRestItemStore error mapping', () => {
   async function refusal(error: PgError): Promise<Error> {
     const { client } = mockClient({ rpc: { data: null, error } })

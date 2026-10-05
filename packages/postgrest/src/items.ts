@@ -27,6 +27,12 @@ const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
 const VIOLATED_CONSTRAINT = /violates [a-z -]*constraint "([^"]+)"/
 /** Triggers and RPCs raise `<trigger or function name>: <reason>`. */
 const NAME_PREFIX = /^([a-z_][a-z0-9_]*):/
+/**
+ * Deadlock (40P01) and serialization failure (40001): PostgreSQL rolled the
+ * whole call back, so a call that is safe to repeat may simply run again.
+ */
+const RETRYABLE_CODES = new Set(['40P01', '40001'])
+const MAX_ATTEMPTS = 3
 
 export interface PostgRestItemStoreOptions {
   url: string
@@ -36,6 +42,11 @@ export interface PostgRestItemStoreOptions {
 interface PgError {
   code?: string
   message?: string
+}
+
+interface RpcResult {
+  data: unknown
+  error: PgError | null
 }
 
 interface InsertRow {
@@ -129,7 +140,7 @@ export class PostgRestItemStore implements ItemStore {
   async forgetItems(ids: readonly string[], reason: string): Promise<ForgetEffect[]> {
     const pIds = onlyUuids(ids)
     if (pIds.length === 0) return []
-    const { data, error } = await this.client.rpc('engram_forget_items', { p_ids: pIds, p_reason: reason })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_forget_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('forgetItems', error)
     return ((data ?? []) as ForgetRow[]).map((row) => ({ itemId: row.item_id, effect: row.effect, via: row.via }))
   }
@@ -151,9 +162,24 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   async supersedeItem(oldId: string, newId: string): Promise<boolean> {
-    const { data, error } = await this.client.rpc('engram_supersede_item', { p_old: oldId, p_new: newId })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_supersede_item', { p_old: oldId, p_new: newId })
     if (error) throw toStoreError('supersedeItem', error)
     return data === true
+  }
+
+  /**
+   * Runs an RPC that is idempotent (forget acts on live items only, supersede
+   * returns false once done) up to MAX_ATTEMPTS times while PostgreSQL rolls
+   * it back as a deadlock victim or a serialization failure, and returns the
+   * last result. Any other error, or success, returns at once.
+   */
+  private async rpcRetryingRollbacks(fn: string, args: Record<string, unknown>): Promise<RpcResult> {
+    let result: RpcResult = { data: null, error: null }
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      result = await this.client.rpc(fn, args)
+      if (!result.error || !RETRYABLE_CODES.has(result.error.code ?? '')) return result
+    }
+    return result
   }
 
   async invariantCounts(): Promise<InvariantCounts> {

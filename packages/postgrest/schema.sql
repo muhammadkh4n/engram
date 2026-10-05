@@ -1989,16 +1989,32 @@ END; $$;
 -- its source, lineage and extraction run. A changed fact is a new item that
 -- supersedes the old one. Forgetting is permanent: forgotten_at is never
 -- cleared, and once it is set neither it nor forgotten_reason changes. The
--- embedding, supersession, restatement, retirement, register, scope and
--- subject columns stay writable. valid_to is derived again from superseded_by
--- whenever either is in the change, so a sent valid_to is ignored and the two
--- never diverge.
+-- embedding, restatement, register, scope and subject columns stay writable.
+-- The lifecycle columns follow the same rules for a direct write as for the
+-- RPCs, because service_role may UPDATE the table:
+-- - superseded_by goes from NULL to an item only when that item exists, is
+--   not forgotten, has the same class and occurred strictly later (pointing
+--   at itself is left to memory_items_supersession_check).
+-- - superseded_by moves from one item to another, or back to NULL, only when
+--   the item it named is forgotten and the change comes from inside a trigger:
+--   the forget cascade handing the supersession to the next live successor.
+--   No other trigger updates memory_items, and a PostgREST client cannot add
+--   one, so pg_trigger_depth() > 1 identifies the cascade; a session setting
+--   could be set by any SQL client.
+-- - a forgotten item's superseded_by, retired_at and retired_reason never
+--   change again, and superseded_by does not change in the UPDATE that
+--   forgets an item.
+-- memory_items_supersession still re-checks the target at commit, which
+-- catches a target forgotten by another transaction after this check.
+-- valid_to is derived again from superseded_by whenever either is in the
+-- change, so a sent valid_to is ignored and the two never diverge.
 CREATE OR REPLACE FUNCTION public.memory_items_before_update() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 DECLARE
   v_changed text[];
+  v_target record;
 BEGIN
   v_changed := array_remove(ARRAY[
     CASE WHEN NEW.id IS DISTINCT FROM OLD.id THEN 'id' END,
@@ -2029,6 +2045,44 @@ BEGIN
      AND (NEW.forgotten_at IS DISTINCT FROM OLD.forgotten_at OR NEW.forgotten_reason IS DISTINCT FROM OLD.forgotten_reason) THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('%s: forgotten_at and forgotten_reason are set once', TG_NAME);
+  END IF;
+  IF OLD.forgotten_at IS NOT NULL
+     AND (NEW.superseded_by IS DISTINCT FROM OLD.superseded_by
+          OR NEW.retired_at IS DISTINCT FROM OLD.retired_at
+          OR NEW.retired_reason IS DISTINCT FROM OLD.retired_reason) THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('%s: a forgotten item keeps its superseded_by, retired_at and retired_reason', TG_NAME);
+  END IF;
+  IF NEW.superseded_by IS DISTINCT FROM OLD.superseded_by THEN
+    IF NEW.forgotten_at IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('%s: superseded_by cannot change on an item being forgotten', TG_NAME);
+    END IF;
+    IF OLD.superseded_by IS NOT NULL
+       AND (pg_trigger_depth() < 2
+            OR NOT EXISTS (SELECT 1 FROM public.memory_items s
+                            WHERE s.id = OLD.superseded_by AND s.forgotten_at IS NOT NULL)) THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('%s: superseded_by is replaced or cleared only by the forget cascade', TG_NAME);
+    END IF;
+    IF NEW.superseded_by IS NOT NULL AND NEW.superseded_by <> NEW.id THEN
+      SELECT t.class, t.occurred_at, t.forgotten_at INTO v_target
+        FROM public.memory_items t
+       WHERE t.id = NEW.superseded_by;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('%s: superseded_by names an item that does not exist', TG_NAME);
+      ELSIF v_target.class <> NEW.class THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('%s: superseded_by names an item of another class', TG_NAME);
+      ELSIF v_target.forgotten_at IS NOT NULL THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('%s: superseded_by names a forgotten item', TG_NAME);
+      ELSIF v_target.occurred_at <= NEW.occurred_at THEN
+        RAISE EXCEPTION USING ERRCODE = 'check_violation',
+          MESSAGE = format('%s: superseded_by names an item that did not occur later', TG_NAME);
+      END IF;
+    END IF;
   END IF;
   IF NEW.superseded_by IS DISTINCT FROM OLD.superseded_by OR NEW.valid_to IS DISTINCT FROM OLD.valid_to THEN
     NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);
@@ -2462,6 +2516,12 @@ END; $$;
 -- the listed ids in p_ids order, then (item_id, 'forgotten', listed id) for
 -- the descendants, then (item_id, 'repointed' | 'restored', the forgotten
 -- successor) ordered by item_id.
+-- Forgets run one at a time: each takes the exclusive transaction-level
+-- advisory lock 7308892986227385959 (the ASCII bytes of "engramfg") before
+-- it locks any row. Two forgets over overlapping closures would otherwise
+-- lock each other's rows in passes with no common order and deadlock.
+-- engram_supersede_item holds the same key shared, so it waits for a forget
+-- instead of deadlocking with it, and supersedes still run side by side.
 CREATE OR REPLACE FUNCTION public.engram_forget_items(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2484,6 +2544,8 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_forget_items: p_reason must be non-blank and at most 2000 characters';
   END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
 
   v_locked := ARRAY(
     SELECT m.id
@@ -2639,6 +2701,9 @@ END; $$;
 -- invalid argument (22023); a broken rule is refused (23514). Returns false
 -- when p_old is already superseded by p_new; otherwise sets superseded_by, and
 -- memory_items_before_update ends p_old's validity at p_new's event time.
+-- Before locking a row it takes the forget advisory key
+-- (7308892986227385959) shared: a running forget finishes first, so the two
+-- never hold each other's rows, while supersedes do not block each other.
 CREATE OR REPLACE FUNCTION public.engram_supersede_item(p_old uuid, p_new uuid) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2656,6 +2721,7 @@ BEGIN
       MESSAGE = 'engram_supersede_item: an item cannot supersede itself';
   END IF;
 
+  PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
   PERFORM 1 FROM public.memory_items i WHERE i.id IN (p_old, p_new) ORDER BY i.id FOR UPDATE;
 
   SELECT i.class, i.occurred_at, i.superseded_by, i.forgotten_at INTO v_old

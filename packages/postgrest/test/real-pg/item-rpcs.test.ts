@@ -589,6 +589,90 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       })
     }, TEST_TIMEOUT_MS)
 
+    it('lets two concurrent forgets over overlapping closures both succeed', async () => {
+      // Ids rise in creation order: a < b < blocker < x < y. The first call lists a and y (a child of b) and
+      // the second lists b and x (a child of a), so each closure holds a root the other call locks first.
+      const a = artifact('feat: the exporter', 0)
+      const b = artifact('feat: the scheduler', 10)
+      const blocker = observation('The exporter writes Parquet.', [a.id])
+      const x = observation('The exporter runs on the scheduler.', [a.id])
+      const y = observation('The scheduler triggers the exporter.', [b.id])
+      await insertItems([a, b, blocker, x, y])
+      const holder = await pg.session()
+      const first = await pg.session()
+      const second = await pg.session()
+      try {
+        await first.run('SET ROLE service_role;')
+        await second.run('SET ROLE service_role;')
+        const firstPid = await first.run('SELECT pg_backend_pid();')
+        const secondPid = await second.run('SELECT pg_backend_pid();')
+        // Holding the blocker stops the first call after it has locked a and y, before it reaches x.
+        await holder.run('BEGIN;')
+        await holder.run(`SELECT 1 FROM public.memory_items WHERE id = '${blocker.id}' FOR UPDATE;`)
+        const firstForget = first.run(forgetQuery([a.id, y.id], 'the exporter was dropped'))
+        await waitUntilLockWait(pg, firstPid)
+        const secondForget = second.run(forgetQuery([b.id, x.id], 'the scheduler was dropped'))
+        await waitUntilLockWait(pg, secondPid)
+        await holder.run('COMMIT;')
+        const [firstEffects, secondEffects] = await Promise.all([firstForget, secondForget])
+        expect(JSON.parse(firstEffects) as Effect[]).toEqual([
+          { itemId: a.id, effect: 'forgotten', via: null },
+          { itemId: y.id, effect: 'forgotten', via: null },
+          { itemId: blocker.id, effect: 'forgotten', via: a.id },
+          { itemId: x.id, effect: 'forgotten', via: a.id },
+        ])
+        expect(JSON.parse(secondEffects) as Effect[]).toEqual([{ itemId: b.id, effect: 'forgotten', via: null }])
+      } finally {
+        await holder.close()
+        await first.close()
+        await second.close()
+      }
+      expect(await rowCount([a.id, b.id, blocker.id, x.id, y.id])).toBe(5)
+      expect(
+        Number(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = ANY (${uuidArray([a.id, b.id, blocker.id, x.id, y.id])}) AND forgotten_at IS NOT NULL`)),
+      ).toBe(5)
+    }, TEST_TIMEOUT_MS)
+
+    it('makes a supersede wait for a concurrent forget instead of deadlocking with it', async () => {
+      // Ids in the order blocker < derived < root: the forget locks root first and derived later, while the
+      // supersede locks its two rows in id order, derived before root.
+      const [blockerId, derivedId, rootId] = [newId(), newId(), newId()]
+      const root = observation('The cache holds a day of results.', [], { id: rootId, occurred_at: at(0) })
+      const blocker = observation('The cache is warmed at boot.', [rootId], { id: blockerId, occurred_at: at(5) })
+      const derived = observation('The cache holds an hour of results.', [rootId], { id: derivedId, occurred_at: at(10) })
+      await insertItems([root, blocker, derived])
+      const holder = await pg.session()
+      const forgetter = await pg.session()
+      const superseder = await pg.session()
+      try {
+        await forgetter.run('SET ROLE service_role;')
+        await superseder.run('SET ROLE service_role;')
+        await superseder.run('\\set VERBOSITY verbose')
+        const forgetterPid = await forgetter.run('SELECT pg_backend_pid();')
+        const supersederPid = await superseder.run('SELECT pg_backend_pid();')
+        await holder.run('BEGIN;')
+        await holder.run(`SELECT 1 FROM public.memory_items WHERE id = '${blocker.id}' FOR UPDATE;`)
+        const forgetting = forgetter.run(forgetQuery([root.id], 'the cache was removed'))
+        await waitUntilLockWait(pg, forgetterPid)
+        const superseding = superseder.run(`SELECT public.engram_supersede_item('${root.id}', '${derived.id}');`).then(
+          () => 'the supersede succeeded',
+          (error: Error) => error.message,
+        )
+        await waitUntilLockWait(pg, supersederPid)
+        await holder.run('COMMIT;')
+        expect(JSON.parse(await forgetting) as Effect[]).toEqual([
+          { itemId: root.id, effect: 'forgotten', via: null },
+          { itemId: blocker.id, effect: 'forgotten', via: root.id },
+          { itemId: derived.id, effect: 'forgotten', via: root.id },
+        ])
+        expect(await superseding).toMatch(/ERROR:\s+23514: engram_supersede_item: a forgotten item neither supersedes nor is superseded/)
+      } finally {
+        await holder.close()
+        await forgetter.close()
+        await superseder.close()
+      }
+    }, TEST_TIMEOUT_MS)
+
     it('returns no row for an unknown or an already forgotten id', async () => {
       const a = artifact('chore: tidy', 0)
       await insertItems([a])
@@ -699,8 +783,14 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         ends_at_b: true,
       })
 
-      await asService(`UPDATE public.memory_items SET superseded_by = NULL WHERE id = '${a.id}';`)
-      expect(await row(a.id, 'superseded_by, valid_to')).toEqual({ superseded_by: null, valid_to: null })
+      // Clearing a live successor is the forget cascade's alone, so valid_to keeps following b.
+      expect(await refusal(`UPDATE public.memory_items SET superseded_by = NULL WHERE id = '${a.id}';`)).toMatch(
+        /ERROR:\s+23514: memory_items_before_update: superseded_by is replaced or cleared only by the forget cascade/,
+      )
+      expect(await row(a.id, `superseded_by, valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({
+        superseded_by: b.id,
+        ends_at_b: true,
+      })
     }, TEST_TIMEOUT_MS)
 
     it.each([

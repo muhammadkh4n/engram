@@ -355,7 +355,7 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         const old = mkUtterance('Use the staging bucket.', { occurredAt: at(10) })
         const other = artifact('chore: move to the staging bucket', { occurredAt: at(20) })
         await commit(old, other)
-        await expectPointerRefused(old, other.id, /memory_items_supersession: superseded_by names an item of another class/)
+        await expectPointerRefused(old, other.id, /memory_items_before_update: superseded_by names an item of another class/)
       }, TEST_TIMEOUT_MS)
 
       it('to itself', async () => {
@@ -369,22 +369,21 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         const gone = mkUtterance('Deploy from the server.', { occurredAt: at(20) })
         await commit(old, gone)
         await pg.psql(forgetSql(gone.id, 'tst: forgotten by hand'))
-        await expectPointerRefused(old, gone.id, /memory_items_supersession: superseded_by names a forgotten item/)
+        await expectPointerRefused(old, gone.id, /memory_items_before_update: superseded_by names a forgotten item/)
       }, TEST_TIMEOUT_MS)
 
       it('to an item with an equal event time', async () => {
         const old = mkUtterance('Run the suite nightly.', { occurredAt: at(10) })
         const same = mkUtterance('Run the suite hourly.', { occurredAt: at(10) })
         await commit(old, same)
-        await expectPointerRefused(old, same.id, /memory_items_supersession: superseded_by names an item that did not occur later/)
+        await expectPointerRefused(old, same.id, /memory_items_before_update: superseded_by names an item that did not occur later/)
       }, TEST_TIMEOUT_MS)
 
       it('to an item with an earlier event time', async () => {
         const old = mkUtterance('Pin the toolchain.', { occurredAt: at(10) })
         const earlier = mkUtterance('Float the toolchain.', { occurredAt: at(5) })
         await commit(old, earlier)
-        // valid_to is derived as the earlier target's occurred_at, so the row CHECK refuses it before commit.
-        await expectPointerRefused(old, earlier.id, /violates check constraint "memory_items_supersession_check"/)
+        await expectPointerRefused(old, earlier.id, /memory_items_before_update: superseded_by names an item that did not occur later/)
       }, TEST_TIMEOUT_MS)
     })
 
@@ -713,6 +712,123 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         await second.close()
       }
       expect(await column(a.id, `coalesce(superseded_by::text, 'none')`)).toBe('none')
+    }, TEST_TIMEOUT_MS)
+  })
+
+  describe('the item lifecycle under a direct service_role UPDATE', () => {
+    const asService = (sql: string) => pg.psqlAs('service_role', sql)
+
+    async function expectServiceRefusal(sql: string, reason: RegExp): Promise<void> {
+      let message: string | undefined
+      try {
+        await asService(`\\set VERBOSITY verbose\n${sql}`)
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message, 'the write was accepted').toBeDefined()
+      expect(message).toMatch(/ERROR:\s+23514: /)
+      expect(message).toMatch(reason)
+    }
+
+    function pointSql(id: string, target: string | null): string {
+      return `UPDATE public.memory_items SET superseded_by = ${target === null ? 'NULL' : `'${target}'`} WHERE id = '${id}';`
+    }
+
+    const REPLACED_OUTSIDE_CASCADE = /memory_items_before_update: superseded_by is replaced or cleared only by the forget cascade/
+    const FORGOTTEN_LIFECYCLE = /memory_items_before_update: a forgotten item keeps its superseded_by, retired_at and retired_reason/
+
+    it('points a live item at a live, later successor of its class', async () => {
+      const a = artifact('build: cache off', { occurredAt: at(10) })
+      const b = artifact('build: cache on', { occurredAt: at(20) })
+      await commit(a, b)
+      await asService(pointSql(a.id, b.id))
+      expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${b.occurredAt}')`)).toBe(`${b.id}|true`)
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses re-pointing a superseded item to another successor', async () => {
+      const a = artifact('ops: one replica', { occurredAt: at(10) })
+      const b = artifact('ops: two replicas', { occurredAt: at(20) })
+      const c = artifact('ops: three replicas', { occurredAt: at(30) })
+      await commit(a, b, c)
+      await asService(pointSql(a.id, b.id))
+      await expectServiceRefusal(pointSql(a.id, c.id), REPLACED_OUTSIDE_CASCADE)
+      expect(await column(a.id, 'superseded_by')).toBe(b.id)
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses clearing superseded_by on a superseded item', async () => {
+      const a = artifact('ops: nightly backup', { occurredAt: at(10) })
+      const b = artifact('ops: hourly backup', { occurredAt: at(20) })
+      await commit(a, b)
+      await asService(pointSql(a.id, b.id))
+      await expectServiceRefusal(pointSql(a.id, null), REPLACED_OUTSIDE_CASCADE)
+      expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${b.occurredAt}')`)).toBe(`${b.id}|true`)
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses changing superseded_by on a forgotten item', async () => {
+      const a = artifact('docs: old runbook', { occurredAt: at(10) })
+      const b = artifact('docs: new runbook', { occurredAt: at(20) })
+      const c = artifact('docs: newest runbook', { occurredAt: at(30) })
+      const d = artifact('docs: lone runbook', { occurredAt: at(10) })
+      await commit(a, b, c, d)
+      await asService(pointSql(a.id, b.id))
+      await asService(forgetSql(a.id, 'tst: forgotten while superseded'))
+      await asService(forgetSql(d.id, 'tst: forgotten while current'))
+      await expectServiceRefusal(pointSql(a.id, c.id), FORGOTTEN_LIFECYCLE)
+      await expectServiceRefusal(pointSql(a.id, null), FORGOTTEN_LIFECYCLE)
+      await expectServiceRefusal(pointSql(d.id, c.id), FORGOTTEN_LIFECYCLE)
+      expect(await column(a.id, 'superseded_by')).toBe(b.id)
+      expect(await column(d.id, `coalesce(superseded_by::text, 'none')`)).toBe('none')
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses changing retired_at or retired_reason on a forgotten item', async () => {
+      const retired = artifact('chore: retired then forgotten', { occurredAt: at(10) })
+      const live = artifact('chore: forgotten while live', { occurredAt: at(10) })
+      await commit(retired, live)
+      await asService(`UPDATE public.memory_items SET retired_at = '2026-02-01T00:00:00Z', retired_reason = 'tst: stale' WHERE id = '${retired.id}';`)
+      await asService(forgetSql(retired.id, 'tst: forgotten after retiring'))
+      await asService(forgetSql(live.id, 'tst: forgotten unretired'))
+      await expectServiceRefusal(
+        `UPDATE public.memory_items SET retired_at = NULL, retired_reason = NULL WHERE id = '${retired.id}';`,
+        FORGOTTEN_LIFECYCLE,
+      )
+      await expectServiceRefusal(
+        `UPDATE public.memory_items SET retired_reason = 'tst: restated' WHERE id = '${retired.id}';`,
+        FORGOTTEN_LIFECYCLE,
+      )
+      await expectServiceRefusal(
+        `UPDATE public.memory_items SET retired_at = '2026-03-01T00:00:00Z', retired_reason = 'tst: late' WHERE id = '${live.id}';`,
+        FORGOTTEN_LIFECYCLE,
+      )
+      expect(await column(retired.id, `retired_reason`)).toBe('tst: stale')
+      expect(await column(live.id, `retired_at IS NULL`)).toBe('t')
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses setting superseded_by in the UPDATE that forgets the item', async () => {
+      const a = artifact('ci: one runner', { occurredAt: at(10) })
+      const b = artifact('ci: two runners', { occurredAt: at(20) })
+      await commit(a, b)
+      await expectServiceRefusal(
+        `UPDATE public.memory_items SET superseded_by = '${b.id}', forgotten_at = '2026-02-01T00:00:00Z', forgotten_reason = 'tst: both at once' WHERE id = '${a.id}';`,
+        /memory_items_before_update: superseded_by cannot change on an item being forgotten/,
+      )
+      expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || (forgotten_at IS NULL)`)).toBe('none|true')
+    }, TEST_TIMEOUT_MS)
+
+    it('still lets the forget cascade re-point past a forgotten successor and then restore', async () => {
+      const a = artifact('deps: lockfile v1', { occurredAt: at(10) })
+      const b = artifact('deps: lockfile v2', { occurredAt: at(20) })
+      const c = artifact('deps: lockfile v3', { occurredAt: at(30) })
+      await commit(a, b, c)
+      await asService(pointSql(a.id, b.id))
+      await asService(pointSql(b.id, c.id))
+
+      await asService(forgetSql(b.id, 'tst: v2 was never released'))
+      expect(await column(a.id, `superseded_by::text || '|' || (valid_to = '${c.occurredAt}')`)).toBe(`${c.id}|true`)
+
+      await asService(forgetSql(c.id, 'tst: v3 was reverted'))
+      expect(await column(a.id, `coalesce(superseded_by::text, 'none') || '|' || coalesce(valid_to::text, 'none')`)).toBe(
+        'none|none',
+      )
     }, TEST_TIMEOUT_MS)
   })
 
