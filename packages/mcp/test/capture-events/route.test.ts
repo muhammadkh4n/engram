@@ -359,3 +359,82 @@ describe('runCaptureEventsRequest — every accepted event can be stored', () =>
     expect(call).toBe(3)
   })
 })
+
+describe('runCaptureEventsRequest — one boundary per event', () => {
+  const DEPTH_REASON = /^\[0\](\[0\]){63}: nested deeper than 64 levels$/
+
+  it('rejects a 200 KB event of 100,000 nested arrays for its depth and stores the two valid events beside it', async () => {
+    const deep = '['.repeat(100_000) + ']'.repeat(100_000)
+    const first = JSON.stringify(validEvent('assistant_turn', 1))
+    const last = JSON.stringify(validEvent('assistant_turn', 2))
+    const body: unknown = JSON.parse(
+      `{"client":{"name":"sample-client","version":"1.0.0"},"events":[${first},${deep},${last}]}`,
+    )
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, body)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 2, duplicates: 0 })
+    const rejected = (res.body as { rejected: Array<{ index: number; reason: string }> }).rejected
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]).toMatchObject({ index: 1, session_id: null, event_uuid: null })
+    expect(rejected[0]!.reason).toMatch(DEPTH_REASON)
+    expect(h.stored[0]!.map((e) => e.eventUuid)).toEqual(['evt-assistant_turn-1', 'evt-assistant_turn-2'])
+  })
+
+  it('rejects an event whose scrubbing throws as internal:TypeError, logging the stack and not the message', async () => {
+    const h = harness()
+    const { scrubEvent } = await import('../../src/capture-events/scrub.js')
+    h.deps.scrub = async (event) => {
+      if (event.event_uuid === 'evt-assistant_turn-2') throw new TypeError('ZQXMARKER value in the message')
+      return scrubEvent(event)
+    }
+    const events = [1, 2, 3].map((n) => validEvent('assistant_turn', n))
+
+    const res = await runCaptureEventsRequest(h.deps, envelope(events))
+
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        accepted: 2,
+        duplicates: 0,
+        rejected: [{ index: 1, session_id: 'sess-a1', event_uuid: 'evt-assistant_turn-2', reason: 'internal:TypeError' }],
+      },
+    })
+    expect(h.stored[0]!.map((e) => e.eventUuid)).toEqual(['evt-assistant_turn-1', 'evt-assistant_turn-3'])
+    const logged = h.logs.join('\n')
+    expect(logged).toContain('TypeError')
+    expect(logged).toMatch(/\n\s+at /)
+    expect(logged).not.toContain('ZQXMARKER')
+  })
+
+  it('rejects an event when scope resolution throws, as internal:<name>, and stores the rest', async () => {
+    const h = harness()
+    let calls = 0
+    const registry = new Proxy(REGISTRY, {
+      get(target, prop, receiver) {
+        if (prop === 'projects' && ++calls === 1) throw new RangeError('ZQXMARKER')
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    h.deps.ready = () => registry
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2)]))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 1, rejected: [{ index: 0, reason: 'internal:RangeError' }] })
+  })
+
+  it('refuses a client nested deeper than 64 levels as an envelope error, never a 500', async () => {
+    let client: unknown = 'x'
+    for (let i = 0; i < 100_000; i++) client = [client]
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, { client, events: [validEvent('assistant_turn', 1)] })
+
+    expect(res.status).toBe(400)
+    expect((res.body as { error: string }).error).toMatch(/^client(\[0\]){64}: nested deeper than 64 levels$/)
+    expect(h.stored).toEqual([])
+  })
+})

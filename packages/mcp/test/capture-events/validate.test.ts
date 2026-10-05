@@ -378,3 +378,40 @@ describe('parseCaptureEventsRequest — rules PostgreSQL applies to what capture
     expect(rejected.map((r) => r.reason.slice(0, 13))).toEqual(['payload.text '])
   })
 })
+
+describe('parseCaptureEventsRequest — nesting bound', () => {
+  function nestedUnder(levels: number): FixtureEvent {
+    // The event object is level 1 and payload level 2; each array adds one.
+    let inner: unknown = []
+    for (let i = 3; i < levels; i++) inner = [inner]
+    return withPayload('assistant_turn', { extra: inner })
+  }
+
+  it('lets an event of 64 levels past the bound, to be judged by the field rules', () => {
+    const r = expectRejected(nestedUnder(64))
+    expect(r.reason).toBe('payload: unknown field(s): extra')
+  })
+
+  it('rejects an event of 65 levels for its depth, naming the path', () => {
+    const r = expectRejected(nestedUnder(65))
+    expect(r.reason).toMatch(/^payload\.extra(\[0\]){62}: nested deeper than 64 levels$/)
+  })
+
+  it('names a key that is not an identifier by its position', () => {
+    let inner: unknown = []
+    for (let i = 0; i < 70; i++) inner = { 'ZQXMARKER key': inner }
+    const r = expectRejected({ ...validEvent('session_start'), payload: inner })
+    expect(r.reason).toMatch(/^payload(\[#0\])+: nested deeper than 64 levels$/)
+    expect(JSON.stringify(r)).not.toContain('ZQXMARKER')
+  })
+
+  it('applies the same bound to the client', () => {
+    const at = (levels: number): unknown => {
+      let client: unknown = {}
+      for (let i = 1; i < levels; i++) client = [client]
+      return parseCaptureEventsRequest({ client, events: [validEvent('session_start')] }, RECEIVED_AT)
+    }
+    expect(at(64)).toEqual({ error: 'client must be an object' })
+    expect(at(65)).toEqual({ error: expect.stringMatching(/^client(\[0\]){64}: nested deeper than 64 levels$/) })
+  })
+})

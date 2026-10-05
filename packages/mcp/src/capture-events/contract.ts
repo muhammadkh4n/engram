@@ -13,6 +13,12 @@ import type { CaptureEventType } from '@engram-mem/core'
 export const CAPTURE_EVENTS_BODY_MAX_BYTES = 8 * 1024 * 1024
 export const CAPTURE_EVENTS_MIN = 1
 export const CAPTURE_EVENTS_MAX = 500
+/**
+ * Deepest nesting of objects and arrays in one event or in the client, the
+ * event or client itself being level 1. It is checked by an iterative walk
+ * before any recursive step, so no input can overflow the stack.
+ */
+export const CAPTURE_NESTING_MAX_LEVELS = 64
 export const CAPTURE_CLIENT_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/
 export const CAPTURE_CLIENT_VERSION_MAX_CHARS = 64
 /** Events posted by this client are backfill: materialized after every live session. */
