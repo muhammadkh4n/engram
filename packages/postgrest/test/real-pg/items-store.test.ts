@@ -21,7 +21,7 @@ const TEST_TIMEOUT_MS = 60_000
 
 const SUBJECT_ID = '01940000-0000-7000-8000-00000000d000'
 const T0 = Date.parse('2026-03-04T05:00:00Z')
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-(8|9|a|b)[0-9a-f]{3}-[0-9a-f]{12}$/
 
 /** The capture event every utterance here was materialized from; its occurred_at is at(0). */
 let captureEventId = ''

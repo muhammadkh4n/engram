@@ -180,7 +180,7 @@ describe('PostgRestItemStore.insertItems', () => {
     await storeWith(client).insertItems([item]).catch(() => undefined)
 
     const sent = (rpcCalls[0]!.args.p_items as Array<Record<string, unknown>>)[0]!
-    expect(sent.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(sent.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-(8|9|a|b)[0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(item.id).toBeUndefined()
   })
 
