@@ -6,6 +6,11 @@
  * rebuild. `node_modules` and `.git` are never entered, symlinked directories
  * are not followed under `**` (no cycles), and wildcards skip dot-entries
  * unless the pattern segment itself starts with a dot.
+ *
+ * A path that does not exist names nothing and is silent. Any other failure
+ * to read a directory or look up a path (EACCES, ELOOP, EIO) is returned as
+ * unreadable: the files behind it are unknown, so a caller that masks with
+ * the result must not treat the expansion as complete.
  */
 
 import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -20,12 +25,36 @@ const MAX_BRACE_EXPANSIONS = 64
 // `~/**` stops here instead of blocking the process for minutes.
 export const MAX_GLOB_DIRS = 20_000
 
+export interface UnreadablePath {
+  path: string
+  /** The error code (EACCES, ELOOP, …), never a message. */
+  code: string
+}
+
 export interface GlobExpansion {
   files: string[]
   /** Directories read and paths looked up; their mtimes decide when to expand again. */
   watched: string[]
   truncated: boolean
+  /** Directories and paths that exist but could not be read or looked up, in walk order. */
+  unreadable: UnreadablePath[]
 }
+
+/**
+ * ENOENT: the path does not exist. ENOTDIR: a parent segment is a file, so
+ * the path cannot exist either. Neither hides a file.
+ */
+function isAbsence(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+function errorCode(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return typeof code === 'string' ? code : 'error'
+}
+
+type UnreadableSink = (path: string, err: unknown) => void
 
 export function expandHome(path: string): string {
   if (path === '~') return homedir()
@@ -123,19 +152,20 @@ export function excludeMatcher(patterns: readonly string[]): (path: string) => b
 
 type EntryKind = 'file' | 'dir' | 'other'
 
-function statKind(path: string): EntryKind | undefined {
+function statKind(path: string, onUnreadable: UnreadableSink): EntryKind | undefined {
   try {
     const st = statSync(path)
     return st.isFile() ? 'file' : st.isDirectory() ? 'dir' : 'other'
-  } catch {
+  } catch (err) {
+    if (!isAbsence(err)) onUnreadable(path, err)
     return undefined
   }
 }
 
-function entryKind(entry: Dirent, path: string): EntryKind | undefined {
+function entryKind(entry: Dirent, path: string, onUnreadable: UnreadableSink): EntryKind | undefined {
   if (entry.isFile()) return 'file'
   if (entry.isDirectory()) return 'dir'
-  return entry.isSymbolicLink() ? statKind(path) : 'other'
+  return entry.isSymbolicLink() ? statKind(path, onUnreadable) : 'other'
 }
 
 class Walk {
@@ -147,6 +177,7 @@ class Walk {
   constructor(
     private readonly segments: readonly string[],
     private readonly isExcluded: (path: string) => boolean,
+    private readonly onUnreadable: UnreadableSink,
   ) {}
 
   private read(dir: string): Dirent[] | undefined {
@@ -158,7 +189,8 @@ class Walk {
     this.dirsRead++
     try {
       return readdirSync(dir, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      if (!isAbsence(err)) this.onUnreadable(dir, err)
       return undefined
     }
   }
@@ -186,7 +218,9 @@ class Walk {
       const path = join(dir, entry.name)
       if (this.isExcluded(path)) continue
       if (entry.isDirectory()) this.walk(path, index)
-      else if (index + 1 === this.segments.length && entryKind(entry, path) === 'file') this.files.add(path)
+      else if (index + 1 === this.segments.length && entryKind(entry, path, this.onUnreadable) === 'file') {
+        this.files.add(path)
+      }
     }
   }
 
@@ -194,7 +228,7 @@ class Walk {
     const segment = this.segments[index]!
     if (!GLOB_CHARS_RE.test(segment)) {
       const path = join(dir, segment)
-      if (!this.isExcluded(path)) this.enter(path, segment, statKind(path), index + 1)
+      if (!this.isExcluded(path)) this.enter(path, segment, statKind(path, this.onUnreadable), index + 1)
       return
     }
     const matches = segmentMatcher(segment)
@@ -202,7 +236,7 @@ class Walk {
       if (!matches(entry.name)) continue
       const path = join(dir, entry.name)
       if (this.isExcluded(path)) continue
-      this.enter(path, entry.name, entryKind(entry, path), index + 1)
+      this.enter(path, entry.name, entryKind(entry, path, this.onUnreadable), index + 1)
     }
   }
 }
@@ -211,6 +245,10 @@ class Walk {
 export function expandGlob(pattern: string, isExcluded: (path: string) => boolean): GlobExpansion {
   const files = new Set<string>()
   const watched = new Set<string>()
+  const unreadable = new Map<string, string>()
+  const onUnreadable: UnreadableSink = (path, err) => {
+    if (!unreadable.has(path)) unreadable.set(path, errorCode(err))
+  }
   let truncated = false
   for (const expanded of expandBraces(pattern)) {
     const absolute = resolve(expanded)
@@ -219,17 +257,22 @@ export function expandGlob(pattern: string, isExcluded: (path: string) => boolea
     const firstGlob = segments.findIndex((s) => GLOB_CHARS_RE.test(s))
     if (firstGlob === -1) {
       watched.add(absolute)
-      if (!isExcluded(absolute) && statKind(absolute) === 'file') files.add(absolute)
+      if (!isExcluded(absolute) && statKind(absolute, onUnreadable) === 'file') files.add(absolute)
       continue
     }
     const base = segments.slice(0, firstGlob).join('/') || '/'
-    const walk = new Walk(segments, isExcluded)
+    const walk = new Walk(segments, isExcluded, onUnreadable)
     walk.walk(base, firstGlob)
     walk.files.forEach((f) => files.add(f))
     walk.watched.forEach((w) => watched.add(w))
     truncated ||= walk.truncated
   }
-  return { files: [...files].sort(), watched: [...watched], truncated }
+  return {
+    files: [...files].sort(),
+    watched: [...watched],
+    truncated,
+    unreadable: [...unreadable].map(([path, code]) => ({ path, code })),
+  }
 }
 
 const PATH_CACHE_VERSION = 1
@@ -298,10 +341,19 @@ export function openGlobPathCache(cacheFile: string | undefined, report: (line: 
     const key = JSON.stringify([pattern, excludes])
     const cached = cacheable ? entries.get(key) : undefined
     if (cached !== undefined && cached.watched.every(([path, mtime]) => mtimeOrMissing(path) === mtime)) {
-      return { files: cached.files, watched: cached.watched.map(([path]) => path), truncated: cached.truncated }
+      return {
+        files: cached.files,
+        watched: cached.watched.map(([path]) => path),
+        truncated: cached.truncated,
+        unreadable: [],
+      }
     }
     const expansion = expandGlob(pattern, excludeMatcher(excludes))
-    if (cacheable) {
+    // Restoring a permission changes a directory's ctime, not its mtime, so a
+    // walk that met an unreadable path is never reused: the next build walks.
+    if (cacheable && expansion.unreadable.length > 0) {
+      dirty ||= entries.delete(key)
+    } else if (cacheable) {
       entries.set(key, {
         files: expansion.files,
         truncated: expansion.truncated,

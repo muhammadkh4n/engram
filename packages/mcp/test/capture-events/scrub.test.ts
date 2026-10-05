@@ -64,6 +64,20 @@ describe('scrubEvent', () => {
     expect(JSON.stringify({ out, masked })).not.toContain(TOKEN)
   })
 
+  it('keeps the answer and note of a question named __proto__ as own keys', async () => {
+    const input = event('user_answer', (e) => {
+      e.payload.questions[0].question = '__proto__'
+      e.payload.answers = JSON.parse('{"__proto__": "keep it"}')
+      e.payload.notes = JSON.parse('{"__proto__": "and say why"}')
+    })
+    const { event: out } = await scrubEvent(input)
+    const payload = out.payload as { answers: Record<string, string>; notes: Record<string, string> }
+    expect(Object.keys(payload.answers)).toEqual(['__proto__'])
+    expect(Object.getOwnPropertyDescriptor(payload.answers, '__proto__')?.value).toBe('keep it')
+    expect(Object.getOwnPropertyDescriptor(payload.notes, '__proto__')?.value).toBe('and say why')
+    expect(JSON.stringify(payload)).toContain('"answers":{"__proto__":"keep it"}')
+  })
+
   it('keeps one answer per question when two questions scrub to the same text', async () => {
     const first = `Send Authorization: Bearer ${TOKEN.slice(0, 20)}a?`
     const second = `Send Authorization: Bearer ${TOKEN.slice(20)}b?`
