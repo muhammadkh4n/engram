@@ -338,6 +338,7 @@ const ITEM_RPC_NAMES = ITEM_RPCS.map(([name]) => name)
 /** Columns an insert may not set: the database or a later write owns them. */
 const NOT_INSERT_COLUMNS = [
   'superseded_by',
+  'valid_to',
   'restated_at',
   'retired_at',
   'retired_reason',
@@ -409,4 +410,28 @@ describe('item store RPCs', () => {
     expect(smoke).toContain(`PERFORM * FROM public.engram_retire_items(${nil}, 'smoke');`)
     expect(smoke).toContain(`PERFORM * FROM public.engram_unretire_items(${nil});`)
   })
+})
+
+describe('valid_to is derived from superseded_by', () => {
+  const DERIVE = 'NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);'
+
+  it('ties valid_to to superseded_by in memory_items_supersession_check', () => {
+    expect(checkExpr('memory_items', 'memory_items_supersession_check')).toContain(
+      '(superseded_by IS NULL) = (valid_to IS NULL)',
+    )
+  })
+
+  it('derives it on every insert, and on an update that touches either column', () => {
+    expect(squash(functionDefinition('memory_items_before_insert'))).toContain(DERIVE)
+    expect(squash(functionDefinition('memory_items_before_update'))).toContain(
+      `IF NEW.superseded_by IS DISTINCT FROM OLD.superseded_by OR NEW.valid_to IS DISTINCT FROM OLD.valid_to THEN ${DERIVE} END IF;`,
+    )
+  })
+
+  it.each(['engram_insert_items', 'engram_supersede_item', 'memory_items_forget_cascade'])(
+    '%s never writes valid_to',
+    (name) => {
+      expect(functionDefinition(name)).not.toMatch(/valid_to/)
+    },
+  )
 })

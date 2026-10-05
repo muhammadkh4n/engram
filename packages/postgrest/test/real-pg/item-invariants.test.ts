@@ -365,7 +365,8 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         const old = mkUtterance('Pin the toolchain.', { occurredAt: at(10) })
         const earlier = mkUtterance('Float the toolchain.', { occurredAt: at(5) })
         await commit(old, earlier)
-        await expectPointerRefused(old, earlier.id, /memory_items_supersession: superseded_by names an item that did not occur later/)
+        // valid_to is derived as the earlier target's occurred_at, so the row CHECK refuses it before commit.
+        await expectPointerRefused(old, earlier.id, /violates check constraint "memory_items_supersession_check"/)
       }, TEST_TIMEOUT_MS)
     })
 

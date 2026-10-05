@@ -116,6 +116,7 @@ export interface MemoryItem {
   embedding: number[] | null
   embeddingModel: string | null
   occurredAt: Date
+  /** The successor's `occurredAt` while `supersededBy` is set, else null; derived by the database. */
   validTo: Date | null
   supersededBy: string | null
   restatedAt: Date[]
@@ -135,8 +136,8 @@ export interface MemoryItem {
 
 /**
  * The columns an insert may set. Supersession, restatement, retirement and
- * forgetting go through their own operations; `contentHash` and `createdAt`
- * are set by the database whatever is sent.
+ * forgetting go through their own operations; `contentHash`, `createdAt` and
+ * `validTo` are set by the database.
  */
 export interface NewItem {
   /** Defaults to a fresh uuid v7. */
@@ -156,7 +157,6 @@ export interface NewItem {
   embedding?: number[] | null
   embeddingModel?: string | null
   occurredAt: Date
-  validTo?: Date | null
   standing?: boolean | null
   registerStatus?: RegisterStatus | null
   registerRef?: string | null

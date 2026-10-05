@@ -1291,7 +1291,7 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_subject_check CHECK (class NOT IN ('mk_statement', 'observation') OR subject_id IS NOT NULL),
     CONSTRAINT memory_items_statement_lineage_check CHECK (class <> 'mk_statement' OR cardinality(lineage) > 0),
     CONSTRAINT memory_items_lineage_self_check CHECK (NOT (id = ANY (lineage)) AND array_position(lineage, NULL) IS NULL),
-    CONSTRAINT memory_items_supersession_check CHECK ((superseded_by IS NULL OR superseded_by <> id) AND (valid_to IS NULL OR valid_to >= occurred_at)),
+    CONSTRAINT memory_items_supersession_check CHECK ((superseded_by IS NULL OR superseded_by <> id) AND (superseded_by IS NULL) = (valid_to IS NULL) AND (valid_to IS NULL OR valid_to >= occurred_at)),
     CONSTRAINT memory_items_retired_check CHECK ((retired_at IS NULL) = (retired_reason IS NULL) AND (retired_reason IS NULL OR retired_reason ~ '\S')),
     CONSTRAINT memory_items_forgotten_check CHECK ((forgotten_at IS NULL) = (forgotten_reason IS NULL) AND (forgotten_reason IS NULL OR forgotten_reason ~ '\S')),
     CONSTRAINT memory_items_embedding_check CHECK ((embedding IS NULL) = (embedding_model IS NULL)),
@@ -1930,8 +1930,12 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- Name: memory_items_before_insert(); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- content_hash and created_at belong to the database: whatever a writer sends
--- is replaced, so the hash always matches the stored content.
+-- content_hash, created_at and valid_to belong to the database: whatever a
+-- writer sends is replaced, so the hash always matches the stored content and
+-- valid_to is the successor's occurred_at while superseded_by is set, else
+-- NULL. occurred_at never changes after insert, so that value cannot go stale.
+-- A superseded_by naming no stored item leaves valid_to NULL, which
+-- memory_items_supersession_check refuses at once.
 CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -1939,6 +1943,7 @@ CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
 BEGIN
   NEW.content_hash := encode(sha256(convert_to(NEW.content, 'UTF8')), 'hex');
   NEW.created_at := now();
+  NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);
   RETURN NEW;
 END; $$;
 
@@ -1952,7 +1957,9 @@ END; $$;
 -- supersedes the old one. Forgetting is permanent: forgotten_at is never
 -- cleared, and once it is set neither it nor forgotten_reason changes. The
 -- embedding, supersession, restatement, retirement, register, scope and
--- subject columns stay writable.
+-- subject columns stay writable. valid_to is derived again from superseded_by
+-- whenever either is in the change, so a sent valid_to is ignored and the two
+-- never diverge.
 CREATE OR REPLACE FUNCTION public.memory_items_before_update() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -1989,6 +1996,9 @@ BEGIN
      AND (NEW.forgotten_at IS DISTINCT FROM OLD.forgotten_at OR NEW.forgotten_reason IS DISTINCT FROM OLD.forgotten_reason) THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = format('%s: forgotten_at and forgotten_reason are set once', TG_NAME);
+  END IF;
+  IF NEW.superseded_by IS DISTINCT FROM OLD.superseded_by OR NEW.valid_to IS DISTINCT FROM OLD.valid_to THEN
+    NEW.valid_to := (SELECT i.occurred_at FROM public.memory_items i WHERE i.id = NEW.superseded_by);
   END IF;
   RETURN NEW;
 END; $$;
@@ -2101,10 +2111,10 @@ END; $$;
 --     nest one level deep whatever the depth of the lineage. UNION, not
 --     UNION ALL, ends the walk on a lineage cycle.
 -- (b) every live item this one superseded is re-pointed to the nearest live
---     item further along the superseded_by chain, read now, with valid_to =
---     that item's occurred_at; when none remains it is restored (superseded_by
---     and valid_to cleared). The walk stops at an id it has already seen, so
---     a cycle not yet refused at commit cannot loop it.
+--     item further along the superseded_by chain, read now; when none remains
+--     it is restored (superseded_by cleared). valid_to follows superseded_by
+--     through memory_items_before_update. The walk stops at an id it has
+--     already seen, so a cycle not yet refused at commit cannot loop it.
 CREATE OR REPLACE FUNCTION public.memory_items_forget_cascade() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2114,7 +2124,6 @@ DECLARE
   v_seen uuid[] := ARRAY[NEW.id];
   v_step record;
   v_successor uuid;
-  v_successor_at timestamp with time zone;
 BEGIN
   WITH RECURSIVE below(id) AS (
     SELECT i.id
@@ -2133,13 +2142,12 @@ BEGIN
    WHERE m.id = b.id AND m.forgotten_at IS NULL;
 
   WHILE v_next IS NOT NULL AND NOT v_next = ANY (v_seen) LOOP
-    SELECT i.superseded_by, i.occurred_at, i.forgotten_at INTO v_step
+    SELECT i.superseded_by, i.forgotten_at INTO v_step
       FROM public.memory_items i
      WHERE i.id = v_next;
     EXIT WHEN NOT FOUND;
     IF v_step.forgotten_at IS NULL THEN
       v_successor := v_next;
-      v_successor_at := v_step.occurred_at;
       EXIT;
     END IF;
     v_seen := v_seen || v_next;
@@ -2147,7 +2155,7 @@ BEGIN
   END LOOP;
 
   UPDATE public.memory_items
-     SET superseded_by = v_successor, valid_to = v_successor_at
+     SET superseded_by = v_successor
    WHERE superseded_by = NEW.id AND forgotten_at IS NULL;
   RETURN NULL;
 END; $$;
@@ -2194,8 +2202,8 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 
 -- Inserts 1 to 500 items given as JSON objects keyed by column name. Every
 -- column may be sent except the ones the database or a later write owns:
--- superseded_by, restated_at, retired_at, retired_reason, forgotten_at,
--- forgotten_reason, content_hash and created_at. Each key is checked for its
+-- superseded_by, valid_to, restated_at, retired_at, retired_reason,
+-- forgotten_at, forgotten_reason, content_hash and created_at. Each key is checked for its
 -- JSON type and for a value its column type accepts before anything is
 -- written, so a bad value is reported by object position and key instead of
 -- as a cast error that quotes it; class, kind, speaker, trust, content,
@@ -2239,8 +2247,7 @@ BEGIN
              ('workspace_id', 'string', NULL), ('plan_slug', 'string', NULL), ('session_id', 'string', NULL),
              ('subject_id', 'string', 'uuid'), ('content', 'string', NULL), ('search_text', 'string', NULL),
              ('context', 'string', NULL), ('embedding', 'array', NULL), ('embedding_model', 'string', NULL),
-             ('occurred_at', 'string', 'timestamptz'), ('valid_to', 'string', 'timestamptz'),
-             ('standing', 'boolean', NULL), ('register_status', 'string', NULL), ('register_ref', 'string', NULL),
+             ('occurred_at', 'string', 'timestamptz'), ('standing', 'boolean', NULL), ('register_status', 'string', NULL), ('register_ref', 'string', NULL),
              ('source', 'object', NULL), ('lineage', 'array', NULL), ('extraction_run_id', 'string', 'uuid')
     ), field AS (
       SELECT t.n, k.key, k.value, s.col, s.json_type, s.sql_type
@@ -2299,7 +2306,7 @@ BEGIN
   WITH added AS (
     INSERT INTO public.memory_items AS m (
       id, class, kind, speaker, trust, project_id, workspace_id, plan_slug, session_id, subject_id,
-      content, search_text, context, embedding, embedding_model, occurred_at, valid_to, standing,
+      content, search_text, context, embedding, embedding_model, occurred_at, standing,
       register_status, register_ref, source, lineage, extraction_run_id)
     SELECT v_ids[t.n::integer],
            t.e ->> 'class',
@@ -2317,7 +2324,6 @@ BEGIN
            CASE WHEN jsonb_typeof(t.e -> 'embedding') = 'array' THEN (t.e -> 'embedding')::text::public.vector END,
            t.e ->> 'embedding_model',
            (t.e ->> 'occurred_at')::timestamptz,
-           (t.e ->> 'valid_to')::timestamptz,
            (t.e ->> 'standing')::boolean,
            t.e ->> 'register_status',
            t.e ->> 'register_ref',
@@ -2525,8 +2531,8 @@ END; $$;
 -- class, p_new occurred strictly later, and p_old is not superseded by a third
 -- item (replacing a successor is forgetting it). A missing or equal id is an
 -- invalid argument (22023); a broken rule is refused (23514). Returns false
--- when p_old is already superseded by p_new; otherwise sets superseded_by and
--- ends p_old's validity at p_new's event time unless it already ended earlier.
+-- when p_old is already superseded by p_new; otherwise sets superseded_by, and
+-- memory_items_before_update ends p_old's validity at p_new's event time.
 CREATE OR REPLACE FUNCTION public.engram_supersede_item(p_old uuid, p_new uuid) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2580,8 +2586,7 @@ BEGIN
   END IF;
 
   UPDATE public.memory_items m
-     SET superseded_by = p_new,
-         valid_to = least(coalesce(m.valid_to, v_new.occurred_at), v_new.occurred_at)
+     SET superseded_by = p_new
    WHERE m.id = p_old;
   RETURN true;
 END; $$;

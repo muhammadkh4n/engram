@@ -28,6 +28,7 @@ const EMBEDDING_DIMS = 1536
 /** Columns engram_insert_items refuses: the database or a later write owns them. */
 const NOT_INSERT_COLUMNS = [
   'superseded_by',
+  'valid_to',
   'restated_at',
   'retired_at',
   'retired_reason',
@@ -281,7 +282,6 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         embedding,
         embedding_model: 'tst-embedder',
         occurred_at: '2026-03-04T05:06:07.123Z',
-        valid_to: '2026-03-05T00:00:00Z',
         standing: true,
         register_status: 'recorded',
         register_ref: 'R-TST-7',
@@ -293,7 +293,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         await row(
           s.id,
           `vector_dims(embedding) AS dims, (embedding::real[])[1:3] AS head, embedding_model, lineage,
-           occurred_at = '2026-03-04T05:06:07.123Z'::timestamptz AS occurred_ok, valid_to = '2026-03-05T00:00:00Z'::timestamptz AS valid_to_ok,
+           occurred_at = '2026-03-04T05:06:07.123Z'::timestamptz AS occurred_ok, valid_to,
            standing, register_status, register_ref, context, session_id, plan_slug, subject_id, trust, source`,
         ),
       ).toEqual({
@@ -302,7 +302,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         embedding_model: 'tst-embedder',
         lineage: [v.id, u.id],
         occurred_ok: true,
-        valid_to_ok: true,
+        valid_to: null,
         standing: true,
         register_status: 'recorded',
         register_ref: 'R-TST-7',
@@ -323,6 +323,14 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         new RegExp(`ERROR:\\s+22023: engram_insert_items: object 2 has the key ${column}, which is not an insert column`),
       )
       expect(await rowCount([ok.id, bad.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('insert refuses a sent valid_to by name', async () => {
+      const bounded = artifact('perf: bounded cache', 0, { valid_to: at(5) })
+      expect(await insertRefusal([bounded])).toMatch(
+        /ERROR:\s+22023: engram_insert_items: object 1 has the key valid_to, which is not an insert column/,
+      )
+      expect(await rowCount([bounded.id])).toBe(0)
     }, TEST_TIMEOUT_MS)
 
     it('refuses a call that is not an array of 1 to 500 objects', async () => {
@@ -438,6 +446,27 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       ).toEqual({ superseded_by: c.id, ends_at_successor: true })
     }, TEST_TIMEOUT_MS)
 
+    it('forgetting the successor re-points valid_to to the next live successor, then clears it', async () => {
+      const a = artifact('docs: draft', 0)
+      const b = artifact('docs: review', 10)
+      const c = artifact('docs: final', 20)
+      await insertItems([a, b, c])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await supersede(b.id, c.id)).toBe(true)
+
+      await forget([b.id], 'reviewed the wrong file')
+      expect(await row(a.id, `superseded_by, valid_to = '${c.occurred_at}'::timestamptz AS ends_at_c`)).toEqual({
+        superseded_by: c.id,
+        ends_at_c: true,
+      })
+
+      expect(await forget([c.id], 'final was never published')).toEqual([
+        { itemId: c.id, effect: 'forgotten', via: null },
+        { itemId: a.id, effect: 'restored', via: c.id },
+      ])
+      expect(await row(a.id, 'superseded_by, valid_to')).toEqual({ superseded_by: null, valid_to: null })
+    }, TEST_TIMEOUT_MS)
+
     it('returns no row for an unknown or an already forgotten id', async () => {
       const a = artifact('chore: tidy', 0)
       await insertItems([a])
@@ -517,12 +546,39 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       })
     }, TEST_TIMEOUT_MS)
 
-    it('keeps a validity that already ended before the successor', async () => {
-      const a = artifact('perf: bounded', 0, { valid_to: at(5) })
+    it("supersede sets valid_to to the successor's occurred_at", async () => {
+      const a = artifact('perf: bounded', 0)
       const b = artifact('perf: replacement', 30)
       await insertItems([a, b])
+      expect(await row(a.id, 'valid_to')).toEqual({ valid_to: null })
       expect(await supersede(a.id, b.id)).toBe(true)
-      expect(await row(a.id, `valid_to = '${at(5)}'::timestamptz AS kept`)).toEqual({ kept: true })
+      expect(
+        await row(a.id, `valid_to = (SELECT n.occurred_at FROM public.memory_items n WHERE n.id = '${b.id}') AS ends_at_successor`),
+      ).toEqual({ ends_at_successor: true })
+    }, TEST_TIMEOUT_MS)
+
+    it('a direct UPDATE of valid_to cannot diverge from superseded_by', async () => {
+      const a = artifact('perf: first pool size', 0)
+      const b = artifact('perf: second pool size', 10)
+      const c = artifact('perf: third pool size', 20)
+      await insertItems([a, b, c])
+      const asService = (sql: string) => pg.psqlAs('service_role', sql)
+
+      await asService(`UPDATE public.memory_items SET valid_to = '${at(5)}' WHERE id = '${a.id}';`)
+      expect(await row(a.id, 'valid_to')).toEqual({ valid_to: null })
+
+      await asService(`UPDATE public.memory_items SET superseded_by = '${b.id}', valid_to = '${at(40)}' WHERE id = '${a.id}';`)
+      expect(await row(a.id, `valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({ ends_at_b: true })
+
+      await asService(`UPDATE public.memory_items SET valid_to = NULL WHERE id = '${a.id}';`)
+      await asService(`UPDATE public.memory_items SET valid_to = '${c.occurred_at}' WHERE id = '${a.id}';`)
+      expect(await row(a.id, `superseded_by, valid_to = '${b.occurred_at}'::timestamptz AS ends_at_b`)).toEqual({
+        superseded_by: b.id,
+        ends_at_b: true,
+      })
+
+      await asService(`UPDATE public.memory_items SET superseded_by = NULL WHERE id = '${a.id}';`)
+      expect(await row(a.id, 'superseded_by, valid_to')).toEqual({ superseded_by: null, valid_to: null })
     }, TEST_TIMEOUT_MS)
 
     it.each([

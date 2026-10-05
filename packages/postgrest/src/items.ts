@@ -208,7 +208,6 @@ function toInsertObject(item: NewItem, position: number): Record<string, unknown
     ['context', item.context],
     ['embedding', item.embedding],
     ['embedding_model', item.embeddingModel],
-    ['valid_to', item.validTo == null ? item.validTo : isoDate(item.validTo, 'validTo', position)],
     ['standing', item.standing],
     ['register_status', item.registerStatus],
     ['register_ref', item.registerRef],
