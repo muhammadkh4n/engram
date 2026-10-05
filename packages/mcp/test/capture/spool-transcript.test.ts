@@ -108,6 +108,17 @@ describe('spoolTranscript', () => {
     expect(batchFiles()).toHaveLength(1)
   })
 
+  it('logs an unset project registry once across three calls', async () => {
+    const path = writeTranscript(transcripts, SESSION, closedTurn(1, 'first prompt'))
+    await spoolTranscript(path, { env })
+    appendEntries(path, SESSION, closedTurn(10, 'second prompt'))
+    await spoolTranscript(path, { env })
+    await spoolTranscript(path, { env })
+
+    const log = readFileSync(captureLogPath(env), 'utf8').split('\n').filter(Boolean)
+    expect(log.filter((l) => l.includes('project registry not configured'))).toHaveLength(1)
+  })
+
   it('leaves the cursor where it was when the spool write fails', async () => {
     const path = writeTranscript(transcripts, SESSION, closedTurn(1, 'first prompt'))
     await spoolTranscript(path, { env })

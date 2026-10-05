@@ -26,7 +26,7 @@ import {
 } from '../capture-events/project-registry.js'
 import { detectCheckout } from '../ingest/project-detect.js'
 import type { EventProject } from './events.js'
-import { appendCaptureLog } from './log.js'
+import { appendCaptureLog, captureLogPath } from './log.js'
 
 type Env = Record<string, string | undefined>
 
@@ -56,15 +56,36 @@ function withAbsoluteRoots(registry: ProjectRegistry, env: Env): CaptureRegistry
 }
 
 /**
+ * The registry condition line last written to each capture log. Capture runs
+ * on every Stop, so a condition that holds for the whole process (an unset
+ * variable, a missing file) would otherwise repeat on every call and bury the
+ * drain and refusal lines; it is written again only when the condition
+ * changes, including after the registry loaded cleanly in between.
+ */
+const lastConditionByLog = new Map<string, string>()
+
+function reportRegistryCondition(env: Env, line: string | null): void {
+  const log = captureLogPath(env)
+  if (line === null) {
+    lastConditionByLog.delete(log)
+    return
+  }
+  if (lastConditionByLog.get(log) === line) return
+  lastConditionByLog.set(log, line)
+  appendCaptureLog(env, line)
+}
+
+/**
  * Reads the file `ENGRAM_PROJECT_REGISTRY_FILE` names. An unset variable or a
- * missing, unreadable or invalid file gives the empty registry and one
- * capture-log line, so a health check can tell why events carry no workspace.
+ * missing, unreadable or invalid file gives the empty registry and a
+ * capture-log line, so a health check can tell why events carry no workspace;
+ * the line is written once per process for as long as the condition holds.
  * Never throws: capture must not fail because of the registry.
  */
 export function loadCaptureRegistry(env: Env): CaptureRegistry {
   const configured = env[PROJECT_REGISTRY_FILE_ENV]?.trim()
   if (!configured) {
-    appendCaptureLog(env, `project registry not configured (${PROJECT_REGISTRY_FILE_ENV} unset); events carry no workspace`)
+    reportRegistryCondition(env, `project registry not configured (${PROJECT_REGISTRY_FILE_ENV} unset); events carry no workspace`)
     return EMPTY_REGISTRY
   }
   const path = expandHome(configured, env)
@@ -73,15 +94,17 @@ export function loadCaptureRegistry(env: Env): CaptureRegistry {
     text = readFileSync(path, 'utf8')
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'unknown'
-    appendCaptureLog(env, `project registry unreadable (${code}); events carry no workspace`)
+    reportRegistryCondition(env, `project registry unreadable (${code}); events carry no workspace`)
     return EMPTY_REGISTRY
   }
   try {
-    return withAbsoluteRoots(parseProjectRegistry(JSON.parse(text)), env)
+    const registry = withAbsoluteRoots(parseProjectRegistry(JSON.parse(text)), env)
+    reportRegistryCondition(env, null)
+    return registry
   } catch (err) {
     // A parse error names a key path and a rule, never a value.
     const reason = err instanceof SyntaxError ? 'not valid JSON' : err instanceof Error ? err.message : 'invalid'
-    appendCaptureLog(env, `project registry invalid (${reason.slice(0, 300)}); events carry no workspace`)
+    reportRegistryCondition(env, `project registry invalid (${reason.slice(0, 300)}); events carry no workspace`)
     return EMPTY_REGISTRY
   }
 }

@@ -157,4 +157,20 @@ describe('loadCaptureRegistry', () => {
     expect(lines).toHaveLength(1)
     expect(lines[0]).toContain('project registry not configured (ENGRAM_PROJECT_REGISTRY_FILE unset)')
   })
+
+  it('writes the unset-variable line once per process and again only after the condition changed', () => {
+    delete env.ENGRAM_PROJECT_REGISTRY_FILE
+    loadCaptureRegistry(env)
+    loadCaptureRegistry(env)
+    expect(logLines()).toHaveLength(1)
+
+    env.ENGRAM_PROJECT_REGISTRY_FILE = '~/registry.json'
+    expect(loadCaptureRegistry(env).projects.size).toBe(2)
+    delete env.ENGRAM_PROJECT_REGISTRY_FILE
+    loadCaptureRegistry(env)
+
+    const lines = logLines()
+    expect(lines).toHaveLength(2)
+    expect(lines.every((l) => l.includes('project registry not configured'))).toBe(true)
+  })
 })
