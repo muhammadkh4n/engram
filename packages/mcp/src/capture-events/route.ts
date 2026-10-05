@@ -9,8 +9,14 @@
  * registry is degraded (no sources configuration, or a configured file it
  * could not read): text scrubbed by a partial registry would keep the
  * secrets it missed, and the client's spool holds the events until a retry.
+ *
+ * 500 and 503 mean only "retry later". A value PostgreSQL refuses (SQLSTATE
+ * class 22, data exception, or 23, integrity violation) fails on every retry,
+ * so it must not hold up its batch: the events are then stored one at a time
+ * and each refused one is rejected as `storage:<sqlstate>`.
  */
 
+import { sqlstateOf } from '@engram-mem/core'
 import type { CaptureSecretHit, CaptureStore, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
 import { parseCaptureEventsRequest } from './validate.js'
 import { resolveEventScope, type ProjectRegistry } from './project-registry.js'
@@ -150,21 +156,77 @@ export async function runCaptureEventsRequest(
     return failedCaptureEventsResponse()
   }
 
-  let accepted = 0
-  let duplicates = 0
-  if (toStore.length > 0) {
-    try {
-      const results = await deps.store.ingestEvents(toStore.map((e) => e.stored))
-      if (results.length !== toStore.length) throw new Error('the store returned no outcome per event')
-      for (const result of results) {
-        if (result.status === 'accepted') accepted++
-        else duplicates++
-      }
-    } catch (err) {
+  const outcome = toStore.length > 0 ? await storeEvents(deps, toStore) : { accepted: 0, duplicates: 0, refused: [] }
+  if (outcome === null) return failedCaptureEventsResponse()
+  rejected.push(...outcome.refused)
+  rejected.sort((a, b) => a.index - b.index)
+  return { status: 200, body: { accepted: outcome.accepted, duplicates: outcome.duplicates, rejected } }
+}
+
+const DATA_ERROR_CLASSES = new Set(['22', '23'])
+
+/** The SQLSTATE when PostgreSQL refused a value (class 22 or 23), else null. */
+function dataErrorCode(err: unknown): string | null {
+  const code = sqlstateOf(err)
+  return code !== null && DATA_ERROR_CLASSES.has(code.slice(0, 2)) ? code : null
+}
+
+interface StoreOutcome {
+  accepted: number
+  duplicates: number
+  refused: Rejection[]
+}
+
+async function ingest(
+  deps: CaptureEventsRouteDeps,
+  events: ReadonlyArray<{ stored: StoredEvent }>,
+  outcome: StoreOutcome,
+): Promise<void> {
+  const results = await deps.store.ingestEvents(events.map((e) => e.stored))
+  if (results.length !== events.length) throw new Error('the store returned no outcome per event')
+  for (const result of results) {
+    if (result.status === 'accepted') outcome.accepted++
+    else outcome.duplicates++
+  }
+}
+
+/**
+ * Stores the batch in one call; when PostgreSQL refuses a value in it, which
+ * rolls the whole call back, stores the events one at a time so only the
+ * refused ones are rejected. Null means a failure worth retrying (the 500).
+ */
+async function storeEvents(
+  deps: CaptureEventsRouteDeps,
+  toStore: ReadonlyArray<{ valid: ValidEvent; stored: StoredEvent }>,
+): Promise<StoreOutcome | null> {
+  const outcome: StoreOutcome = { accepted: 0, duplicates: 0, refused: [] }
+  try {
+    await ingest(deps, toStore, outcome)
+    return outcome
+  } catch (err) {
+    if (dataErrorCode(err) === null) {
       deps.log(`capture events: store failed: ${describeError(err)}`)
-      return failedCaptureEventsResponse()
+      return null
+    }
+    deps.log(`capture events: the store refused a value (${describeError(err)}); storing the events one at a time`)
+  }
+  for (const entry of toStore) {
+    try {
+      await ingest(deps, [entry], outcome)
+    } catch (err) {
+      const code = dataErrorCode(err)
+      if (code === null) {
+        deps.log(`capture events: store failed: ${describeError(err)}`)
+        return null
+      }
+      deps.log(`capture events: event ${entry.valid.index} refused by the store: ${describeError(err)}`)
+      outcome.refused.push({
+        index: entry.valid.index,
+        session_id: entry.valid.event.session_id,
+        event_uuid: entry.valid.event.event_uuid,
+        reason: `storage:${code}`,
+      })
     }
   }
-  rejected.sort((a, b) => a.index - b.index)
-  return { status: 200, body: { accepted, duplicates, rejected } }
+  return outcome
 }

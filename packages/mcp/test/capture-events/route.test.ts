@@ -260,3 +260,102 @@ describe('runCaptureEventsRequest', () => {
     expect(h.logs.join('\n')).not.toContain('secret row data')
   })
 })
+
+describe('runCaptureEventsRequest — every accepted event can be stored', () => {
+  const R = '�'
+
+  function refusingStore(refused: ReadonlySet<string>, code: string) {
+    const calls: StoredEvent[][] = []
+    const ingestEvents = async (events: readonly StoredEvent[]): Promise<IngestedEvent[]> => {
+      calls.push([...events])
+      if (events.some((e) => refused.has(e.eventUuid))) {
+        throw Object.assign(new Error(`ingestEvents failed (${code}): unsupported Unicode escape sequence`), { code })
+      }
+      return events.map((_e, i) => ({ eventId: String(200 + i), status: 'accepted' as const }))
+    }
+    return { calls, ingestEvents }
+  }
+
+  it('stores U+0000, unpaired surrogates and an unsafe answer key as U+FFFD, and a valid pair unchanged', async () => {
+    const h = harness()
+    const turn = (n: number, text: string) => {
+      const e = validEvent('assistant_turn', n)
+      return { ...e, payload: { ...e.payload, text } }
+    }
+    const question = 'Which store\u0000 should the worker read?'
+    const answer = validEvent('user_answer', 6)
+    answer.payload = {
+      questions: [{ question, header: '', options: [], multiSelect: false }],
+      answers: { [question]: 'Postgres' },
+      transcript_line: 7,
+    }
+    const res = await runCaptureEventsRequest(
+      h.deps,
+      envelope([turn(1, 'timer\u0000 now'), turn(2, 'abc\ud83d'), turn(3, '\ude00 low'), turn(4, 'ship 😀'), answer]),
+    )
+
+    expect(res).toEqual({ status: 200, body: { accepted: 5, duplicates: 0, rejected: [] } })
+    const payloads = h.stored[0]!.map((e) => e.payload)
+    expect(payloads.slice(0, 4).map((p) => p.text)).toEqual([`timer${R} now`, `abc${R}`, `${R} low`, 'ship 😀'])
+    expect(payloads[4]!.answers).toEqual({ [`Which store${R} should the worker read?`]: 'Postgres' })
+  })
+
+  it('answers a data refusal of event 2 of 3 with 200, storing the other two one at a time', async () => {
+    const h = harness()
+    const store = refusingStore(new Set(['evt-assistant_turn-2']), '22P05')
+    h.deps.store = { ingestEvents: store.ingestEvents }
+    const events = [1, 2, 3].map((n) => validEvent('assistant_turn', n))
+
+    const res = await runCaptureEventsRequest(h.deps, envelope(events))
+
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        accepted: 2,
+        duplicates: 0,
+        rejected: [{ index: 1, session_id: 'sess-a1', event_uuid: 'evt-assistant_turn-2', reason: 'storage:22P05' }],
+      },
+    })
+    expect(store.calls.map((c) => c.map((e) => e.eventUuid))).toEqual([
+      ['evt-assistant_turn-1', 'evt-assistant_turn-2', 'evt-assistant_turn-3'],
+      ['evt-assistant_turn-1'],
+      ['evt-assistant_turn-2'],
+      ['evt-assistant_turn-3'],
+    ])
+  })
+
+  it('treats a refused rule (class 23) the same way', async () => {
+    const h = harness()
+    const store = refusingStore(new Set(['evt-assistant_turn-1']), '23514')
+    h.deps.store = { ingestEvents: store.ingestEvents }
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2)]))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 1, rejected: [{ index: 0, reason: 'storage:23514' }] })
+  })
+
+  it('keeps a failure that is not a data error a retryable 500, in the batch or in the one-at-a-time pass', async () => {
+    const h = harness()
+    const lost = refusingStore(new Set(['evt-assistant_turn-1']), '08006')
+    h.deps.store = { ingestEvents: lost.ingestEvents }
+    expect((await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1)]))).status).toBe(500)
+    expect(lost.calls).toHaveLength(1)
+
+    let call = 0
+    h.deps.store = {
+      ingestEvents: async (events) => {
+        call++
+        if (call === 1) throw Object.assign(new Error('refused'), { code: '22P05' })
+        if (call === 3) throw Object.assign(new Error('connection lost'), { code: '08006' })
+        return events.map((_e, i) => ({ eventId: String(i), status: 'accepted' as const }))
+      },
+    }
+    const res = await runCaptureEventsRequest(
+      h.deps,
+      envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2), validEvent('assistant_turn', 3)]),
+    )
+    expect(res).toEqual({ status: 500, body: { error: 'capture events failed; retry later', retryable: true } })
+    expect(call).toBe(3)
+  })
+})

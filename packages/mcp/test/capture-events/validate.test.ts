@@ -292,3 +292,89 @@ describe('parseCaptureEventsRequest — reasons never carry values', () => {
     expect(JSON.stringify(r)).not.toContain(MARKER)
   })
 })
+
+describe('parseCaptureEventsRequest — text PostgreSQL cannot store', () => {
+  const R = '�'
+
+  it.each([
+    ['U+0000', 'the worker\u0000 runs', `the worker${R} runs`],
+    ['a lone high surrogate', 'abc\ud83d', `abc${R}`],
+    ['a lone low surrogate', '\ude00 timer', `${R} timer`],
+    ['a valid pair', 'ship it 😀', 'ship it 😀'],
+  ])('accepts %s in assistant_turn text and validates the replaced text', (_label, text, stored) => {
+    const { event } = expectValid(withPayload('assistant_turn', { text }))
+    expect((event.payload as { text: string }).text).toBe(stored)
+  })
+
+  it('replaces an unsafe key and its question text alike, so the answer still names its question', () => {
+    const question = 'Which store\u0000 should the worker read?'
+    const { event } = expectValid(
+      withPayload('user_answer', {
+        questions: [{ question, header: '', options: [], multiSelect: false }],
+        answers: { [question]: 'Postgres' },
+        notes: undefined,
+      }),
+    )
+    const payload = event.payload as { questions: Array<{ question: string }>; answers: Record<string, string> }
+    expect(payload.questions[0]!.question).toBe(`Which store${R} should the worker read?`)
+    expect(payload.answers).toEqual({ [`Which store${R} should the worker read?`]: 'Postgres' })
+  })
+
+  it('validates identifiers after the replacement, so U+0000 in session_id is stored as U+FFFD', () => {
+    const { event } = expectValid({ ...validEvent('session_start'), session_id: 'sess\u0000a1' })
+    expect(event.session_id).toBe(`sess${R}a1`)
+  })
+
+  it('rejects two keys that become equal, naming the object and not the key', () => {
+    const question = 'ZQXMARKER question?'
+    const r = expectRejected(
+      withPayload('user_answer', {
+        questions: [{ question: `${question}${R}`, header: '', options: [], multiSelect: false }],
+        answers: { [`${question}\u0000`]: 'a', [`${question}${R}`]: 'b' },
+        notes: undefined,
+      }),
+    )
+    expect(r.reason).toMatch(/^payload\.answers has keys that are equal once/)
+    expect(JSON.stringify(r)).not.toContain('ZQXMARKER')
+  })
+
+  it('replaces unsafe text in the client version', () => {
+    const result = parseCaptureEventsRequest(
+      { client: { name: 'sample-client', version: '1.0\u0000' }, events: [validEvent('session_start')] },
+      RECEIVED_AT,
+    )
+    if ('error' in result) throw new Error(result.error)
+    expect(result.client.version).toBe(`1.0${R}`)
+  })
+})
+
+describe('parseCaptureEventsRequest — rules PostgreSQL applies to what capture writes', () => {
+  it('rejects a ledger_decision by mk whose source is blank', () => {
+    const r = expectRejected(withPayload('ledger_decision', { by: 'mk', quote: 'use a timer', source: ' ' }))
+    expect(r.reason).toMatch(/^payload\.source must not be blank/)
+  })
+
+  it('accepts an offset of 15:59 and rejects 16:00, which PostgreSQL cannot read', () => {
+    expectValid({ ...validEvent('session_start'), occurred_at: '2026-10-05T23:30:00+15:59' })
+    expectValid({ ...validEvent('session_start'), occurred_at: '2026-10-04T19:00:00-15:59' })
+    expect(expectRejected({ ...validEvent('session_start'), occurred_at: '2026-10-05T23:30:00+16:00' }).reason)
+      .toMatch(/^occurred_at /)
+  })
+
+  it('rejects a register id over 64 chars, which would overflow the item event key', () => {
+    const long = `R-TST-${'1'.repeat(59)}`
+    expectValid(withPayload('register_entry', { id: `R-TST-${'1'.repeat(58)}` }))
+    expect(expectRejected(withPayload('register_entry', { id: long })).reason).toMatch(/^payload\.id /)
+    expect(expectRejected(withPayload('register_entry', { supersedes: [long] })).reason).toMatch(
+      /^payload\.supersedes\[0\] /,
+    )
+  })
+
+  it('rejects a prompt whose kept head of 1,000,000 chars is blank', () => {
+    const text = `${' '.repeat(USER_PROMPT_TEXT_MAX_CHARS)}late words`
+    // Counts and reasons only: a failed match on the 1,000,010-char event would diff it whole.
+    const { events, rejected } = parseBatch([withPayload('user_prompt', { text })])
+    expect(events.length).toBe(0)
+    expect(rejected.map((r) => r.reason.slice(0, 13))).toEqual(['payload.text '])
+  })
+})

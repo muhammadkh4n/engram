@@ -75,6 +75,11 @@ export const BRIEFING_ITEM_IDS_MAX = 100
 export const BRIEFING_CHANNEL_PATTERN = /^[a-z_]{1,32}$/
 
 export const REGISTER_ID_PATTERN = /^R-[A-Z]{2,6}-[0-9]+$/
+/**
+ * A register entry's item keys are `register:<id>` and `register:<id>:<sha256
+ * hex>`, and the item store bounds every event key to 512 chars.
+ */
+export const REGISTER_ID_MAX_CHARS = 64
 export const REGISTER_STATUS_PATTERN = /^[a-z_]{1,32}$/
 export const REGISTER_SUBJECT_MAX_CHARS = 200
 export const REGISTER_VERIFIED_MAX_CHARS = 1024

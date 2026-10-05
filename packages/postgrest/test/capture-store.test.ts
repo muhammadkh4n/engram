@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
-import { isItemConstraintError, type ProjectRow } from '@engram-mem/core'
+import { isItemConstraintError, sqlstateOf, type ProjectRow, type StoredEvent } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '../src/capture-store.js'
 
 interface Result {
@@ -105,6 +105,54 @@ describe('PostgRestCaptureStore.syncProjects', () => {
     expect(seen[0]!.get('Prefer')?.split(',').map((part) => part.trim())).toContain('timezone=UTC')
     expect(seen[0]!.get('Authorization')).toBe('Bearer test-key')
     expect(seen[0]!.get('apikey')).toBe('test-key')
+  })
+})
+
+const STORED: StoredEvent = {
+  sessionId: 'sess-a1',
+  eventUuid: 'evt-1',
+  type: 'user_prompt',
+  occurredAt: '2026-10-05T11:30:00Z',
+  cwd: '/home/dev/sample-repo',
+  project: { id: null, workspace: null, repo_root: null, branch: null, worktree: null },
+  planDirs: [],
+  client: { name: 'sample-client', version: '1.0.0' },
+  payload: { text: 'hello', transcript_line: 1 },
+  scrub: { masked: [] },
+  hits: [],
+}
+
+describe('PostgRestCaptureStore.ingestEvents', () => {
+  it('carries the SQLSTATE of a refused call as code, without details', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: { code: '22P05', message: 'unsupported Unicode escape sequence', details: SECRET_ROW, hint: null },
+    })
+    const err = await store.ingestEvents([STORED]).catch((e: unknown) => e)
+    expect(sqlstateOf(err)).toBe('22P05')
+    expect(String((err as Error).message)).not.toContain('hunter-two')
+  })
+
+  it('carries the SQLSTATE on a refused rule too', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: {
+        code: '23514',
+        message: 'new row for relation "memory_capture_events" violates check constraint "memory_capture_events_session_id_check"',
+        details: SECRET_ROW,
+        hint: null,
+      },
+    })
+    const err = await store.ingestEvents([STORED]).catch((e: unknown) => e)
+    expect(isItemConstraintError(err)).toBe(true)
+    expect(sqlstateOf(err)).toBe('23514')
+  })
+
+  it('gives a failure with no SQLSTATE no code', async () => {
+    const { store } = storeWith({ data: null, error: { code: '', message: 'fetch failed', details: null, hint: null } })
+    const err = await store.ingestEvents([STORED]).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(sqlstateOf(err)).toBeNull()
   })
 })
 

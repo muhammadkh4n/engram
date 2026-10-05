@@ -114,7 +114,9 @@ export interface CaptureStore {
    * Stores each event once per (sessionId, eventUuid), in one transaction,
    * and writes its hits only when this call inserted it. Returns one outcome
    * per input, in input order: a repeated key, within the call or from an
-   * earlier one, reads `duplicate` with the stored row's id.
+   * earlier one, reads `duplicate` with the stored row's id. When
+   * PostgreSQL refuses the call, the error carries the SQLSTATE as `code`
+   * (see sqlstateOf) and nothing from the call is stored.
    */
   ingestEvents(events: readonly StoredEvent[]): Promise<IngestedEvent[]>
 
@@ -144,4 +146,13 @@ export interface CaptureStore {
    * null), by id ascending. Read only.
    */
   scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]>
+}
+
+const SQLSTATE = /^[0-9A-Z]{5}$/
+
+/** The SQLSTATE a store error carries as its `code`, or null when it has none. */
+export function sqlstateOf(err: unknown): string | null {
+  if (err === null || typeof err !== 'object') return null
+  const code = (err as { code?: unknown }).code
+  return typeof code === 'string' && SQLSTATE.test(code) ? code : null
 }
