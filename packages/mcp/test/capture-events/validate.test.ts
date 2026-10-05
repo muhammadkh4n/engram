@@ -1,0 +1,294 @@
+import { describe, it, expect } from 'vitest'
+import { CAPTURE_EVENT_TYPES } from '@engram-mem/core'
+import { parseCaptureEventsRequest } from '../../src/capture-events/validate.js'
+import {
+  CAPTURE_EVENTS_MAX,
+  CAPTURE_FREE_TEXT_MAX_CHARS,
+  USER_PROMPT_TEXT_MAX_CHARS,
+  type Rejection,
+  type ValidEvent,
+} from '../../src/capture-events/contract.js'
+import {
+  OCCURRED_AT_MS,
+  RECEIVED_AT,
+  SAMPLE_LEGACY_ITEM_ID,
+  envelope,
+  validEvent,
+  type FixtureEvent,
+} from './fixtures.js'
+
+type Parsed = { events: ValidEvent[]; rejected: Rejection[] }
+
+function parseBatch(events: unknown[]): Parsed {
+  const result = parseCaptureEventsRequest(envelope(events), RECEIVED_AT)
+  if ('error' in result) throw new Error(`unexpected envelope error: ${result.error}`)
+  return result
+}
+
+function expectValid(event: unknown): ValidEvent {
+  const { events, rejected } = parseBatch([event])
+  expect(rejected).toEqual([])
+  expect(events).toHaveLength(1)
+  return events[0]!
+}
+
+function expectRejected(event: unknown): Rejection {
+  const { events, rejected } = parseBatch([event])
+  expect(events).toEqual([])
+  expect(rejected).toHaveLength(1)
+  return rejected[0]!
+}
+
+function withPayload(type: (typeof CAPTURE_EVENT_TYPES)[number], patch: Record<string, unknown>): FixtureEvent {
+  const event = validEvent(type)
+  return { ...event, payload: { ...event.payload, ...patch } }
+}
+
+function withoutPayloadKey(event: FixtureEvent, key: string): FixtureEvent {
+  const payload = { ...event.payload }
+  delete payload[key]
+  return { ...event, payload }
+}
+
+describe('parseCaptureEventsRequest — fixtures', () => {
+  it.each([...CAPTURE_EVENT_TYPES])('accepts the %s fixture unchanged', (type) => {
+    const fixture = validEvent(type)
+    const { event } = expectValid(fixture)
+    expect(event).toEqual(fixture)
+  })
+
+  it('keeps each event at its index and reports rejections at theirs', () => {
+    const bad = { ...validEvent('session_end', 2), role: 'user' }
+    const { events, rejected } = parseBatch([validEvent('session_start'), bad, validEvent('pre_compact')])
+    expect(events.map((e) => e.index)).toEqual([0, 2])
+    expect(rejected).toEqual([
+      { index: 1, session_id: 'sess-a1', event_uuid: 'evt-session_end-2', reason: 'unknown field(s): role' },
+    ])
+  })
+
+  it('echoes ids only when they are strings of at most 256 chars', () => {
+    const r = expectRejected({ ...validEvent('session_end'), session_id: 'x'.repeat(257), event_uuid: 7 })
+    expect(r.session_id).toBeNull()
+    expect(r.event_uuid).toBeNull()
+  })
+})
+
+describe('parseCaptureEventsRequest — envelope', () => {
+  const now = RECEIVED_AT
+  it.each([
+    ['no events', envelope([])],
+    ['501 events', envelope(Array.from({ length: CAPTURE_EVENTS_MAX + 1 }, (_, i) => validEvent('session_start', i)))],
+    ['a missing client', { events: [validEvent('session_start')] }],
+    ['an extra key dry_run', { ...envelope([validEvent('session_start')]), dry_run: true }],
+    ['a bad client name', { client: { name: 'Bad Name', version: '1' }, events: [validEvent('session_start')] }],
+    ['a body that is not an object', [validEvent('session_start')]],
+  ])('refuses %s', (_label, body) => {
+    const result = parseCaptureEventsRequest(body, now)
+    expect(result).toEqual({ error: expect.any(String) })
+  })
+
+  it('accepts exactly 500 events', () => {
+    const events = Array.from({ length: CAPTURE_EVENTS_MAX }, (_, i) => validEvent('session_start', i))
+    expect(parseBatch(events).events).toHaveLength(CAPTURE_EVENTS_MAX)
+  })
+})
+
+describe('parseCaptureEventsRequest — event fields', () => {
+  it('rejects an extra event key by name', () => {
+    expect(expectRejected({ ...validEvent('user_prompt'), role: 'user' }).reason).toBe('unknown field(s): role')
+  })
+
+  it('rejects a missing event field', () => {
+    const event: Record<string, unknown> = { ...validEvent('session_start') }
+    delete event.plan_dirs
+    expect(expectRejected(event).reason).toBe('missing field(s): plan_dirs')
+  })
+
+  it('rejects an assistant_turn text of 200,001 chars', () => {
+    const r = expectRejected(withPayload('assistant_turn', { text: 'a'.repeat(CAPTURE_FREE_TEXT_MAX_CHARS + 1) }))
+    expect(r.reason).toBe('payload.text exceeds 200000 characters')
+  })
+
+  it.each([
+    ['before 2020', '2019-12-31T23:59:59Z'],
+    ['11 minutes after receipt', new Date(RECEIVED_AT.getTime() + 11 * 60_000).toISOString()],
+    ['without an offset', '2026-10-05T10:00:00'],
+    ['an impossible date', '2026-02-30T10:00:00Z'],
+  ])('rejects occurred_at %s', (_label, occurredAt) => {
+    expect(expectRejected({ ...validEvent('session_start'), occurred_at: occurredAt }).reason).toMatch(/^occurred_at /)
+  })
+
+  it('accepts occurred_at with a numeric offset and 9 minutes after receipt', () => {
+    expectValid({ ...validEvent('session_start'), occurred_at: '2026-10-05T14:09:00.123456+02:00' })
+  })
+
+  it('rejects a control character in session_id and a bad event_uuid', () => {
+    expect(expectRejected({ ...validEvent('session_start'), session_id: 'sess\u0007' }).reason).toMatch(/^session_id /)
+    expect(expectRejected({ ...validEvent('session_start'), event_uuid: '-evt' }).reason).toMatch(/^event_uuid /)
+  })
+
+  it('rejects an extra project key and an unknown type', () => {
+    const event = validEvent('session_start')
+    const project = { ...(event.project as Record<string, unknown>), host: 'x' }
+    expect(expectRejected({ ...event, project }).reason).toBe('project: unknown field(s): host')
+    expect(expectRejected({ ...event, type: 'tool_call' }).reason).toMatch(/^type must be one of /)
+  })
+
+  it('rejects an unknown payload key', () => {
+    expect(expectRejected(withPayload('session_end', { extra: 1 })).reason).toBe('payload: unknown field(s): extra')
+  })
+
+  it('does not echo an unknown key that is not a plain identifier', () => {
+    const r = expectRejected(withPayload('session_end', { 'sk-live secret value': 1 }))
+    expect(r.reason).toBe('payload: unknown field(s): 1 unprintable')
+  })
+})
+
+describe('parseCaptureEventsRequest — user_prompt', () => {
+  it('accepts a 1,000,001-char text', () => {
+    const text = 'p'.repeat(USER_PROMPT_TEXT_MAX_CHARS + 1)
+    const { event } = expectValid(withPayload('user_prompt', { text }))
+    expect(event.type === 'user_prompt' && event.payload.text.length).toBe(USER_PROMPT_TEXT_MAX_CHARS + 1)
+  })
+
+  it('rejects a null transcript_line without an origin', () => {
+    const r = expectRejected(withPayload('user_prompt', { transcript_line: null }))
+    expect(r.reason).toBe('payload.transcript_line may be null only with an origin')
+  })
+
+  it('rejects an origin of an unknown type', () => {
+    const r = expectRejected(withPayload('user_prompt', { origin: { type: 'web' } }))
+    expect(r.reason).toBe('payload.origin.type must be one of history, legacy')
+  })
+
+  it('rejects a history origin whose timestamp_ms differs from occurred_at', () => {
+    const origin = { type: 'history', timestamp_ms: OCCURRED_AT_MS + 1, line: 3, paste_missing: false }
+    expect(expectRejected(withPayload('user_prompt', { origin })).reason).toMatch(/^payload\.origin\.timestamp_ms /)
+  })
+
+  it.each([
+    ['history', { type: 'history', timestamp_ms: OCCURRED_AT_MS, line: 3, paste_missing: true }],
+    ['legacy', { type: 'legacy', table: 'memory_episodes', id: SAMPLE_LEGACY_ITEM_ID, truncated: false }],
+  ])('accepts a %s origin with null cwd and transcript_line', (_label, origin) => {
+    const event = { ...withPayload('user_prompt', { origin, transcript_line: null }), cwd: null }
+    const { event: parsed } = expectValid(event)
+    expect(parsed.payload).toEqual({ text: 'move the ingest worker to a systemd timer', transcript_line: null, origin })
+  })
+
+  it('rejects a null cwd without an origin', () => {
+    expect(expectRejected({ ...validEvent('user_prompt'), cwd: null }).reason).toMatch(/^cwd /)
+  })
+
+  it('accepts truncated: true and rejects truncated: false', () => {
+    expectValid(withPayload('user_prompt', { truncated: true }))
+    expect(expectRejected(withPayload('user_prompt', { truncated: false })).reason).toBe('payload.truncated may only be true')
+  })
+})
+
+describe('parseCaptureEventsRequest — user_answer', () => {
+  const question = 'Which store should the worker read?'
+
+  it('rejects an answers key naming no question', () => {
+    const r = expectRejected(withPayload('user_answer', { answers: { [question]: 'Postgres', 'Other?': 'x' } }))
+    expect(r.reason).toBe('payload.answers has a key that names no question')
+  })
+
+  it('rejects duplicate question texts', () => {
+    const first = (validEvent('user_answer').payload.questions as unknown[])[0]
+    const r = expectRejected(withPayload('user_answer', { questions: [first, first] }))
+    expect(r.reason).toBe('payload.questions[1].question duplicates an earlier question')
+  })
+
+  it('rejects an event with no answer, note or response that is not blank', () => {
+    const event = withoutPayloadKey(
+      withPayload('user_answer', { answers: { [question]: '  ' }, notes: { [question]: '' } }),
+      'response',
+    )
+    expect(expectRejected(event).reason).toBe('payload has no answer, note or response that is not blank')
+  })
+
+  it('accepts empty answers with a response', () => {
+    const event = withoutPayloadKey(withPayload('user_answer', { answers: {} }), 'notes')
+    expectValid(event)
+  })
+
+  it('accepts the 2-char answer ok', () => {
+    const event = withoutPayloadKey(withoutPayloadKey(withPayload('user_answer', { answers: { [question]: 'ok' } }), 'notes'), 'response')
+    expectValid(event)
+  })
+
+  it('keeps a __proto__ question key as an own answer', () => {
+    const questions = [{ question: '__proto__', header: '', options: [], multiSelect: false }]
+    const answers = JSON.parse('{"__proto__": "yes"}') as Record<string, unknown>
+    const event = withoutPayloadKey(withoutPayloadKey(withPayload('user_answer', { questions, answers }), 'notes'), 'response')
+    const { event: parsed } = expectValid(event)
+    const payload = parsed.payload as { answers: Record<string, string> }
+    expect(Object.hasOwn(payload.answers, '__proto__')).toBe(true)
+    expect(Object.getPrototypeOf(payload.answers)).toBe(Object.prototype)
+  })
+})
+
+describe('parseCaptureEventsRequest — ledger, register and candidate rules', () => {
+  it('rejects a ledger_decision by mk without a quote', () => {
+    const event = withoutPayloadKey(validEvent('ledger_decision'), 'quote')
+    expect(expectRejected(event).reason).toBe('payload with by "mk" requires quote and source')
+  })
+
+  it('accepts a ledger_decision by the session without a quote or source', () => {
+    expectValid(withoutPayloadKey(withoutPayloadKey(withPayload('ledger_decision', { by: 'session' }), 'quote'), 'source'))
+  })
+
+  it('rejects candidate_status recorded without register_id', () => {
+    const r = expectRejected(withoutPayloadKey(validEvent('candidate_status'), 'register_id'))
+    expect(r.reason).toBe('payload.register_id is required when status is recorded')
+  })
+
+  it('rejects candidate_status dismissed with a register_id', () => {
+    const r = expectRejected(withPayload('candidate_status', { status: 'dismissed' }))
+    expect(r.reason).toBe('payload.register_id must be absent when status is dismissed')
+  })
+
+  it('accepts candidate_status dismissed without a register_id', () => {
+    expectValid(withoutPayloadKey(withPayload('candidate_status', { status: 'dismissed' }), 'register_id'))
+  })
+
+  it('rejects register_id plan:/x', () => {
+    expect(expectRejected(withPayload('candidate_status', { register_id: 'plan:/x' })).reason).toMatch(/^payload\.register_id /)
+  })
+
+  it('accepts a plan ledger decision as register_id', () => {
+    expectValid(withPayload('candidate_status', { register_id: 'plan:tst-plan/MK-1a2b3c4d' }))
+  })
+
+  it.each(['project:', 'workspace:', 'team:x', 'global '])('rejects register_entry scope %j', (scope) => {
+    expect(expectRejected(withPayload('register_entry', { scope })).reason).toMatch(/^payload\.scope /)
+  })
+
+  it.each(['global', 'workspace:ws-test'])('accepts register_entry scope %s', (scope) => {
+    expectValid(withPayload('register_entry', { scope }))
+  })
+
+  it('rejects an upper-case sha and a register id in supersedes that is not one', () => {
+    expect(expectRejected(withPayload('git_commit', { sha: 'A'.repeat(40) })).reason).toMatch(/^payload\.sha /)
+    expect(expectRejected(withPayload('register_entry', { supersedes: ['TST-1'] })).reason).toMatch(
+      /^payload\.supersedes\[0\] /,
+    )
+  })
+})
+
+describe('parseCaptureEventsRequest — reasons never carry values', () => {
+  const MARKER = 'ZQXMARKER-9f3e'
+
+  it.each([
+    ['an over-long text', withPayload('assistant_turn', { text: `${MARKER} ${'a'.repeat(CAPTURE_FREE_TEXT_MAX_CHARS)}` })],
+    ['an unknown type', { ...validEvent('session_start'), type: MARKER }],
+    ['a bad sha', withPayload('git_commit', { sha: MARKER })],
+    ['an unknown answer key', withPayload('user_answer', { answers: { [MARKER]: 'x' } })],
+    ['an unknown payload key', withPayload('session_end', { [MARKER]: 'x' })],
+    ['a bad occurred_at', { ...validEvent('session_start'), occurred_at: MARKER }],
+    ['a bad register scope', withPayload('register_entry', { scope: `project:${MARKER}\u0001` })],
+  ])('omits the marker from the rejection of %s', (_label, event) => {
+    const r = expectRejected({ ...event, event_uuid: 'evt-marker' })
+    expect(JSON.stringify(r)).not.toContain(MARKER)
+  })
+})
