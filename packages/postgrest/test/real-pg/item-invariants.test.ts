@@ -324,6 +324,37 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await rowCount(o.id)).toBe(0)
     }, TEST_TIMEOUT_MS)
 
+    it.each(['infinity', '-infinity'])('a direct insert of a non-finite occurred_at violates the finite check (%s)', async (when) => {
+      const u = mkUtterance('An utterance with no real time.', { occurredAt: when })
+      await expectCheckViolation(insert(u), /violates check constraint "memory_items_finite_check"/)
+      expect(await rowCount(u.id)).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it.each([
+      ['retired_at', `retired_at = 'infinity', retired_reason = 'tst: retired forever'`],
+      ['forgotten_at', `forgotten_at = '-infinity', forgotten_reason = 'tst: forgotten always'`],
+      ['a restated_at element', `restated_at = ARRAY['${at(5)}', 'infinity']::timestamptz[]`],
+    ])('an UPDATE that sets %s to a non-finite time violates the finite check', async (_label, assignment) => {
+      const u = mkUtterance('Keep the times finite.')
+      await commit(u)
+      await expectCheckViolation(
+        `UPDATE public.memory_items SET ${assignment} WHERE id = '${u.id}';`,
+        /violates check constraint "memory_items_finite_check"/,
+      )
+      expect(await column(u.id, `retired_at IS NULL AND forgotten_at IS NULL AND restated_at = '{}'`)).toBe('t')
+    }, TEST_TIMEOUT_MS)
+
+    it('a capture event at a non-finite occurred_at violates its finite check', async () => {
+      await expectCheckViolation(
+        `INSERT INTO public.memory_capture_events (session_id, event_uuid, type, occurred_at, payload)
+           VALUES ('tst-finite-session', 'tst-finite-event', 'user_prompt', 'infinity', '{}'::jsonb);`,
+        /violates check constraint "memory_capture_events_finite_check"/,
+      )
+      expect(
+        Number(await pg.psql(`SELECT count(*) FROM public.memory_capture_events WHERE session_id = 'tst-finite-session'`)),
+      ).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
     describe('superseded_by set by a direct UPDATE', () => {
       async function expectPointerRefused(old: Item, target: string, reason: RegExp): Promise<void> {
         await expectCheckViolation(

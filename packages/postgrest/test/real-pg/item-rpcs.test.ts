@@ -265,6 +265,83 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await rowCount([replay.id])).toBe(0)
     }, TEST_TIMEOUT_MS)
 
+    it('refuses two objects that share an id, naming both positions, and stores nothing', async () => {
+      const a = utterance('Tag the release after the smoke run.')
+      const b = utterance('Tag it before the announcement.')
+      const c = utterance('Same row id, written in capitals.', { id: b.id.toUpperCase() })
+      const message = await insertRefusal([a, b, c])
+      expect(message).toMatch(/ERROR:\s+22023: engram_insert_items: objects 2 and 3 share an id/)
+      expect(await rowCount([a.id, b.id])).toBe(0)
+
+      const replay = { ...a, source: { type: 'transcript', event_key: eventKey() } }
+      expect(await insertRefusal([a, replay])).toMatch(/22023: engram_insert_items: objects 1 and 2 share an id/)
+      expect(await rowCount([a.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('reports the stored id and inserted=false for a retried key and true for a new key in the same call', async () => {
+      const stored = utterance('Run the migrations before the deploy.')
+      const sameId = utterance('Run them in one transaction.')
+      await insertItems([stored, sameId])
+      const retriedWithNewId = { ...stored, id: newId() }
+      const fresh = utterance('Then warm the cache.')
+      const fresher = utterance('Then page the on-call.')
+
+      expect(await insertItems([retriedWithNewId, fresh, sameId, fresher])).toEqual([
+        { ord: 1, id: stored.id, inserted: false },
+        { ord: 2, id: fresh.id, inserted: true },
+        { ord: 3, id: sameId.id, inserted: false },
+        { ord: 4, id: fresher.id, inserted: true },
+      ])
+      expect(await rowCount([retriedWithNewId.id])).toBe(0)
+      expect(await rowCount([fresh.id, fresher.id])).toBe(2)
+    }, TEST_TIMEOUT_MS)
+
+    it.each([
+      ['infinity', 'infinity', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['-infinity', '-infinity', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['now', 'now', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['an offset-less time', '2026-03-04T05:06:07', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['a space instead of T', '2026-03-04 05:06:07+00:00', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['an offset without a colon', '2026-03-04T05:06:07+0000', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['a US DateStyle date', '03/04/2026 05:06:07+00', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['a Postgres DateStyle form', 'Wed Mar 04 05:06:07 2026 UTC', /object 2: occurred_at must be ISO-8601 with Z or an offset/],
+      ['a day the month does not have', '2026-02-30T05:06:07Z', /object 2: occurred_at is not a valid timestamptz/],
+    ])('refuses occurred_at of infinity, now, offset-less and DateStyle forms, naming the object (%s)', async (_label, when, reason) => {
+      const ok = utterance('This time is fine.')
+      const bad = utterance('This time is not.', { occurred_at: when })
+      const message = await insertRefusal([ok, bad])
+      expect(message).toMatch(/ERROR:\s+22023: engram_insert_items: /)
+      expect(message).toMatch(reason)
+      expect(message).not.toContain(when)
+      expect(await rowCount([ok.id, bad.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('accepts occurred_at with Z, a positive or negative offset and up to six fractional digits', async () => {
+      const zulu = utterance('Zulu time.', { occurred_at: '2026-03-04T05:06:07Z' })
+      const east = utterance('Half an hour east.', { occurred_at: '2026-03-04T10:36:07.5+05:30' })
+      const west = utterance('Eight hours west.', { occurred_at: '2026-03-03T21:06:07.123456-08:00' })
+      await insertItems([zulu, east, west])
+      expect(
+        await row(west.id, `occurred_at = '2026-03-04T05:06:07.123456Z'::timestamptz AS same_instant`),
+      ).toEqual({ same_instant: true })
+      expect(await row(east.id, `occurred_at = '2026-03-04T05:06:07.5Z'::timestamptz AS same_instant`)).toEqual({
+        same_instant: true,
+      })
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses occurred_at more than ten minutes ahead', async () => {
+      const ahead = utterance('A prompt from a fast clock.', { occurred_at: new Date(Date.now() + 11 * 60_000).toISOString() })
+      expect(await insertRefusal([utterance('On time.'), ahead])).toMatch(
+        /ERROR:\s+22023: engram_insert_items: object 2: occurred_at is more than 10 minutes ahead of now/,
+      )
+      expect(await rowCount([ahead.id])).toBe(0)
+
+      const skewed = utterance('A prompt from a slightly fast clock.', {
+        occurred_at: new Date(Date.now() + 8 * 60_000).toISOString(),
+      })
+      expect(await insertItems([skewed])).toEqual([{ ord: 1, id: skewed.id, inserted: true }])
+    }, TEST_TIMEOUT_MS)
+
     it('generates an id for an object that has none', async () => {
       const { id: _unused, ...withoutId } = utterance('Name the branch after the ticket.')
       const [result] = await insertItems([withoutId])

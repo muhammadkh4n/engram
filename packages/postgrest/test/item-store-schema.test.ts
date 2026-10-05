@@ -129,6 +129,7 @@ describe('memory_items CHECKs match the core vocabularies', () => {
       'memory_items_content_hash_check',
       'memory_items_register_check',
       'memory_items_mk_decision_check',
+      'memory_items_finite_check',
     ])
   })
 })
@@ -362,7 +363,10 @@ describe('item store RPCs', () => {
     expect(schema.indexOf('ENABLE ROW LEVEL SECURITY;')).toBeGreaterThan(Math.max(...offsets))
   })
 
-  it.each(ITEM_RPC_NAMES)('%s raises only 22023 or 23514, its own name first, never a value', (name) => {
+  // engram_insert_items may also raise internal_error, for a guard on a state
+  // its own statements cannot produce; the format argument is a position.
+  it.each(ITEM_RPC_NAMES)('%s raises only 22023, 23514 or its guard error, its own name first, never a value', (name) => {
+    const codes = name === 'engram_insert_items' ? 'invalid_parameter_value|check_violation|internal_error' : 'invalid_parameter_value|check_violation'
     const raises = [...functionDefinition(name).matchAll(/RAISE EXCEPTION([\s\S]*?);/g)].map((m) => squash(m[1]!))
     if (name === 'engram_invariant_counts') {
       expect(raises).toEqual([])
@@ -372,7 +376,7 @@ describe('item store RPCs', () => {
     for (const raise of raises) {
       expect(raise).toMatch(
         new RegExp(
-          `^USING ERRCODE = '(invalid_parameter_value|check_violation)', MESSAGE = (format\\()?'${name}: [^']*'( \\|\\| v_problem|, v_count\\))?$`,
+          `^USING ERRCODE = '(${codes})', MESSAGE = (format\\()?'${name}: [^']*'( \\|\\| v_problem|, v_(count|missing)\\))?$`,
         ),
       )
     }

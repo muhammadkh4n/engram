@@ -15,7 +15,7 @@ import type {
   Speaker,
 } from '@engram-mem/core'
 import { parseVector } from './parse-vector.js'
-import { onlyUuids } from './uuid.js'
+import { isUuid, onlyUuids } from './uuid.js'
 
 /** engram_insert_items refuses more objects than this in one call. */
 const MAX_INSERT_ITEMS = 500
@@ -91,13 +91,20 @@ export class PostgRestItemStore implements ItemStore {
     if (rows.length !== items.length) {
       throw new Error(`insertItems failed: ${rows.length} result rows for ${items.length} items`)
     }
-    return [...rows]
-      .sort((a, b) => a.ord - b.ord)
-      .map((row) => ({
-        id: row.id,
-        eventKey: items[row.ord - 1]?.source.event_key ?? null,
-        inserted: row.inserted,
-      }))
+    const sorted = [...rows].sort((a, b) => a.ord - b.ord)
+    sorted.forEach((row, i) => {
+      if (row.ord !== i + 1) {
+        throw new Error(`insertItems failed: result rows do not cover positions 1 to ${items.length}`)
+      }
+      if (typeof row.id !== 'string' || !isUuid(row.id)) {
+        throw new Error(`insertItems failed: result row ${row.ord} has no id`)
+      }
+    })
+    return sorted.map((row) => ({
+      id: row.id,
+      eventKey: items[row.ord - 1]!.source.event_key ?? null,
+      inserted: row.inserted,
+    }))
   }
 
   async getItems(ids: readonly string[], opts: { includeForgotten?: boolean } = {}): Promise<MemoryItem[]> {
@@ -178,9 +185,18 @@ function toStoreError(operation: string, error: PgError): Error {
   return new Error(`${operation} failed (${code}): ${message}`)
 }
 
+/**
+ * toISOString writes a year past 9999 or before 0 as a signed six-digit year,
+ * which the RPC's ISO-8601 rule refuses, and PostgreSQL has no year 0, so a
+ * date outside years 1 to 9999 is refused here with the field named.
+ */
 function isoDate(value: Date, field: string, position: number): string {
   if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
     throw new Error(`insertItems failed: item ${position}: ${field} is not a valid date`)
+  }
+  const year = value.getUTCFullYear()
+  if (year < 1 || year > 9999) {
+    throw new Error(`insertItems failed: item ${position}: ${field} has a year outside 1 to 9999`)
   }
   return value.toISOString()
 }
@@ -224,14 +240,28 @@ function text(row: ItemRow, column: string): string | null {
   return value == null ? null : String(value)
 }
 
+/**
+ * A timestamp the Date parser cannot read (PostgreSQL's 'infinity', a BC
+ * date) would otherwise become an Invalid Date that compares false with
+ * everything, so it fails the read instead. The value is not quoted.
+ */
+function timestamp(value: unknown, column: string, id: string): Date {
+  const parsed = new Date(String(value))
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`getItems failed: item ${id}: ${column} is not a parseable timestamp`)
+  }
+  return parsed
+}
+
 function date(row: ItemRow, column: string): Date | null {
   const value = row[column]
-  return value == null ? null : new Date(String(value))
+  return value == null ? null : timestamp(value, column, String(row.id))
 }
 
 function fromRow(row: ItemRow): MemoryItem {
+  const id = String(row.id)
   return {
-    id: String(row.id),
+    id,
     class: row.class as ItemClass,
     kind: row.kind as ItemKind,
     speaker: row.speaker as Speaker,
@@ -246,10 +276,10 @@ function fromRow(row: ItemRow): MemoryItem {
     context: text(row, 'context'),
     embedding: parseVector(row.embedding),
     embeddingModel: text(row, 'embedding_model'),
-    occurredAt: new Date(String(row.occurred_at)),
+    occurredAt: timestamp(row.occurred_at, 'occurred_at', id),
     validTo: date(row, 'valid_to'),
     supersededBy: text(row, 'superseded_by'),
-    restatedAt: ((row.restated_at ?? []) as string[]).map((at) => new Date(at)),
+    restatedAt: ((row.restated_at ?? []) as string[]).map((at) => timestamp(at, 'restated_at', id)),
     retiredAt: date(row, 'retired_at'),
     retiredReason: text(row, 'retired_reason'),
     forgottenAt: date(row, 'forgotten_at'),
@@ -261,6 +291,6 @@ function fromRow(row: ItemRow): MemoryItem {
     lineage: ((row.lineage ?? []) as string[]).map(String),
     contentHash: String(row.content_hash),
     extractionRunId: text(row, 'extraction_run_id'),
-    createdAt: new Date(String(row.created_at)),
+    createdAt: timestamp(row.created_at, 'created_at', id),
   }
 }

@@ -595,6 +595,23 @@ $$;
 
 
 --
+-- Name: engram_all_finite(timestamp with time zone[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- True when no element of the array is infinity or -infinity. A CHECK
+-- constraint cannot hold a subquery, so memory_items_finite_check reaches the
+-- restated_at elements through this function. It must exist before the
+-- tables whose CHECKs call it. pg_catalog-qualified and without a SET clause,
+-- like engram_norm_quote.
+CREATE OR REPLACE FUNCTION public.engram_all_finite(p_times timestamp with time zone[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM pg_catalog.unnest(p_times) AS t(v) WHERE NOT pg_catalog.isfinite(t.v))
+$$;
+
+
+--
 -- Name: engram_text_boost(text, integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1309,7 +1326,12 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
         AND ((register_status IS NOT DISTINCT FROM 'recorded') = (register_ref IS NOT NULL))
         AND (register_ref IS NULL OR register_ref ~ '^(R-[A-Z]{2,6}-[0-9]+|plan:[a-z0-9][a-z0-9-]{0,79}/[A-Za-z0-9][A-Za-z0-9._-]{0,39})$')),
     CONSTRAINT memory_items_mk_decision_check CHECK (NOT (class = 'artifact' AND kind = 'ledger_decision' AND (source ->> 'by') IS NOT DISTINCT FROM 'mk')
-        OR (coalesce(source ->> 'quote', '') ~ '\S' AND coalesce(source ->> 'quote_source', '') ~ '\S'))
+        OR (coalesce(source ->> 'quote', '') ~ '\S' AND coalesce(source ->> 'quote_source', '') ~ '\S')),
+    CONSTRAINT memory_items_finite_check CHECK (isfinite(occurred_at)
+        AND (valid_to IS NULL OR isfinite(valid_to))
+        AND (retired_at IS NULL OR isfinite(retired_at))
+        AND (forgotten_at IS NULL OR isfinite(forgotten_at))
+        AND public.engram_all_finite(restated_at))
 );
 
 
@@ -1355,7 +1377,8 @@ CREATE TABLE IF NOT EXISTS public.memory_capture_events (
     CONSTRAINT memory_capture_events_event_uuid_check CHECK (char_length(event_uuid) BETWEEN 1 AND 128),
     CONSTRAINT memory_capture_events_type_check CHECK (type IN ('user_prompt', 'user_answer', 'assistant_turn', 'session_start', 'session_end', 'pre_compact', 'git_commit', 'ledger_decision', 'ledger_ruling', 'briefing_shown', 'register_entry', 'candidate_status')),
     CONSTRAINT memory_capture_events_payload_check CHECK (jsonb_typeof(payload) = 'object'),
-    CONSTRAINT memory_capture_events_attempts_check CHECK (attempts >= 0)
+    CONSTRAINT memory_capture_events_attempts_check CHECK (attempts >= 0),
+    CONSTRAINT memory_capture_events_finite_check CHECK (isfinite(occurred_at))
 );
 
 
@@ -2207,11 +2230,17 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- JSON type and for a value its column type accepts before anything is
 -- written, so a bad value is reported by object position and key instead of
 -- as a cast error that quotes it; class, kind, speaker, trust, content,
--- search_text, occurred_at and source are required. A missing id is generated.
--- An object whose source.event_key is already stored, or appears earlier in
--- the same call, is skipped and reported with the stored id and
--- inserted = false, so a retried delivery is a no-op. One row per object comes
--- back, in input order. The deferred lineage and supersession checks run at
+-- search_text, occurred_at and source are required. A missing id is generated;
+-- two objects of one call may not send the same id, so every inserted row
+-- maps back to exactly one position. occurred_at must be ISO-8601 with Z or a
+-- +hh:mm offset: a form read through DateStyle or the session TimeZone (an
+-- offset-less time, 'now', a US date) would store a time the sender did not
+-- mean, and 'infinity' is no event time. It may lie at most 10 minutes past
+-- now(), the clock skew a capture client is allowed; a later time is a wrong
+-- clock, not an event. An object whose source.event_key is already stored, or
+-- appears earlier in the same call, is skipped and reported with the stored id
+-- and inserted = false, so a retried delivery is a no-op. One row per object
+-- comes back, in input order. The deferred lineage and supersession checks run at
 -- the caller's commit, so a statement may come before the utterance it quotes
 -- and one failing object fails them all.
 CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean)
@@ -2223,6 +2252,9 @@ DECLARE
   v_problem text;
   v_ids uuid[];
   v_inserted uuid[];
+  v_result_ids uuid[];
+  v_result_added boolean[];
+  v_missing integer;
 BEGIN
   IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -2265,6 +2297,12 @@ BEGIN
                WHEN f.sql_type IS NOT NULL
                     AND NOT pg_input_is_valid(CASE WHEN f.json_type = 'string' THEN f.value #>> '{}' ELSE f.value::text END, f.sql_type) THEN
                  format('object %s: %s is not a valid %s', f.n, f.col, f.sql_type)
+               WHEN f.col = 'occurred_at'
+                    AND (f.value #>> '{}') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$' THEN
+                 format('object %s: occurred_at must be ISO-8601 with Z or an offset', f.n)
+               WHEN f.col = 'occurred_at'
+                    AND (f.value #>> '{}')::timestamptz > now() + interval '10 minutes' THEN
+                 format('object %s: occurred_at is more than 10 minutes ahead of now', f.n)
                WHEN f.col = 'embedding'
                     AND (jsonb_array_length(f.value) <> 1536
                          OR EXISTS (SELECT 1 FROM jsonb_array_elements(f.value) AS x(v)
@@ -2290,6 +2328,22 @@ BEGIN
      CROSS JOIN unnest(ARRAY['class', 'kind', 'speaker', 'trust', 'content', 'search_text', 'occurred_at', 'source']) WITH ORDINALITY AS r(col, k)
      WHERE coalesce(t.e -> r.col, 'null'::jsonb) = 'null'::jsonb
      ORDER BY t.n, r.k
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NULL THEN
+    WITH sent AS (
+      SELECT t.n, (t.e ->> 'id')::uuid AS item_id
+        FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+       WHERE t.e ->> 'id' IS NOT NULL
+    ), firsts AS (
+      SELECT s.n, first_value(s.n) OVER (PARTITION BY s.item_id ORDER BY s.n) AS first_n
+        FROM sent s
+    )
+    SELECT format('objects %s and %s share an id', f.first_n, f.n) INTO v_problem
+      FROM firsts f
+     WHERE f.n > f.first_n
+     ORDER BY f.n
      LIMIT 1;
   END IF;
 
@@ -2339,24 +2393,31 @@ BEGIN
   )
   SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
 
+  -- v_ids holds no id twice, so an id in v_inserted names its position
+  -- exactly. Every other object was skipped on its event key, whose stored
+  -- row is visible to this statement.
+  SELECT array_agg(CASE WHEN v_ids[t.n::integer] = ANY (v_inserted) THEN v_ids[t.n::integer]
+                        ELSE (SELECT x.id FROM public.memory_items x
+                               WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = (t.e -> 'source' ->> 'event_key')) END
+                   ORDER BY t.n),
+         array_agg(v_ids[t.n::integer] = ANY (v_inserted) ORDER BY t.n)
+    INTO v_result_ids, v_result_added
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n);
+
+  -- Unreachable while ON CONFLICT DO NOTHING behaves as documented: under
+  -- READ COMMITTED the conflicting row is visible here, and under REPEATABLE
+  -- READ an invisible one fails the INSERT with a serialization error. A
+  -- NULL id would otherwise reach the caller as a stored item.
+  v_missing := array_position(v_result_ids, NULL);
+  IF v_missing IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'internal_error',
+      MESSAGE = format('engram_insert_items: object %s was neither inserted nor matched to a stored event key', v_missing);
+  END IF;
+
   RETURN QUERY
-  WITH input AS (
-    SELECT t.n::integer AS n,
-           v_ids[t.n::integer] AS item_id,
-           t.e -> 'source' ->> 'event_key' AS event_key,
-           row_number() OVER (PARTITION BY v_ids[t.n::integer] ORDER BY t.n) = 1 AS first_with_id
-      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
-  ), outcome AS (
-    SELECT i.n, i.item_id, i.event_key, i.first_with_id AND i.item_id = ANY (v_inserted) AS added
-      FROM input i
-  )
-  SELECT o.n,
-         CASE WHEN o.added THEN o.item_id
-              ELSE (SELECT x.id FROM public.memory_items x
-                     WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = o.event_key) END,
-         o.added
-    FROM outcome o
-   ORDER BY o.n;
+  SELECT r.n::integer, r.item_id, r.added
+    FROM unnest(v_result_ids, v_result_added) WITH ORDINALITY AS r(item_id, added, n)
+   ORDER BY r.n;
 END; $$;
 
 
@@ -2995,6 +3056,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM PUBLIC;
@@ -3034,6 +3096,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) FROM %I', role_name);
@@ -3068,6 +3131,7 @@ GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_norm_quote(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_all_finite(timestamp with time zone[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_match(text[], integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, text) TO service_role;

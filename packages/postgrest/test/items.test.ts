@@ -211,6 +211,51 @@ describe('PostgRestItemStore.insertItems', () => {
 
     await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(/insertItems failed/)
   })
+
+  it('isoDate rejects years beyond 9999', async () => {
+    const { client, rpc } = mockClient()
+    const farFuture = new Date(Date.UTC(10000, 0, 1))
+    const beforeYearOne = new Date('0000-12-31T23:59:59Z')
+
+    await expect(storeWith(client).insertItems([{ ...utterance, occurredAt: farFuture }]))
+      .rejects.toThrow(/item 1: occurredAt has a year outside 1 to 9999/)
+    await expect(storeWith(client).insertItems([utterance, { ...statement, occurredAt: beforeYearOne }]))
+      .rejects.toThrow(/item 2: occurredAt has a year outside 1 to 9999/)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('accepts the last instant of year 9999', async () => {
+    const { client, rpcCalls } = mockClient({ rpc: { data: [{ ord: 1, id: ID_A, inserted: true }], error: null } })
+
+    await storeWith(client).insertItems([{ ...utterance, occurredAt: new Date('9999-12-31T23:59:59.999Z') }])
+
+    const [object] = rpcCalls[0]!.args.p_items as Array<Record<string, unknown>>
+    expect(object!.occurred_at).toBe('9999-12-31T23:59:59.999Z')
+  })
+
+  it.each([
+    ['null', null],
+    ['an empty string', ''],
+    ['a non-uuid string', 'tst-not-an-id'],
+  ])('insertItems throws when a result row has no id (%s)', async (_label, id) => {
+    const { client } = mockClient({
+      rpc: { data: [{ ord: 1, id: ID_A, inserted: true }, { ord: 2, id, inserted: false }], error: null },
+    })
+
+    await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(
+      /insertItems failed: result row 2 has no id/,
+    )
+  })
+
+  it('refuses result rows whose positions do not run from 1 to the item count', async () => {
+    const { client } = mockClient({
+      rpc: { data: [{ ord: 1, id: ID_A, inserted: true }, { ord: 3, id: ID_B, inserted: true }], error: null },
+    })
+
+    await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(
+      /insertItems failed: result rows do not cover positions 1 to 2/,
+    )
+  })
 })
 
 describe('PostgRestItemStore.getItems', () => {
@@ -289,6 +334,26 @@ describe('PostgRestItemStore.getItems', () => {
         createdAt: new Date('2026-03-04T05:06:08.500Z'),
       },
     ])
+  })
+
+  it.each([
+    ['occurred_at', 'infinity'],
+    ['created_at', 'tst-not-a-time'],
+    ['retired_at', '-infinity'],
+  ])('fromRow throws on an unparseable timestamp in %s', async (column, value) => {
+    const { client } = mockClient({ select: () => ({ data: [{ ...row, [column]: value }], error: null }) })
+
+    const read = storeWith(client).getItems([ID_B])
+
+    await expect(read).rejects.toThrow(`getItems failed: item ${ID_B}: ${column} is not a parseable timestamp`)
+    await expect(read).rejects.not.toThrow(value)
+  })
+
+  it('fromRow throws on an unparseable restated_at element', async () => {
+    const restated = ['2026-03-06T00:00:00+00:00', 'infinity']
+    const { client } = mockClient({ select: () => ({ data: [{ ...row, restated_at: restated }], error: null }) })
+
+    await expect(storeWith(client).getItems([ID_B])).rejects.toThrow(/restated_at is not a parseable timestamp/)
   })
 
   it('reads forgotten items too when asked', async () => {
