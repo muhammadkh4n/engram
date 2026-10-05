@@ -8,7 +8,10 @@
  * - a malformed vector is an invalid argument and writes nothing;
  * - each recorded failure raises an item's attempt count and keeps the error
  *   cut to 500 characters; at 5 the item leaves the pending set and is
- *   counted; a forgotten or embedded item is not raised.
+ *   counted; a forgotten or embedded item is not raised;
+ * - engram_items_reset_embedding_failures clears the attempts and the error
+ *   of the given ids, or of every item at 5 attempts when given none, and the
+ *   items are pending again.
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -234,6 +237,54 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
           { id: done, error: '400 refused' },
         ]),
       ).rejects.toThrow('engram_items_record_embedding_failures: objects 1 and 2 share an id')
+    },
+    TEST_TIMEOUT_MS,
+  )
+  it(
+    'returns failed items to the pending set: the given ids, or every item at 5 attempts when given none',
+    async () => {
+      const [one, two, tried] = (await insertItems([
+        item({ content: 'A sample prompt refused five times, reset by id.' }),
+        item({ content: 'A sample prompt refused five times, reset with the rest.' }),
+        item({ content: 'A sample prompt refused once.' }),
+      ])) as [string, string, string]
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        await store.recordEmbeddingFailures([
+          { id: one, error: '400 refused' },
+          { id: two, error: '400 refused' },
+        ])
+      }
+      await store.recordEmbeddingFailures([{ id: tried, error: '400 refused once' }])
+      expect(await pendingIds()).not.toContain(one)
+      const failed = await store.embeddingFailedCount()
+
+      await expect(store.resetEmbeddingFailures([one])).resolves.toBe(1)
+      expect(await pendingIds()).toContain(one)
+      expect(await pendingIds()).not.toContain(two)
+      expect(
+        await pg.psql(`SELECT embedding_attempts || ' ' || coalesce(embedding_error, 'none') FROM public.memory_items WHERE id = '${one}';`),
+      ).toBe('0 none')
+      await expect(store.embeddingFailedCount()).resolves.toBe(failed - 1)
+
+      await expect(store.resetEmbeddingFailures()).resolves.toBe(failed - 1)
+      expect(await pendingIds()).toEqual(expect.arrayContaining([one, two, tried]))
+      await expect(store.embeddingFailedCount()).resolves.toBe(0)
+      expect(
+        await pg.psql(`SELECT embedding_attempts || ' ' || embedding_error FROM public.memory_items WHERE id = '${tried}';`),
+      ).toBe('1 400 refused once')
+      await expect(store.resetEmbeddingFailures()).resolves.toBe(0)
+
+      await expect(store.resetEmbeddingFailures([tried])).resolves.toBe(1)
+      expect(
+        await pg.psql(`SELECT embedding_attempts || ' ' || coalesce(embedding_error, 'none') FROM public.memory_items WHERE id = '${tried}';`),
+      ).toBe('0 none')
+      await expect(store.resetEmbeddingFailures([tried])).resolves.toBe(0)
+      await expect(store.resetEmbeddingFailures(['not-a-uuid'])).rejects.toThrow(
+        'resetEmbeddingFailures failed (22P02)',
+      )
+      await expect(
+        pg.psqlAs('service_role', `SELECT public.engram_items_reset_embedding_failures('{}'::uuid[]);`),
+      ).rejects.toThrow('p_ids holds 0 ids, not 1 to 256; pass NULL to reset every failed item')
     },
     TEST_TIMEOUT_MS,
   )

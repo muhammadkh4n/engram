@@ -172,6 +172,15 @@ export interface CaptureStore {
   embeddingFailedCount(): Promise<number>
 
   /**
+   * Returns failed items to the pending set by clearing their attempt count
+   * and stored error: the given 1 to EMBEDDING_BATCH_MAX ids, or, given none,
+   * every item embeddingFailedCount counts. The recovery step after refusals
+   * that were not the items' own. Forgotten items are left as they are.
+   * Returns how many items were reset.
+   */
+  resetEmbeddingFailures(ids?: readonly string[]): Promise<number>
+
+  /**
    * Up to `limit` rows of `target` with an id above `afterId` (every row when
    * null), by id ascending. Read only.
    */

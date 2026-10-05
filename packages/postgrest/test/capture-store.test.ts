@@ -391,6 +391,30 @@ describe('PostgRestCaptureStore embedding failures', () => {
     expect(sqlstateOf(err)).toBe('22023')
   })
 
+  it('resets the given ids, or every failed item when given none, through engram_items_reset_embedding_failures', async () => {
+    const given = storeWith({ data: 1, error: null })
+    await expect(given.store.resetEmbeddingFailures([ID])).resolves.toBe(1)
+    expect(given.calls).toEqual([{ fn: 'engram_items_reset_embedding_failures', args: { p_ids: [ID] } }])
+    const every = storeWith({ data: '7', error: null })
+    await expect(every.store.resetEmbeddingFailures()).resolves.toBe(7)
+    expect(every.calls).toEqual([{ fn: 'engram_items_reset_embedding_failures', args: { p_ids: null } }])
+  })
+
+  it('refuses an empty or oversized id list without calling the RPC, and a count it cannot read', async () => {
+    const { store, calls } = storeWith({ data: 2, error: null })
+    await expect(store.resetEmbeddingFailures([])).rejects.toThrow(
+      'resetEmbeddingFailures: ids must hold 1 to 256 ids; pass none to reset every failed item',
+    )
+    await expect(store.resetEmbeddingFailures(Array.from({ length: 257 }, () => ID))).rejects.toThrow(
+      'ids must hold 1 to 256 ids',
+    )
+    expect(calls).toEqual([])
+    await expect(store.resetEmbeddingFailures([ID])).rejects.toThrow('resetEmbeddingFailures failed: the RPC returned no row count')
+    await expect(storeWith({ data: -1, error: null }).store.resetEmbeddingFailures()).rejects.toThrow(
+      'resetEmbeddingFailures failed: the RPC returned no row count',
+    )
+  })
+
   it('reads the count from engram_items_embedding_failed_count, as a number or a bigint string', async () => {
     const asNumber = storeWith({ data: 3, error: null })
     await expect(asNumber.store.embeddingFailedCount()).resolves.toBe(3)

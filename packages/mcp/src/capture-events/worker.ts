@@ -13,12 +13,18 @@
  * An item the provider refuses on its own (EmbeddingInputError: HTTP 400 or
  * 422) would fail every batch it sits in, and the pending read returns the
  * oldest items first, so it would stop embedding for every newer item. A
- * refused batch is therefore embedded again one item at a time; each item
- * refused alone has its failure recorded, and after EMBEDDING_ATTEMPTS_MAX
- * failures it leaves the pending set. Any other failure (network, timeout,
- * 408, 409, 429, 5xx, a malformed vector, a store error) says nothing about
- * the items: they stay pending and the next tick waits a backoff that doubles
- * from the interval up to WORKER_EMBED_BACKOFF_MAX_MS.
+ * refused batch is therefore embedded again one item at a time. A refusal
+ * counts against an item only in a pass where another item of the same batch
+ * embedded: that proves the provider accepts input, so the refusal is the
+ * item's own. After EMBEDDING_ATTEMPTS_MAX such failures it leaves the
+ * pending set. A pass where nothing embedded (a lone item included) counts
+ * nothing: a provider or proxy fault that refuses every request would
+ * otherwise move the whole backlog out of the pending set within a few
+ * passes. Like any other failure (network, timeout, 408, 409, 429, 5xx, a
+ * malformed vector, a store error), it leaves the items pending, and the next
+ * embedding pass waits a backoff that doubles from the interval up to
+ * WORKER_EMBED_BACKOFF_MAX_MS. Materialization keeps its own interval through
+ * a backoff: only the embedding step waits.
  *
  * The loop is a self-scheduling timeout, so ticks never overlap, and all of
  * its state lives in the returned handle. Log lines carry counts, error codes
@@ -84,9 +90,13 @@ interface EmbedOutcome {
   written: number
   /** Input-specific failures recorded. */
   recorded: number
+  /** The first refusal's message when every item read was refused, so nothing was recorded. */
+  refusedAll: string | null
   /** The failure that is not the input's fault and cut the pass short, if any. */
   error: unknown
 }
+
+const NO_PASS: EmbedOutcome = { read: 0, written: 0, recorded: 0, refusedAll: null, error: null }
 
 export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   const { store, embedder, embeddingModel, log } = opts
@@ -98,8 +108,10 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   /** Items out of the pending set; null until read. */
   let embedFailed: number | null = null
   let lastEmbedFailed: number | null = 0
-  /** Consecutive ticks whose embedding pass failed for a reason other than the input. */
+  /** Consecutive embedding passes that failed or embedded nothing. */
   let embedFailures = 0
+  /** Date.now() before which no embedding pass runs. */
+  let embedNotBefore = 0
 
   const checkedVectors = (vectors: number[][], expected: number): number[][] => {
     if (vectors.length !== expected) {
@@ -141,11 +153,11 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
 
   const embedPending = async (): Promise<EmbedOutcome> => {
     const pending = await store.pendingEmbeddings(WORKER_EMBED_BATCH)
-    if (pending.length === 0) return { read: 0, written: 0, recorded: 0, error: null }
+    if (pending.length === 0) return { ...NO_PASS }
     const texts = pending.map((p) => buildTextToEmbed({ cleanText: p.searchText }))
 
     let vectors: Array<number[] | null>
-    let failures: EmbeddingFailure[] = []
+    let refusals: EmbeddingFailure[] = []
     let error: unknown = null
     try {
       vectors = checkedVectors(await embedder.embedBatch(texts), pending.length)
@@ -154,9 +166,9 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
       if (pending.length === 1) {
         // A batch of one already failed alone.
         vectors = [null]
-        failures = [{ id: pending[0]!.id, error: await failureText(err) }]
+        refusals = [{ id: pending[0]!.id, error: await failureText(err) }]
       } else {
-        ;({ vectors, failures, error } = await embedOneByOne(pending, texts))
+        ;({ vectors, failures: refusals, error } = await embedOneByOne(pending, texts))
       }
     }
 
@@ -164,8 +176,12 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
       vector === null ? [] : [{ id: pending[i]!.id, embedding: vector, model: embeddingModel }],
     )
     const written = rows.length > 0 ? await store.setEmbeddings(rows) : 0
-    const recorded = failures.length > 0 ? await store.recordEmbeddingFailures(failures) : 0
-    return { read: pending.length, written, recorded, error }
+    // A vector the provider returned in this pass proves it accepts input,
+    // so only then is a refusal the refused item's own.
+    const accepted = rows.length > 0
+    const recorded = accepted && refusals.length > 0 ? await store.recordEmbeddingFailures(refusals) : 0
+    const refusedAll = !accepted && error === null && refusals.length > 0 ? refusals[0]!.error : null
+    return { read: pending.length, written, recorded, refusedAll, error }
   }
 
   const refreshEmbedFailed = async (recorded: number): Promise<void> => {
@@ -186,17 +202,25 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     }
     if (result === null || !result.locked) return { full: false }
 
-    let embedded: EmbedOutcome = { read: 0, written: 0, recorded: 0, error: null }
-    try {
-      embedded = await embedPending()
-    } catch (err) {
-      embedded = { ...embedded, error: err }
-    }
-    if (embedded.error === null) {
-      embedFailures = 0
-    } else {
-      embedFailures += 1
-      log(`capture worker: embedding failed: ${describeError(embedded.error)}; next tick in ${backoffMs()} ms`)
+    let embedded: EmbedOutcome = { ...NO_PASS }
+    if (Date.now() >= embedNotBefore) {
+      try {
+        embedded = await embedPending()
+      } catch (err) {
+        embedded = { ...NO_PASS, error: err }
+      }
+      if (embedded.error === null && embedded.refusedAll === null) {
+        embedFailures = 0
+      } else {
+        embedFailures += 1
+        const waitMs = backoffMs()
+        embedNotBefore = Date.now() + waitMs
+        log(
+          embedded.error !== null
+            ? `capture worker: embedding failed: ${describeError(embedded.error)}; next embedding pass in ${waitMs} ms`
+            : `capture worker: embedding refused for every item: ${embedded.refusedAll}`,
+        )
+      }
     }
     await refreshEmbedFailed(embedded.recorded)
 
@@ -210,7 +234,8 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     }
     lastDead = result.dead
     lastEmbedFailed = embedFailed
-    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embedded.read >= WORKER_EMBED_BATCH }
+    const embeddedFull = embedded.read >= WORKER_EMBED_BATCH && embedded.error === null && embedded.refusedAll === null
+    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull }
   }
 
   /** The interval doubled once per consecutive failed embedding pass, capped. */
@@ -232,7 +257,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
       })
       .then((outcome) => {
         inFlight = null
-        schedule(embedFailures > 0 ? backoffMs() : outcome.full ? 0 : intervalMs)
+        schedule(outcome.full ? 0 : intervalMs)
       })
   }
 
