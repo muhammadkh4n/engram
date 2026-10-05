@@ -43,6 +43,7 @@ const ASK_TOOL = 'AskUserQuestion'
 /** The answer recorded when the user added a note and chose no option. */
 const NOTES_ONLY = '(notes only)'
 const PLAIN_COMMAND_RE = /^\/[A-Za-z][\w:-]*(?:\s|$)/
+const COMMAND_TAG_PREFIX = '<command-'
 const COMMAND_NAME_RE = /<command-name>([\s\S]*?)<\/command-name>/
 const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/
 /** Local command output, bang-mode lines and interruption markers: written by the CLI, not typed as a prompt. */
@@ -110,7 +111,12 @@ function isTurnContent(entry: Json): boolean {
 
 // ── Prompts ──────────────────────────────────────────────────────────────
 
+/**
+ * `/name args` when the text is a tagged slash command. The CLI writes the tags
+ * first, so tags later in a prompt are text the user quoted, not a command.
+ */
 function taggedCommand(text: string): string | null {
+  if (!text.trimStart().startsWith(COMMAND_TAG_PREFIX)) return null
   const name = COMMAND_NAME_RE.exec(text)?.[1]
   if (name === undefined || isBlank(name)) return null
   const args = COMMAND_ARGS_RE.exec(text)?.[1]

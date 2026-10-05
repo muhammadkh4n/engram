@@ -339,6 +339,21 @@ describe('drainSpool', () => {
     expect(stub.received).toHaveLength(0)
   })
 
+  it('stops with bad_url on a server URL without a scheme, keeps the files and records no URL text', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    for (const serverUrl of ['rexvps:3850', 'tst-user:tst-pass@rexvps:3850/mcp', 'not a url']) {
+      const result = await drainSpool({ env: { ...env, ENGRAM_SERVER_URL: serverUrl } })
+      expect(result).toMatchObject({ stopped: 'bad_url', remaining: 1 })
+      expect(stub.received).toHaveLength(0)
+      const state = await loadSpoolState(root)
+      expect(state.last_error).toBe('bad_url')
+      expect(state.next_attempt_at).toBeNull()
+      const raw = readFileSync(join(root, '.state.json'), 'utf8')
+      expect(raw).not.toContain('rexvps')
+      expect(raw).not.toContain('tst-pass')
+    }
+  })
+
   it('starts no request once the deadline has passed', async () => {
     await writeSpoolBatch(SESSION, [prompt(1)], { root })
     const result = await drainSpool({ env, deadlineMs: Date.now() - 1 })
