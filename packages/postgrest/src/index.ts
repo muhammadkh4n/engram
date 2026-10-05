@@ -17,6 +17,8 @@ export type { PostgRestAdapterOptions, LexicalMode } from './adapter.js'
 export { getSchemaSQL, getMigrationSQL } from './migrations.js'
 export { PostgRestItemStore } from './items.js'
 export type { PostgRestItemStoreOptions } from './items.js'
+export { PostgRestCaptureStore } from './capture-store.js'
+export type { PostgRestCaptureStoreOptions } from './capture-store.js'
 
 import { PostgRestStorageAdapter } from './adapter.js'
 import type { PostgRestAdapterOptions } from './adapter.js'
