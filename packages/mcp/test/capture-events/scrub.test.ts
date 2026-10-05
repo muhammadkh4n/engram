@@ -129,6 +129,14 @@ describe('scrubEvent', () => {
     expect(payload.truncated).toBe(true)
   }, 60_000)
 
+  it('keeps a dialog answer marked truncated, and leaves an unmarked one unmarked', async () => {
+    const marked = event('user_answer', (e) => {
+      e.payload.truncated = true
+    })
+    expect((await scrubEvent(marked)).event.payload).toMatchObject({ truncated: true })
+    expect((await scrubEvent(event('user_answer'))).event.payload).not.toHaveProperty('truncated')
+  })
+
   it('never cuts a surrogate pair in half', async () => {
     const input = event('user_prompt', (e) => {
       e.payload.text = 'a'.repeat(USER_PROMPT_TEXT_MAX_CHARS - 1) + '😀tail'

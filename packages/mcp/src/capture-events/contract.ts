@@ -26,9 +26,14 @@ export const CAPTURE_BACKFILL_CLIENT = 'engram-backfill'
 
 // ── Text limits ──────────────────────────────────────────────────────────
 
-/** Every free-text string, except a prompt's `text`, is capped here. */
+/** Every free-text string, except the user's own words, is capped here. */
 export const CAPTURE_FREE_TEXT_MAX_CHARS = 200_000
-/** A prompt is never rejected for its length; the route keeps this many leading chars. */
+/**
+ * The cap on the user's words. A prompt is never rejected for its length: the
+ * route keeps this many leading chars. A dialog answer, note or response may
+ * hold up to this many chars; the producer cuts a longer one and marks the
+ * event `truncated`.
+ */
 export const USER_PROMPT_TEXT_MAX_CHARS = 1_000_000
 
 // ── Event fields ─────────────────────────────────────────────────────────
@@ -168,6 +173,8 @@ export interface UserAnswerPayload {
   /** Keyed by question text. */
   notes?: Record<string, string>
   response?: string
+  /** The producer cut at least one answer, note or the response to USER_PROMPT_TEXT_MAX_CHARS. */
+  truncated?: true
   transcript_line: number
 }
 
