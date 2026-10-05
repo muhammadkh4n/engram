@@ -17,7 +17,7 @@
 
 import { promises as fs } from 'node:fs'
 import { basename } from 'node:path'
-import { ASSISTANT_TOOLS_MAX, CAPTURE_FREE_TEXT_MAX_CHARS, USER_PROMPT_TEXT_MAX_CHARS } from '../capture-events/contract.js'
+import { ASSISTANT_TOOLS_MAX } from '../capture-events/contract.js'
 import type { AnswerQuestion, AssistantTool, UserAnswerPayload, UserPromptPayload } from '../capture-events/contract.js'
 import type { EventProject, TranscriptEvent } from './events.js'
 import { planDirsAfter } from './plan-dirs.js'
@@ -108,13 +108,6 @@ function isTurnContent(entry: Json): boolean {
   return entry.type === 'assistant' || (entry.type === 'user' && hasToolResult(messageContent(entry)))
 }
 
-/** `<cut text, true>` when text is longer than max: its head, never ending inside a surrogate pair. */
-function clip(text: string, max: number): [string, boolean] {
-  if (text.length <= max) return [text, false]
-  const head = text.slice(0, max)
-  return [/[\uD800-\uDBFF]$/.test(head) ? head.slice(0, -1) : head, true]
-}
-
 // ── Prompts ──────────────────────────────────────────────────────────────
 
 function taggedCommand(text: string): string | null {
@@ -161,9 +154,12 @@ export function humanPromptText(entry: unknown): string | null {
   return null
 }
 
+/**
+ * The prompt whole: texts are cut to the route's caps only after scrubbing,
+ * since a cut here could split a secret the scrubber would then miss.
+ */
 function promptPayload(text: string, line: number): UserPromptPayload {
-  const [head, cut] = clip(text, USER_PROMPT_TEXT_MAX_CHARS)
-  return cut ? { text: head, truncated: true, transcript_line: line } : { text: head, transcript_line: line }
+  return { text, transcript_line: line }
 }
 
 // ── Answers ──────────────────────────────────────────────────────────────
@@ -563,8 +559,7 @@ class TranscriptRead {
     if (!turn || !final) return
     const { entry, line, planDirs } = final.anchor
     if (typeof entry.uuid !== 'string' || typeof entry.timestamp !== 'string') return
-    const [text] = clip(final.text, CAPTURE_FREE_TEXT_MAX_CHARS)
-    const payload = { text, transcript_line: line, tools: turnTools(turn.calls.values()) }
+    const payload = { text: final.text, transcript_line: line, tools: turnTools(turn.calls.values()) }
     this.events.push((await this.envelope(entry, planDirs, { type: 'assistant_turn', payload })) as TranscriptEvent)
   }
 

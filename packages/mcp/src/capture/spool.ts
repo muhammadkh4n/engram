@@ -18,12 +18,13 @@ import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { CAPTURE_EVENTS_BODY_MAX_BYTES, CAPTURE_EVENTS_MAX } from '../capture-events/contract.js'
+import { CAPTURE_EVENTS_MAX } from '../capture-events/contract.js'
 import { scrubEvent } from '../capture-events/scrub.js'
 import { appendPrivateFile, ensurePrivateDir, openPrivateHandle } from '../ingest/private-files.js'
 import { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 import { captureClientInfo, sessionFileName, type CaptureClient, type CaptureEvent } from './events.js'
 import { appendCaptureLog } from './log.js'
+import { BATCH_BYTES_MAX } from './route-fit.js'
 import { acquireFileLock, releaseFileLock, writePrivateFileAtomic } from './transcript-cursor.js'
 
 type Env = Record<string, string | undefined>
@@ -36,14 +37,6 @@ export const DRAIN_MAX_PASSES = 3
 /** A temp file this old was left by a writer that crashed before its rename. */
 export const SPOOL_TMP_STALE_MS = 10 * 60_000
 const STATE_MESSAGE_MAX_CHARS = 300
-
-/**
- * Room left under the route's body cap for the request's `client` block and
- * for masking placeholders longer than the values they replace. A request
- * that still exceeds the cap is answered 413 and split in two.
- */
-const REQUEST_ENVELOPE_RESERVE_BYTES = 64 * 1024
-const BATCH_BYTES_MAX = CAPTURE_EVENTS_BODY_MAX_BYTES - REQUEST_ENVELOPE_RESERVE_BYTES
 
 const DEAD_DIR = '.dead'
 const STATE_FILE = '.state.json'
@@ -257,6 +250,25 @@ function appendDeadLetters(root: string, dir: string, letters: readonly DeadLett
   const deadDir = join(root, DEAD_DIR)
   ensurePrivateDir(deadDir)
   appendPrivateFile(join(deadDir, `${dir}${BATCH_SUFFIX}`), letters.map((l) => `${JSON.stringify(l)}\n`).join(''))
+}
+
+/**
+ * Records events a producer could not spool because the route would refuse
+ * them, in the session's dead-letter file beside the drainer's own.
+ */
+export function writeDeadLetters(
+  sessionId: string,
+  letters: ReadonlyArray<{ reason: string; event: unknown }>,
+  opts: { root: string },
+): void {
+  if (letters.length === 0) return
+  ensurePrivateDir(opts.root)
+  const at = new Date().toISOString()
+  appendDeadLetters(
+    opts.root,
+    sessionFileName(sessionId),
+    letters.map((l) => ({ at, reason: clip(l.reason), event: l.event })),
+  )
 }
 
 // ── Sending one batch ────────────────────────────────────────────────────
