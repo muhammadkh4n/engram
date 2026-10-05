@@ -10,9 +10,10 @@
  * - what was said never changes after insert, and forgetting is permanent;
  * - forgetting an item forgets what was derived from it and hands its
  *   supersessions to the next live successor or restores them;
- * - forgotten_at is set only by a transaction holding the forget lock
- *   exclusively, and an insert with lineage holds it shared, so forgets and
- *   lineage checks wait for each other instead of deadlocking.
+ * - forgotten_at is set only by a forget that took the forget lock at
+ *   transaction level and then marked its transaction, and an insert with
+ *   lineage holds the lock shared, so forgets and lineage checks wait for
+ *   each other instead of deadlocking.
  * Every refused write must leave no row behind (or the row unchanged).
  */
 import { createHash } from 'node:crypto'
@@ -189,9 +190,15 @@ function inTransaction(...statements: string[]): string {
 /** The transaction-level advisory lock engram_forget_items holds exclusively while it forgets. */
 const FORGET_LOCK_KEY = '7308892986227385959'
 
-/** Runs `sql` in one statement that first takes the forget lock exclusively, as engram_forget_items does. */
+/** The transaction-local setting a forget sets to txid_current() once it holds the forget lock. */
+const FORGET_MARK = 'engram.forget_lock_xact'
+
+/**
+ * Runs `sql` in one statement that first does what engram_forget_items does before it forgets: take the
+ * forget lock at transaction level, then mark the transaction.
+ */
 function underForgetLock(sql: string): string {
-  return `DO $forget$ BEGIN PERFORM pg_advisory_xact_lock(${FORGET_LOCK_KEY}); ${sql} END $forget$;`
+  return `DO $forget$ BEGIN PERFORM pg_advisory_xact_lock(${FORGET_LOCK_KEY}); PERFORM set_config('${FORGET_MARK}', txid_current()::text, true); ${sql} END $forget$;`
 }
 
 /** A direct UPDATE that forgets one item, with nothing held. */
@@ -199,7 +206,7 @@ function bareForgetSql(id: string, reason: string, when = '2026-02-01T00:00:00Z'
   return `UPDATE public.memory_items SET forgotten_at = '${when}', forgotten_reason = ${text(reason)} WHERE id = '${id}';`
 }
 
-/** A direct forget by a writer holding the forget lock, the only way forgotten_at may be set outside the RPC. */
+/** A direct forget by a writer that took the forget lock and marked its transaction, as the RPC does. */
 function forgetSql(id: string, reason: string, when = '2026-02-01T00:00:00Z'): string {
   return underForgetLock(bareForgetSql(id, reason, when))
 }
@@ -832,6 +839,8 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
     const SUCCESSOR_STILL_LIVE =
       /memory_items_before_update: superseded_by is replaced or cleared only once the item it names is forgotten or retired/
     const FORGOTTEN_LIFECYCLE = /memory_items_before_update: a forgotten item keeps its superseded_by, retired_at and retired_reason/
+    const NOT_UNDER_LOCK =
+      /memory_items_before_update: forgotten_at is set only by a forget that holds the forget lock for the whole transaction/
 
     it('points a live item at a live, later successor of its class', async () => {
       const a = artifact('build: cache off', { occurredAt: at(10) })
@@ -918,32 +927,65 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await column(live.id, `retired_at IS NULL`)).toBe('t')
     }, TEST_TIMEOUT_MS)
 
-    it('refuses a direct UPDATE that forgets an item while the forget lock is not held exclusively', async () => {
+    it('refuses a direct UPDATE that forgets an item without the forget lock and the mark a forget sets', async () => {
       const u = artifact('ci: forgotten by hand', { occurredAt: at(10) })
       const child = observation('The runner forgotten by hand built the release.', [u.id])
       await commit(u, child)
-      const NOT_UNDER_LOCK = /memory_items_before_update: forgotten_at is set only while the transaction holds the forget lock exclusively/
       await expectOwnerRefusal(bareForgetSql(u.id, 'tst: no lock'), NOT_UNDER_LOCK)
       await expectOwnerRefusal(
         `DO $shared$ BEGIN PERFORM pg_advisory_xact_lock_shared(${FORGET_LOCK_KEY}); ${bareForgetSql(u.id, 'tst: shared lock')} END $shared$;`,
+        NOT_UNDER_LOCK,
+      )
+      // The lock alone is not the proof: only a forget marks its transaction after taking it.
+      await expectOwnerRefusal(
+        `DO $unmarked$ BEGIN PERFORM pg_advisory_xact_lock(${FORGET_LOCK_KEY}); ${bareForgetSql(u.id, 'tst: unmarked')} END $unmarked$;`,
         NOT_UNDER_LOCK,
       )
       expect(await column(u.id, 'forgotten_at IS NULL')).toBe('t')
       expect(await column(child.id, 'forgotten_at IS NULL')).toBe('t')
     }, TEST_TIMEOUT_MS)
 
-    it('keeps a passed forget-lock check only while the lock that passed it is held', async () => {
+    it('refuses a forget under a session-level forget lock, before and after its release, and still forgets through the RPC', async () => {
+      const held = artifact('ci: runner forgotten under a session lock', { occurredAt: at(10) })
+      const released = artifact('ci: runner forgotten after the unlock', { occurredAt: at(10) })
+      await commit(held, released)
+      const session = await pg.session()
+      const outcome = (run: Promise<string>) => run.then(() => 'succeeded', (error: Error) => error.message)
+      let underSessionLock = ''
+      let afterUnlock = ''
+      try {
+        await session.run('BEGIN;')
+        await session.run(`SELECT pg_advisory_lock(${FORGET_LOCK_KEY});`)
+        await session.run('SAVEPOINT tst_session_lock;')
+        underSessionLock = await outcome(session.run(bareForgetSql(held.id, 'tst: under a session lock')))
+        await session.run('ROLLBACK TO SAVEPOINT tst_session_lock;')
+        await session.run(`SELECT pg_advisory_unlock(${FORGET_LOCK_KEY});`)
+        afterUnlock = await outcome(session.run(bareForgetSql(released.id, 'tst: after the unlock')))
+        await session.run('ROLLBACK;')
+      } finally {
+        await session.close()
+      }
+
+      expect(underSessionLock).toMatch(NOT_UNDER_LOCK)
+      expect(afterUnlock).toMatch(NOT_UNDER_LOCK)
+      expect(await column(held.id, 'forgotten_at IS NULL')).toBe('t')
+      expect(await column(released.id, 'forgotten_at IS NULL')).toBe('t')
+      await asOwner(`SELECT * FROM public.engram_forget_items(ARRAY['${released.id}']::uuid[], 'tst: through the rpc');`)
+      expect(await column(released.id, 'forgotten_reason')).toBe('tst: through the rpc')
+    }, TEST_TIMEOUT_MS)
+
+    it('keeps the forget mark only while the lock taken before it is held', async () => {
       const [first, second, third, fourth] = ['one', 'two', 'three', 'four'].map((n) =>
         artifact(`ci: runner ${n} forgotten by hand`, { occurredAt: at(10) }),
       )
       await commit(first!, second!, third!, fourth!)
-      const NOT_UNDER_LOCK = /memory_items_before_update: forgotten_at is set only while the transaction holds the forget lock exclusively/
-      // The lock taken under the savepoint goes with it, and so does the remembered check.
+      // The lock taken under the savepoint goes with it, and so does the mark set after it.
       await expectOwnerRefusal(
         [
           'BEGIN;',
           'SAVEPOINT tst_held;',
           `SELECT pg_advisory_xact_lock(${FORGET_LOCK_KEY});`,
+          `SELECT set_config('${FORGET_MARK}', txid_current()::text, true);`,
           bareForgetSql(first!.id, 'tst: under the savepoint'),
           'ROLLBACK TO SAVEPOINT tst_held;',
           bareForgetSql(second!.id, 'tst: after the rollback'),
@@ -953,7 +995,7 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       )
       // A value set for the whole session, or left by an earlier transaction, names another transaction.
       await expectOwnerRefusal(
-        `SET engram.forget_lock_xact = '1';\n${forgetSql(third!.id, 'tst: under the lock')}\n${bareForgetSql(fourth!.id, 'tst: next transaction')}`,
+        `SET ${FORGET_MARK} = '1';\n${forgetSql(third!.id, 'tst: under the lock')}\n${bareForgetSql(fourth!.id, 'tst: next transaction')}`,
         NOT_UNDER_LOCK,
       )
       expect(await column(first!.id, 'forgotten_at IS NULL')).toBe('t')

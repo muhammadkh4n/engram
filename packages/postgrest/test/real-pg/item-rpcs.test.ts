@@ -733,29 +733,23 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       }
     }, TEST_TIMEOUT_MS)
 
-    it('checks the forget lock in pg_locks once for a forget of 500 descendants', async () => {
+    it('forgets 500 descendants in one call, every cascaded row passing the forget check', async () => {
       const root = artifact('feat: the event bus', 0)
       const descendants = Array.from({ length: 500 }, (_, i) => observation(`Consumer ${i} reads the event bus.`, [root.id]))
       await insertItems([root])
       await insertItems(descendants)
-      const session = await pg.session()
-      try {
-        // Counted per transaction in pg_stat_xact_user_functions; setting it needs a superuser.
-        await session.run("SET track_functions = 'pl';")
-        await session.run('SET ROLE service_role;')
-        await session.run('BEGIN;')
-        const effects = JSON.parse(await session.run(forgetQuery([root.id], 'the bus was replaced'))) as Effect[]
-        const reads = await session.run(
-          `SELECT coalesce(sum(calls), 0) FROM pg_catalog.pg_stat_xact_user_functions
-            WHERE schemaname = 'public' AND funcname = 'engram_forget_lock_held';`,
-        )
-        await session.run('COMMIT;')
 
-        expect(effects).toHaveLength(501)
-        expect(Number(reads)).toBe(1)
-      } finally {
-        await session.close()
-      }
+      const effects = await forget([root.id], 'the bus was replaced')
+
+      expect(effects).toHaveLength(501)
+      expect(await rowCount([root.id, ...descendants.map((d) => d.id)])).toBe(501)
+      expect(
+        Number(
+          await pg.psql(
+            `SELECT count(*) FROM public.memory_items WHERE id = ANY (${uuidArray([root.id, ...descendants.map((d) => d.id)])}) AND forgotten_at IS NULL`,
+          ),
+        ),
+      ).toBe(0)
     }, TEST_TIMEOUT_MS)
 
     it('returns no row for an unknown or an already forgotten id', async () => {
@@ -850,6 +844,53 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         } finally {
           await actor.close()
           await forgetter.close()
+        }
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it.each(['engram_retire_items', 'engram_unretire_items'] as const)(
+      'lets %s of two rows and an insert whose lineage names them in the other order both finish, without a deadlock',
+      async (fn) => {
+        // Ids rise in creation order: first < second. The retire locks first, then second. The insert's lineage
+        // check runs at once here, so it holds second before it asks for first: the order a call inserting two
+        // rows whose lineage names second, then first, takes at commit.
+        const first = artifact('feat: the indexer', 0)
+        const second = artifact('feat: the compactor', 10)
+        await insertItems([first, second])
+        if (fn === 'engram_unretire_items') await retire([first.id, second.id], 'parked')
+        const fromSecond = observation('The compactor rewrites what the indexer built.', [second.id])
+        const fromFirst = observation('The indexer feeds the compactor.', [first.id])
+        const call =
+          fn === 'engram_retire_items'
+            ? `SELECT coalesce(json_agg(r.id ORDER BY r.id), '[]'::json) FROM public.engram_retire_items(${uuidArray([first.id, second.id])}, 'replaced by the planner') AS r(id);`
+            : `SELECT coalesce(json_agg(r.id ORDER BY r.id), '[]'::json) FROM public.engram_unretire_items(${uuidArray([first.id, second.id])}) AS r(id);`
+        const inserter = await pg.session()
+        const actor = await pg.session()
+        const outcome = (run: Promise<string>) => run.then((out) => out, (error: Error) => error.message)
+        try {
+          for (const session of [inserter, actor]) {
+            await session.run('SET ROLE service_role;')
+            await session.run('\\set VERBOSITY verbose')
+          }
+          const actorPid = await actor.run('SELECT pg_backend_pid();')
+          await inserter.run('BEGIN;')
+          await inserter.run('SET CONSTRAINTS public.memory_items_lineage IMMEDIATE;')
+          await inserter.run(insertQuery([fromSecond]))
+          const acting = outcome(actor.run(call))
+          await waitUntilLockWait(pg, actorPid)
+          const inserting = await outcome(inserter.run(insertQuery([fromFirst])))
+          const committing = await outcome(inserter.run('COMMIT;'))
+          const acted = await acting
+
+          expect(inserting).not.toMatch(/40P01|deadlock/)
+          expect(committing).not.toMatch(/ERROR/)
+          expect(acted).not.toMatch(/40P01|deadlock/)
+          expect(JSON.parse(acted) as string[]).toEqual([first.id, second.id].sort())
+          expect(await rowCount([fromSecond.id, fromFirst.id])).toBe(2)
+        } finally {
+          await inserter.close()
+          await actor.close()
         }
       },
       TEST_TIMEOUT_MS,
