@@ -1,9 +1,8 @@
 /**
- * The laptop CLIs send hook text to models themselves (salience classifier,
- * session summariser, pre-compact extractor) before anything reaches
- * Memory.ingest. These tests import each CLI entry point with every network
- * dependency stubbed and assert that the model call, the rejection log and
- * the ingest call all receive scrubbed text.
+ * The laptop ingest CLI sends hook text to the salience classifier itself
+ * before anything reaches Memory.ingest. These tests import the CLI entry
+ * point with every network dependency stubbed and assert that the model
+ * call, the rejection log and the ingest call all receive scrubbed text.
  */
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -13,12 +12,9 @@ import { join } from 'node:path'
 // Synthetic credential shapes: none of these is a real key.
 const FAKE_KEY = 'sk-test-0123456789abcdefghijklmnop'
 const FAKE_PASSWORD = 'c0rrect-h0rse-battery'
-const TRANSCRIPT_PATH = '/tmp/engram-cli-scrub-test/transcript.jsonl'
 
 const h = vi.hoisted(() => ({
   stdin: '',
-  transcript: '',
-  digestTranscript: vi.fn(),
   extractSalience: vi.fn(),
   memoryIngest: vi.fn(),
   memoryDispose: vi.fn(),
@@ -30,7 +26,6 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   const readFileSync = ((path: unknown, ...rest: unknown[]) => {
     if (path === 0) return h.stdin
-    if (path === TRANSCRIPT_PATH) return h.transcript
     return (actual.readFileSync as (...a: unknown[]) => unknown)(path, ...rest)
   }) as typeof actual.readFileSync
   return { ...actual, default: { ...actual, readFileSync }, readFileSync }
@@ -57,7 +52,7 @@ vi.mock('@engram-mem/postgrest', () => ({
 }))
 
 vi.mock('@engram-mem/openai', () => ({
-  openaiIntelligence: () => ({ extractSalience: h.extractSalience, digestTranscript: h.digestTranscript, embed: vi.fn() }),
+  openaiIntelligence: () => ({ extractSalience: h.extractSalience, embed: vi.fn() }),
   DEFAULT_CHAT_MODEL: 'default-chat-model',
 }))
 
@@ -95,30 +90,13 @@ const cliTimers: Array<ReturnType<typeof setTimeout>> = []
 const savedArgv = process.argv
 const savedEnv = { ...process.env }
 
-function transcriptLines(entries: Array<{ type: string; text: string }>): string {
-  return entries
-    .map((e) => JSON.stringify({ type: e.type, message: { content: [{ type: 'text', text: e.text }] } }))
-    .join('\n')
-}
-
-const SECRET_TRANSCRIPT = transcriptLines([
-  {
-    type: 'user',
-    text: `Here is the env block for the HTTP server, wire it into ecosystem.config.cjs:\nOPENAI_API_KEY=${FAKE_KEY}\nNEO4J_PASSWORD=${FAKE_PASSWORD}\nPORT=8787`,
-  },
-  {
-    type: 'assistant',
-    text: 'Added the env block to the pm2 app entry, restarted the process and confirmed the health endpoint answers on port 8787 again.',
-  },
-])
-
 function allText(value: unknown): string {
   return JSON.stringify(value)
 }
 
 beforeEach(() => {
   vi.resetModules()
-  for (const fn of [h.digestTranscript, h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
+  for (const fn of [h.extractSalience, h.memoryIngest, h.memoryDispose, h.logRejection, h.findDuplicate]) {
     fn.mockReset()
   }
   h.memoryIngest.mockResolvedValue(undefined)
@@ -243,63 +221,5 @@ describe('engram-ingest CLI', () => {
     const code = await runIngest([...flags, '--content', 'feat: stream the transcript read', '--source', 'git-commit'])
     expect(code).toBe(1)
     expect(stderrLines.join('')).toContain('missing required env: OPENAI_API_KEY')
-  })
-})
-
-describe('session-summary CLI', () => {
-  it('sends the digest model a scrubbed transcript and logs the redaction kinds', async () => {
-    h.transcript = SECRET_TRANSCRIPT
-    h.digestTranscript.mockResolvedValue({
-      memory: 'Session: pm2 env wiring\n- Added the env block and restarted the HTTP server.',
-      context: '',
-    })
-
-    const { runSessionSummaryWorker } = await import('../src/session-summary.js')
-    const code = await runSessionSummaryWorker(
-      JSON.stringify({ session_id: 'sess-1', transcript_path: TRANSCRIPT_PATH }),
-      process.env,
-    )
-
-    expect(code).toBe(0)
-    expect(h.memoryIngest).toHaveBeenCalledOnce()
-    expect(h.digestTranscript).toHaveBeenCalledOnce()
-    const prompt = allText(h.digestTranscript.mock.calls[0])
-    expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
-    expect(prompt).toContain('NEO4J_PASSWORD=[REDACTED:NEO4J_PASSWORD]')
-    expect(prompt).not.toContain(FAKE_KEY)
-    expect(prompt).not.toContain(FAKE_PASSWORD)
-    expect(stderrLines).toContain('[engram-summary] redacted 2 secret value(s): known(2)\n')
-  })
-})
-
-describe('pre-compact CLI', () => {
-  it('sends the digest model a scrubbed transcript and prints its context', async () => {
-    h.transcript = [SECRET_TRANSCRIPT, SECRET_TRANSCRIPT].join('\n')
-    h.digestTranscript.mockResolvedValue({
-      memory: '- Wired the pm2 env block for the HTTP server.',
-      context: 'Wiring the HTTP server env block under pm2.',
-    })
-    const stdout: string[] = []
-
-    const { runPreCompact } = await import('../src/pre-compact.js')
-    const code = await runPreCompact(
-      JSON.stringify({ session_id: 'sess-2', transcript_path: TRANSCRIPT_PATH, trigger: 'auto' }),
-      process.env,
-      (text) => stdout.push(text),
-    )
-
-    expect(code).toBe(0)
-    expect(h.memoryIngest).toHaveBeenCalledOnce()
-    expect(h.digestTranscript).toHaveBeenCalledOnce()
-    const prompt = allText(h.digestTranscript.mock.calls[0])
-    expect(prompt).toContain('OPENAI_API_KEY=[REDACTED:OPENAI_API_KEY]')
-    expect(prompt).not.toContain(FAKE_KEY)
-    expect(prompt).not.toContain(FAKE_PASSWORD)
-    expect(stderrLines).toContain('[engram-compact] redacted 4 secret value(s): known(4)\n')
-    expect(stdout).toEqual([
-      JSON.stringify({
-        additionalContext: '[Engram Memory — preserved before compaction]\nWiring the HTTP server env block under pm2.',
-      }),
-    ])
   })
 })
