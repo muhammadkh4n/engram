@@ -14,10 +14,11 @@
  * events), `.state.json` (the drainer's health), `.drain.lock` and temp files.
  */
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { scrubSecrets } from '@engram-mem/core'
 import { CAPTURE_EVENTS_MAX } from '../capture-events/contract.js'
 import { scrubEvent } from '../capture-events/scrub.js'
 import { appendPrivateFile, ensurePrivateDir, openPrivateHandle } from '../ingest/private-files.js'
@@ -25,7 +26,7 @@ import { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 import { captureClientInfo, sessionFileName, type CaptureClient, type CaptureEvent } from './events.js'
 import { appendCaptureLog } from './log.js'
 import { BATCH_BYTES_MAX } from './route-fit.js'
-import { acquireFileLock, releaseFileLock, writePrivateFileAtomic } from './transcript-cursor.js'
+import { acquireFileLock, refreshFileLock, releaseFileLock, writePrivateFileAtomic } from './transcript-cursor.js'
 
 type Env = Record<string, string | undefined>
 
@@ -242,7 +243,10 @@ interface DeadLetter {
   at: string
   status?: number
   reason: string
-  event: unknown
+  /** Absent only when a line could not be masked; `length` and `sha256` stand in for it. */
+  event?: unknown
+  length?: number
+  sha256?: string
 }
 
 function appendDeadLetters(root: string, dir: string, letters: readonly DeadLetter[]): void {
@@ -295,6 +299,20 @@ interface Prepared {
 }
 
 /**
+ * A spool line that can never be sent, as its dead letter. The line was
+ * written by a producer that may not have scrubbed it, so the dead letter
+ * holds the line with every registered value masked; a line that cannot be
+ * masked is recorded by its length and sha256 alone.
+ */
+async function unsendableLine(line: string, reason: string, at: string): Promise<DeadLetter> {
+  try {
+    return { at, reason, event: (await scrubSecrets(line)).text }
+  } catch {
+    return { at, reason, length: line.length, sha256: createHash('sha256').update(line, 'utf8').digest('hex') }
+  }
+}
+
+/**
  * Parses and scrubs a batch. Scrubbing is pure and the secret registry never
  * throws, so an event that makes `scrubEvent` throw is malformed and would be
  * refused by the route; it is dead-lettered rather than sent unscrubbed.
@@ -307,14 +325,14 @@ async function prepareBatch(raw: string, at: string): Promise<Prepared> {
     try {
       parsed = JSON.parse(line)
     } catch {
-      prepared.unsendable.push({ at, reason: 'invalid_json', event: line })
+      prepared.unsendable.push(await unsendableLine(line, 'invalid_json', at))
       continue
     }
     try {
       prepared.events.push((await scrubEvent(parsed as CaptureEvent)).event)
       prepared.lines.push(line)
     } catch {
-      prepared.unsendable.push({ at, reason: 'unscrubbable_event', event: parsed })
+      prepared.unsendable.push(await unsendableLine(line, 'unscrubbable_event', at))
     }
   }
   return prepared
@@ -457,7 +475,16 @@ export interface DrainOptions {
   client?: CaptureClient
 }
 
-export type DrainStop = 'locked' | 'backoff' | 'no_url' | 'no_token' | 'ack_mismatch' | 'retry_later' | 'deadline'
+/** `lock_lost`: another drainer took the lock over mid-drain, so this one stopped before its next file. */
+export type DrainStop =
+  | 'locked'
+  | 'lock_lost'
+  | 'backoff'
+  | 'no_url'
+  | 'no_token'
+  | 'ack_mismatch'
+  | 'retry_later'
+  | 'deadline'
 
 export interface DrainResult {
   /** Batch files deleted after a 200 response covered them. */
@@ -487,6 +514,7 @@ class Drain {
   constructor(
     private readonly root: string,
     private readonly opts: DrainOptions,
+    private readonly lock: { path: string; token: string },
   ) {}
 
   async run(): Promise<DrainStop | null> {
@@ -519,6 +547,10 @@ class Drain {
     const queue = [...batches]
     for (let batch = queue.shift(); batch !== undefined; batch = queue.shift()) {
       if (this.opts.deadlineMs !== undefined && Date.now() >= this.opts.deadlineMs) return 'deadline'
+      // A drain with no deadline can outlive the lock's stale age; refreshing
+      // it before each file keeps a second drainer from joining, and a lock
+      // that is no longer ours means one already has.
+      if (!(await refreshFileLock(this.lock.path, this.lock.token))) return 'lock_lost'
       const outcome = await sendBatch(ctx, batch)
       switch (outcome.kind) {
         case 'acked':
@@ -568,7 +600,8 @@ class Drain {
 
 /**
  * Sends the spool's batch files to the capture route. One drainer runs at a
- * time; a second returns `locked` at once. Nothing is sent before the backoff
+ * time; a second returns `locked` at once, and a drainer whose lock was taken
+ * over returns `lock_lost` before its next file. Nothing is sent before the backoff
  * set by the last retryable failure has passed.
  */
 export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
@@ -582,7 +615,7 @@ export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
   }
   try {
     await removeStaleTmp(root)
-    const drain = new Drain(root, opts)
+    const drain = new Drain(root, opts, { path: lockPath, token: lock })
     const stopped = await drain.run()
     if (drain.tally.dead > 0) appendCaptureLog(opts.env, `spool drain dead-lettered ${drain.tally.dead} event(s)`)
     return { ...drain.tally, remaining: (await listBatches(root)).length, stopped }
