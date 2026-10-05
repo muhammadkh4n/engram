@@ -121,6 +121,23 @@ Tables (all in `public`):
 
 Vector indexes use HNSW (`m=16, ef_construction=64` defaults — tune for your scale).
 
+## Item store
+
+`schema.sql` also creates the typed item store. Nothing reads or writes these tables yet: recall, capture and consolidation still use the tables listed under [Schema](#schema), which are unchanged.
+
+Tables (all in `public`):
+- `memory_items` — one row per typed item: an utterance, a statement quoted from the user, an assistant observation, an artifact (commit, PR, ledger entry), a document section, a session index entry, or a row copied from the older tables (class `legacy`). Each item records its speaker, a trust level (0–3), where it came from (`source`, a JSON object whose `type` names the producer) and the items it was derived from (`lineage`). CHECK constraints hold the rules that tie speaker and trust to the class, so an item the assistant wrote can never be stored as the user's word. `source.event_key`, when present, is unique: it makes an insert idempotent.
+- `memory_subjects` — what statements and observations are about, unique per project by case-insensitive label.
+- `memory_item_entities` — tickets, repos, paths, commit shas, URLs and packages an item names.
+- `memory_capture_events` — raw capture events, unique per `(session_id, event_uuid)`, with a processing queue on `processed_at`.
+- `memory_extraction_runs` — one row per extraction run, with the extractor version, the model and the outcome.
+- `memory_projects` — the registry of project and workspace ids items may carry.
+- `memory_secret_hits` — where a value was masked before storage and which detector or registered secret name matched; never the value.
+
+Every table has row-level security with the `service_role_all` policy. The apply revokes all table privileges from `PUBLIC`, `service_role`, `anon` and `authenticated` and grants `service_role` `SELECT`, `INSERT` and `UPDATE` (`SELECT` and `INSERT` on `memory_item_entities` and `memory_secret_hits`), plus `USAGE` and `SELECT` on the two id sequences, so the grants are the same on every database whatever its default privileges. No API role can `DELETE` or `TRUNCATE`: forgetting an item is a tombstone, not a delete. `memory_items` runs autovacuum at about 1% dead rows (`autovacuum_vacuum_scale_factor = 0.01`) and keeps 10% free page space (`fillfactor = 90`), because items are updated in place and the BM25 index counts dead row versions until they are vacuumed.
+
+Deploy: apply `schema.sql`, then `bm25.sql` (which adds `idx_items_bm25` on `memory_items.search_text`), both with `-v ON_ERROR_STOP=1 -1`, then run `NOTIFY pgrst, 'reload schema';` so PostgREST sees the new tables.
+
 ## Lexical ranking
 
 The keyword leg of recall runs in one of two modes, chosen once at startup and logged to stderr:
@@ -158,9 +175,9 @@ The adapter probes for `engram_bm25_match` when it initializes and keeps that mo
 
 Re-apply `bm25.sql` (same flags as above), then reload PostgREST's schema cache with `NOTIFY pgrst, 'reload schema';`. No service restart is needed: the function keeps its name, and a signature change only appends parameters with defaults, so a running service's calls still resolve. The file drops the previous signature before creating the new one (when `p_kinds` and `p_exclude_session_id` were added, it dropped `engram_bm25_match(text[], integer, text, text)`), because PostgREST cannot resolve a call when two functions share a name.
 
-pg_textsearch writes `k1` and `b` into each index's metapage when the index is built. `ALTER INDEX … SET (b = …)` only rewrites the stored options, and scores keep the old value until a rebuild. So before creating the indexes, `bm25.sql` drops any of the four whose stored options (`pg_class.reloptions`) are not exactly `text_config=english, k1=1.2, b=0.4`, and builds it again. While an index is rebuilt, writes to its table wait. An index that already has these options is kept, so applying the file again rebuilds nothing.
+pg_textsearch writes `k1` and `b` into each index's metapage when the index is built. `ALTER INDEX … SET (b = …)` only rewrites the stored options, and scores keep the old value until a rebuild. So before creating the indexes, `bm25.sql` drops any of the five whose stored options (`pg_class.reloptions`) are not exactly `text_config=english, k1=1.2, b=0.4`, and builds it again. While an index is rebuilt, writes to its table wait. An index that already has these options is kept, so applying the file again rebuilds nothing.
 
-To go back to the default `b`, drop the four BM25 indexes, then apply the earlier `bm25.sql`, which creates them with the default options.
+To go back to the default `b`, drop the five BM25 indexes, then apply the earlier `bm25.sql`, which creates them with the default options.
 
 ### Rollback
 
@@ -171,6 +188,7 @@ DROP INDEX public.idx_episodes_bm25;
 DROP INDEX public.idx_digests_bm25;
 DROP INDEX public.idx_semantic_bm25;
 DROP INDEX public.idx_procedural_bm25;
+DROP INDEX public.idx_items_bm25;
 DROP FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text);
 DROP EXTENSION pg_textsearch;
 ```

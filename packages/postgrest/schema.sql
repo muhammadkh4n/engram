@@ -1103,6 +1103,273 @@ CREATE TABLE IF NOT EXISTS public.sensory_snapshots (
 
 
 --
+-- Item store. memory_items holds typed items: each row records who said or
+-- produced it (speaker), how far it can be trusted (trust) and where it came
+-- from (source, lineage). The rules below are CHECK constraints so that no
+-- writer, the RPCs or a direct PostgREST request, can store an item the rules
+-- refuse.
+--
+-- The tables are created in foreign-key order: subjects, extraction runs and
+-- projects first, then memory_items, then the tables that point at items.
+-- memory_extraction_runs.anchor_item_id points back at memory_items, so its
+-- foreign key is added after memory_items exists.
+--
+
+--
+-- Name: memory_subjects; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_subjects (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    project_id text,
+    label text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_subjects_project_id_check CHECK (project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'),
+    CONSTRAINT memory_subjects_label_check CHECK (label ~ '\S' AND char_length(label) <= 200)
+);
+
+
+--
+-- Name: memory_extraction_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    session_id text,
+    anchor_item_id uuid,
+    extractor_version text NOT NULL,
+    model text,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    status text NOT NULL,
+    stats jsonb DEFAULT '{}'::jsonb NOT NULL,
+    error text,
+    CONSTRAINT memory_extraction_runs_extractor_version_check CHECK (extractor_version ~ '\S' AND char_length(extractor_version) <= 64),
+    CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed'))
+);
+
+
+--
+-- Name: memory_projects; Type: TABLE; Schema: public; Owner: -
+--
+-- The registry of project and workspace ids items may carry. A workspace
+-- groups projects and belongs to no workspace itself.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_projects (
+    id text PRIMARY KEY,
+    kind text NOT NULL,
+    workspace_id text REFERENCES public.memory_projects(id),
+    vault_folder text,
+    register_prefix text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_projects_id_check CHECK (id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'),
+    CONSTRAINT memory_projects_kind_check CHECK (kind IN ('project', 'workspace')),
+    CONSTRAINT memory_projects_workspace_check CHECK (kind = 'project' OR workspace_id IS NULL),
+    CONSTRAINT memory_projects_vault_folder_check CHECK (vault_folder IS NULL OR char_length(vault_folder) <= 200),
+    CONSTRAINT memory_projects_register_prefix_check CHECK (register_prefix IS NULL OR register_prefix ~ '^[A-Z]{2,6}$')
+);
+
+
+--
+-- Name: memory_items; Type: TABLE; Schema: public; Owner: -
+--
+-- Class rules, one CHECK each:
+-- - utterance: what was said in a session. MK's prompts and answers are
+--   trust 0; assistant turns are trust 3.
+-- - mk_statement: an exact quote of MK, trust 0. It needs a subject and a
+--   non-empty lineage (the utterances it was quoted from).
+-- - observation: written by the assistant; trust 2 when source.evidence is a
+--   non-empty array of pointers, else 3. It needs a subject.
+-- - artifact, document_section, session_index: produced by tools, trust 1.
+-- - legacy: rows copied from the memory_* tiers, trust 3 whoever spoke.
+-- Only utterances, observations and legacy rows may have the assistant as
+-- speaker, so nothing the assistant wrote can be stored as MK's word.
+--
+-- A CHECK that evaluates to NULL passes, so the rules that compare nullable
+-- columns use IS NOT DISTINCT FROM or CASE, whose WHEN treats NULL as false.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_items (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    class text NOT NULL,
+    kind text NOT NULL,
+    speaker text NOT NULL,
+    trust smallint NOT NULL,
+    project_id text,
+    workspace_id text,
+    plan_slug text,
+    session_id text,
+    subject_id uuid REFERENCES public.memory_subjects(id),
+    content text NOT NULL,
+    search_text text NOT NULL,
+    context text,
+    embedding public.vector(1536),
+    embedding_model text,
+    occurred_at timestamp with time zone NOT NULL,
+    valid_to timestamp with time zone,
+    superseded_by uuid REFERENCES public.memory_items(id),
+    restated_at timestamp with time zone[] DEFAULT '{}'::timestamp with time zone[] NOT NULL,
+    retired_at timestamp with time zone,
+    retired_reason text,
+    forgotten_at timestamp with time zone,
+    forgotten_reason text,
+    standing boolean,
+    register_status text,
+    register_ref text,
+    source jsonb NOT NULL,
+    lineage uuid[] DEFAULT '{}'::uuid[] NOT NULL,
+    content_hash text NOT NULL,
+    extraction_run_id uuid REFERENCES public.memory_extraction_runs(id),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_items_class_check CHECK (class IN ('utterance', 'mk_statement', 'observation', 'artifact', 'document_section', 'session_index', 'legacy')),
+    CONSTRAINT memory_items_kind_check CHECK (CASE class
+        WHEN 'utterance' THEN kind IN ('user_prompt', 'user_answer', 'assistant_turn')
+        WHEN 'mk_statement' THEN kind IN ('ruling', 'fact', 'correction')
+        WHEN 'observation' THEN kind IN ('fact', 'procedure', 'finding')
+        WHEN 'artifact' THEN kind IN ('commit', 'pr', 'ledger_decision', 'ledger_ruling', 'ruling_entry')
+        WHEN 'document_section' THEN kind IN ('note', 'plan_readme', 'plan_phase', 'plan_ledger', 'plan_ledger_log', 'finding', 'audit', 'research')
+        WHEN 'session_index' THEN kind IN ('session')
+        WHEN 'legacy' THEN kind IN ('legacy_episode', 'legacy_digest', 'legacy_fact')
+        ELSE false END),
+    CONSTRAINT memory_items_speaker_check CHECK (CASE class
+        WHEN 'utterance' THEN (CASE WHEN kind = 'assistant_turn' THEN speaker = 'assistant' ELSE speaker = 'mk' END)
+        WHEN 'mk_statement' THEN speaker = 'mk'
+        WHEN 'observation' THEN speaker = 'assistant'
+        WHEN 'artifact' THEN speaker = 'artifact'
+        WHEN 'document_section' THEN speaker = 'artifact'
+        WHEN 'session_index' THEN speaker = 'system'
+        WHEN 'legacy' THEN speaker IN ('mk', 'assistant', 'system', 'artifact')
+        ELSE false END),
+    CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
+        WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
+        WHEN 'mk_statement' THEN 0
+        WHEN 'observation' THEN (CASE WHEN jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+        WHEN 'artifact' THEN 1
+        WHEN 'document_section' THEN 1
+        WHEN 'session_index' THEN 1
+        WHEN 'legacy' THEN 3
+        ELSE -1 END),
+    CONSTRAINT memory_items_assistant_check CHECK (speaker <> 'assistant' OR class IN ('utterance', 'observation', 'legacy')),
+    CONSTRAINT memory_items_subject_check CHECK (class NOT IN ('mk_statement', 'observation') OR subject_id IS NOT NULL),
+    CONSTRAINT memory_items_statement_lineage_check CHECK (class <> 'mk_statement' OR cardinality(lineage) > 0),
+    CONSTRAINT memory_items_lineage_self_check CHECK (NOT (id = ANY (lineage)) AND array_position(lineage, NULL) IS NULL),
+    CONSTRAINT memory_items_supersession_check CHECK ((superseded_by IS NULL OR superseded_by <> id) AND (valid_to IS NULL OR valid_to >= occurred_at)),
+    CONSTRAINT memory_items_retired_check CHECK ((retired_at IS NULL) = (retired_reason IS NULL) AND (retired_reason IS NULL OR retired_reason ~ '\S')),
+    CONSTRAINT memory_items_forgotten_check CHECK ((forgotten_at IS NULL) = (forgotten_reason IS NULL) AND (forgotten_reason IS NULL OR forgotten_reason ~ '\S')),
+    CONSTRAINT memory_items_embedding_check CHECK ((embedding IS NULL) = (embedding_model IS NULL)),
+    CONSTRAINT memory_items_source_check CHECK (jsonb_typeof(source) = 'object'
+        AND (source ->> 'type') IN ('transcript', 'history', 'git', 'ledger', 'register', 'vault', 'legacy', 'ingest_tool', 'extraction')
+        AND (NOT (source ? 'event_key') OR (jsonb_typeof(source -> 'event_key') = 'string' AND (source ->> 'event_key') ~ '\S'))),
+    CONSTRAINT memory_items_text_check CHECK (content ~ '\S' AND search_text ~ '\S' AND (context IS NULL OR context ~ '\S')),
+    CONSTRAINT memory_items_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (plan_slug IS NULL OR plan_slug ~ '^[a-z0-9][a-z0-9-]{0,127}$')
+        AND (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256)),
+    CONSTRAINT memory_items_content_hash_check CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT memory_items_register_check CHECK ((class = 'mk_statement') = (standing IS NOT NULL)
+        AND (register_status IS NULL OR (register_status IN ('candidate', 'recorded', 'dismissed') AND class = 'mk_statement' AND standing IS TRUE))
+        AND ((register_status IS NOT DISTINCT FROM 'recorded') = (register_ref IS NOT NULL))
+        AND (register_ref IS NULL OR register_ref ~ '^(R-[A-Z]{2,6}-[0-9]+|plan:[a-z0-9][a-z0-9-]{0,79}/[A-Za-z0-9][A-Za-z0-9._-]{0,39})$')),
+    CONSTRAINT memory_items_mk_decision_check CHECK (NOT (class = 'artifact' AND kind = 'ledger_decision' AND (source ->> 'by') IS NOT DISTINCT FROM 'mk')
+        OR (coalesce(source ->> 'quote', '') ~ '\S' AND coalesce(source ->> 'quote_source', '') ~ '\S'))
+);
+
+
+--
+-- Name: memory_item_entities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_item_entities (
+    item_id uuid NOT NULL REFERENCES public.memory_items(id) ON DELETE CASCADE,
+    entity text NOT NULL,
+    entity_type text NOT NULL,
+    PRIMARY KEY (item_id, entity),
+    CONSTRAINT memory_item_entities_entity_check CHECK (entity ~ '\S' AND char_length(entity) <= 2000),
+    CONSTRAINT memory_item_entities_entity_type_check CHECK (entity_type IN ('ticket', 'repo', 'path', 'sha', 'url', 'package'))
+);
+
+
+--
+-- Name: memory_capture_events; Type: TABLE; Schema: public; Owner: -
+--
+-- Raw capture events, one row per (session_id, event_uuid): a replayed
+-- delivery hits the unique key instead of adding a row.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_capture_events (
+    id bigserial PRIMARY KEY,
+    session_id text NOT NULL,
+    event_uuid text NOT NULL,
+    type text NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    cwd text,
+    project jsonb DEFAULT '{}'::jsonb NOT NULL,
+    plan_dirs text[] DEFAULT '{}'::text[] NOT NULL,
+    client jsonb DEFAULT '{}'::jsonb NOT NULL,
+    payload jsonb NOT NULL,
+    scrub jsonb DEFAULT '{}'::jsonb NOT NULL,
+    received_at timestamp with time zone DEFAULT now() NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    processed_at timestamp with time zone,
+    error text,
+    CONSTRAINT memory_capture_events_session_event_key UNIQUE (session_id, event_uuid),
+    CONSTRAINT memory_capture_events_session_id_check CHECK (char_length(session_id) BETWEEN 1 AND 256),
+    CONSTRAINT memory_capture_events_event_uuid_check CHECK (char_length(event_uuid) BETWEEN 1 AND 128),
+    CONSTRAINT memory_capture_events_type_check CHECK (type IN ('user_prompt', 'user_answer', 'assistant_turn', 'session_start', 'session_end', 'pre_compact', 'git_commit', 'ledger_decision', 'ledger_ruling', 'briefing_shown', 'register_entry', 'candidate_status')),
+    CONSTRAINT memory_capture_events_payload_check CHECK (jsonb_typeof(payload) = 'object'),
+    CONSTRAINT memory_capture_events_attempts_check CHECK (attempts >= 0)
+);
+
+
+--
+-- Name: memory_secret_hits; Type: TABLE; Schema: public; Owner: -
+--
+-- One row per value masked before storage: where it was and which detector
+-- or registered secret name matched. The value itself is never stored.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_secret_hits (
+    id bigserial PRIMARY KEY,
+    found_at timestamp with time zone DEFAULT now() NOT NULL,
+    target_table text NOT NULL,
+    target_id text NOT NULL,
+    field text NOT NULL,
+    detector text NOT NULL,
+    secret_name text,
+    CONSTRAINT memory_secret_hits_target_table_check CHECK (target_table IN ('memory_capture_events', 'memory_items')),
+    CONSTRAINT memory_secret_hits_text_check CHECK (target_id ~ '\S' AND field ~ '\S' AND detector ~ '\S' AND (secret_name IS NULL OR secret_name ~ '\S'))
+);
+
+
+--
+-- Name: memory_extraction_runs memory_extraction_runs_anchor_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_extraction_runs_anchor_item_id_fkey' AND conrelid = 'public.memory_extraction_runs'::regclass) THEN
+    ALTER TABLE ONLY public.memory_extraction_runs
+      ADD CONSTRAINT memory_extraction_runs_anchor_item_id_fkey FOREIGN KEY (anchor_item_id) REFERENCES public.memory_items(id);
+  END IF;
+END $$;
+
+
+--
+-- Storage parameters of memory_items. Items are updated in place: once for the
+-- embedding, again for supersession, restatement and register status.
+-- The optional BM25 index (bm25.sql) counts every dead row version in its
+-- document statistics until VACUUM removes it, so BM25 scores drift as dead
+-- rows accumulate; autovacuum therefore runs at about 1% dead rows instead of
+-- PostgreSQL's default 20%, and analyze at 2%. fillfactor 90 leaves free space in each page so an update that
+-- touches no indexed column stays a HOT update and adds no index entry. Set by
+-- ALTER TABLE rather than in CREATE TABLE so that re-applying the file also
+-- converges an existing table.
+--
+
+ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_threshold = 100, autovacuum_analyze_scale_factor = 0.02);
+
+
+--
 -- forget() tombstone columns — idempotent ADD COLUMN for already-provisioned
 -- DBs (CREATE TABLE IF NOT EXISTS above is a no-op there, so the column in the
 -- table body never lands on an existing DB). Placed after the CREATE TABLEs and
@@ -1577,6 +1844,30 @@ CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural 
 
 
 --
+-- Item store indexes. idx_items_event_key makes source.event_key unique where
+-- present: it is the idempotency key of an item insert, and each writer
+-- namespaces its keys. idx_items_lineage serves the lineage @> ARRAY[id]
+-- lookups that find the items derived from a given item. The HNSW index has
+-- the same form and predicate as the tier tables' indexes above.
+--
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_items_event_key ON public.memory_items USING btree ((source ->> 'event_key')) WHERE (source ? 'event_key');
+CREATE INDEX IF NOT EXISTS idx_items_class_kind ON public.memory_items USING btree (class, kind);
+CREATE INDEX IF NOT EXISTS idx_items_project ON public.memory_items USING btree (project_id) WHERE (project_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_items_session ON public.memory_items USING btree (session_id, occurred_at) WHERE (session_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_items_occurred ON public.memory_items USING btree (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_items_subject ON public.memory_items USING btree (subject_id) WHERE (subject_id IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_items_superseded_by ON public.memory_items USING btree (superseded_by) WHERE (superseded_by IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (lineage);
+CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
+CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
+CREATE INDEX IF NOT EXISTS idx_capture_events_pending ON public.memory_capture_events USING btree (occurred_at, id) WHERE (processed_at IS NULL);
+CREATE INDEX IF NOT EXISTS idx_capture_events_session ON public.memory_capture_events USING btree (session_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extraction_runs USING btree (session_id, started_at);
+
+
+--
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -1623,6 +1914,48 @@ ALTER TABLE public.memory_semantic ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.sensory_snapshots ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_subjects; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_subjects ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_extraction_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_extraction_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_projects; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_projects ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_items; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_items ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_item_entities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_item_entities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_capture_events; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_capture_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_secret_hits; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_secret_hits ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
@@ -1678,6 +2011,107 @@ CREATE POLICY service_role_all ON public.memory_semantic TO service_role USING (
 
 DROP POLICY IF EXISTS service_role_all ON public.sensory_snapshots;
 CREATE POLICY service_role_all ON public.sensory_snapshots TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_subjects service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_subjects;
+CREATE POLICY service_role_all ON public.memory_subjects TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_extraction_runs service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_extraction_runs;
+CREATE POLICY service_role_all ON public.memory_extraction_runs TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_projects service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_projects;
+CREATE POLICY service_role_all ON public.memory_projects TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_items service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_items;
+CREATE POLICY service_role_all ON public.memory_items TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_item_entities service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_item_entities;
+CREATE POLICY service_role_all ON public.memory_item_entities TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_capture_events service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_capture_events;
+CREATE POLICY service_role_all ON public.memory_capture_events TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_secret_hits service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_secret_hits;
+CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Item store table privileges, identical on every database.
+--
+-- A fresh database grants a new table to no role but its owner, while the
+-- production database's default privileges give service_role every table
+-- privilege, DELETE and TRUNCATE included, and UPDATE on sequences. So all
+-- privileges are revoked from PUBLIC, service_role, anon and authenticated
+-- first, then service_role gets back what the item store needs: SELECT, INSERT
+-- and UPDATE (memory_item_entities and memory_secret_hits are append-only:
+-- SELECT and INSERT), and USAGE and SELECT on the two id sequences. Items are
+-- never deleted through the API: forgetting is a tombstone, so only the owner
+-- can DELETE or TRUNCATE. Re-applying the file repeats the revoke, so a grant
+-- added by hand does not survive the next apply.
+--
+
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
+REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
+
+-- anon and authenticated exist on Supabase and on installs that followed the
+-- self-host runbook; a database without them has nothing to revoke.
+DO $$
+DECLARE
+  role_name name;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_subjects TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_extraction_runs TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_projects TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_items TO service_role;
+GRANT SELECT, INSERT ON TABLE public.memory_item_entities TO service_role;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.memory_capture_events TO service_role;
+GRANT SELECT, INSERT ON TABLE public.memory_secret_hits TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.memory_capture_events_id_seq TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.memory_secret_hits_id_seq TO service_role;
 
 
 --

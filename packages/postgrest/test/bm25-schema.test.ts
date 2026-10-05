@@ -127,6 +127,17 @@ const TIERS = {
   },
 } as const
 
+/**
+ * The item store's index. It reads the items' own search_text column, so it
+ * has no tier fts column to match and no branch in engram_bm25_match.
+ */
+const ITEMS_INDEX = {
+  name: 'idx_items_bm25',
+  table: 'memory_items',
+  expr: 'search_text',
+  predicate: 'forgotten_at IS NULL',
+} as const
+
 /** The options every BM25 index is built with: english, k1 = 1.2, b = 0.4. */
 const INDEX_OPTIONS = "text_config = 'english', k1 = 1.2, b = 0.4"
 
@@ -149,7 +160,7 @@ describe('bm25.sql BM25 indexes', () => {
 
   it('creates one english BM25 index per tier with the recall predicate', () => {
     const indexes = bm25Indexes()
-    expect(indexes).toHaveLength(4)
+    expect(indexes).toHaveLength(5)
     for (const tier of Object.values(TIERS)) {
       expect(indexes).toContainEqual({
         name: tier.index,
@@ -161,9 +172,13 @@ describe('bm25.sql BM25 indexes', () => {
     }
   })
 
+  it('creates the item store index on the search_text of items not forgotten', () => {
+    expect(bm25Indexes()).toContainEqual({ ...ITEMS_INDEX, options: INDEX_OPTIONS })
+  })
+
   it('builds every index with k1 = 1.2 and b = 0.4', () => {
     const indexes = bm25Indexes()
-    expect(indexes).toHaveLength(4)
+    expect(indexes).toHaveLength(5)
     for (const index of indexes) {
       expect(index.options).toBe(INDEX_OPTIONS)
     }
@@ -202,7 +217,7 @@ describe('bm25.sql converges existing BM25 indexes to the target options', () =>
     )
   })
 
-  it('considers exactly the four BM25 indexes in public', () => {
+  it('considers exactly the five BM25 indexes in public', () => {
     const block = convergenceBlock()
     const names = block.match(/c\.relname IN \(([^)]*)\)/)
     expect(names).not.toBeNull()
@@ -447,7 +462,7 @@ describe('BM25 removal is explicit drops, never CASCADE', () => {
   })
 
   it('lists every BM25 object, then the extension, in the bm25.sql header and the README', () => {
-    expect(removal).toHaveLength(6)
+    expect(removal).toHaveLength(7)
     const header = bm25
       .slice(0, bm25.search(/^CREATE EXTENSION IF NOT EXISTS/m))
       .split('\n')

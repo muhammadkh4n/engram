@@ -5,11 +5,27 @@
  * functions run, not only that they parse. Re-applying both files must leave
  * the catalog unchanged: every statement in them is written to be idempotent.
  */
+import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { postgrestImage, realPgImage, startRealPg, type RealPg } from './harness.js'
 
 const SETUP_TIMEOUT_MS = 120_000
 const TEST_TIMEOUT_MS = 60_000
+
+const UTTERANCE_ID = '01920000-0000-7000-8000-000000000001'
+const UTTERANCE_TEXT = 'Keep the fixture rows across a re-apply.'
+
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** An mk utterance with every required column, as a VALUES row for memory_items. */
+function utteranceInsert(id: string, content: string, eventKey: string): string {
+  return `INSERT INTO public.memory_items
+      (id, class, kind, speaker, trust, project_id, session_id, content, search_text, occurred_at, source, content_hash)
+    VALUES ('${id}', 'utterance', 'user_prompt', 'mk', 0, 'tst-project', 'tst-session', '${content}', '${content}',
+      '2026-01-02T03:04:05Z', '{"type": "transcript", "event_key": "${eventKey}"}'::jsonb, '${sha256Hex(content)}')`
+}
 
 describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => {
   let pg: RealPg
@@ -57,14 +73,70 @@ describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => 
       .toBe('t')
   }, TEST_TIMEOUT_MS)
 
-  it('re-applies both files without changing the schema dump', async () => {
+  it('re-applies both files without changing the schema dump or the item store rows', async () => {
+    await pg.psql(`
+      INSERT INTO public.memory_projects (id, kind) VALUES ('tst-project', 'project');
+      ${utteranceInsert(UTTERANCE_ID, UTTERANCE_TEXT, 'capture:tst-session:1')};
+      INSERT INTO public.memory_capture_events (session_id, event_uuid, type, occurred_at, payload)
+        VALUES ('tst-session', 'tst-event-1', 'user_prompt', '2026-01-02T03:04:05Z', '{"text": "hello"}'::jsonb);
+    `)
+
     const before = await pg.dumpSchema()
     await pg.applySchema()
     const after = await pg.dumpSchema()
 
     expect(before).not.toMatch(/^\\(un)?restrict/m)
     expect(before).toContain('CREATE TABLE public.memory_episodes')
+    expect(before).toContain('CREATE TABLE public.memory_items')
     expect(after).toBe(before)
+
+    expect(await pg.psql("SELECT id || '|' || kind FROM public.memory_projects")).toBe('tst-project|project')
+    expect(await pg.psql('SELECT id, content, content_hash FROM public.memory_items')).toBe(
+      `${UTTERANCE_ID}|${UTTERANCE_TEXT}|${sha256Hex(UTTERANCE_TEXT)}`,
+    )
+    expect(await pg.psql('SELECT session_id, event_uuid, type FROM public.memory_capture_events')).toBe(
+      'tst-session|tst-event-1|user_prompt',
+    )
+  }, TEST_TIMEOUT_MS)
+
+  it('lets service_role insert and read items but not delete them, and refuses anon', async () => {
+    const id = '01920000-0000-7000-8000-000000000002'
+    expect(
+      await pg.psqlAs('service_role', `${utteranceInsert(id, 'Inserted by the service role.', 'capture:tst-session:2')} RETURNING kind`),
+    ).toBe('user_prompt')
+    expect(await pg.psqlAs('service_role', `SELECT content FROM public.memory_items WHERE id = '${id}'`)).toBe(
+      'Inserted by the service role.',
+    )
+    await expect(pg.psqlAs('service_role', `DELETE FROM public.memory_items WHERE id = '${id}'`)).rejects.toThrow(
+      /permission denied for table memory_items/,
+    )
+    await expect(pg.psqlAs('service_role', 'TRUNCATE public.memory_items')).rejects.toThrow(
+      /permission denied for table memory_items/,
+    )
+    await expect(pg.psqlAs('anon', 'SELECT count(*) FROM public.memory_items')).rejects.toThrow(
+      /permission denied for table memory_items/,
+    )
+    expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = '${id}'`)).toBe('1')
+  }, TEST_TIMEOUT_MS)
+
+  it('stores the storage parameters on memory_items', async () => {
+    const options = (await pg.psql("SELECT unnest(reloptions) FROM pg_class WHERE oid = 'public.memory_items'::regclass"))
+      .split('\n')
+      .sort()
+    expect(options).toEqual([
+      'autovacuum_analyze_scale_factor=0.02',
+      'autovacuum_vacuum_scale_factor=0.01',
+      'autovacuum_vacuum_threshold=100',
+      'fillfactor=90',
+    ])
+  }, TEST_TIMEOUT_MS)
+
+  it('refuses an extraction run whose anchor names no item', async () => {
+    await expect(
+      pg.psql(`INSERT INTO public.memory_extraction_runs (anchor_item_id, extractor_version, status)
+        VALUES ('01920000-0000-7000-8000-0000000000ff', 'tst-extractor-1', 'running')`),
+    ).rejects.toThrow(/violates foreign key constraint "memory_extraction_runs_anchor_item_id_fkey"/)
+    expect(await pg.psql('SELECT count(*) FROM public.memory_extraction_runs')).toBe('0')
   }, TEST_TIMEOUT_MS)
 
   it('runs SQL under a role and refuses what that role may not do', async () => {
