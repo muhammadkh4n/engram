@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import {
+  detectCheckout,
   detectProject,
   resolveProject,
   resolveProjectScope,
@@ -144,6 +145,52 @@ describe('detectProject', () => {
     mkdirSync(repo, { recursive: true })
     writeFileSync(join(repo, '.git'), 'not a gitdir pointer')
     expect(detectProject(repo)).toBe('odd-repo')
+  })
+})
+
+describe('detectCheckout', () => {
+  let root: string
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'engram-checkout-'))
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('names a main checkout with its own root and no worktree', () => {
+    const repo = join(root, 'plain-repo')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    mkdirSync(join(repo, 'src', 'deep'), { recursive: true })
+
+    expect(detectCheckout(join(repo, 'src', 'deep'))).toEqual({ repo: 'plain-repo', repoRoot: repo, worktree: null })
+  })
+
+  it('names a linked worktree by its main repository, its own root and its directory name', () => {
+    const main = join(root, 'real-repo')
+    mkdirSync(main, { recursive: true })
+    initRepoWithCommit(main)
+    const worktree = join(root, 'real-repo-topic')
+    git(main, 'worktree', 'add', '-q', '-b', 'topic', worktree)
+    mkdirSync(join(worktree, 'pkg'), { recursive: true })
+
+    expect(detectCheckout(join(worktree, 'pkg'))).toEqual({ repo: 'real-repo', repoRoot: worktree, worktree: 'real-repo-topic' })
+  })
+
+  it('treats a submodule as its own checkout, not a worktree', () => {
+    const superRepo = join(root, 'super')
+    mkdirSync(join(superRepo, '.git', 'modules', 'vendor-lib'), { recursive: true })
+    const sub = join(superRepo, 'libs', 'vendor-lib')
+    mkdirSync(sub, { recursive: true })
+    writeFileSync(join(sub, '.git'), 'gitdir: ../../.git/modules/vendor-lib\n')
+
+    expect(detectCheckout(sub)).toEqual({ repo: 'vendor-lib', repoRoot: sub, worktree: null })
+  })
+
+  it('returns null outside any repository', () => {
+    const loose = join(root, 'loose', 'dir')
+    mkdirSync(loose, { recursive: true })
+    expect(detectCheckout(loose)).toBeNull()
   })
 })
 
