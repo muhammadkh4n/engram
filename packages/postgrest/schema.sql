@@ -1977,6 +1977,11 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- bounds source.event_key, so every key fits a btree index row.
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
+-- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
+-- first read of items still waiting for a vector; the predicate keeps it to
+-- that backlog, which embedding drains.
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL);
+
 
 --
 -- Item store triggers. The CHECKs on memory_items see one row at a time; the
@@ -3472,6 +3477,128 @@ END; $$;
 
 
 --
+-- Name: engram_items_pending_embedding(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
+-- no embedding, not forgotten, not an assistant utterance, and not a
+-- session_index or legacy item. Assistant turns are trust 3 and never ranked
+-- by vector; session indexes and legacy rows are embedded by their own
+-- writers or not at all. Read only; idx_items_pending_embedding serves the
+-- order.
+CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer DEFAULT 32) RETURNS TABLE(id uuid, search_text text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_pending_embedding: p_limit must be from 1 to 256';
+  END IF;
+  RETURN QUERY
+  SELECT i.id, i.search_text
+    FROM public.memory_items i
+   WHERE i.embedding IS NULL
+     AND i.forgotten_at IS NULL
+     AND NOT (i.class = 'utterance' AND i.speaker = 'assistant')
+     AND i.class NOT IN ('session_index', 'legacy')
+   ORDER BY i.created_at, i.id
+   LIMIT p_limit;
+END; $$;
+
+
+--
+-- Name: engram_items_set_embeddings(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Writes 1 to 256 embeddings, each {id, embedding, model}: 1536 numbers in the
+-- real range and a non-blank model string of at most 200 characters, every id
+-- distinct. A row is written only while it has no embedding and is not
+-- forgotten, so a repeat, or a batch that lost a race with a forget, writes
+-- nothing for that row. Returns the rows written.
+-- It takes the forget advisory key (7308892986227385959) exclusively, then
+-- locks the rows FOR NO KEY UPDATE in id order, as engram_retire_items does:
+-- a forget locks rows in its own order, and an UPDATE taking row locks
+-- without the key could deadlock with it.
+CREATE OR REPLACE FUNCTION public.engram_items_set_embeddings(p_rows jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_count integer;
+  v_problem text;
+  v_written integer;
+BEGIN
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_set_embeddings: p_rows must be a JSON array';
+  END IF;
+  v_count := jsonb_array_length(p_rows);
+  IF v_count < 1 OR v_count > 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_items_set_embeddings: p_rows holds %s objects, not 1 to 256', v_count);
+  END IF;
+
+  SELECT p.reason INTO v_problem
+    FROM (
+      SELECT t.n,
+             CASE
+               WHEN jsonb_typeof(t.e) <> 'object' THEN format('object %s is not a JSON object', t.n)
+               WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.e) AS k(key) WHERE k.key NOT IN ('id', 'embedding', 'model')) THEN
+                 format('object %s has a key other than id, embedding and model', t.n)
+               WHEN jsonb_typeof(t.e -> 'id') IS DISTINCT FROM 'string' OR NOT pg_input_is_valid(t.e ->> 'id', 'uuid') THEN
+                 format('object %s: id must be a uuid string', t.n)
+               WHEN jsonb_typeof(t.e -> 'model') IS DISTINCT FROM 'string' OR (t.e ->> 'model') !~ '\S'
+                    OR char_length(t.e ->> 'model') > 200 THEN
+                 format('object %s: model must be a non-blank string of at most 200 characters', t.n)
+               WHEN jsonb_typeof(t.e -> 'embedding') IS DISTINCT FROM 'array'
+                    OR jsonb_array_length(t.e -> 'embedding') <> 1536
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements(t.e -> 'embedding') AS x(v)
+                                WHERE CASE WHEN jsonb_typeof(x.v) = 'number' THEN abs(x.v::text::numeric) > 3.4028234663852886e38 ELSE true END) THEN
+                 format('object %s: embedding must hold 1536 numbers in the real range', t.n)
+             END AS reason
+        FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)
+    ) p
+   WHERE p.reason IS NOT NULL
+   ORDER BY p.n
+   LIMIT 1;
+
+  IF v_problem IS NULL THEN
+    WITH sent AS (
+      SELECT t.n, first_value(t.n) OVER (PARTITION BY (t.e ->> 'id')::uuid ORDER BY t.n) AS first_n
+        FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)
+    )
+    SELECT format('objects %s and %s share an id', s.first_n, s.n) INTO v_problem
+      FROM sent s
+     WHERE s.n > s.first_n
+     ORDER BY s.n
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_set_embeddings: ' || v_problem;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  PERFORM 1
+     FROM public.memory_items i
+    WHERE i.id IN (SELECT (t.e ->> 'id')::uuid FROM jsonb_array_elements(p_rows) AS t(e))
+    ORDER BY i.id
+      FOR NO KEY UPDATE;
+  UPDATE public.memory_items m
+     SET embedding = (r.e -> 'embedding')::text::public.vector,
+         embedding_model = r.e ->> 'model'
+    FROM jsonb_array_elements(p_rows) AS r(e)
+   WHERE m.id = (r.e ->> 'id')::uuid
+     AND m.embedding IS NULL
+     AND m.forgotten_at IS NULL;
+  GET DIAGNOSTICS v_written = ROW_COUNT;
+  RETURN v_written;
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3871,6 +3998,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -3920,6 +4049,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -3959,6 +4090,8 @@ GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_materialize(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;

@@ -1,9 +1,11 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { ItemConstraintError, MATERIALIZE_LIMIT_MAX } from '@engram-mem/core'
+import { EMBEDDING_BATCH_MAX, ItemConstraintError, MATERIALIZE_LIMIT_MAX } from '@engram-mem/core'
 import type {
   CaptureStore,
   IngestedEvent,
+  ItemEmbedding,
   MaterializeResult,
+  PendingEmbedding,
   ProjectRow,
   ScanRow,
   ScanTarget,
@@ -111,6 +113,35 @@ export class PostgRestCaptureStore implements CaptureStore {
     const { data, error } = await this.client.rpc('engram_capture_materialize', { p_limit: limit })
     if (error) throw toStoreError('materialize', error)
     return toMaterializeResult(data)
+  }
+
+  async pendingEmbeddings(limit: number): Promise<PendingEmbedding[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > EMBEDDING_BATCH_MAX) {
+      throw new Error(`pendingEmbeddings: limit must be an integer from 1 to ${EMBEDDING_BATCH_MAX}`)
+    }
+    const { data, error } = await this.client.rpc('engram_items_pending_embedding', { p_limit: limit })
+    if (error) throw toStoreError('pendingEmbeddings', error)
+    if (!Array.isArray(data)) throw new Error('pendingEmbeddings failed: the RPC returned no rows array')
+    return (data as unknown as Array<Record<string, unknown>>).map((row) => {
+      if (typeof row.id !== 'string' || typeof row.search_text !== 'string') {
+        throw new Error('pendingEmbeddings failed: the RPC returned an unexpected row')
+      }
+      return { id: row.id, searchText: row.search_text }
+    })
+  }
+
+  async setEmbeddings(rows: readonly ItemEmbedding[]): Promise<number> {
+    if (rows.length < 1 || rows.length > EMBEDDING_BATCH_MAX) {
+      throw new Error(`setEmbeddings: rows must hold 1 to ${EMBEDDING_BATCH_MAX} embeddings`)
+    }
+    const pRows = rows.map((row) => ({ id: row.id, embedding: row.embedding, model: row.model }))
+    const { data, error } = await this.client.rpc('engram_items_set_embeddings', { p_rows: pRows })
+    if (error) throw toStoreError('setEmbeddings', error)
+    const written = typeof data === 'string' ? Number(data) : data
+    if (typeof written !== 'number' || !Number.isInteger(written) || written < 0 || written > rows.length) {
+      throw new Error('setEmbeddings failed: the RPC returned no row count')
+    }
+    return written
   }
 
   async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {
