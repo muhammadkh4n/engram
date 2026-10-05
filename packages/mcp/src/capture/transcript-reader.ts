@@ -9,6 +9,10 @@
  * is only known once the turn closes, and a tool result always finds its
  * tool_use in the same read. Events already emitted from an open turn are
  * listed in the cursor and are not emitted twice.
+ *
+ * A turn force-closed at EOF (session end, an idle sweep) moves the cursor past
+ * calls that have no result yet, such as a dialog still waiting for the user.
+ * The cursor carries those calls, and a later result is resolved against them.
  */
 
 import { promises as fs } from 'node:fs'
@@ -17,7 +21,7 @@ import { ASSISTANT_TOOLS_MAX, CAPTURE_FREE_TEXT_MAX_CHARS, USER_PROMPT_TEXT_MAX_
 import type { AnswerQuestion, AssistantTool, UserAnswerPayload, UserPromptPayload } from '../capture-events/contract.js'
 import type { EventProject, TranscriptEvent } from './events.js'
 import { planDirsAfter } from './plan-dirs.js'
-import { emptyCursor, type TranscriptCursor } from './transcript-cursor.js'
+import { emptyCursor, type PendingCall, type RefKind, type TranscriptCursor } from './transcript-cursor.js'
 
 export interface ReadTranscriptOptions {
   /** The project block for an entry's cwd and git branch. */
@@ -54,6 +58,9 @@ const PATH_TOOLS = new Set(['Write', 'Edit', 'MultiEdit'])
 const COMMIT_RE = /^\[[^\]\n]*?\b([0-9a-f]{7,40})\]/gm
 const PR_COMMANDS = ['gh pr create', 'gh pr edit', 'gh pr merge', 'gh pr ready', 'gh pr comment']
 const PR_URL_RE = /https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[0-9]+/g
+/** Bounds on the calls a cursor carries past a force-closed turn: the newest that fit are kept. */
+const PENDING_CALLS_MAX = 200
+const PENDING_CALLS_MAX_BYTES = 64 * 1024
 
 // ── Entry helpers ────────────────────────────────────────────────────────
 
@@ -163,7 +170,13 @@ function promptPayload(text: string, line: number): UserPromptPayload {
 
 interface ToolCall {
   name: string
-  input: Json
+  /** A dialog's questions; empty for any other tool. */
+  questions: AnswerQuestion[]
+  /** The refs this call's result yields: commit shas, PR URLs. */
+  refKinds: RefKind[]
+  /** The path a write tool names; reported whether or not the call has a result. */
+  path?: string
+  /** The result's text; null while the call has no result. */
   resultText: string | null
 }
 
@@ -194,9 +207,58 @@ function byQuestion(map: unknown, texts: Set<string>, pick: (v: unknown) => stri
   return Object.fromEntries(entries)
 }
 
+function refKinds(name: string, input: Json): RefKind[] {
+  const command = name === 'Bash' ? str(input.command, '') : ''
+  return [
+    ...(command.includes('git commit') ? (['commit'] as const) : []),
+    ...(PR_COMMANDS.some((c) => command.includes(c)) ? (['pr'] as const) : []),
+  ]
+}
+
+function newCall(name: string, input: Json): ToolCall {
+  const path = name === 'NotebookEdit' ? input.notebook_path : PATH_TOOLS.has(name) ? input.file_path : undefined
+  return {
+    name,
+    questions: name === ASK_TOOL ? askQuestions(input) : [],
+    refKinds: refKinds(name, input),
+    resultText: null,
+    ...(typeof path === 'string' && path.length > 0 ? { path } : {}),
+  }
+}
+
+/**
+ * A carried call as the cursor stores it. Its path is left out: the force-closed turn
+ * already reported it.
+ */
+function pendingRecord(id: string, call: ToolCall): PendingCall {
+  return {
+    id,
+    name: call.name,
+    ...(call.questions.length > 0 ? { questions: call.questions } : {}),
+    ...(call.refKinds.length > 0 ? { ref_kinds: call.refKinds } : {}),
+  }
+}
+
+function carriedCall(p: PendingCall): ToolCall {
+  return { name: p.name, questions: p.questions ?? [], refKinds: p.ref_kinds ?? [], resultText: null }
+}
+
+/** The newest records that fit the cursor's bounds, oldest first. */
+function boundedPending(records: PendingCall[]): PendingCall[] {
+  const kept: PendingCall[] = []
+  // Two bytes for the array brackets; each record after the first adds a comma.
+  let bytes = 2
+  for (let i = records.length - 1; i >= 0 && kept.length < PENDING_CALLS_MAX; i--) {
+    const size = Buffer.byteLength(JSON.stringify(records[i])) + (kept.length > 0 ? 1 : 0)
+    if (bytes + size > PENDING_CALLS_MAX_BYTES) continue
+    bytes += size
+    kept.push(records[i])
+  }
+  return kept.reverse()
+}
+
 /** The answer of a completed dialog, or null when the user said nothing in it. */
-function answerPayload(call: ToolCall, result: Json, line: number): UserAnswerPayload | null {
-  const questions = askQuestions(call.input)
+function answerPayload(questions: AnswerQuestion[], result: Json, line: number): UserAnswerPayload | null {
   const texts = new Set(questions.map((q) => q.question))
   const answers = byQuestion(result.answers, texts, (v) => (typeof v === 'string' && v !== NOTES_ONLY ? v : null))
   const notes = byQuestion(result.annotations, texts, (v) =>
@@ -218,25 +280,28 @@ type ResultEvent = { type: 'user_answer'; payload: UserAnswerPayload } | { type:
 
 /**
  * The event a tool result carries: a dialog the user answered, or the text they typed
- * when they rejected a tool call (an answer when the call was a dialog).
+ * when they rejected a tool call (an answer when the call was a dialog). A call that is
+ * no longer known (a reset or lost cursor) is a dialog when its result has a dialog's
+ * shape, and the questions then come from the result.
  */
-function toolResultEvent(entry: Json, calls: Map<string, ToolCall>, line: number): ResultEvent | null {
+function toolResultEvent(entry: Json, callOf: (id: string) => ToolCall | undefined, line: number): ResultEvent | null {
   const content = messageContent(entry)
   if (entry.type !== 'user' || !Array.isArray(content)) return null
   for (const block of content) {
     if (!isObject(block) || block.type !== 'tool_result') continue
-    const call = typeof block.tool_use_id === 'string' ? calls.get(block.tool_use_id) : undefined
+    const call = typeof block.tool_use_id === 'string' ? callOf(block.tool_use_id) : undefined
     const result = entry.toolUseResult
-    if (call?.name === ASK_TOOL && isObject(result) && Array.isArray(result.questions) && isObject(result.answers)) {
+    const maybeDialog = call === undefined || call.name === ASK_TOOL
+    if (maybeDialog && isObject(result) && Array.isArray(result.questions) && isObject(result.answers)) {
       // A dialog that timed out was resolved by the CLI, not by the user.
       if (result.afkTimeoutMs !== undefined) return null
-      const payload = answerPayload(call, result, line)
+      const payload = answerPayload(call ? call.questions : askQuestions(result), result, line)
       return payload && { type: 'user_answer', payload }
     }
     const feedback = entry.userFeedback
     if (block.is_error !== true || entry.toolDenialKind !== 'user-rejected') continue
     if (typeof feedback !== 'string' || isBlank(feedback)) continue
-    const questions = call?.name === ASK_TOOL ? askQuestions(call.input) : []
+    const questions = call?.questions ?? []
     if (questions.length > 0) {
       return { type: 'user_answer', payload: { questions, answers: {}, response: feedback, transcript_line: line } }
     }
@@ -263,7 +328,11 @@ interface Turn {
 
 const newTurn = (): Turn => ({ texts: [], textsBeforeLastToolUse: 0, calls: new Map() })
 
-function feedTurn(turn: Turn, entry: Json, line: number, planDirs: string[]): void {
+/**
+ * Adds an entry to the turn. A result for a call carried from a force-closed turn moves
+ * that call into this turn, so its refs are reported with this turn's text.
+ */
+function feedTurn(turn: Turn, carried: Map<string, ToolCall>, entry: Json, line: number, planDirs: string[]): void {
   const content = messageContent(entry)
   if (!Array.isArray(content)) return
   for (const block of content) {
@@ -271,11 +340,17 @@ function feedTurn(turn: Turn, entry: Json, line: number, planDirs: string[]): vo
     if (entry.type === 'assistant' && block.type === 'text' && typeof block.text === 'string') {
       if (!isBlank(block.text)) turn.texts.push({ text: block.text, entry, line, planDirs })
     } else if (entry.type === 'assistant' && block.type === 'tool_use' && typeof block.id === 'string') {
-      turn.calls.set(block.id, { name: str(block.name, ''), input: isObject(block.input) ? block.input : {}, resultText: null })
+      turn.calls.set(block.id, newCall(str(block.name, ''), isObject(block.input) ? block.input : {}))
       turn.textsBeforeLastToolUse = turn.texts.length
     } else if (block.type === 'tool_result' && typeof block.tool_use_id === 'string') {
-      const call = turn.calls.get(block.tool_use_id)
-      if (call) call.resultText = contentText(block.content)
+      const id = block.tool_use_id
+      const waiting = carried.get(id)
+      if (waiting) {
+        carried.delete(id)
+        turn.calls.set(id, waiting)
+      }
+      const call = turn.calls.get(id)
+      if (call) call.resultText = contentText(block.content) ?? ''
     }
   }
 }
@@ -285,16 +360,10 @@ function turnTools(calls: Iterable<ToolCall>): AssistantTool[] {
   const refs: AssistantTool[] = []
   const paths: AssistantTool[] = []
   for (const call of calls) {
-    if (call.name === 'Bash') {
-      const command = str(call.input.command, '')
-      const result = call.resultText ?? ''
-      if (command.includes('git commit')) for (const m of result.matchAll(COMMIT_RE)) refs.push({ name: call.name, ref: m[1] })
-      if (PR_COMMANDS.some((c) => command.includes(c))) {
-        for (const m of result.matchAll(PR_URL_RE)) refs.push({ name: call.name, ref: m[0] })
-      }
-    }
-    const path = call.name === 'NotebookEdit' ? call.input.notebook_path : PATH_TOOLS.has(call.name) ? call.input.file_path : undefined
-    if (typeof path === 'string' && path.length > 0) paths.push({ name: call.name, ref: path })
+    const result = call.resultText ?? ''
+    if (call.refKinds.includes('commit')) for (const m of result.matchAll(COMMIT_RE)) refs.push({ name: call.name, ref: m[1] })
+    if (call.refKinds.includes('pr')) for (const m of result.matchAll(PR_URL_RE)) refs.push({ name: call.name, ref: m[0] })
+    if (call.path !== undefined) paths.push({ name: call.name, ref: call.path })
   }
   const unique = new Map<string, AssistantTool>()
   for (const tool of [...refs, ...paths]) {
@@ -398,6 +467,10 @@ class TranscriptRead {
   private turn: Turn | null = null
   private mark: Mark
   private here: Mark
+  /** Calls of force-closed turns still waiting for a result; a result is resolved against them first. */
+  private readonly carried: Map<string, ToolCall>
+  /** `carried` as of `mark`, which the cursor saves. */
+  private markCarried: PendingCall[]
 
   constructor(
     private readonly sessionId: string,
@@ -413,6 +486,13 @@ class TranscriptRead {
       planDirs: [...cursor.plan_dirs],
     }
     this.here = { ...this.mark }
+    this.carried = new Map(cursor.pending_calls.map((p) => [p.id, carriedCall(p)]))
+    this.markCarried = [...cursor.pending_calls]
+  }
+
+  private setMark(mark: Mark): void {
+    this.mark = mark
+    this.markCarried = [...this.carried].map(([id, call]) => pendingRecord(id, call))
   }
 
   async line(raw: RawLine): Promise<void> {
@@ -430,14 +510,14 @@ class TranscriptRead {
       planDirs,
     }
     if (inScope) await this.entry(entry, lineNo, planDirs, before)
-    if (this.turn === null) this.mark = this.here
+    if (this.turn === null) this.setMark(this.here)
   }
 
   private async entry(entry: Json, lineNo: number, planDirs: string[], before: Mark): Promise<void> {
     if (isTurnStart(entry)) {
       if (this.turn) await this.closeTurn()
       // The new turn's lines are read again until it closes.
-      this.mark = before
+      this.setMark(before)
       this.turn = newTurn()
     } else if (this.turn === null && isTurnContent(entry)) {
       this.turn = newTurn()
@@ -446,10 +526,11 @@ class TranscriptRead {
     if (prompt !== null) {
       await this.emit(entry, lineNo, planDirs, { type: 'user_prompt', payload: promptPayload(prompt, lineNo) })
     } else {
-      const result = toolResultEvent(entry, this.turn?.calls ?? new Map(), lineNo)
+      const callOf = (id: string): ToolCall | undefined => this.carried.get(id) ?? this.turn?.calls.get(id)
+      const result = toolResultEvent(entry, callOf, lineNo)
       if (result) await this.emit(entry, lineNo, planDirs, result)
     }
-    if (this.turn) feedTurn(this.turn, entry, lineNo, planDirs)
+    if (this.turn) feedTurn(this.turn, this.carried, entry, lineNo, planDirs)
     if (entry.type === 'system' && entry.subtype === 'turn_duration' && this.turn) await this.closeTurn()
   }
 
@@ -489,8 +570,10 @@ class TranscriptRead {
 
   async finish(forceClose: boolean): Promise<ReadTranscriptResult> {
     if (forceClose && this.turn) {
+      const waiting = [...this.turn.calls].filter(([, call]) => call.resultText === null)
       await this.closeTurn()
-      this.mark = this.here
+      for (const [id, call] of waiting) this.carried.set(id, call)
+      this.setMark(this.here)
     }
     const m = this.mark
     const lineOf = (e: TranscriptEvent): number => e.payload.transcript_line ?? 0
@@ -505,6 +588,7 @@ class TranscriptRead {
         last_line_start: m.lastLineStart,
         open_turn_emitted: this.tracked.filter((t) => t.line > m.line).map((t) => t.uuid),
         plan_dirs: m.planDirs,
+        pending_calls: boundedPending(this.markCarried),
       },
     }
   }

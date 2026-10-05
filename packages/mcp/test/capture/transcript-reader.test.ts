@@ -427,6 +427,138 @@ describe('turns', () => {
   })
 })
 
+describe('calls still waiting when a turn is force-closed', () => {
+  const PICK = [{ question: 'Which option?', header: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }]
+  const PICK_QUESTIONS = [
+    {
+      question: 'Which option?',
+      header: 'Pick',
+      options: [
+        { label: 'A', description: '' },
+        { label: 'B', description: '' },
+      ],
+      multiSelect: false,
+    },
+  ]
+
+  /** A turn that asks a dialog and is swept while the dialog waits for the user. */
+  async function sweptDialog() {
+    const path = writeTranscript(dir, SESSION, [
+      humanPrompt(uuid(1), at(1), 'choose for me'),
+      assistantText(uuid(2), at(2), 'Asking first.'),
+      askCall(uuid(3), at(3), 'toolu_ask', PICK),
+    ])
+    const swept = await read(path, null, true)
+    expect(swept.events.map((e) => [e.type, e.event_uuid])).toEqual([
+      ['user_prompt', uuid(1)],
+      ['assistant_turn', uuid(2)],
+    ])
+    return { path, swept }
+  }
+
+  it('captures a dialog answered after the idle sweep, once, with the question from the call', async () => {
+    const { path, swept } = await sweptDialog()
+    expect(swept.cursor.pending_calls).toEqual([{ id: 'toolu_ask', name: 'AskUserQuestion', questions: PICK_QUESTIONS }])
+
+    appendEntries(path, SESSION, [
+      askResult(uuid(4), at(4), 'toolu_ask', PICK, { answers: { 'Which option?': 'B' } }),
+      assistantText(uuid(5), at(5), 'Going with B.'),
+    ])
+    const open = await read(path, swept.cursor)
+    expect(open.events.map((e) => [e.type, e.event_uuid])).toEqual([['user_answer', uuid(4)]])
+
+    appendEntries(path, SESSION, [turnEnd(uuid(6), at(6))])
+    const closed = await read(path, open.cursor)
+    expect(closed.events.map((e) => [e.type, e.event_uuid])).toEqual([['assistant_turn', uuid(5)]])
+    expect(open.events[0].payload).toEqual({
+      questions: PICK_QUESTIONS,
+      answers: { 'Which option?': 'B' },
+      transcript_line: 4,
+    })
+    expect(closed.cursor.pending_calls).toEqual([])
+  })
+
+  it('turns feedback typed into a dialog rejected after the sweep into an answer with the response', async () => {
+    const { path, swept } = await sweptDialog()
+    appendEntries(path, SESSION, [
+      toolResult(uuid(4), at(4), 'toolu_ask', 'The user does not want to proceed.', {
+        isError: true,
+        toolUseResult: 'User rejected tool use',
+        toolDenialKind: 'user-rejected',
+        userFeedback: 'neither, keep both',
+      }),
+      assistantText(uuid(5), at(5), 'Keeping both.'),
+      turnEnd(uuid(6), at(6)),
+    ])
+    const next = await read(path, swept.cursor)
+    expect(next.events.map((e) => [e.type, e.event_uuid])).toEqual([
+      ['user_answer', uuid(4)],
+      ['assistant_turn', uuid(5)],
+    ])
+    expect(next.events[0].payload).toEqual({
+      questions: PICK_QUESTIONS,
+      answers: {},
+      response: 'neither, keep both',
+      transcript_line: 4,
+    })
+  })
+
+  it('reports a commit whose result lands after the sweep with the next assistant turn', async () => {
+    const path = writeTranscript(dir, SESSION, [
+      humanPrompt(uuid(1), at(1), 'commit it'),
+      assistantText(uuid(2), at(2), 'Committing.'),
+      toolUse(uuid(3), at(3), 'toolu_commit', 'Bash', { command: 'git commit -m "x"' }),
+    ])
+    const swept = await read(path, null, true)
+    expect(swept.events.find((e) => e.type === 'assistant_turn')?.payload).toMatchObject({ text: 'Committing.', tools: [] })
+
+    appendEntries(path, SESSION, [
+      toolResult(uuid(4), at(4), 'toolu_commit', '[main abc1234] x\n 1 file changed'),
+      assistantText(uuid(5), at(5), 'Committed.'),
+      turnEnd(uuid(6), at(6)),
+    ])
+    const next = await read(path, swept.cursor)
+    expect(next.events.map((e) => [e.type, e.event_uuid])).toEqual([['assistant_turn', uuid(5)]])
+    expect(next.events[0].payload).toEqual({
+      text: 'Committed.',
+      transcript_line: 5,
+      tools: [{ name: 'Bash', ref: 'abc1234' }],
+    })
+  })
+
+  it('builds the answer from the dialog result when the call is no longer known', async () => {
+    const { path, swept } = await sweptDialog()
+    appendEntries(path, SESSION, [
+      askResult(uuid(4), at(4), 'toolu_ask', PICK, { answers: { 'Which option?': 'A' } }),
+      turnEnd(uuid(5), at(5)),
+    ])
+    const lost = { ...swept.cursor, pending_calls: [] }
+    const next = await read(path, lost)
+    expect(next.events.map((e) => [e.type, e.event_uuid])).toEqual([['user_answer', uuid(4)]])
+    expect(next.events[0].payload).toEqual({
+      questions: PICK_QUESTIONS,
+      answers: { 'Which option?': 'A' },
+      transcript_line: 4,
+    })
+  })
+
+  it('keeps the newest waiting calls that fit 200 calls and 64 KiB', async () => {
+    const calls = Array.from({ length: 205 }, (_, i) =>
+      toolUse(uuid(10 + i), at(10 + i), `toolu_${i}`, 'Bash', { command: `sleep ${i}` }),
+    )
+    const huge = [{ question: 'q'.repeat(70 * 1024), options: [{ label: 'A' }] }]
+    const path = writeTranscript(dir, SESSION, [
+      humanPrompt(uuid(1), at(1), 'run them all'),
+      ...calls,
+      askCall(uuid(2), at(2), 'toolu_huge', huge),
+    ])
+    const swept = await read(path, null, true)
+    const ids = swept.cursor.pending_calls.map((c) => c.id)
+    expect(ids).toEqual(Array.from({ length: 200 }, (_, i) => `toolu_${i + 5}`))
+    expect(Buffer.byteLength(JSON.stringify(swept.cursor.pending_calls))).toBeLessThanOrEqual(64 * 1024)
+  })
+})
+
 describe('plans', () => {
   it('adds the plan a tool call touched to later events, but not a plan named in text', async () => {
     const events = await eventsOf([
