@@ -1506,6 +1506,13 @@ ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_fa
 --   so one text the model can never take does not stop embedding for every
 --   newer item; engram_items_embedding_failed_count reports how many left,
 --   and engram_items_reset_embedding_failures returns them to the queue.
+-- - embedding_claimed_by and embedding_claimed_until: the capture worker
+--   that read the item for embedding, and when that claim lapses. The pending
+--   read claims what it returns for 120 seconds and a worker renews its
+--   claims while its pass runs, so two server processes never send the same
+--   item to the provider; a crashed worker's claim lapses on its own.
+--   memory_items_embedding_claim_check sets both or neither and keeps the
+--   lapse time in range, as every timestamptz column of the item store is.
 -- - memory_items_version_of_check bounds source.version_of as
 --   memory_items_source_check bounds source.event_key: a non-blank string of
 --   at most 512 characters, so every idx_items_version_of key fits a btree
@@ -1516,6 +1523,8 @@ ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_fa
 
 ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_attempts smallint DEFAULT 0 NOT NULL;
 ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_error text;
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_claimed_by uuid;
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_claimed_until timestamp with time zone;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_version_of_check' AND conrelid = 'public.memory_items'::regclass) THEN
@@ -1527,6 +1536,11 @@ DO $$ BEGIN
     ALTER TABLE ONLY public.memory_items
       ADD CONSTRAINT memory_items_embedding_attempts_check CHECK (embedding_attempts BETWEEN 0 AND 5
         AND (embedding_error IS NULL OR (embedding_error ~ '\S' AND char_length(embedding_error) <= 500)));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_embedding_claim_check' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE ONLY public.memory_items
+      ADD CONSTRAINT memory_items_embedding_claim_check CHECK (public.engram_time_in_range(embedding_claimed_until)
+        AND (embedding_claimed_by IS NULL) = (embedding_claimed_until IS NULL));
   END IF;
 END $$;
 
@@ -2056,11 +2070,13 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
--- first read of items still waiting for a vector. Its predicate is that
--- function's WHERE, word for word, so it holds only the backlog embedding
--- drains: assistant utterances, session indexes and legacy rows are never
--- embedded by the worker, and an index that held them would be walked whole
--- on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
+-- first read of items still waiting for a vector. Its predicate is the
+-- eligibility clauses of that function's WHERE, word for word, so it holds
+-- only the backlog embedding drains; the claim clause is checked on the rows
+-- the index returns, so only items under another worker's live claim (at
+-- most a few batches) are read and passed over. Assistant utterances,
+-- session indexes and legacy rows are never embedded by the worker, and an
+-- index that held them would be walked whole on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
 -- whatever its predicate, so an index built before the embedding_attempts
 -- clause is dropped first and rebuilt with it; otherwise the planner could no
 -- longer match it to the function and every call would scan the table.
@@ -3805,21 +3821,33 @@ END; $$;
 
 
 --
--- Name: engram_items_pending_embedding(integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_pending_embedding(integer, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
--- no embedding, not forgotten, fewer than 5 refused embedding attempts, not
--- an assistant utterance, and not a session_index or legacy item. Assistant
--- turns are trust 3 and never ranked
--- by vector; session indexes and legacy rows are embedded by their own
--- writers or not at all. Read only; idx_items_pending_embedding serves the
--- order, and its predicate repeats this WHERE word for word so the planner
+-- The signature without p_claimant read without claiming; dropping it leaves
+-- no unclaimed read for a caller to reach.
+DROP FUNCTION IF EXISTS public.engram_items_pending_embedding(integer);
+
+-- Claims and returns up to p_limit (1 to 256) items that still need an
+-- embedding, oldest first: no embedding, not forgotten, fewer than 5 refused
+-- embedding attempts, not an assistant utterance, and not a session_index or
+-- legacy item. Assistant turns are trust 3 and never ranked by vector;
+-- session indexes and legacy rows are embedded by their own writers or not
+-- at all. idx_items_pending_embedding serves the order, and its predicate
+-- repeats the eligibility clauses of this WHERE word for word so the planner
 -- proves the match and the index holds no row this function skips. The WHERE
 -- columns are unqualified to keep that text identical; none of them is an
 -- output column name.
-CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer DEFAULT 32) RETURNS TABLE(id uuid, search_text text)
-    LANGUAGE plpgsql STABLE SECURITY DEFINER
+-- Claims: an item is taken only when p_claimant already holds it, nobody
+-- does, or the holder's claim has lapsed, and every row returned is claimed
+-- for p_claimant for 120 seconds. The call takes the forget advisory key
+-- exclusively before it reads, as every function that locks item rows does,
+-- so two calls run one after the other and the second reads after the
+-- first's claims are committed: two calls never return the same item while
+-- a claim is live. A row some other writer holds locked is skipped rather
+-- than waited on.
+CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer, p_claimant uuid) RETURNS TABLE(id uuid, search_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 BEGIN
@@ -3827,16 +3855,85 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_items_pending_embedding: p_limit must be from 1 to 256';
   END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_pending_embedding: p_claimant must be a uuid';
+  END IF;
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
   RETURN QUERY
-  SELECT i.id, i.search_text
-    FROM public.memory_items i
-   WHERE embedding IS NULL
-     AND forgotten_at IS NULL
-     AND embedding_attempts < 5
-     AND NOT (class = 'utterance' AND speaker = 'assistant')
-     AND class NOT IN ('session_index', 'legacy')
-   ORDER BY i.created_at, i.id
-   LIMIT p_limit;
+  WITH candidate AS (
+    SELECT i.id
+      FROM public.memory_items i
+     WHERE embedding IS NULL
+       AND forgotten_at IS NULL
+       AND embedding_attempts < 5
+       AND NOT (class = 'utterance' AND speaker = 'assistant')
+       AND class NOT IN ('session_index', 'legacy')
+       AND (embedding_claimed_by = p_claimant OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())
+     ORDER BY i.created_at, i.id
+     LIMIT p_limit
+       FOR NO KEY UPDATE OF i SKIP LOCKED
+  ), claimed AS (
+    UPDATE public.memory_items m
+       SET embedding_claimed_by = p_claimant,
+           embedding_claimed_until = now() + interval '120 seconds'
+      FROM candidate c
+     WHERE m.id = c.id
+    RETURNING m.id, m.search_text, m.created_at
+  )
+  SELECT k.id, k.search_text
+    FROM claimed k
+   ORDER BY k.created_at, k.id;
+END; $$;
+
+
+--
+-- Name: engram_items_renew_embedding_claims(uuid[], uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Extends p_claimant's claims on 1 to 256 items to 120 seconds from now,
+-- for items p_claimant still holds that are still waiting for a vector (no
+-- embedding, not forgotten); a lapsed claim nobody took over is held again.
+-- Returns the claims extended. A worker calls it while its pass runs, so a
+-- pass that outlasts one lease keeps its items. It takes the forget advisory
+-- key exclusively before it locks rows, as engram_items_pending_embedding
+-- does; a row some other writer holds locked is skipped, and the next
+-- renewal reaches it well before the claim lapses.
+CREATE OR REPLACE FUNCTION public.engram_items_renew_embedding_claims(p_ids uuid[], p_claimant uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_renewed integer;
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_items_renew_embedding_claims: p_ids holds %s ids, not 1 to 256', coalesce(cardinality(p_ids), 0));
+  END IF;
+  IF array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_renew_embedding_claims: p_ids holds a null id';
+  END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_renew_embedding_claims: p_claimant must be a uuid';
+  END IF;
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  WITH held AS (
+    SELECT i.id
+      FROM public.memory_items i
+     WHERE i.id = ANY (p_ids)
+       AND i.embedding_claimed_by = p_claimant
+       AND i.embedding IS NULL
+       AND i.forgotten_at IS NULL
+       FOR NO KEY UPDATE OF i SKIP LOCKED
+  )
+  UPDATE public.memory_items m
+     SET embedding_claimed_until = now() + interval '120 seconds'
+    FROM held h
+   WHERE m.id = h.id;
+  GET DIAGNOSTICS v_renewed = ROW_COUNT;
+  RETURN v_renewed;
 END; $$;
 
 
@@ -3848,7 +3945,8 @@ END; $$;
 -- real range and a non-blank model string of at most 200 characters, every id
 -- distinct. A row is written only while it has no embedding and is not
 -- forgotten, so a repeat, or a batch that lost a race with a forget, writes
--- nothing for that row. Returns the rows written.
+-- nothing for that row. Returns the rows written. A written row's embedding
+-- claim is cleared: the item needs no further pass.
 -- It takes the forget advisory key (7308892986227385959) exclusively, then
 -- locks the rows FOR NO KEY UPDATE in id order, as engram_retire_items does:
 -- a forget locks rows in its own order, and an UPDATE taking row locks
@@ -3921,7 +4019,9 @@ BEGIN
       FOR NO KEY UPDATE;
   UPDATE public.memory_items m
      SET embedding = (r.e -> 'embedding')::text::public.vector,
-         embedding_model = r.e ->> 'model'
+         embedding_model = r.e ->> 'model',
+         embedding_claimed_by = NULL,
+         embedding_claimed_until = NULL
     FROM jsonb_array_elements(p_rows) AS r(e)
    WHERE m.id = (r.e ->> 'id')::uuid
      AND m.embedding IS NULL
@@ -3932,17 +4032,24 @@ END; $$;
 
 
 --
--- Name: engram_items_record_embedding_failures(jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_record_embedding_failures(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- The signature without p_claimant raised an item whoever held it; dropping
+-- it leaves no way to count one refusal twice.
+DROP FUNCTION IF EXISTS public.engram_items_record_embedding_failures(jsonb);
+
 -- Records 1 to 256 input-specific embedding failures, each {id, error}: a
--- uuid and the provider's non-blank message, every id distinct. Each item
--- still pending (no embedding, not forgotten, fewer than 5 attempts) has
--- embedding_attempts raised by one and embedding_error set to the message cut
--- to 500 characters; any other row is left as it is. Returns the rows raised.
+-- uuid and the provider's non-blank message, every id distinct, found by
+-- p_claimant's embedding pass. Each item still pending (no embedding, not
+-- forgotten, fewer than 5 attempts) on which no other claimant holds a live
+-- claim has embedding_attempts raised by one and embedding_error set to the
+-- message cut to 500 characters; any other row is left as it is. Returns the
+-- rows raised. A pass whose claim lapsed and was taken over records nothing,
+-- so a refusal counts once per item per pass.
 -- It takes the forget advisory key exclusively, then locks the rows FOR NO
 -- KEY UPDATE in id order, as engram_items_set_embeddings does.
-CREATE OR REPLACE FUNCTION public.engram_items_record_embedding_failures(p_rows jsonb) RETURNS integer
+CREATE OR REPLACE FUNCTION public.engram_items_record_embedding_failures(p_rows jsonb, p_claimant uuid) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -3959,6 +4066,10 @@ BEGIN
   IF v_count < 1 OR v_count > 256 THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = format('engram_items_record_embedding_failures: p_rows holds %s objects, not 1 to 256', v_count);
+  END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_record_embedding_failures: p_claimant must be a uuid';
   END IF;
 
   SELECT p.reason INTO v_problem
@@ -4009,7 +4120,8 @@ BEGIN
    WHERE m.id = (r.e ->> 'id')::uuid
      AND m.embedding IS NULL
      AND m.forgotten_at IS NULL
-     AND m.embedding_attempts < 5;
+     AND m.embedding_attempts < 5
+     AND (m.embedding_claimed_by = p_claimant OR m.embedding_claimed_until IS NULL OR m.embedding_claimed_until <= now());
   GET DIAGNOSTICS v_raised = ROW_COUNT;
   RETURN v_raised;
 END; $$;
@@ -4514,9 +4626,10 @@ REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
@@ -4570,9 +4683,10 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
@@ -4615,9 +4729,10 @@ GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_materialize(integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;

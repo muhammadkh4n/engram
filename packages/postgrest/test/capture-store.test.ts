@@ -17,6 +17,8 @@ interface Result {
   error: { code: string; message: string; details: string | null; hint: string | null } | null
 }
 
+/** The claimant id an embedding worker passes with its reads and refusals. */
+const CLAIMANT = '00000000-0000-4000-8000-00000000c0de'
 const SECRET_ROW = 'Failing row contains (sample-repo, project, ws-test, the deploy password is hunter-two)'
 
 const ROWS: ProjectRow[] = [
@@ -312,21 +314,39 @@ describe('PostgRestCaptureStore embeddings', () => {
 
   it('reads pending items from engram_items_pending_embedding as camelCase rows', async () => {
     const { store, calls } = storeWith({ data: [{ id: ID, search_text: 'sample text' }], error: null })
-    await expect(store.pendingEmbeddings(32)).resolves.toEqual([{ id: ID, searchText: 'sample text' }])
-    expect(calls).toEqual([{ fn: 'engram_items_pending_embedding', args: { p_limit: 32 } }])
+    await expect(store.pendingEmbeddings(32, CLAIMANT)).resolves.toEqual([{ id: ID, searchText: 'sample text' }])
+    expect(calls).toEqual([{ fn: 'engram_items_pending_embedding', args: { p_limit: 32, p_claimant: CLAIMANT } }])
   })
 
   it('refuses a pending limit outside 1 to 256 without calling the RPC', async () => {
     const { store, calls } = storeWith({ data: [], error: null })
     for (const limit of [0, 257, 1.5]) {
-      await expect(store.pendingEmbeddings(limit)).rejects.toThrow('limit must be an integer from 1 to 256')
+      await expect(store.pendingEmbeddings(limit, CLAIMANT)).rejects.toThrow('limit must be an integer from 1 to 256')
     }
     expect(calls).toEqual([])
   })
 
   it('refuses a pending row without a string id and search_text', async () => {
     const { store } = storeWith({ data: [{ id: ID, search_text: null }], error: null })
-    await expect(store.pendingEmbeddings(1)).rejects.toThrow('pendingEmbeddings failed: the RPC returned an unexpected row')
+    await expect(store.pendingEmbeddings(1, CLAIMANT)).rejects.toThrow('pendingEmbeddings failed: the RPC returned an unexpected row')
+  })
+
+  it('sends renewals to engram_items_renew_embedding_claims and returns the claims extended', async () => {
+    const { store, calls } = storeWith({ data: 1, error: null })
+    await expect(store.renewEmbeddingClaims([ID], CLAIMANT)).resolves.toBe(1)
+    expect(calls).toEqual([{ fn: 'engram_items_renew_embedding_claims', args: { p_ids: [ID], p_claimant: CLAIMANT } }])
+  })
+
+  it('refuses an empty or oversized renewal without calling the RPC, and a count above the ids sent', async () => {
+    const { store, calls } = storeWith({ data: 2, error: null })
+    await expect(store.renewEmbeddingClaims([], CLAIMANT)).rejects.toThrow('ids must hold 1 to 256 ids')
+    await expect(store.renewEmbeddingClaims(Array.from({ length: 257 }, () => ID), CLAIMANT)).rejects.toThrow(
+      'ids must hold 1 to 256 ids',
+    )
+    expect(calls).toEqual([])
+    await expect(store.renewEmbeddingClaims([ID], CLAIMANT)).rejects.toThrow(
+      'renewEmbeddingClaims failed: the RPC returned no row count',
+    )
   })
 
   it('sends embeddings to engram_items_set_embeddings and returns the rows written', async () => {
@@ -364,17 +384,17 @@ describe('PostgRestCaptureStore embedding failures', () => {
   it('sends failures to engram_items_record_embedding_failures and returns the rows raised', async () => {
     const { store, calls } = storeWith({ data: 1, error: null })
     const rows = [{ id: ID, error: "400 Invalid 'input': the sample text cannot be embedded" }]
-    await expect(store.recordEmbeddingFailures(rows)).resolves.toBe(1)
-    expect(calls).toEqual([{ fn: 'engram_items_record_embedding_failures', args: { p_rows: rows } }])
+    await expect(store.recordEmbeddingFailures(rows, CLAIMANT)).resolves.toBe(1)
+    expect(calls).toEqual([{ fn: 'engram_items_record_embedding_failures', args: { p_rows: rows, p_claimant: CLAIMANT } }])
   })
 
   it('refuses an empty or oversized batch without calling the RPC, and a count above the rows sent', async () => {
     const { store, calls } = storeWith({ data: 2, error: null })
-    await expect(store.recordEmbeddingFailures([])).rejects.toThrow('rows must hold 1 to 256 failures')
+    await expect(store.recordEmbeddingFailures([], CLAIMANT)).rejects.toThrow('rows must hold 1 to 256 failures')
     const many = Array.from({ length: 257 }, () => ({ id: ID, error: 'e' }))
-    await expect(store.recordEmbeddingFailures(many)).rejects.toThrow('rows must hold 1 to 256 failures')
+    await expect(store.recordEmbeddingFailures(many, CLAIMANT)).rejects.toThrow('rows must hold 1 to 256 failures')
     expect(calls).toEqual([])
-    await expect(store.recordEmbeddingFailures([{ id: ID, error: 'e' }])).rejects.toThrow(
+    await expect(store.recordEmbeddingFailures([{ id: ID, error: 'e' }], CLAIMANT)).rejects.toThrow(
       'recordEmbeddingFailures failed: the RPC returned no row count',
     )
   })
@@ -384,7 +404,7 @@ describe('PostgRestCaptureStore embedding failures', () => {
       data: null,
       error: { code: '22023', message: 'engram_items_record_embedding_failures: objects 1 and 2 share an id', details: SECRET_ROW, hint: null },
     })
-    const err = await store.recordEmbeddingFailures([{ id: ID, error: 'e' }]).catch((e: unknown) => e)
+    const err = await store.recordEmbeddingFailures([{ id: ID, error: 'e' }], CLAIMANT).catch((e: unknown) => e)
     expect((err as Error).message).toBe(
       'recordEmbeddingFailures failed (22023): engram_items_record_embedding_failures: objects 1 and 2 share an id',
     )
