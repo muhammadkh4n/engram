@@ -179,6 +179,20 @@ async function waitFor(what: string, timeoutMs: number, probe: () => Promise<boo
 
 const PSQL_FLAGS = ['-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1']
 
+const LOCK_WAIT_TIMEOUT_MS = 10_000
+
+/** Resolves once the backend `pid` is waiting on a lock held by another transaction. */
+export async function waitUntilLockWait(pg: RealPg, pid: string): Promise<void> {
+  if (!/^\d+$/.test(pid)) throw new Error(`not a backend pid: ${pid}`)
+  const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const waiting = await pg.psql(`SELECT coalesce(wait_event_type, '') FROM pg_stat_activity WHERE pid = ${pid}`)
+    if (waiting === 'Lock') return
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error(`backend ${pid} never waited on a lock`)
+}
+
 export async function startRealPg(options: RealPgOptions = {}): Promise<RealPg> {
   if (!realPgImage) throw new Error('ENGRAM_TEST_PG_IMAGE is not set')
   await requireImage(realPgImage)

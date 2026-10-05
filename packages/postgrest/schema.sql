@@ -1207,13 +1207,17 @@ CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
 -- Name: memory_projects; Type: TABLE; Schema: public; Owner: -
 --
 -- The registry of project and workspace ids items may carry. A workspace
--- groups projects and belongs to no workspace itself.
+-- groups projects and belongs to no workspace itself. workspace_id must name a
+-- row of kind workspace: the foreign key pairs it with workspace_kind, a
+-- constant 'workspace', against the unique (id, kind), so naming a project is
+-- refused and so is turning a named workspace into a project.
 --
 
 CREATE TABLE IF NOT EXISTS public.memory_projects (
     id text PRIMARY KEY,
     kind text NOT NULL,
-    workspace_id text REFERENCES public.memory_projects(id),
+    workspace_id text,
+    workspace_kind text GENERATED ALWAYS AS ('workspace') STORED NOT NULL,
     vault_folder text,
     register_prefix text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1221,7 +1225,9 @@ CREATE TABLE IF NOT EXISTS public.memory_projects (
     CONSTRAINT memory_projects_kind_check CHECK (kind IN ('project', 'workspace')),
     CONSTRAINT memory_projects_workspace_check CHECK (kind = 'project' OR workspace_id IS NULL),
     CONSTRAINT memory_projects_vault_folder_check CHECK (vault_folder IS NULL OR char_length(vault_folder) <= 200),
-    CONSTRAINT memory_projects_register_prefix_check CHECK (register_prefix IS NULL OR register_prefix ~ '^[A-Z]{2,6}$')
+    CONSTRAINT memory_projects_register_prefix_check CHECK (register_prefix IS NULL OR register_prefix ~ '^[A-Z]{2,6}$'),
+    CONSTRAINT memory_projects_id_kind_key UNIQUE (id, kind),
+    CONSTRAINT memory_projects_workspace_fkey FOREIGN KEY (workspace_id, workspace_kind) REFERENCES public.memory_projects (id, kind)
 );
 
 
@@ -1314,7 +1320,8 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_embedding_check CHECK ((embedding IS NULL) = (embedding_model IS NULL)),
     CONSTRAINT memory_items_source_check CHECK (jsonb_typeof(source) = 'object'
         AND (source ->> 'type') IN ('transcript', 'history', 'git', 'ledger', 'register', 'vault', 'legacy', 'ingest_tool', 'extraction')
-        AND (NOT (source ? 'event_key') OR (jsonb_typeof(source -> 'event_key') = 'string' AND (source ->> 'event_key') ~ '\S'))),
+        AND (NOT (source ? 'event_key') OR (jsonb_typeof(source -> 'event_key') = 'string' AND (source ->> 'event_key') ~ '\S'
+                                            AND char_length(source ->> 'event_key') <= 512))),
     CONSTRAINT memory_items_text_check CHECK (content ~ '\S' AND search_text ~ '\S' AND (context IS NULL OR context ~ '\S')),
     CONSTRAINT memory_items_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
         AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
@@ -1344,7 +1351,7 @@ CREATE TABLE IF NOT EXISTS public.memory_item_entities (
     entity text NOT NULL,
     entity_type text NOT NULL,
     PRIMARY KEY (item_id, entity),
-    CONSTRAINT memory_item_entities_entity_check CHECK (entity ~ '\S' AND char_length(entity) <= 2000),
+    CONSTRAINT memory_item_entities_entity_check CHECK (entity ~ '\S' AND char_length(entity) <= 2000 AND octet_length(entity) <= 2000),
     CONSTRAINT memory_item_entities_entity_type_check CHECK (entity_type IN ('ticket', 'repo', 'path', 'sha', 'url', 'package'))
 );
 
@@ -1906,7 +1913,10 @@ CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural 
 --
 -- Item store indexes. idx_items_event_key makes source.event_key unique where
 -- present: it is the idempotency key of an item insert, and each writer
--- namespaces its keys. idx_items_lineage serves the lineage @> ARRAY[id]
+-- namespaces its keys. memory_items_source_check bounds a key at 512
+-- characters: at most 4 bytes each in UTF-8, so at most 2,048 bytes, under the
+-- btree limit of about 2,700 bytes per index row, past which an insert fails
+-- with 54000 naming no column. idx_items_lineage serves the lineage @> ARRAY[id]
 -- lookups that find the items derived from a given item. The HNSW index has
 -- the same form and predicate as the tier tables' indexes above.
 --
@@ -2237,7 +2247,10 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- offset-less time, 'now', a US date) would store a time the sender did not
 -- mean, and 'infinity' is no event time. It may lie at most 10 minutes past
 -- now(), the clock skew a capture client is allowed; a later time is a wrong
--- clock, not an event. An object whose source.event_key is already stored, or
+-- clock, not an event. source.event_key holds at most 512 characters, the
+-- bound that keeps it inside a unique btree index row; a longer key is
+-- refused here by position instead of failing the index. An object whose
+-- source.event_key is already stored, or
 -- appears earlier in the same call, is skipped and reported with the stored id
 -- and inserted = false, so a retried delivery is a no-op. One row per object
 -- comes back, in input order. The deferred lineage and supersession checks run at
@@ -2312,6 +2325,10 @@ BEGIN
                     AND EXISTS (SELECT 1 FROM jsonb_array_elements(f.value) AS x(v)
                                  WHERE jsonb_typeof(x.v) <> 'string' OR NOT pg_input_is_valid(x.v #>> '{}', 'uuid')) THEN
                  format('object %s: lineage must hold uuid strings only', f.n)
+               WHEN f.col = 'source'
+                    AND jsonb_typeof(f.value -> 'event_key') = 'string'
+                    AND char_length(f.value ->> 'event_key') > 512 THEN
+                 format('object %s: source.event_key is longer than 512 characters', f.n)
              END AS reason
         FROM field f
     )
@@ -2429,7 +2446,15 @@ END; $$;
 -- lineage, at any depth, in one UPDATE. The closure is computed first, each id
 -- once: a listed id keeps the caller's reason, and a descendant gets
 -- "lineage: <listed id> forgotten: <reason>", naming the first listed id
--- (in p_ids order) it descends from. The live items whose superseded_by is in
+-- (in p_ids order) it descends from. The live listed items are locked FOR
+-- UPDATE first; then the closure is recomputed and its new members locked,
+-- in id order, until a pass adds none. A writer of a new descendant holds its
+-- lineage rows FOR SHARE until it commits, so the lock waits for it and the
+-- next pass sees its row; once every member is locked, no descendant and no
+-- superseded_by pointer (its foreign key takes FOR KEY SHARE) can commit
+-- against the closure. The UPDATE therefore forgets the whole closure itself,
+-- the cascade trigger finds nothing left to forget, and the rows returned are
+-- exactly what this call changed. The live items whose superseded_by is in
 -- the closure are read before the UPDATE; the forget cascade trigger then
 -- re-points each to the nearest live successor or restores it, and both
 -- outcomes are reported with via = the forgotten successor. Unknown and
@@ -2444,6 +2469,8 @@ CREATE OR REPLACE FUNCTION public.engram_forget_items(p_ids uuid[], p_reason tex
 DECLARE
   v_closure uuid[];
   v_roots uuid[];
+  v_locked uuid[];
+  v_unlocked uuid[];
   v_successors uuid[];
   v_targets uuid[];
   v_forgotten uuid[];
@@ -2458,27 +2485,45 @@ BEGIN
       MESSAGE = 'engram_forget_items: p_reason must be non-blank and at most 2000 characters';
   END IF;
 
-  WITH RECURSIVE walk(node, root) AS (
-    SELECT i.id, i.id
-      FROM public.memory_items i
-     WHERE i.id = ANY (p_ids) AND i.forgotten_at IS NULL
-    UNION
-    SELECT c.id, w.root
-      FROM walk w
-      JOIN public.memory_items c ON c.lineage @> ARRAY[w.node]
-     WHERE c.forgotten_at IS NULL
-  ), chosen AS (
-    SELECT DISTINCT ON (w.node)
-           w.node,
-           CASE WHEN w.node = ANY (p_ids) THEN NULL ELSE w.root END AS root,
-           array_position(p_ids, w.root) AS root_pos
-      FROM walk w
-     ORDER BY w.node, (w.node = w.root) DESC, array_position(p_ids, w.root)
-  )
-  SELECT array_agg(c.node ORDER BY c.root IS NOT NULL, c.root_pos, c.node),
-         array_agg(c.root ORDER BY c.root IS NOT NULL, c.root_pos, c.node)
-    INTO v_closure, v_roots
-    FROM chosen c;
+  v_locked := ARRAY(
+    SELECT m.id
+      FROM public.memory_items m
+     WHERE m.id = ANY (p_ids) AND m.forgotten_at IS NULL
+     ORDER BY m.id
+       FOR UPDATE);
+  IF cardinality(v_locked) = 0 THEN
+    RETURN;
+  END IF;
+
+  LOOP
+    WITH RECURSIVE walk(node, root) AS (
+      SELECT i.id, i.id
+        FROM public.memory_items i
+       WHERE i.id = ANY (p_ids) AND i.forgotten_at IS NULL
+      UNION
+      SELECT c.id, w.root
+        FROM walk w
+        JOIN public.memory_items c ON c.lineage @> ARRAY[w.node]
+       WHERE c.forgotten_at IS NULL
+    ), chosen AS (
+      SELECT DISTINCT ON (w.node)
+             w.node,
+             CASE WHEN w.node = ANY (p_ids) THEN NULL ELSE w.root END AS root,
+             array_position(p_ids, w.root) AS root_pos
+        FROM walk w
+       ORDER BY w.node, (w.node = w.root) DESC, array_position(p_ids, w.root)
+    )
+    SELECT array_agg(c.node ORDER BY c.root IS NOT NULL, c.root_pos, c.node),
+           array_agg(c.root ORDER BY c.root IS NOT NULL, c.root_pos, c.node)
+      INTO v_closure, v_roots
+      FROM chosen c;
+
+    EXIT WHEN v_closure IS NULL;
+    v_unlocked := ARRAY(SELECT c.node FROM unnest(v_closure) AS c(node) WHERE NOT c.node = ANY (v_locked) ORDER BY c.node);
+    EXIT WHEN cardinality(v_unlocked) = 0;
+    PERFORM 1 FROM public.memory_items m WHERE m.id = ANY (v_unlocked) ORDER BY m.id FOR UPDATE;
+    v_locked := v_locked || v_unlocked;
+  END LOOP;
 
   IF v_closure IS NULL THEN
     RETURN;

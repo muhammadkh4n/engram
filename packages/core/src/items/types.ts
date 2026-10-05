@@ -90,7 +90,9 @@ export type ItemInvariant = (typeof ITEM_INVARIANTS)[number]
 /**
  * Where an item came from. Keys stay snake_case because the object is stored
  * as-is in the `source` jsonb column. `event_key` is unique across the store
- * where present, so each writer namespaces it (`capture:…`, `git:…`).
+ * where present, so each writer namespaces it (`capture:…`, `git:…`). At most
+ * 512 characters: the store refuses a longer key, which would not fit its
+ * unique index.
  */
 export interface ItemSource {
   type: SourceType

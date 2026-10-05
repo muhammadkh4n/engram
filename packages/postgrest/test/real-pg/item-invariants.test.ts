@@ -15,11 +15,10 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { realPgImage, startRealPg, type PsqlSession, type RealPg } from './harness.js'
+import { realPgImage, startRealPg, waitUntilLockWait, type PsqlSession, type RealPg } from './harness.js'
 
 const SETUP_TIMEOUT_MS = 120_000
 const TEST_TIMEOUT_MS = 60_000
-const LOCK_WAIT_TIMEOUT_MS = 10_000
 
 const SUBJECT_ID = '01930000-0000-7000-8000-000000000000'
 const T0 = Date.parse('2026-01-02T03:00:00Z')
@@ -241,18 +240,6 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
     )
   }
 
-  /** Resolves once the backend `pid` is waiting on a lock held by another transaction. */
-  async function waitUntilLockWait(pid: string): Promise<void> {
-    if (!/^\d+$/.test(pid)) throw new Error(`not a backend pid: ${pid}`)
-    const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      const waiting = await pg.psql(`SELECT coalesce(wait_event_type, '') FROM pg_stat_activity WHERE pid = ${pid}`)
-      if (waiting === 'Lock') return
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    throw new Error(`backend ${pid} never waited on a lock`)
-  }
-
   describe('refuses a write that breaks a rule, leaving no row', () => {
     it('an mk_statement spoken by the assistant', async () => {
       const u = mkUtterance('Keep the changelog short.')
@@ -416,6 +403,41 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await rowCount(o.id)).toBe(0)
     }, TEST_TIMEOUT_MS)
 
+    it('a source.event_key longer than 512 characters', async () => {
+      const a = artifact('chore: an overlong key', { source: { type: 'git', event_key: `git:${'k'.repeat(509)}` } })
+      await expectCheckViolation(insert(a), /violates check constraint "memory_items_source_check"/)
+      expect(await rowCount(a.id)).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('an entity within 2,000 characters but over 2,000 bytes, before the btree row limit', async () => {
+      const a = artifact('chore: an entity in three-byte characters')
+      await commit(a)
+      const message = await expectCheckViolation(
+        `INSERT INTO public.memory_item_entities (item_id, entity, entity_type) VALUES ('${a.id}', ${text('€'.repeat(1000))}, 'path');`,
+        /violates check constraint "memory_item_entities_entity_check"/,
+      )
+      expect(message).not.toMatch(/54000|index row size/)
+    }, TEST_TIMEOUT_MS)
+
+    it('a project naming another project as its workspace', async () => {
+      await pg.psql(`INSERT INTO public.memory_projects (id, kind) VALUES ('tst-inv-proj-a', 'project')`)
+      const message = await refusal(
+        `INSERT INTO public.memory_projects (id, kind, workspace_id) VALUES ('tst-inv-proj-b', 'project', 'tst-inv-proj-a');`,
+      )
+      expect(message).toMatch(/ERROR:\s+23503: /)
+      expect(message).toMatch(/memory_projects_workspace_fkey/)
+      expect(await pg.psql(`SELECT count(*) FROM public.memory_projects WHERE id = 'tst-inv-proj-b'`)).toBe('0')
+    }, TEST_TIMEOUT_MS)
+
+    it('turning a workspace that a project names into a project', async () => {
+      await pg.psql(`INSERT INTO public.memory_projects (id, kind) VALUES ('tst-inv-ws', 'workspace');
+        INSERT INTO public.memory_projects (id, kind, workspace_id) VALUES ('tst-inv-proj-c', 'project', 'tst-inv-ws');`)
+      const message = await refusal(`UPDATE public.memory_projects SET kind = 'project' WHERE id = 'tst-inv-ws';`)
+      expect(message).toMatch(/ERROR:\s+23503: /)
+      expect(message).toMatch(/memory_projects_workspace_fkey/)
+      expect(await pg.psql(`SELECT kind FROM public.memory_projects WHERE id = 'tst-inv-ws'`)).toBe('workspace')
+    }, TEST_TIMEOUT_MS)
+
     it('a ledger decision by MK without its quote', async () => {
       const d = artifact('Use one item store.', {
         kind: 'ledger_decision',
@@ -544,6 +566,23 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await column(u.id, `created_at > now() - interval '1 hour'`)).toBe('t')
     }, TEST_TIMEOUT_MS)
 
+    it('an event key of 512 four-byte characters, which the unique index holds', async () => {
+      const a = artifact('chore: the longest key', { source: { type: 'git', event_key: '𝄞'.repeat(512) } })
+      await commit(a)
+      expect(await column(a.id, `octet_length(source ->> 'event_key')`)).toBe('2048')
+    }, TEST_TIMEOUT_MS)
+
+    it('an entity of exactly 2,000 bytes, and a project in a workspace', async () => {
+      const a = artifact('chore: the longest entity')
+      await commit(a)
+      await pg.psql(
+        `INSERT INTO public.memory_item_entities (item_id, entity, entity_type) VALUES ('${a.id}', ${text('é'.repeat(1000))}, 'path');`,
+      )
+      await pg.psql(`INSERT INTO public.memory_projects (id, kind) VALUES ('tst-inv-ws-ok', 'workspace');
+        INSERT INTO public.memory_projects (id, kind, workspace_id) VALUES ('tst-inv-proj-ok', 'project', 'tst-inv-ws-ok');`)
+      expect(await pg.psql(`SELECT workspace_id FROM public.memory_projects WHERE id = 'tst-inv-proj-ok'`)).toBe('tst-inv-ws-ok')
+    }, TEST_TIMEOUT_MS)
+
     it('a service_role insert, whose triggers run without any EXECUTE grant on them', async () => {
       const u = mkUtterance('Written by the service role.')
       await pg.psqlAs('service_role', insert(u))
@@ -642,7 +681,7 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         await second.run('BEGIN;')
         await second.run(forgetSql(u.id, 'tst: forgotten while the other commit waits'))
         const committing = failureOf(first.run('COMMIT;'))
-        await waitUntilLockWait(pid)
+        await waitUntilLockWait(pg, pid)
         await second.run('COMMIT;')
         expect(await committing).toMatch(/ERROR:\s+23514: memory_items_lineage: lineage contains a forgotten item/)
       } finally {
@@ -666,7 +705,7 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
         await second.run('BEGIN;')
         await second.run(forgetSql(b.id, 'tst: forgotten while the other commit waits'))
         const committing = failureOf(first.run('COMMIT;'))
-        await waitUntilLockWait(pid)
+        await waitUntilLockWait(pg, pid)
         await second.run('COMMIT;')
         expect(await committing).toMatch(/ERROR:\s+23514: memory_items_supersession: superseded_by names a forgotten item/)
       } finally {

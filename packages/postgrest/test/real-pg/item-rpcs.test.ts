@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto'
 import { ITEM_INVARIANTS } from '@engram-mem/core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { realPgImage, startRealPg, type RealPg } from './harness.js'
+import { realPgImage, startRealPg, waitUntilLockWait, type RealPg } from './harness.js'
 
 const SETUP_TIMEOUT_MS = 120_000
 const TEST_TIMEOUT_MS = 60_000
@@ -177,11 +177,13 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
     )
   }
 
+  function forgetQuery(ids: readonly string[], reason: string): string {
+    return `SELECT coalesce(json_agg(json_build_object('itemId', r.item_id, 'effect', r.effect, 'via', r.via) ORDER BY r.k), '[]'::json)
+         FROM public.engram_forget_items(${uuidArray(ids)}, ${text(reason)}) WITH ORDINALITY AS r(item_id, effect, via, k);`
+  }
+
   async function forget(ids: readonly string[], reason: string): Promise<Effect[]> {
-    return asService<Effect[]>(
-      `SELECT coalesce(json_agg(json_build_object('itemId', r.item_id, 'effect', r.effect, 'via', r.via) ORDER BY r.k), '[]'::json)
-         FROM public.engram_forget_items(${uuidArray(ids)}, ${text(reason)}) WITH ORDINALITY AS r(item_id, effect, via, k);`,
-    )
+    return asService<Effect[]>(forgetQuery(ids, reason))
   }
 
   async function retire(ids: readonly string[], reason: string): Promise<string[]> {
@@ -340,6 +342,17 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         occurred_at: new Date(Date.now() + 8 * 60_000).toISOString(),
       })
       expect(await insertItems([skewed])).toEqual([{ ord: 1, id: skewed.id, inserted: true }])
+    }, TEST_TIMEOUT_MS)
+
+    it('refuses a source.event_key longer than 512 characters by position, without quoting it', async () => {
+      const long = artifact('chore: an overlong key', 0, { source: { type: 'git', event_key: `git:${'k'.repeat(509)}` } })
+      const message = await insertRefusal([utterance('A short key.'), long])
+      expect(message).toMatch(/ERROR:\s+22023: engram_insert_items: object 2: source\.event_key is longer than 512 characters/)
+      expect(message).not.toContain('kkkkkkkk')
+      expect(await rowCount([long.id])).toBe(0)
+
+      const longest = artifact('chore: the longest key', 0, { source: { type: 'git', event_key: `git:${'k'.repeat(508)}` } })
+      expect(await insertItems([longest])).toEqual([{ ord: 1, id: longest.id, inserted: true }])
     }, TEST_TIMEOUT_MS)
 
     it('generates an id for an object that has none', async () => {
@@ -542,6 +555,38 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         { itemId: a.id, effect: 'restored', via: c.id },
       ])
       expect(await row(a.id, 'superseded_by, valid_to')).toEqual({ superseded_by: null, valid_to: null })
+    }, TEST_TIMEOUT_MS)
+
+    it('reports a descendant committed while the call waits, under the call reason', async () => {
+      const root = artifact('feat: the importer', 0)
+      const child = observation('The importer reads CSV.', [root.id])
+      await insertItems([root, child])
+      const late = observation('The importer reads CSV with a header row.', [child.id])
+      const inserter = await pg.session()
+      const forgetter = await pg.session()
+      try {
+        await inserter.run('SET ROLE service_role;')
+        await forgetter.run('SET ROLE service_role;')
+        const pid = await forgetter.run('SELECT pg_backend_pid();')
+        await inserter.run('BEGIN;')
+        await inserter.run(`SELECT count(*) FROM public.engram_insert_items(${jsonb([late])});`)
+        // Runs the deferred lineage check now: it holds the child FOR SHARE until COMMIT.
+        await inserter.run('SET CONSTRAINTS ALL IMMEDIATE;')
+        const forgetting = forgetter.run(forgetQuery([root.id], 'the importer was reverted'))
+        await waitUntilLockWait(pg, pid)
+        await inserter.run('COMMIT;')
+        expect(JSON.parse(await forgetting) as Effect[]).toEqual([
+          { itemId: root.id, effect: 'forgotten', via: null },
+          { itemId: child.id, effect: 'forgotten', via: root.id },
+          { itemId: late.id, effect: 'forgotten', via: root.id },
+        ])
+      } finally {
+        await inserter.close()
+        await forgetter.close()
+      }
+      expect(await row(late.id, 'forgotten_reason')).toEqual({
+        forgotten_reason: `lineage: ${root.id} forgotten: the importer was reverted`,
+      })
     }, TEST_TIMEOUT_MS)
 
     it('returns no row for an unknown or an already forgotten id', async () => {
