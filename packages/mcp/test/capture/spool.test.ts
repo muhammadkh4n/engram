@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { captureClientInfo, type CaptureEvent } from '../../src/capture/events.js'
 import {
   DRAIN_BACKOFF_BASE_MS,
+  DRAIN_LOCK_STALE_MS,
   drainSpool,
   loadSpoolState,
   spoolRoot,
@@ -17,6 +18,27 @@ import { at, TEST_BRANCH, TEST_CWD, uuid } from './transcripts.js'
 const PERMISSION_BITS = constants.S_IRWXU | constants.S_IRWXG | constants.S_IRWXO
 const SESSION = '00000000-0000-4000-8000-000000009100'
 const TOKEN = 'test-capture-token'
+const SECRET = 'zr4-dead-letter-secret-8812'
+
+// The secret registry is built once per process from process.env, on the
+// first scrub, so its source must be in place before any test runs.
+const registryDir = mkdtempSync(join(tmpdir(), 'engram-spool-registry-'))
+const savedEnv = { SOURCES: process.env.ENGRAM_SECRET_SOURCES_FILE, CACHE: process.env.XDG_CACHE_HOME }
+
+beforeAll(() => {
+  writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ FIXTURE_SECRET: SECRET }))
+  writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
+  process.env.ENGRAM_SECRET_SOURCES_FILE = join(registryDir, 'sources.json')
+  process.env.XDG_CACHE_HOME = join(registryDir, 'cache')
+})
+
+afterAll(() => {
+  if (savedEnv.SOURCES === undefined) delete process.env.ENGRAM_SECRET_SOURCES_FILE
+  else process.env.ENGRAM_SECRET_SOURCES_FILE = savedEnv.SOURCES
+  if (savedEnv.CACHE === undefined) delete process.env.XDG_CACHE_HOME
+  else process.env.XDG_CACHE_HOME = savedEnv.CACHE
+  rmSync(registryDir, { recursive: true, force: true })
+})
 
 let home: string
 let stub: CaptureStub
@@ -300,5 +322,78 @@ describe('drainSpool', () => {
     const result = await drainSpool({ env })
     expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
     expect(deadLetters()).toMatchObject([{ reason: 'invalid_json', event: '{not json' }])
+  })
+
+  it('masks a registered value in a truncated line before dead-lettering it', async () => {
+    const line = JSON.stringify({ ...prompt(1), payload: { text: `use the key ${SECRET} for the replica`, transcript_line: 1 } })
+    const cut = line.slice(0, line.indexOf(SECRET) + SECRET.length + 5)
+    const [path] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    writeFileSync(path!, `${cut}\n${readFileSync(path!, 'utf8')}`)
+
+    const result = await drainSpool({ env })
+
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
+    const [letter] = deadLetters() as unknown as Array<{ reason: string; event: string }>
+    expect(letter!.reason).toBe('invalid_json')
+    expect(letter!.event).toContain('use the key [')
+    expect(letter!.event).not.toContain(SECRET)
+    expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(SECRET)
+  })
+
+  it('masks a registered value in a line scrubbing cannot walk before dead-lettering it', async () => {
+    const [path] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    const malformed = JSON.stringify({ cwd: `/home/tester/${SECRET}` })
+    writeFileSync(path!, `${malformed}\n${readFileSync(path!, 'utf8')}`)
+
+    const result = await drainSpool({ env })
+
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
+    const [letter] = deadLetters() as unknown as Array<{ reason: string; event: string }>
+    expect(letter!.reason).toBe('unscrubbable_event')
+    expect(typeof letter!.event).toBe('string')
+    expect(letter!.event).not.toContain(SECRET)
+    expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(SECRET)
+  })
+
+  it('refreshes its lock before each file, so a drain past the stale age keeps it', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    const lockPath = join(root, '.drain.lock')
+    stub.hold = true
+    const first = drainSpool({ env })
+    await until(() => stub.received.length === 1)
+    // The first request has taken longer than the lock's stale age.
+    const longAgo = new Date(Date.now() - DRAIN_LOCK_STALE_MS - 1_000)
+    utimesSync(lockPath, longAgo, longAgo)
+    stub.release()
+    stub.hold = true
+    await until(() => stub.received.length === 2)
+    expect(Date.now() - statSync(lockPath).mtimeMs).toBeLessThan(DRAIN_LOCK_STALE_MS)
+
+    stub.hold = false
+    const second = await drainSpool({ env })
+
+    expect(second.stopped).toBe('locked')
+    stub.release()
+    expect(await first).toMatchObject({ files_sent: 2, remaining: 0, stopped: null })
+    expect(stub.received).toHaveLength(2)
+  })
+
+  it('stops before its next file once another drainer has taken its lock over', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    await writeSpoolBatch(SESSION, [prompt(3)], { root })
+    const lockPath = join(root, '.drain.lock')
+    stub.hold = true
+    const first = drainSpool({ env })
+    await until(() => stub.received.length === 1)
+    writeFileSync(lockPath, 'another-holder\n')
+    stub.release()
+
+    const result = await first
+
+    expect(result).toMatchObject({ files_sent: 1, remaining: 2, stopped: 'lock_lost' })
+    expect(stub.received).toHaveLength(1)
+    expect(readFileSync(lockPath, 'utf8')).toBe('another-holder\n')
   })
 })

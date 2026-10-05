@@ -150,9 +150,11 @@ describe('loadCaptureRegistry', () => {
     expect(lines[1]).toContain('not valid JSON')
   })
 
-  it('treats an unset variable as nothing configured: empty, and no log line', () => {
+  it('gives an unset variable an empty registry and one capture-log line naming the variable', () => {
     delete env.ENGRAM_PROJECT_REGISTRY_FILE
     expect(loadCaptureRegistry(env).workspaces.size).toBe(0)
-    expect(logLines()).toEqual([])
+    const lines = logLines()
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('project registry not configured (ENGRAM_PROJECT_REGISTRY_FILE unset)')
   })
 })

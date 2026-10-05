@@ -258,6 +258,23 @@ export async function releaseFileLock(path: string, token: string): Promise<void
   }
 }
 
+/**
+ * Marks the lock fresh while it still carries this holder's token, so a
+ * holder that works past `staleMs` is not taken over; false when the lock is
+ * gone or another holder's, and the caller must stop.
+ */
+export async function refreshFileLock(path: string, token: string): Promise<boolean> {
+  try {
+    if ((await fs.readFile(path, 'utf8')).trim() !== token) return false
+    const now = new Date()
+    await fs.utimes(path, now, now)
+    return true
+  } catch (err) {
+    if (isErrno(err, 'ENOENT')) return false
+    throw err
+  }
+}
+
 /** Removes `path`; true when it existed. */
 async function consume(path: string): Promise<boolean> {
   try {

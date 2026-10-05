@@ -56,14 +56,17 @@ function withAbsoluteRoots(registry: ProjectRegistry, env: Env): CaptureRegistry
 }
 
 /**
- * Reads the file `ENGRAM_PROJECT_REGISTRY_FILE` names. A missing, unreadable
- * or invalid file gives the empty registry and one capture-log line; an unset
- * variable gives the empty registry silently, since nothing is configured.
+ * Reads the file `ENGRAM_PROJECT_REGISTRY_FILE` names. An unset variable or a
+ * missing, unreadable or invalid file gives the empty registry and one
+ * capture-log line, so a health check can tell why events carry no workspace.
  * Never throws: capture must not fail because of the registry.
  */
 export function loadCaptureRegistry(env: Env): CaptureRegistry {
   const configured = env[PROJECT_REGISTRY_FILE_ENV]?.trim()
-  if (!configured) return EMPTY_REGISTRY
+  if (!configured) {
+    appendCaptureLog(env, `project registry not configured (${PROJECT_REGISTRY_FILE_ENV} unset); events carry no workspace`)
+    return EMPTY_REGISTRY
+  }
   const path = expandHome(configured, env)
   let text: string
   try {
