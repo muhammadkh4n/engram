@@ -1427,6 +1427,26 @@ CREATE TABLE IF NOT EXISTS public.memory_capture_events (
 
 
 --
+-- Name: memory_capture_event_counts; Type: TABLE; Schema: public; Owner: -
+--
+-- Running counts of capture events by state, so engram_capture_materialize
+-- reports table-wide pending and dead counts without reading every
+-- unprocessed event. The counts are the column sums over all rows:
+-- memory_capture_events_count adds one row per change in an event's state,
+-- insert-only so concurrent ingests never wait on each other, and
+-- engram_capture_materialize folds the rows into one under its lock. pending
+-- counts events with processed_at NULL and fewer than 3 attempts, dead those
+-- with processed_at NULL and 3 attempts or more.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_capture_event_counts (
+    id bigserial PRIMARY KEY,
+    pending bigint NOT NULL,
+    dead bigint NOT NULL
+);
+
+
+--
 -- Name: memory_secret_hits; Type: TABLE; Schema: public; Owner: -
 --
 -- One row per value masked before storage: where it was and which detector
@@ -1509,6 +1529,19 @@ DO $$ BEGIN
         AND (embedding_error IS NULL OR (embedding_error ~ '\S' AND char_length(embedding_error) <= 500)));
   END IF;
 END $$;
+
+
+--
+-- Columns memory_capture_events gained after it was first provisioned, added
+-- the same idempotent way.
+-- - backfill: the event was posted by the history backfill (client name
+--   'engram-backfill') or recovers a prompt from history (payload.origin).
+--   Generated at insert, so engram_capture_materialize ranks sessions from
+--   idx_capture_events_candidates instead of reading every pending payload.
+--
+
+ALTER TABLE public.memory_capture_events ADD COLUMN IF NOT EXISTS backfill boolean NOT NULL
+    GENERATED ALWAYS AS ((payload ? 'origin') OR coalesce((client ->> 'name') = 'engram-backfill', false)) STORED;
 
 
 --
@@ -2007,7 +2040,11 @@ CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (l
 CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
 CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
-CREATE INDEX IF NOT EXISTS idx_capture_events_pending ON public.memory_capture_events USING btree (occurred_at, id) WHERE (processed_at IS NULL);
+-- Materialize candidates in session and event-time order: one probe finds
+-- each session's earliest candidate, a range scan its next ones. Replaces an
+-- index over every unprocessed event in time order, which no ranking used.
+DROP INDEX IF EXISTS public.idx_capture_events_pending;
+CREATE INDEX IF NOT EXISTS idx_capture_events_candidates ON public.memory_capture_events USING btree (session_id, occurred_at, id) INCLUDE (backfill) WHERE (processed_at IS NULL AND attempts < 3);
 CREATE INDEX IF NOT EXISTS idx_capture_events_session ON public.memory_capture_events USING btree (session_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extraction_runs USING btree (session_id, started_at);
 
@@ -2442,6 +2479,72 @@ CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER UPDATE OF superseded_b
 
 DROP TRIGGER IF EXISTS memory_items_forget_cascade ON public.memory_items;
 CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON public.memory_items FOR EACH ROW WHEN (OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL) EXECUTE FUNCTION public.memory_items_forget_cascade();
+
+
+--
+-- Name: memory_capture_events_count(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Keeps memory_capture_event_counts in step with memory_capture_events. As a
+-- row trigger it adds one row holding the change in pending and dead that an
+-- insert, update or delete makes, and nothing when the event's state is
+-- unchanged; as a TRUNCATE trigger it clears the counts with the events.
+CREATE OR REPLACE FUNCTION public.memory_capture_events_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_pending bigint := 0;
+  v_dead bigint := 0;
+BEGIN
+  IF TG_OP = 'TRUNCATE' THEN
+    DELETE FROM public.memory_capture_event_counts;
+    RETURN NULL;
+  END IF;
+  IF TG_OP <> 'INSERT' THEN
+    IF OLD.processed_at IS NULL THEN
+      IF OLD.attempts < 3 THEN v_pending := v_pending - 1; ELSE v_dead := v_dead - 1; END IF;
+    END IF;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    IF NEW.processed_at IS NULL THEN
+      IF NEW.attempts < 3 THEN v_pending := v_pending + 1; ELSE v_dead := v_dead + 1; END IF;
+    END IF;
+  END IF;
+  IF v_pending <> 0 OR v_dead <> 0 THEN
+    INSERT INTO public.memory_capture_event_counts (pending, dead) VALUES (v_pending, v_dead);
+  END IF;
+  RETURN NULL;
+END; $$;
+
+
+--
+-- Name: memory_capture_events triggers; Type: TRIGGER; Schema: public; Owner: -
+--
+-- Only processed_at and attempts move an event between pending, dead and
+-- processed, so updates of other columns skip the count.
+--
+
+DROP TRIGGER IF EXISTS memory_capture_events_count ON public.memory_capture_events;
+CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();
+
+DROP TRIGGER IF EXISTS memory_capture_events_count_truncate ON public.memory_capture_events;
+CREATE TRIGGER memory_capture_events_count_truncate AFTER TRUNCATE ON public.memory_capture_events FOR EACH STATEMENT EXECUTE FUNCTION public.memory_capture_events_count();
+
+-- A database that stored events before the counts existed starts from a
+-- count of them. Once the triggers exist the counts table is empty only when
+-- no event is pending or dead, so counting then is always right; the table
+-- lock keeps an ingest from landing between the count and this transaction's
+-- end.
+DO $$ BEGIN
+  LOCK TABLE public.memory_capture_events IN SHARE ROW EXCLUSIVE MODE;
+  IF NOT EXISTS (SELECT 1 FROM public.memory_capture_event_counts) THEN
+    INSERT INTO public.memory_capture_event_counts (pending, dead)
+    SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)
+      FROM public.memory_capture_events c
+     WHERE c.processed_at IS NULL;
+  END IF;
+END $$;
 
 
 --
@@ -3290,6 +3393,12 @@ END; $$;
 -- then everything by (occurred_at, id). Every event of a session shares its
 -- session's rank, so a backlog never delays live capture and a session's
 -- events always run in event-time order.
+-- A call reads in proportion to p_limit and to the sessions with candidates,
+-- never to the backlog: one probe of idx_capture_events_candidates per
+-- session finds its earliest candidate (and so its rank, from the backfill
+-- column), and sessions are then merged in rank order, each read only below
+-- the p_limit-th best event so far. A session whose earliest candidate ranks
+-- after that event cannot contribute, nor can any session after it.
 -- Each event runs in its own subtransaction with the deferred constraint
 -- triggers forced at its end (SET CONSTRAINTS ALL IMMEDIATE), so a broken
 -- invariant fails that event alone: attempts goes up by one, error keeps the
@@ -3328,13 +3437,23 @@ END; $$;
 -- which would release it on a failure.
 -- Returns {"locked": true, "processed", "failed", "skipped", "pending",
 -- "dead"}: processed counts events marked processed by this call, skipped
--- included; pending (candidates left) and dead (3 attempts) are table-wide.
+-- included; pending (candidates left) and dead (3 attempts) are table-wide,
+-- read from memory_capture_event_counts, whose rows the call folds into one.
 CREATE OR REPLACE FUNCTION public.engram_capture_materialize(p_limit integer DEFAULT 200) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 DECLARE
-  v_ids bigint[];
+  v_ids bigint[] := '{}'::bigint[];
+  v_ranks boolean[] := '{}'::boolean[];
+  v_times timestamp with time zone[] := '{}'::timestamp with time zone[];
+  v_session record;
+  v_below_rank boolean;
+  v_below_at timestamp with time zone;
+  v_below_id bigint;
+  v_upto_at timestamp with time zone;
+  v_upto_id bigint;
+  v_count_rows bigint;
   v_id bigint;
   e public.memory_capture_events%ROWTYPE;
   p jsonb;
@@ -3370,15 +3489,64 @@ BEGIN
     RETURN jsonb_build_object('locked', false);
   END IF;
 
-  v_ids := ARRAY(
-    SELECT c.id
-      FROM (SELECT ev.id, ev.occurred_at,
-                   first_value((ev.payload ? 'origin') OR (ev.client ->> 'name') IS NOT DISTINCT FROM 'engram-backfill')
-                     OVER (PARTITION BY ev.session_id ORDER BY ev.occurred_at, ev.id) AS backfill
-              FROM public.memory_capture_events ev
-             WHERE ev.processed_at IS NULL AND ev.attempts < 3) AS c
-     ORDER BY c.backfill, c.occurred_at, c.id
-     LIMIT p_limit);
+  -- v_ids, v_ranks and v_times hold the best candidates so far in rank
+  -- order; once there are p_limit of them, the last is the bound below which
+  -- a later session's events must rank to displace it.
+  FOR v_session IN
+    WITH RECURSIVE heads AS (
+      (SELECT c.session_id, c.occurred_at, c.id, c.backfill
+         FROM public.memory_capture_events c
+        WHERE c.processed_at IS NULL AND c.attempts < 3
+        ORDER BY c.session_id, c.occurred_at, c.id
+        LIMIT 1)
+      UNION ALL
+      SELECT n.session_id, n.occurred_at, n.id, n.backfill
+        FROM heads h
+       CROSS JOIN LATERAL (
+         SELECT c.session_id, c.occurred_at, c.id, c.backfill
+           FROM public.memory_capture_events c
+          WHERE c.processed_at IS NULL AND c.attempts < 3 AND c.session_id > h.session_id
+          ORDER BY c.session_id, c.occurred_at, c.id
+          LIMIT 1) AS n
+    )
+    SELECT h.session_id, h.backfill, h.occurred_at, h.id
+      FROM heads h
+     ORDER BY h.backfill, h.occurred_at, h.id
+     LIMIT p_limit
+  LOOP
+    EXIT WHEN cardinality(v_ids) = p_limit
+          AND (v_session.backfill, v_session.occurred_at, v_session.id) > (v_below_rank, v_below_at, v_below_id);
+    -- A plain row comparison, so the scan stops at the bound as an index
+    -- condition instead of filtering the rest of the session.
+    IF cardinality(v_ids) = p_limit AND v_session.backfill = v_below_rank THEN
+      v_upto_at := v_below_at;
+      v_upto_id := v_below_id;
+    ELSE
+      v_upto_at := 'infinity';
+      v_upto_id := 9223372036854775807;
+    END IF;
+    SELECT coalesce(array_agg(m.id ORDER BY m.rank, m.occurred_at, m.id), '{}'),
+           coalesce(array_agg(m.rank ORDER BY m.rank, m.occurred_at, m.id), '{}'),
+           coalesce(array_agg(m.occurred_at ORDER BY m.rank, m.occurred_at, m.id), '{}')
+      INTO v_ids, v_ranks, v_times
+      FROM (SELECT u.id, u.rank, u.occurred_at
+              FROM (SELECT b.id, b.rank, b.occurred_at
+                      FROM unnest(v_ids, v_ranks, v_times) AS b(id, rank, occurred_at)
+                    UNION ALL
+                    (SELECT c.id, v_session.backfill, c.occurred_at
+                       FROM public.memory_capture_events c
+                      WHERE c.processed_at IS NULL AND c.attempts < 3 AND c.session_id = v_session.session_id
+                        AND (c.occurred_at, c.id) < (v_upto_at, v_upto_id)
+                      ORDER BY c.occurred_at, c.id
+                      LIMIT p_limit)) AS u
+             ORDER BY u.rank, u.occurred_at, u.id
+             LIMIT p_limit) AS m;
+    IF cardinality(v_ids) = p_limit THEN
+      v_below_rank := v_ranks[p_limit];
+      v_below_at := v_times[p_limit];
+      v_below_id := v_ids[p_limit];
+    END IF;
+  END LOOP;
 
   FOREACH v_id IN ARRAY v_ids LOOP
     SELECT * INTO e FROM public.memory_capture_events c WHERE c.id = v_id;
@@ -3621,10 +3789,16 @@ BEGIN
     END;
   END LOOP;
 
-  SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)
-    INTO v_pending, v_dead
-    FROM public.memory_capture_events c
-   WHERE c.processed_at IS NULL;
+  SELECT count(*), coalesce(sum(n.pending), 0), coalesce(sum(n.dead), 0)
+    INTO v_count_rows, v_pending, v_dead
+    FROM public.memory_capture_event_counts n;
+  IF v_count_rows > 1 THEN
+    -- The sum of the deleted rows, not of the rows read above: an ingest
+    -- that committed in between is counted in its own rows either way.
+    WITH folded AS (DELETE FROM public.memory_capture_event_counts RETURNING pending, dead)
+    SELECT coalesce(sum(f.pending), 0), coalesce(sum(f.dead), 0) INTO v_pending, v_dead FROM folded f;
+    INSERT INTO public.memory_capture_event_counts (pending, dead) VALUES (v_pending, v_dead);
+  END IF;
   RETURN jsonb_build_object('locked', true, 'processed', v_processed, 'failed', v_failed, 'skipped', v_skipped,
                             'pending', v_pending, 'dead', v_dead);
 END; $$;
@@ -4084,6 +4258,12 @@ ALTER TABLE public.memory_item_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_capture_events ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_capture_event_counts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_capture_event_counts ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memory_secret_hits; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4194,6 +4374,14 @@ CREATE POLICY service_role_all ON public.memory_capture_events TO service_role U
 
 
 --
+-- Name: memory_capture_event_counts service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_capture_event_counts;
+CREATE POLICY service_role_all ON public.memory_capture_event_counts TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: memory_secret_hits service_role_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -4219,8 +4407,8 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
-REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM PUBLIC, service_role;
+REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -4231,8 +4419,8 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
-      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -4244,6 +4432,7 @@ GRANT SELECT ON TABLE public.memory_projects TO service_role;
 GRANT SELECT ON TABLE public.memory_items TO service_role;
 GRANT SELECT ON TABLE public.memory_item_entities TO service_role;
 GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
+GRANT SELECT ON TABLE public.memory_capture_event_counts TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 
 
@@ -4298,7 +4487,8 @@ $smoke$;
 -- re-created above lose their grants on every apply, so this section runs
 -- after the last function definition and re-applying the file restores it.
 --
--- Every function below except the memory_items_* trigger functions is an RPC
+-- Every function below except the memory_items_* and memory_capture_events_*
+-- trigger functions is an RPC
 -- endpoint and gets the service_role grant. The trigger functions are revoked
 -- from service_role as well and granted to no role, so a database whose
 -- default privileges give service_role EXECUTE on new functions ends with the
@@ -4351,11 +4541,13 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -4405,6 +4597,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM %I', role_name);
     END IF;
   END LOOP;
 END

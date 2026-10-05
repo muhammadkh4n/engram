@@ -24,6 +24,7 @@ const ITEM_TABLES = [
   'memory_items',
   'memory_item_entities',
   'memory_capture_events',
+  'memory_capture_event_counts',
   'memory_secret_hits',
 ] as const
 
