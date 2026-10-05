@@ -51,6 +51,10 @@ describe('cursor files', () => {
       last_line_start: 80,
       open_turn_emitted: ['00000000-0000-4000-8000-000000000004'],
       plan_dirs: ['Active/tst-plan'],
+      pending_calls: [
+        { id: 'toolu_ask', name: 'AskUserQuestion', questions: [{ question: 'Go?', header: '', options: [], multiSelect: false }] },
+        { id: 'toolu_commit', name: 'Bash', ref_kinds: ['commit'] },
+      ],
     }
     await saveCursor(root, SESSION, cursor)
     expect(await loadCursor(root, SESSION)).toEqual(cursor)
@@ -65,6 +69,12 @@ describe('cursor files', () => {
     writeFileSync(join(root, `${SESSION}.json`), '{"v":1,"offset":"twelve"}')
     expect(await loadCursor(root, SESSION)).toBeNull()
     writeFileSync(join(root, `${SESSION}.json`), '{"v":1')
+    expect(await loadCursor(root, SESSION)).toBeNull()
+    const { pending_calls: _none, ...withoutCalls } = emptyCursor('/tmp/session.jsonl')
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(withoutCalls))
+    expect(await loadCursor(root, SESSION)).toEqual(emptyCursor('/tmp/session.jsonl'))
+    const saved = { ...emptyCursor('/tmp/session.jsonl'), pending_calls: [{ id: 'toolu_x' }] }
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(saved))
     expect(await loadCursor(root, SESSION)).toBeNull()
   })
 

@@ -8,8 +8,23 @@ import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import type { AnswerQuestion } from '../capture-events/contract.js'
 import { ensurePrivateDir, openPrivateHandle } from '../ingest/private-files.js'
 import { sessionFileName } from './events.js'
+
+/** The kinds of ref a Bash call's result can carry. */
+export type RefKind = 'commit' | 'pr'
+
+/**
+ * A tool call of a force-closed turn that had no result yet. It keeps what the
+ * result's event needs: a dialog's questions, and which refs a Bash result yields.
+ */
+export interface PendingCall {
+  id: string
+  name: string
+  questions?: AnswerQuestion[]
+  ref_kinds?: RefKind[]
+}
 
 export interface TranscriptCursor {
   v: 1
@@ -25,6 +40,11 @@ export interface TranscriptCursor {
   open_turn_emitted: string[]
   /** The session's plan folders as of `offset`, most recent first. */
   plan_dirs: string[]
+  /**
+   * Calls of force-closed turns still waiting for a result as of `offset`, oldest first, so a
+   * result written after an idle sweep (a dialog answered later) still finds its call.
+   */
+  pending_calls: PendingCall[]
 }
 
 export const READER_LOCK_STALE_MS = 60_000
@@ -56,6 +76,7 @@ export function emptyCursor(transcriptPath: string): TranscriptCursor {
     last_line_start: null,
     open_turn_emitted: [],
     plan_dirs: [],
+    pending_calls: [],
   }
 }
 
@@ -65,6 +86,28 @@ function isErrno(err: unknown, code: string): boolean {
 
 const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((s) => typeof s === 'string')
+const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+function isQuestion(v: unknown): v is AnswerQuestion {
+  return (
+    isRecord(v) &&
+    typeof v.question === 'string' &&
+    typeof v.header === 'string' &&
+    typeof v.multiSelect === 'boolean' &&
+    Array.isArray(v.options) &&
+    v.options.every((o) => isRecord(o) && typeof o.label === 'string' && typeof o.description === 'string')
+  )
+}
+
+function isPendingCall(v: unknown): v is PendingCall {
+  return (
+    isRecord(v) &&
+    typeof v.id === 'string' &&
+    typeof v.name === 'string' &&
+    (v.questions === undefined || (Array.isArray(v.questions) && v.questions.every(isQuestion))) &&
+    (v.ref_kinds === undefined || (Array.isArray(v.ref_kinds) && v.ref_kinds.every((k) => k === 'commit' || k === 'pr')))
+  )
+}
 
 function parseCursor(value: unknown): TranscriptCursor | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -79,7 +122,9 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     (lastStart === null || (isCount(lastStart) && lastStart < c.offset)) &&
     (c.last_uuid === null) === (lastStart === null) &&
     isStringArray(c.open_turn_emitted) &&
-    isStringArray(c.plan_dirs)
+    isStringArray(c.plan_dirs) &&
+    // A cursor written before calls were carried has none waiting.
+    (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall)))
   if (!valid) return null
   return {
     v: 1,
@@ -90,6 +135,7 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     last_line_start: lastStart as number | null,
     open_turn_emitted: [...(c.open_turn_emitted as string[])],
     plan_dirs: [...(c.plan_dirs as string[])],
+    pending_calls: [...((c.pending_calls as PendingCall[] | undefined) ?? [])],
   }
 }
 
