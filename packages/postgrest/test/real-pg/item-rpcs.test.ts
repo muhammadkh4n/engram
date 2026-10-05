@@ -911,6 +911,47 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
   })
 
   describe('engram_supersede_item', () => {
+    it('lets a supersede and an insert whose lineage names both rows in the other order both finish, without a deadlock', async () => {
+      // Ids: successor < older. The supersede locks its two rows in id order, the successor first. The insert's
+      // lineage check runs at once here, so it holds the older row before it asks for the successor: the order a
+      // call inserting two rows whose lineage names the older row, then the successor, takes at commit.
+      const successorId = newId()
+      const olderId = newId()
+      const older = artifact('perf: the first cache layout', 0, { id: olderId })
+      const successor = artifact('perf: the second cache layout', 30, { id: successorId })
+      await insertItems([older, successor])
+      const fromOlder = observation('The first layout keyed entries by path.', [older.id])
+      const fromSuccessor = observation('The second layout keys entries by content hash.', [successor.id])
+      const inserter = await pg.session()
+      const superseder = await pg.session()
+      const outcome = (run: Promise<string>) => run.then((out) => out, (error: Error) => error.message)
+      try {
+        for (const session of [inserter, superseder]) {
+          await session.run('SET ROLE service_role;')
+          await session.run('\\set VERBOSITY verbose')
+        }
+        const supersederPid = await superseder.run('SELECT pg_backend_pid();')
+        await inserter.run('BEGIN;')
+        await inserter.run('SET CONSTRAINTS ALL IMMEDIATE;')
+        await inserter.run(insertQuery([fromOlder]))
+        const superseding = outcome(superseder.run(`SELECT to_json(public.engram_supersede_item('${older.id}', '${successor.id}'));`))
+        await waitUntilLockWait(pg, supersederPid)
+        const inserting = await outcome(inserter.run(insertQuery([fromSuccessor])))
+        const committing = await outcome(inserter.run('COMMIT;'))
+        const superseded = await superseding
+
+        expect(inserting).not.toMatch(/40P01|deadlock/)
+        expect(committing).not.toMatch(/ERROR/)
+        expect(superseded).not.toMatch(/40P01|deadlock/)
+        expect(superseded).toBe('true')
+        expect(await rowCount([fromOlder.id, fromSuccessor.id])).toBe(2)
+        expect(await row(older.id, 'superseded_by')).toEqual({ superseded_by: successor.id })
+      } finally {
+        await inserter.close()
+        await superseder.close()
+      }
+    }, TEST_TIMEOUT_MS)
+
     it('returns true, then false on a repeat, and ends validity at the successor', async () => {
       const a = artifact('perf: cache v1', 0)
       const b = artifact('perf: cache v2', 30)

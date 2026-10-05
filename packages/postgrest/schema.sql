@@ -2008,12 +2008,13 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- valid_to is the successor's occurred_at while superseded_by is set, and a
 -- new row has no successor, so it starts NULL.
 -- A row with lineage takes the forget lock (7308892986227385959) shared
--- before it is written, as engram_insert_items and engram_supersede_item do:
--- its lineage check locks those rows FOR SHARE, in no fixed order, while a
--- forget, or a retire, locks them in its own order, so the two would
--- otherwise deadlock. Forgets and retires hold the key exclusively: holding
--- it shared makes either wait for this transaction or this transaction wait
--- for it.
+-- before it is written, as engram_insert_items does: its lineage check locks
+-- those rows FOR SHARE, in no fixed order, while every function that locks
+-- existing rows (forget, retire, unretire, supersede) locks them in its own
+-- order, so the two would otherwise deadlock. Those functions hold the key
+-- exclusively from before their first row lock: holding it shared makes
+-- either wait for this transaction or this transaction wait for it, while
+-- inserts still run beside each other (FOR SHARE locks do not conflict).
 CREATE OR REPLACE FUNCTION public.memory_items_before_insert() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2634,10 +2635,11 @@ END; $$;
 -- advisory lock 7308892986227385959 (the ASCII bytes of "engramfg") before
 -- it locks any row. Two forgets over overlapping closures would otherwise
 -- lock each other's rows in passes with no common order and deadlock.
--- engram_supersede_item and every insert of a row with lineage hold the
--- same key shared, so they wait for a forget instead of deadlocking with it
--- and still run side by side; engram_retire_items and engram_unretire_items
--- hold it exclusively. Once it holds the key, the call sets the
+-- The rule is the same for every function that locks existing item rows:
+-- engram_retire_items, engram_unretire_items and engram_supersede_item hold
+-- the key exclusively too, and every insert of a row with lineage holds it
+-- shared, so no two writers that lock the same rows in different orders
+-- ever run at once. Once it holds the key, the call sets the
 -- transaction-local engram.forget_lock_xact to txid_current();
 -- memory_items_before_update refuses forgotten_at in any transaction without
 -- that mark, so every forget path takes its locks in this one order.
@@ -2763,11 +2765,11 @@ END; $$;
 -- locks the listed rows FOR NO KEY UPDATE in id order. A forget locks rows
 -- in its own order, and a lineage check locks the rows a new item names FOR
 -- SHARE in the order they were inserted; a retire locking the same rows in
--- id order could each wait on a row the other holds. Forgets hold the key
--- exclusively, and supersedes and inserts of rows with lineage hold it shared
--- from before their first row lock to commit, so with the key exclusive a
--- retire waits for every one of them to finish, or they wait for it.
--- Retires are rare, so retires and unretires also wait for each other.
+-- id order could each wait on a row the other holds. Forgets and supersedes
+-- hold the key exclusively, and inserts of rows with lineage hold it shared,
+-- each from before its first row lock to commit, so a retire waits for every
+-- one of them to finish, or they wait for it. Retires and unretires also
+-- wait for each other.
 -- FOR NO KEY UPDATE is the lock the UPDATE takes anyway (no key column
 -- changes): it does not block a foreign-key check, which takes FOR KEY SHARE.
 CREATE OR REPLACE FUNCTION public.engram_retire_items(p_ids uuid[], p_reason text) RETURNS SETOF uuid
@@ -2838,8 +2840,13 @@ END; $$;
 -- when p_old is already superseded by p_new; otherwise sets superseded_by, and
 -- memory_items_before_update ends p_old's validity at p_new's event time.
 -- Before locking a row it takes the forget advisory key
--- (7308892986227385959) shared: a running forget finishes first, so the two
--- never hold each other's rows, while supersedes do not block each other.
+-- (7308892986227385959) exclusively, as every function that locks existing
+-- item rows does. Id order alone is not enough: a lineage check locks the
+-- rows a new item names FOR SHARE in insertion order, so an insert holding
+-- p_old and then naming p_new would wait on this call while this call waits
+-- on it. Inserts of rows with lineage hold the key shared until commit, so
+-- the supersede waits for them, or they wait for it; supersedes also wait
+-- for each other, for forgets and for retires.
 CREATE OR REPLACE FUNCTION public.engram_supersede_item(p_old uuid, p_new uuid) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2857,7 +2864,7 @@ BEGIN
       MESSAGE = 'engram_supersede_item: an item cannot supersede itself';
   END IF;
 
-  PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
   PERFORM 1 FROM public.memory_items i WHERE i.id IN (p_old, p_new) ORDER BY i.id FOR UPDATE;
 
   SELECT i.class, i.occurred_at, i.superseded_by, i.forgotten_at INTO v_old
