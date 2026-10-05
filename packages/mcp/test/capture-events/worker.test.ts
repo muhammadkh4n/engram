@@ -7,15 +7,18 @@
  * provider refuses on its own (400, 422) is embedded apart from the rest,
  * counted only in a pass where another item embedded, and leaves the pending
  * set after its fifth such failure; a pass where every item is refused counts
- * nothing; a full batch runs the next tick at once; stop waits for a tick in
+ * nothing; a worker reads, renews and records under one claimant id of its
+ * own, and renews its claims while a pass runs and not after it; a full
+ * batch runs the next tick at once; stop waits for a tick in
  * flight up to its grace; shutdown resolves 0 after a clean stop or at the
  * grace, and 1 when a step throws.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { EMBED_MAX_CHARS, EMBEDDING_ATTEMPTS_MAX, EmbeddingInputError } from '@engram-mem/core'
+import { EMBED_MAX_CHARS, EMBEDDING_ATTEMPTS_MAX, EMBEDDING_CLAIM_LEASE_SECONDS, EmbeddingInputError } from '@engram-mem/core'
 import type { EmbeddingFailure, ItemEmbedding, MaterializeResult, PendingEmbedding } from '@engram-mem/core'
 import {
   WORKER_EMBED_BACKOFF_MAX_MS,
+  WORKER_EMBED_CLAIM_RENEW_MS,
   WORKER_INTERVAL_MS,
   startCaptureWorker,
   type CaptureWorkerEmbedder,
@@ -51,6 +54,9 @@ interface Fakes {
   embedded: string[][]
   written: ItemEmbedding[][]
   failures: EmbeddingFailure[][]
+  /** The claimant id passed with each read, renewal and recorded refusal, in call order. */
+  claimants: string[]
+  renewals: string[][]
   logs: string[]
 }
 
@@ -60,11 +66,14 @@ function fakes(over: {
   embedBatch?: (texts: string[]) => Promise<number[][]>
   record?: (rows: readonly EmbeddingFailure[]) => Promise<number>
   failedCount?: () => Promise<number>
+  renew?: () => Promise<number>
 } = {}): Fakes {
   const calls: string[] = []
   const embedded: string[][] = []
   const written: ItemEmbedding[][] = []
   const failures: EmbeddingFailure[][] = []
+  const claimants: string[] = []
+  const renewals: string[][] = []
   const logs: string[] = []
   const embedder: CaptureWorkerEmbedder = {
     embedBatch: async (texts) => {
@@ -80,17 +89,24 @@ function fakes(over: {
         calls.push(`materialize(${limit})`)
         return over.materialize ? over.materialize() : IDLE
       },
-      pendingEmbeddings: async (limit) => {
+      pendingEmbeddings: async (limit, claimant) => {
         calls.push(`pendingEmbeddings(${limit})`)
+        claimants.push(claimant)
         return over.pending ? over.pending() : []
+      },
+      renewEmbeddingClaims: async (ids, claimant) => {
+        renewals.push([...ids])
+        claimants.push(claimant)
+        return over.renew ? over.renew() : ids.length
       },
       setEmbeddings: async (rows) => {
         calls.push('setEmbeddings')
         written.push([...rows])
         return rows.length
       },
-      recordEmbeddingFailures: async (rows) => {
+      recordEmbeddingFailures: async (rows, claimant) => {
         calls.push('recordEmbeddingFailures')
+        claimants.push(claimant)
         failures.push([...rows])
         return over.record ? over.record(rows) : rows.length
       },
@@ -103,7 +119,7 @@ function fakes(over: {
     embeddingModel: MODEL,
     log: (line) => logs.push(line),
   }
-  return { opts, calls, embedded, written, failures, logs }
+  return { opts, calls, embedded, written, failures, claimants, renewals, logs }
 }
 
 /**
@@ -461,6 +477,65 @@ describe('startCaptureWorker', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(f.calls.filter((c) => c.startsWith('materialize'))).toHaveLength(2)
     await worker.stop(1000)
+  })
+
+  it('reads, renews and records under one claimant id of its own, distinct from another worker', async () => {
+    const refusing = async (texts: string[]): Promise<number[][]> => {
+      if (texts.includes(PENDING[1]!.searchText)) throw new EmbeddingInputError(400, '400 Invalid input')
+      return texts.map(() => vector())
+    }
+    const first = fakes({ pending: async () => PENDING, embedBatch: refusing })
+    const second = fakes({ pending: async () => PENDING, embedBatch: refusing })
+    const workers = [startCaptureWorker(first.opts), startCaptureWorker(second.opts)]
+    await vi.advanceTimersByTimeAsync(0)
+    await Promise.all(workers.map((w) => w.stop(1000)))
+
+    expect(first.calls).toContain('recordEmbeddingFailures')
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    expect(new Set(first.claimants).size).toBe(1)
+    expect(first.claimants[0]).toMatch(uuid)
+    expect(new Set(second.claimants).size).toBe(1)
+    expect(second.claimants[0]).not.toBe(first.claimants[0])
+  })
+
+  it('renews the claims of a pass in flight every renewal interval, and stops renewing when the pass ends', async () => {
+    const gate = deferred<number[][]>()
+    const f = fakes({ pending: async () => PENDING, embedBatch: () => gate.promise })
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.renewals).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(WORKER_EMBED_CLAIM_RENEW_MS)
+    expect(f.renewals).toEqual([PENDING.map((p) => p.id)])
+    await vi.advanceTimersByTimeAsync(WORKER_EMBED_CLAIM_RENEW_MS)
+    expect(f.renewals).toHaveLength(2)
+
+    gate.resolve(PENDING.map(() => vector()))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.written).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(WORKER_EMBED_CLAIM_RENEW_MS * 3)
+    await worker.stop(1000)
+    expect(f.renewals).toHaveLength(2)
+    expect(WORKER_EMBED_CLAIM_RENEW_MS * 4).toBeLessThanOrEqual(EMBEDDING_CLAIM_LEASE_SECONDS * 1000)
+  })
+
+  it('logs a failed renewal without text and finishes the pass', async () => {
+    const gate = deferred<number[][]>()
+    const f = fakes({
+      pending: async () => PENDING,
+      embedBatch: () => gate.promise,
+      renew: async () => {
+        throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' })
+      },
+    })
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(WORKER_EMBED_CLAIM_RENEW_MS)
+    gate.resolve(PENDING.map(() => vector()))
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+    expect(f.written).toHaveLength(1)
+    expect(f.logs[0]).toBe('capture worker: renewing embedding claims failed: ECONNRESET: connection reset')
+    expect(f.logs.join('\n')).not.toContain('plum-orchard')
   })
 
   it('stop waits for a tick in flight and schedules nothing after it', async () => {

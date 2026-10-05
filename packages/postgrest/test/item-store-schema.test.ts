@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   CAPTURE_EVENT_TYPES,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
   ENTITY_TYPES,
   ITEM_CLASSES,
   ITEM_INVARIANTS,
@@ -484,18 +485,30 @@ describe('valid_to is derived from superseded_by', () => {
   )
 })
 
+describe('the embedding claim lease', () => {
+  it('is EMBEDDING_CLAIM_LEASE_SECONDS wherever a claim is taken or renewed', () => {
+    for (const name of ['engram_items_pending_embedding', 'engram_items_renew_embedding_claims']) {
+      const body = functionDefinition(name)
+      expect(body).toContain(`embedding_claimed_until = now() + interval '${EMBEDDING_CLAIM_LEASE_SECONDS} seconds'`)
+      expect(body.match(/interval '/g)).toHaveLength(1)
+    }
+  })
+})
+
 describe('the pending-embedding index', () => {
-  it('holds exactly the rows engram_items_pending_embedding selects: the predicates match word for word', () => {
+  it('holds exactly the rows engram_items_pending_embedding may claim: its WHERE is the predicate word for word, then the claim clause', () => {
     const index = schema.match(
       /CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public\.memory_items USING btree \(created_at, id\) WHERE \((.*)\);/,
     )
     if (!index) throw new Error('idx_items_pending_embedding not found')
     const fn = schema.match(
-      /FUNCTION public\.engram_items_pending_embedding\(p_limit integer DEFAULT 32\)[\s\S]*?FROM public\.memory_items i\s+WHERE ([\s\S]*?)\s+ORDER BY i\.created_at, i\.id/,
+      /FUNCTION public\.engram_items_pending_embedding\(p_limit integer, p_claimant uuid\)[\s\S]*?FROM public\.memory_items i\s+WHERE ([\s\S]*?)\s+ORDER BY i\.created_at, i\.id/,
     )
     if (!fn) throw new Error('engram_items_pending_embedding WHERE not found')
     const predicate = squash(index[1]!)
-    expect(squash(fn[1]!)).toBe(predicate)
+    expect(squash(fn[1]!)).toBe(
+      `${predicate} AND (embedding_claimed_by = p_claimant OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())`,
+    )
     for (const clause of [
       'embedding IS NULL',
       'forgotten_at IS NULL',

@@ -6,9 +6,20 @@
  * RPC takes a transaction-scoped Postgres advisory lock and returns
  * `locked: false` without touching anything when another call holds it. A
  * PostgREST request is one pooled transaction, so a lock held in process
- * memory or across requests would not exclude another replica. Embedding
- * runs only in a tick whose materialize call held the lock, so replicas do
- * not embed the same pending rows side by side.
+ * memory or across requests would not exclude another replica.
+ *
+ * That lock is released when the materialize call returns, so it does not
+ * cover embedding. Instead the pending read claims every item it returns for
+ * this worker (a random claimant id per worker) for
+ * EMBEDDING_CLAIM_LEASE_SECONDS, and no other worker reads an item while its
+ * claim is live: two server processes never send the same item to the
+ * provider side by side. While a pass runs the worker renews its claims every
+ * WORKER_EMBED_CLAIM_RENEW_MS, so a pass that outlasts one lease (a provider
+ * call can retry for longer) keeps its items; a worker that crashed stops
+ * renewing and its claims lapse within the lease. Only if every renewal of a
+ * pass fails for a whole lease can another worker take its items while the
+ * pass still runs; a refusal is then still recorded once, because the
+ * database ignores a refusal from a pass whose claim was taken over.
  *
  * An item the provider refuses on its own (EmbeddingInputError: HTTP 400 or
  * 422) would fail every batch it sits in, and the pending read returns the
@@ -30,8 +41,10 @@
  * its state lives in the returned handle. Log lines carry counts, error codes
  * and messages only, never stored text.
  */
+import { randomUUID } from 'node:crypto'
 import {
   buildTextToEmbed,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
   EMBEDDING_ERROR_MAX_CHARS,
   isEmbeddingInputError,
   scrubSecrets,
@@ -48,6 +61,8 @@ export const WORKER_EMBED_BATCH = 32
 export const WORKER_INTERVAL_MS = 2000
 /** The longest wait after repeated embedding failures that are not the input's fault. */
 export const WORKER_EMBED_BACKOFF_MAX_MS = 60_000
+/** How often a running embedding pass renews its claims: four times per lease. */
+export const WORKER_EMBED_CLAIM_RENEW_MS = (EMBEDDING_CLAIM_LEASE_SECONDS * 1000) / 4
 /** Longest error message a log line keeps. */
 const ERROR_MESSAGE_MAX_CHARS = 500
 
@@ -59,7 +74,12 @@ export interface CaptureWorkerEmbedder {
 export interface CaptureWorkerOptions {
   store: Pick<
     CaptureStore,
-    'materialize' | 'pendingEmbeddings' | 'setEmbeddings' | 'recordEmbeddingFailures' | 'embeddingFailedCount'
+    | 'materialize'
+    | 'pendingEmbeddings'
+    | 'renewEmbeddingClaims'
+    | 'setEmbeddings'
+    | 'recordEmbeddingFailures'
+    | 'embeddingFailedCount'
   >
   embedder: CaptureWorkerEmbedder
   /** Stored with every vector: `<model>:<dimensions>:v<embed text version>`. */
@@ -101,6 +121,8 @@ const NO_PASS: EmbedOutcome = { read: 0, written: 0, recorded: 0, refusedAll: nu
 export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   const { store, embedder, embeddingModel, log } = opts
   const intervalMs = opts.intervalMs ?? WORKER_INTERVAL_MS
+  /** Names this worker's embedding claims; no other worker shares it. */
+  const claimant = randomUUID()
   let timer: ReturnType<typeof setTimeout> | null = null
   let inFlight: Promise<void> | null = null
   let stopped = false
@@ -151,9 +173,29 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     return { vectors, failures, error: null }
   }
 
+  /** Renews the claims on `ids` until the returned function is called. */
+  const holdClaims = (ids: string[]): (() => void) => {
+    const timer = setInterval(() => {
+      store.renewEmbeddingClaims(ids, claimant).catch((err: unknown) => {
+        log(`capture worker: renewing embedding claims failed: ${describeError(err)}`)
+      })
+    }, WORKER_EMBED_CLAIM_RENEW_MS)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }
+
   const embedPending = async (): Promise<EmbedOutcome> => {
-    const pending = await store.pendingEmbeddings(WORKER_EMBED_BATCH)
+    const pending = await store.pendingEmbeddings(WORKER_EMBED_BATCH, claimant)
     if (pending.length === 0) return { ...NO_PASS }
+    const release = holdClaims(pending.map((p) => p.id))
+    try {
+      return await embedClaimed(pending)
+    } finally {
+      release()
+    }
+  }
+
+  const embedClaimed = async (pending: PendingEmbedding[]): Promise<EmbedOutcome> => {
     const texts = pending.map((p) => buildTextToEmbed({ cleanText: p.searchText }))
 
     let vectors: Array<number[] | null>
@@ -179,7 +221,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     // A vector the provider returned in this pass proves it accepts input,
     // so only then is a refusal the refused item's own.
     const accepted = rows.length > 0
-    const recorded = accepted && refusals.length > 0 ? await store.recordEmbeddingFailures(refusals) : 0
+    const recorded = accepted && refusals.length > 0 ? await store.recordEmbeddingFailures(refusals, claimant) : 0
     const refusedAll = !accepted && error === null && refusals.length > 0 ? refusals[0]!.error : null
     return { read: pending.length, written, recorded, refusedAll, error }
   }
