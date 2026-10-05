@@ -132,6 +132,22 @@ describe('prompts', () => {
     ])
   })
 
+  it('captures a typed prompt that quotes a command tag whole, and a tagged command only at the start', async () => {
+    const quoted =
+      'why did the reader drop this line?\n<command-name>/plan-run</command-name>\n<command-args>tst-plan</command-args>'
+    const events = await eventsOf([
+      humanPrompt(uuid(1), at(1), quoted),
+      userEntry(uuid(2), at(2), `look at this: ${quoted}`),
+      humanPrompt(uuid(3), at(3), '  \n<command-name>/review</command-name>\n<command-args>the diff</command-args>'),
+      slashCommand(uuid(4), at(4), '/plan-run', 'tst-plan'),
+    ])
+    expect(prompts(events).map((p) => (p as { text: string }).text)).toEqual([
+      quoted,
+      '/review the diff',
+      '/plan-run tst-plan',
+    ])
+  })
+
   it('keeps a prompt over the route cap whole, since a cut before scrubbing could split a secret', async () => {
     const long = 'a'.repeat(1_000_005)
     const events = await eventsOf([humanPrompt(uuid(1), at(1), long)])

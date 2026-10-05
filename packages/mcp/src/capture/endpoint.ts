@@ -15,9 +15,23 @@ type Env = Record<string, string | undefined>
 
 export const CAPTURE_TOKEN_FILE_ENV = 'ENGRAM_CAPTURE_TOKEN_FILE'
 
-/** Drops a trailing `/mcp`, `/capture` or `/capture/events`, the query and the hash; appends `/capture/events`. */
+function parseHttpUrl(serverUrl: string): URL | null {
+  try {
+    const url = new URL(serverUrl)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Drops a trailing `/mcp`, `/capture` or `/capture/events`, the query and the hash; appends `/capture/events`.
+ * Throws when the URL is not http or https: `host:port` parses as a URL whose scheme is the host. The message
+ * omits the URL, which can carry credentials.
+ */
 export function captureEventsEndpoint(serverUrl: string): string {
-  const url = new URL(serverUrl)
+  const url = parseHttpUrl(serverUrl)
+  if (url === null) throw new Error('server URL is not an http(s) URL')
   const base = url.pathname.replace(/\/+$/, '').replace(/\/(?:mcp|capture\/events|capture)$/, '')
   url.pathname = `${base}/capture/events`
   url.search = ''

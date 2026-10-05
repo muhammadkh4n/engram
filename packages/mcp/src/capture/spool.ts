@@ -487,12 +487,16 @@ export interface DrainOptions {
   client?: CaptureClient
 }
 
-/** `lock_lost`: another drainer took the lock over mid-drain, so this one stopped before its next file. */
+/**
+ * `lock_lost`: another drainer took the lock over mid-drain, so this one stopped before its next file.
+ * `bad_url`: `ENGRAM_SERVER_URL` is not an http(s) URL; recorded in `.state.json` without the URL.
+ */
 export type DrainStop =
   | 'locked'
   | 'lock_lost'
   | 'backoff'
   | 'no_url'
+  | 'bad_url'
   | 'no_token'
   | 'ack_mismatch'
   | 'retry_later'
@@ -533,9 +537,17 @@ class Drain {
     const first = await listBatches(this.root)
     if (first.length === 0) return null
     const serverUrl = this.opts.env.ENGRAM_SERVER_URL
-    const endpoint = this.opts.endpoint ?? (serverUrl ? captureEventsEndpoint(serverUrl) : undefined)
-    if (!endpoint) return 'no_url'
+    if (!this.opts.endpoint && !serverUrl) return 'no_url'
     this.state = await loadSpoolState(this.root)
+    let endpoint: string
+    try {
+      endpoint = this.opts.endpoint ?? captureEventsEndpoint(serverUrl as string)
+    } catch {
+      // A configuration error, not a transient one: no backoff, and no URL
+      // text in the state file or the log, since a URL can carry credentials.
+      await this.error('bad_url')
+      return 'bad_url'
+    }
     const next = this.state.next_attempt_at
     if (next !== null && Date.parse(next) > Date.now()) return 'backoff'
     let token: string
