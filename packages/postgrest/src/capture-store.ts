@@ -1,12 +1,19 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { ItemConstraintError } from '@engram-mem/core'
-import type { CaptureStore, ProjectRow } from '@engram-mem/core'
+import type { CaptureStore, ProjectRow, ScanRow, ScanTarget } from '@engram-mem/core'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
 const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
 const VIOLATED_CONSTRAINT = /violates [a-z -]*constraint "([^"]+)"/
 /** RPCs raise `<function name>: <reason>`. */
 const NAME_PREFIX = /^([a-z_][a-z0-9_]*):/
+
+/** Columns the stored-secret scan reads, per table. */
+const SCAN_COLUMNS: Record<ScanTarget, string> = {
+  memory_items: 'id,content,context,search_text,source',
+  memory_capture_events: 'id,payload,cwd,project,plan_dirs',
+}
+const SCAN_PAGE_MAX = 1000
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -57,6 +64,48 @@ export class PostgRestCaptureStore implements CaptureStore {
     }
     return written
   }
+
+  async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {
+    const columns = SCAN_COLUMNS[target]
+    if (columns === undefined) throw new Error(`scanPage: unknown target ${String(target)}`)
+    if (!Number.isInteger(limit) || limit < 1 || limit > SCAN_PAGE_MAX) {
+      throw new Error(`scanPage: limit must be an integer from 1 to ${SCAN_PAGE_MAX}`)
+    }
+    let query = this.client.from(target).select(columns)
+    if (afterId !== null) query = query.gt('id', afterId)
+    const { data, error } = await query.order('id', { ascending: true }).limit(limit)
+    if (error) throw toStoreError('scanPage', error)
+    if (!Array.isArray(data)) throw new Error('scanPage failed: PostgREST returned no rows array')
+    return (data as unknown as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id),
+      texts: target === 'memory_items' ? itemTexts(row) : eventTexts(row),
+    }))
+  }
+}
+
+function itemTexts(row: Record<string, unknown>): string[] {
+  return [...strings(row.content), ...strings(row.context), ...strings(row.search_text), ...jsonTexts(row.source)]
+}
+
+function eventTexts(row: Record<string, unknown>): string[] {
+  return [...jsonTexts(row.payload), ...strings(row.cwd), ...jsonTexts(row.project), ...jsonTexts(row.plan_dirs)]
+}
+
+function strings(value: unknown): string[] {
+  return typeof value === 'string' ? [value] : []
+}
+
+/**
+ * Every object key and string value in a JSON value, depth first. Keys count:
+ * an answer map is keyed by question text.
+ */
+function jsonTexts(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap(jsonTexts)
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, inner]) => [key, ...jsonTexts(inner)])
+  }
+  return []
 }
 
 function toStoreError(operation: string, error: PgError): Error {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createSecretRegistry } from '../../src/ingest/secret-registry.js'
@@ -547,5 +547,71 @@ describe('glob path cache, literal paths', () => {
     const registry = createSecretRegistry({ configPath, pathCacheFile: cacheFile, log: (line) => logs.push(line) })
     expect(isKnown(registry, `lit-${ALNUM}`)).toBe(true)
     expect(existsSync(cacheFile)).toBe(false)
+  })
+})
+
+describe('given values and status()', () => {
+  it('registers given values under their own names, with no configuration at all', () => {
+    const registry = createSecretRegistry({
+      configPath: undefined,
+      values: [{ name: 'SERVICE_TOKEN', value: ALNUM }],
+      log: (line) => logs.push(line),
+    })
+    expect(mask(registry, `sent ${ALNUM} upstream`)).toBe('sent [REDACTED:SERVICE_TOKEN] upstream')
+    expect(registry.status()).toEqual({ configured: false, unreadable: [], values: 1 })
+  })
+
+  it('joins given values with the sources, a given name winning for a value found in both', () => {
+    write('run/secrets/api_token', `${ALNUM}\n`)
+    write('run/secrets/db_password', `pw-${ALNUM}\n`)
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'run/secrets/*', format: 'value' }] }))
+    const registry = createSecretRegistry({
+      configPath,
+      values: [{ name: 'SERVICE_TOKEN', value: ALNUM }],
+      log: (line) => logs.push(line),
+    })
+    expect(mask(registry, `${ALNUM} and pw-${ALNUM}`)).toBe('[REDACTED:SERVICE_TOKEN] and [REDACTED:db_password]')
+    expect(registry.status()).toEqual({ configured: true, unreadable: [], values: 2 })
+  })
+
+  it('skips given values that are too short or publicly known', () => {
+    const registry = createSecretRegistry({
+      configPath: undefined,
+      values: [
+        { name: 'SHORT', value: 'abc12' },
+        { name: 'DEFAULT', value: 'postgres' },
+      ],
+      log: (line) => logs.push(line),
+    })
+    expect(registry.status().values).toBe(0)
+    expect(logs.join('\n')).not.toContain('postgres')
+  })
+
+  it('lists a configuration path that is a directory as unreadable', () => {
+    const configPath = join(dir, 'sources-dir')
+    mkdirSync(configPath)
+    const registry = createSecretRegistry({ configPath, log: (line) => logs.push(line) })
+    expect(registry.status()).toEqual({ configured: false, unreadable: [configPath], values: 0 })
+  })
+
+  // A mode-000 file is still readable by root.
+  it.skipIf(process.getuid?.() === 0)('lists an unreadable source file and keeps the readable ones', () => {
+    write('run/secrets/api_token', `${ALNUM}\n`)
+    chmodSync(write('run/secrets/locked_token', `pw-${ALNUM}\n`), 0o000)
+    const registry = registryFor([
+      { path: 'run/secrets/api_token', format: 'value' },
+      { path: 'run/secrets/locked_token', format: 'value' },
+    ])
+    const status = registry.status()
+    expect(status.configured).toBe(true)
+    expect(status.unreadable).toEqual([join(dir, 'run/secrets/locked_token')])
+    expect(status.values).toBe(1)
+  })
+
+  it('reports a configuration that is not sources JSON as not configured, without its content', () => {
+    const configPath = write('sources.json', `{"sources": "${ALNUM}"}`)
+    const registry = createSecretRegistry({ configPath, log: (line) => logs.push(line) })
+    expect(registry.status()).toEqual({ configured: false, unreadable: [], values: 0 })
+    expect(JSON.stringify(registry.status())).not.toContain(ALNUM)
   })
 })
