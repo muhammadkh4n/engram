@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src", "test/memory-kind.test.ts"]
+  "include": ["src", "test/memory-kind.test.ts", "test/items"]
 }

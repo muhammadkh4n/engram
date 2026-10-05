@@ -1,6 +1,36 @@
 export * from './types.js'
 export { MEMORY_KINDS, memoryKind, isMemoryKind, assertMemoryKinds } from './memory-kind.js'
 export type { MemoryKind, MemoryKindRow } from './memory-kind.js'
+export {
+  ITEM_CLASSES,
+  ITEM_KINDS,
+  SPEAKERS,
+  SOURCE_TYPES,
+  REGISTER_STATUSES,
+  ENTITY_TYPES,
+  CAPTURE_EVENT_TYPES,
+  ITEM_INVARIANTS,
+} from './items/types.js'
+export type {
+  ItemClass,
+  ItemKind,
+  ItemKindOf,
+  Speaker,
+  SourceType,
+  RegisterStatus,
+  EntityType,
+  CaptureEventType,
+  ItemInvariant,
+  ItemSource,
+  MemoryItem,
+  NewItem,
+  InsertedItem,
+  ForgetEffect,
+  InvariantCounts,
+} from './items/types.js'
+export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
+export type { ItemStore } from './items/item-store.js'
+export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {
