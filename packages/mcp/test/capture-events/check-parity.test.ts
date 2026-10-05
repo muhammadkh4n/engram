@@ -89,6 +89,11 @@ const PARITY: Record<string, Parity> = {
     def: '47773c495e69',
     unreachable: 'the insert trigger computes content_hash from content',
   },
+  'memory_items.memory_items_embedding_attempts_check': {
+    def: 'fc551540768d',
+    unreachable:
+      'capture writes neither column; engram_items_record_embedding_failures raises the count while it is under 5 and cuts the error to 500 characters',
+  },
   'memory_items.memory_items_embedding_check': {
     def: '74daedc51f0a',
     unreachable: 'materialize writes no embedding; the worker writes embedding and model together',
@@ -156,7 +161,7 @@ const PARITY: Record<string, Parity> = {
     unreachable: 'retire reasons are "register status: <status>" and "superseded in the register by <id>", never blank',
   },
   'memory_items.memory_items_source_check': {
-    def: '5ed72f6788ce',
+    def: '7c2b1f15c71b',
     refusedBy: [
       {
         label: 'a 65-char register id, whose event key would pass 512 chars',
@@ -166,6 +171,11 @@ const PARITY: Record<string, Parity> = {
     ],
     unreachable:
       'source.type is a literal; the other event keys are capture:<id>, git:<repo>:<sha> and ledger-decision:<plan>:<id>:<hex>, all bounded under 512',
+  },
+  'memory_items.memory_items_version_of_check': {
+    def: '684362a7b608',
+    unreachable:
+      'version_of is register:<id> with the id at most 64 chars, or ledger-decision:<plan>:<id> with a bounded slug and id, both far under 512',
   },
   'memory_items.memory_items_speaker_check': { def: '44eaceb5e657', unreachable: 'speaker is a literal per event type' },
   'memory_items.memory_items_statement_lineage_check': {

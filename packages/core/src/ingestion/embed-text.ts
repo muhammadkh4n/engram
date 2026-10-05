@@ -1,10 +1,38 @@
 /**
- * Upper bound on the text sent to the embedding model for one message.
- * text-embedding-3 accepts 8,191 tokens; 6,000 characters stays under that
- * even at one token per character (dense code, CJK, base64). When a message
- * is longer, its head is kept: the opening of a message carries its topic.
+ * Upper bound, in UTF-16 code units, on the text sent to the embedding model
+ * for one message. When a message is longer, its head is kept: the opening of
+ * a message carries its topic.
  */
 export const EMBED_MAX_CHARS = 6000
+
+/**
+ * Upper bound on the UTF-8 size of that text. text-embedding-3 accepts 8,191
+ * tokens, and a byte-level BPE token covers at least one UTF-8 byte, so text
+ * of at most 8,191 bytes can never exceed the limit. 6,000 code units alone
+ * do not guarantee it: CJK takes 3 bytes per code unit and rare characters
+ * can tokenize byte by byte, up to 18,000 tokens.
+ */
+export const EMBED_MAX_UTF8_BYTES = 8191
+
+const utf8Encoder = new TextEncoder()
+const utf8Decoder = new TextDecoder()
+
+/**
+ * The head of `text` that the embedding model can always take: at most
+ * EMBED_MAX_CHARS code units and EMBED_MAX_UTF8_BYTES bytes of UTF-8, cut on
+ * a character boundary. Text within both bounds is returned unchanged.
+ */
+export function capEmbedText(text: string): string {
+  const head = text.length > EMBED_MAX_CHARS ? text.slice(0, EMBED_MAX_CHARS) : text
+  // One UTF-16 code unit encodes to at most 3 UTF-8 bytes.
+  if (head.length * 3 <= EMBED_MAX_UTF8_BYTES) return head
+  const bytes = utf8Encoder.encode(head)
+  if (bytes.length <= EMBED_MAX_UTF8_BYTES) return head
+  let end = EMBED_MAX_UTF8_BYTES
+  // A continuation byte (10xxxxxx) at the cut means a character straddles it.
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end--
+  return utf8Decoder.decode(bytes.subarray(0, end))
+}
 
 /** Upper bound on the neighbour-turn context prefixed to a message. */
 export const EMBED_CONTEXT_MAX_CHARS = 500
@@ -35,7 +63,7 @@ export interface EmbedTextInput {
  * places of the embedding space.
  *
  * Every rule keeps the head of the text and caps the total at
- * EMBED_MAX_CHARS:
+ * EMBED_MAX_CHARS, then at EMBED_MAX_UTF8_BYTES (capEmbedText):
  *  - with a preamble: preamble, blank line, message; cut from the end;
  *  - with neighbour turns (message > 20 chars): the last
  *    EMBED_CONTEXT_MAX_CHARS of the context, a newline, then the whole
@@ -46,6 +74,10 @@ export interface EmbedTextInput {
  *    clean text to embed meaningfully), else the clean text.
  */
 export function buildTextToEmbed(input: EmbedTextInput): string {
+  return capEmbedText(buildUncapped(input))
+}
+
+function buildUncapped(input: EmbedTextInput): string {
   const { cleanText, rawContent, preamble, contextTurns } = input
 
   if (preamble) {

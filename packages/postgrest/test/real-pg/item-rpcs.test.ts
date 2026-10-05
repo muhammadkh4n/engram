@@ -1226,6 +1226,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const full = {
         lineage: [],
         restated_at: [],
+        embedding_attempts: 0,
         created_at: at(0),
         ...item,
         content_hash: sha256Hex(item.content as string),

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { CircuitOpenError, TimeoutError } from '@engram-mem/core'
+import { CircuitOpenError, EMBED_MAX_UTF8_BYTES, TimeoutError, isEmbeddingInputError } from '@engram-mem/core'
 
 // ---------------------------------------------------------------------------
 // Mock the openai module before any imports that use it.
@@ -301,9 +301,64 @@ describe('OpenAIEmbeddingService', () => {
     it('rejects a batch containing an empty input before any API call', async () => {
       const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
 
-      await expect(service.embedBatch(['ok', ''])).rejects.toThrow(/empty/i)
+      const err = await service.embedBatch(['ok', '']).catch((e: unknown) => e)
+      expect((err as Error).message).toMatch(/empty/i)
+      expect(isEmbeddingInputError(err)).toBe(true)
 
       expect(mockCreate).not.toHaveBeenCalled()
+    })
+
+    it('keeps CJK input within the UTF-8 bound, cut on a character boundary', async () => {
+      mockCreate.mockResolvedValueOnce(makeEmbedResponse([makeVector(4)]))
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key' })
+
+      await service.embed('漢'.repeat(6000))
+
+      const sent = mockCreate.mock.calls[0][0].input as string
+      expect(sent).toBe('漢'.repeat(Math.floor(EMBED_MAX_UTF8_BYTES / 3)))
+    })
+  })
+
+  describe('an input the provider refuses', () => {
+    // Shaped like the openai SDK's BadRequestError and UnprocessableEntityError.
+    const refusal = (status: number): Error =>
+      Object.assign(new Error(`${status} Invalid 'input[0]': the sample input cannot be embedded.\nMore details.`), {
+        status,
+      })
+
+    it.each([400, 422])('marks a %i as input-specific, without a retry or a circuit failure', async (status) => {
+      mockCreate.mockRejectedValue(refusal(status))
+      const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
+      try {
+        const err = await service.embedBatch(['one', 'two']).catch((e: unknown) => e)
+        expect(isEmbeddingInputError(err)).toBe(true)
+        expect((err as { status: unknown }).status).toBe(status)
+        expect((err as Error).message).toBe(`${status} Invalid 'input[0]': the sample input cannot be embedded.`)
+        expect(mockCreate).toHaveBeenCalledTimes(1)
+        expect(service.getBreaker().getFailureCount()).toBe(0)
+
+        await expect(service.embed('three')).rejects.toSatisfy(isEmbeddingInputError)
+        expect(mockCreate).toHaveBeenCalledTimes(2)
+      } finally {
+        mockCreate.mockReset()
+      }
+    })
+
+    it.each([408, 409, 429, 500, 503])('leaves a %i to retry and the circuit breaker', async (status) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        mockCreate.mockRejectedValue(Object.assign(new Error(`${status} provider error`), { status }))
+        const service = new OpenAIEmbeddingService({ apiKey: 'test-key', timeoutMs: 5000 })
+        const pending = service.embedBatch(['one']).catch((e: unknown) => e)
+        await vi.runAllTimersAsync()
+        const err = await pending
+        expect(isEmbeddingInputError(err)).toBe(false)
+        expect(mockCreate).toHaveBeenCalledTimes(4)
+        expect(service.getBreaker().getFailureCount()).toBe(4)
+      } finally {
+        vi.useRealTimers()
+        mockCreate.mockReset()
+      }
     })
   })
 })

@@ -79,6 +79,21 @@ export interface ItemEmbedding {
   model: string
 }
 
+/**
+ * Input-specific embedding failures after which an item leaves the pending
+ * set, so one text the model can never take does not hold back newer items.
+ */
+export const EMBEDDING_ATTEMPTS_MAX = 5
+
+/** The longest embedding error an item keeps. */
+export const EMBEDDING_ERROR_MAX_CHARS = 500
+
+/** An item the embedding provider refused on its own, with the provider's message. */
+export interface EmbeddingFailure {
+  id: string
+  error: string
+}
+
 /** The tables the stored-secret scan reads. */
 export const SCAN_TARGETS = ['memory_items', 'memory_capture_events'] as const
 export type ScanTarget = (typeof SCAN_TARGETS)[number]
@@ -129,8 +144,9 @@ export interface CaptureStore {
 
   /**
    * Up to `limit` (1 to EMBEDDING_BATCH_MAX) items that still need an
-   * embedding, oldest first: no embedding, not forgotten, not an assistant
-   * utterance, and not a session_index or legacy item.
+   * embedding, oldest first: no embedding, not forgotten, fewer than
+   * EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant utterance, and
+   * not a session_index or legacy item.
    */
   pendingEmbeddings(limit: number): Promise<PendingEmbedding[]>
 
@@ -140,6 +156,20 @@ export interface CaptureStore {
    * rows were written, so a repeat returns 0.
    */
   setEmbeddings(rows: readonly ItemEmbedding[]): Promise<number>
+
+  /**
+   * Records 1 to EMBEDDING_BATCH_MAX input-specific embedding failures, each
+   * on a distinct item: raises its attempt count and keeps the error, cut to
+   * EMBEDDING_ERROR_MAX_CHARS. An item that is no longer pending is left as
+   * it is. Returns how many items were raised.
+   */
+  recordEmbeddingFailures(rows: readonly EmbeddingFailure[]): Promise<number>
+
+  /**
+   * How many items left the pending set after EMBEDDING_ATTEMPTS_MAX
+   * failures and still have no embedding (forgotten items excluded).
+   */
+  embeddingFailedCount(): Promise<number>
 
   /**
    * Up to `limit` rows of `target` with an id above `afterId` (every row when
