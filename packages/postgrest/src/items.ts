@@ -55,6 +55,7 @@ interface InsertRow {
   ord: number
   id: string
   inserted: boolean
+  forgotten: boolean
 }
 
 interface ForgetRow {
@@ -118,11 +119,15 @@ export class PostgRestItemStore implements ItemStore {
       if (typeof row.id !== 'string' || !isUuid(row.id)) {
         throw new Error(`insertItems failed: result row ${row.ord} has no id`)
       }
+      if (typeof row.inserted !== 'boolean' || typeof row.forgotten !== 'boolean') {
+        throw new Error(`insertItems failed: result row ${row.ord} lacks inserted or forgotten`)
+      }
     })
     return sorted.map((row) => ({
       id: row.id,
       eventKey: items[row.ord - 1]!.source.event_key ?? null,
       inserted: row.inserted,
+      forgotten: row.forgotten,
     }))
   }
 

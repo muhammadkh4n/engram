@@ -44,6 +44,7 @@ interface InsertRow {
   ord: number
   id: string
   inserted: boolean
+  forgotten: boolean
 }
 
 interface Effect {
@@ -233,8 +234,8 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const u = utterance('Cut the release branch on Thursdays.')
       const s = statement('Cut the release branch on Thursdays.', [u.id])
       expect(await insertItems([s, u])).toEqual([
-        { ord: 1, id: s.id, inserted: true },
-        { ord: 2, id: u.id, inserted: true },
+        { ord: 1, id: s.id, inserted: true, forgotten: false },
+        { ord: 2, id: u.id, inserted: true, forgotten: false },
       ])
       expect(await row(u.id, 'content_hash')).toEqual({ content_hash: sha256Hex(u.content as string) })
       expect(await row(s.id, 'lineage')).toEqual({ lineage: [u.id] })
@@ -245,16 +246,16 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const s = statement('Keep the staging data for a week.', [u.id])
       await insertItems([s, u])
       expect(await insertItems([s, u])).toEqual([
-        { ord: 1, id: s.id, inserted: false },
-        { ord: 2, id: u.id, inserted: false },
+        { ord: 1, id: s.id, inserted: false, forgotten: false },
+        { ord: 2, id: u.id, inserted: false, forgotten: false },
       ])
       const retried = [
         { ...s, id: newId() },
         { ...u, id: newId() },
       ]
       expect(await insertItems(retried)).toEqual([
-        { ord: 1, id: s.id, inserted: false },
-        { ord: 2, id: u.id, inserted: false },
+        { ord: 1, id: s.id, inserted: false, forgotten: false },
+        { ord: 2, id: u.id, inserted: false, forgotten: false },
       ])
       expect(await rowCount(retried.map((o) => o.id))).toBe(0)
     }, TEST_TIMEOUT_MS)
@@ -263,10 +264,85 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const first = utterance('Rotate the deploy key.')
       const replay = { ...first, id: newId() }
       expect(await insertItems([first, replay])).toEqual([
-        { ord: 1, id: first.id, inserted: true },
-        { ord: 2, id: first.id, inserted: false },
+        { ord: 1, id: first.id, inserted: true, forgotten: false },
+        { ord: 2, id: first.id, inserted: false, forgotten: false },
       ])
       expect(await rowCount([replay.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('resolves a lineage naming a replayed object to the stored item, within the call', async () => {
+      const u1 = utterance('Freeze merges the day before a release.')
+      await insertItems([u1])
+      const u2 = utterance('Freeze merges the day before a release.', { source: u1.source })
+      const s = observation('Releases follow a merge freeze.', [u2.id])
+      expect(await insertItems([u2, s])).toEqual([
+        { ord: 1, id: u1.id, inserted: false, forgotten: false },
+        { ord: 2, id: s.id, inserted: true, forgotten: false },
+      ])
+      expect(await row(s.id, 'lineage')).toEqual({ lineage: [u1.id] })
+      expect(await rowCount([u2.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('resolves a lineage naming an object skipped as a repeat of an earlier one in the same call', async () => {
+      const first = utterance('Archive the old dashboards.')
+      const replay = { ...first, id: newId() }
+      const derived = observation('The old dashboards are archived.', [replay.id, first.id])
+      expect(await insertItems([first, replay, derived])).toEqual([
+        { ord: 1, id: first.id, inserted: true, forgotten: false },
+        { ord: 2, id: first.id, inserted: false, forgotten: false },
+        { ord: 3, id: derived.id, inserted: true, forgotten: false },
+      ])
+      expect(await row(derived.id, 'lineage')).toEqual({ lineage: [first.id, first.id] })
+      expect(await rowCount([replay.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('reports a replayed forgotten item and refuses, by position, a lineage naming it directly or through the replay', async () => {
+      const u1 = utterance('Drop the nightly export.')
+      await insertItems([u1])
+      await forget([u1.id], 'said by mistake')
+      const u2 = utterance('Drop the nightly export.', { source: u1.source })
+      expect(await insertItems([u2])).toEqual([{ ord: 1, id: u1.id, inserted: false, forgotten: true }])
+
+      const viaReplay = observation('The nightly export is gone.', [u2.id])
+      const throughReplay = await insertRefusal([u2, viaReplay])
+      expect(throughReplay).toMatch(/ERROR:\s+22023: engram_insert_items: object 2: lineage names a forgotten item/)
+      expect(await rowCount([u2.id, viaReplay.id])).toBe(0)
+
+      const other = utterance('Keep the weekly export.')
+      const direct = observation('The nightly export was dropped.', [u1.id])
+      const byStoredId = await insertRefusal([other, direct])
+      expect(byStoredId).toMatch(/ERROR:\s+22023: engram_insert_items: object 2: lineage names a forgotten item/)
+      expect(await rowCount([other.id, direct.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
+    it('asks for a retry when a concurrent call stores the event key of an object another object names', async () => {
+      const stored = utterance('Pin the base image digest.')
+      const mine = { ...stored, id: newId() }
+      const derived = observation('Base images are pinned by digest.', [mine.id])
+      const writer = await pg.session()
+      const caller = await pg.session()
+      const outcome = (run: Promise<string>) => run.then((out) => out, (error: Error) => error.message)
+      try {
+        for (const session of [writer, caller]) {
+          await session.run('SET ROLE service_role;')
+          await session.run('\\set VERBOSITY verbose')
+        }
+        const callerPid = await caller.run('SELECT pg_backend_pid();')
+        await writer.run('BEGIN;')
+        await writer.run(insertQuery([stored]))
+        const calling = outcome(caller.run(insertQuery([mine, derived])))
+        await waitUntilLockWait(pg, callerPid)
+        expect(await outcome(writer.run('COMMIT;'))).not.toMatch(/ERROR/)
+        expect(await calling).toMatch(/40001: engram_insert_items: object 1 was stored by a concurrent call, retry the call/)
+        expect(await rowCount([mine.id, derived.id])).toBe(0)
+        expect(JSON.parse(await caller.run(insertQuery([mine, derived])))).toEqual([
+          { ord: 1, id: stored.id, inserted: false, forgotten: false },
+          { ord: 2, id: derived.id, inserted: true, forgotten: false },
+        ])
+      } finally {
+        await writer.close()
+        await caller.close()
+      }
     }, TEST_TIMEOUT_MS)
 
     it('refuses two objects that share an id, naming both positions, and stores nothing', async () => {
@@ -291,10 +367,10 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const fresher = utterance('Then page the on-call.')
 
       expect(await insertItems([retriedWithNewId, fresh, sameId, fresher])).toEqual([
-        { ord: 1, id: stored.id, inserted: false },
-        { ord: 2, id: fresh.id, inserted: true },
-        { ord: 3, id: sameId.id, inserted: false },
-        { ord: 4, id: fresher.id, inserted: true },
+        { ord: 1, id: stored.id, inserted: false, forgotten: false },
+        { ord: 2, id: fresh.id, inserted: true, forgotten: false },
+        { ord: 3, id: sameId.id, inserted: false, forgotten: false },
+        { ord: 4, id: fresher.id, inserted: true, forgotten: false },
       ])
       expect(await rowCount([retriedWithNewId.id])).toBe(0)
       expect(await rowCount([fresh.id, fresher.id])).toBe(2)
@@ -343,7 +419,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const skewed = utterance('A prompt from a slightly fast clock.', {
         occurred_at: new Date(Date.now() + 8 * 60_000).toISOString(),
       })
-      expect(await insertItems([skewed])).toEqual([{ ord: 1, id: skewed.id, inserted: true }])
+      expect(await insertItems([skewed])).toEqual([{ ord: 1, id: skewed.id, inserted: true, forgotten: false }])
     }, TEST_TIMEOUT_MS)
 
     it('refuses by position an occurred_at in year 1 whose offset puts it in 1 BC, and a five-digit year', async () => {
@@ -358,7 +434,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await rowCount([early.id, late.id])).toBe(0)
 
       const first = utterance('A prompt at the first instant of year 1.', { occurred_at: '0001-01-01T00:00:00Z' })
-      expect(await insertItems([first])).toEqual([{ ord: 1, id: first.id, inserted: true }])
+      expect(await insertItems([first])).toEqual([{ ord: 1, id: first.id, inserted: true, forgotten: false }])
     }, TEST_TIMEOUT_MS)
 
     it('refuses a source.event_key longer than 512 characters by position, without quoting it', async () => {
@@ -369,7 +445,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await rowCount([long.id])).toBe(0)
 
       const longest = artifact('chore: the longest key', 0, { source: { type: 'git', event_key: `git:${'k'.repeat(508)}` } })
-      expect(await insertItems([longest])).toEqual([{ ord: 1, id: longest.id, inserted: true }])
+      expect(await insertItems([longest])).toEqual([{ ord: 1, id: longest.id, inserted: true, forgotten: false }])
     }, TEST_TIMEOUT_MS)
 
     it.each([
@@ -565,6 +641,21 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(
         await row(a.id, `superseded_by, valid_to = '${c.occurred_at}'::timestamptz AS ends_at_successor`),
       ).toEqual({ superseded_by: c.id, ends_at_successor: true })
+    }, TEST_TIMEOUT_MS)
+
+    it('re-points onto a retired successor: retiring an item does not bring back the one it replaced', async () => {
+      const a = artifact('ops: runbook v1', 0)
+      const b = artifact('ops: runbook v2', 10)
+      const c = artifact('ops: runbook v3', 20)
+      await insertItems([a, b, c])
+      expect(await supersede(a.id, b.id)).toBe(true)
+      expect(await supersede(b.id, c.id)).toBe(true)
+      expect(await retire([c.id], 'runbook moved to the wiki')).toEqual([c.id])
+      expect(await forget([b.id], 'v2 was never used')).toEqual([
+        { itemId: b.id, effect: 'forgotten', via: null },
+        { itemId: a.id, effect: 'repointed', via: b.id },
+      ])
+      expect(await row(a.id, 'superseded_by')).toEqual({ superseded_by: c.id })
     }, TEST_TIMEOUT_MS)
 
     it('forgetting the successor re-points valid_to to the next live successor, then clears it', async () => {
