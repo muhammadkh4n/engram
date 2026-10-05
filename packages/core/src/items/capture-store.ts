@@ -73,7 +73,11 @@ export const EMBEDDING_BATCH_MAX = 256
  */
 export const EMBEDDING_CLAIM_LEASE_SECONDS = 120
 
-/** An item that still needs a vector: its id and the text to embed it from. */
+/**
+ * An item that still needs a vector: its id and the text to embed it from,
+ * its search text cut to EMBED_MAX_CHARS characters, which hold every code
+ * unit the embed text builder keeps.
+ */
 export interface PendingEmbedding {
   id: string
   searchText: string

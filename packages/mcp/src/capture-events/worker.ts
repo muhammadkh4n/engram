@@ -44,6 +44,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   buildTextToEmbed,
+  cutWholeChars,
   EMBEDDING_CLAIM_LEASE_SECONDS,
   EMBEDDING_ERROR_MAX_CHARS,
   isEmbeddingInputError,
@@ -337,7 +338,7 @@ async function failureText(err: Error): Promise<string> {
   const firstLine = err.message.split('\n', 1)[0]!.trim()
   if (firstLine === '') return fallback
   try {
-    const scrubbed = (await scrubSecrets(firstLine)).text.slice(0, EMBEDDING_ERROR_MAX_CHARS).trim()
+    const scrubbed = cutWholeChars((await scrubSecrets(firstLine)).text, EMBEDDING_ERROR_MAX_CHARS).trim()
     return scrubbed === '' ? fallback : scrubbed
   } catch {
     return fallback
@@ -349,5 +350,5 @@ function describeError(err: unknown): string {
   if (!(err instanceof Error)) return 'unknown error'
   const code = (err as { code?: unknown }).code
   const label = typeof code === 'string' || typeof code === 'number' ? String(code) : err.name
-  return `${label}: ${err.message.slice(0, ERROR_MESSAGE_MAX_CHARS)}`
+  return `${label}: ${cutWholeChars(err.message, ERROR_MESSAGE_MAX_CHARS)}`
 }
