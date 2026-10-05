@@ -10,6 +10,43 @@ export interface ProjectRow {
   registerPrefix: string | null
 }
 
+/** One value masked before storage: where it was and what matched it, never the value. */
+export interface CaptureSecretHit {
+  /** Path of the field, e.g. `payload.questions[0].question`. */
+  field: string
+  /** The redaction kind that matched. */
+  detector: string
+  /** The registered secret's name for a known value, else null. */
+  secretName: string | null
+}
+
+/**
+ * One validated, scrubbed capture event as it is stored. `project` holds the
+ * resolved `id` and `workspace` beside the sent `repo_root`, `branch` and
+ * `worktree`; `scrub` records what the route masked or could not resolve.
+ */
+export interface StoredEvent {
+  sessionId: string
+  eventUuid: string
+  type: string
+  /** RFC 3339 with an offset. */
+  occurredAt: string
+  cwd: string | null
+  project: Record<string, string | null>
+  planDirs: string[]
+  client: { name: string; version: string }
+  payload: Record<string, unknown>
+  scrub: Record<string, unknown>
+  /** One `memory_secret_hits` row each, written only when the event is new. */
+  hits: CaptureSecretHit[]
+}
+
+/** The outcome for one stored event: its row id and whether this call wrote it. */
+export interface IngestedEvent {
+  eventId: string
+  status: 'accepted' | 'duplicate'
+}
+
 /** The tables the stored-secret scan reads. */
 export const SCAN_TARGETS = ['memory_items', 'memory_capture_events'] as const
 export type ScanTarget = (typeof SCAN_TARGETS)[number]
@@ -40,6 +77,14 @@ export interface CaptureStore {
    * inserted or changed.
    */
   syncProjects(rows: readonly ProjectRow[]): Promise<number>
+
+  /**
+   * Stores each event once per (sessionId, eventUuid), in one transaction,
+   * and writes its hits only when this call inserted it. Returns one outcome
+   * per input, in input order: a repeated key, within the call or from an
+   * earlier one, reads `duplicate` with the stored row's id.
+   */
+  ingestEvents(events: readonly StoredEvent[]): Promise<IngestedEvent[]>
 
   /**
    * Up to `limit` rows of `target` with an id above `afterId` (every row when

@@ -1,6 +1,6 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { ItemConstraintError } from '@engram-mem/core'
-import type { CaptureStore, ProjectRow, ScanRow, ScanTarget } from '@engram-mem/core'
+import type { CaptureStore, IngestedEvent, ProjectRow, ScanRow, ScanTarget, StoredEvent } from '@engram-mem/core'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
 const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
@@ -63,6 +63,35 @@ export class PostgRestCaptureStore implements CaptureStore {
       throw new Error('syncProjects failed: the RPC returned no row count')
     }
     return written
+  }
+
+  async ingestEvents(events: readonly StoredEvent[]): Promise<IngestedEvent[]> {
+    const pEvents = events.map((e) => ({
+      session_id: e.sessionId,
+      event_uuid: e.eventUuid,
+      type: e.type,
+      occurred_at: e.occurredAt,
+      cwd: e.cwd,
+      project: e.project,
+      plan_dirs: e.planDirs,
+      client: e.client,
+      payload: e.payload,
+      scrub: e.scrub,
+      hits: e.hits.map((h) => ({ field: h.field, detector: h.detector, secret_name: h.secretName })),
+    }))
+    const { data, error } = await this.client.rpc('engram_capture_ingest', { p_events: pEvents })
+    if (error) throw toStoreError('ingestEvents', error)
+    if (!Array.isArray(data) || data.length !== events.length) {
+      throw new Error('ingestEvents failed: the RPC returned no row per event')
+    }
+    return (data as unknown as Array<Record<string, unknown>>).map((row, i) => {
+      const status = row.status
+      const eventId = row.event_id
+      if (Number(row.ord) !== i + 1 || (status !== 'accepted' && status !== 'duplicate') || eventId == null) {
+        throw new Error('ingestEvents failed: the RPC returned an unexpected row')
+      }
+      return { eventId: String(eventId), status }
+    })
   }
 
   async scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]> {
