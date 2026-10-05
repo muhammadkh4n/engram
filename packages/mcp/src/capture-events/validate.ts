@@ -9,7 +9,7 @@
  * returned to the client and logged.
  */
 
-import { CAPTURE_EVENT_TYPES, type CaptureEventType } from '@engram-mem/core'
+import { CAPTURE_EVENT_TYPES, PostgresTextKeyCollision, toPostgresText, type CaptureEventType } from '@engram-mem/core'
 import {
   ASSISTANT_TOOLS_MAX,
   ASSISTANT_TOOL_NAME_MAX_CHARS,
@@ -49,6 +49,7 @@ import {
   REGISTER_APPLIES_TO_ITEM_MAX_CHARS,
   REGISTER_APPLIES_TO_MAX,
   REGISTER_FILE_MAX_CHARS,
+  REGISTER_ID_MAX_CHARS,
   REGISTER_ID_PATTERN,
   REGISTER_REF_PATTERN,
   REGISTER_RESTATED_ITEM_MAX_CHARS,
@@ -61,6 +62,7 @@ import {
   REGISTER_TRIGGER_ITEM_MAX_CHARS,
   REGISTER_VERIFIED_MAX_CHARS,
   SESSION_REASON_MAX_CHARS,
+  USER_PROMPT_TEXT_MAX_CHARS,
   USER_ANSWER_HEADER_MAX_CHARS,
   USER_ANSWER_OPTIONS_MAX,
   USER_ANSWER_OPTION_LABEL_MAX_CHARS,
@@ -101,6 +103,7 @@ const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/
 const ECHOABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 const EVENT_FIELDS = ['session_id', 'event_uuid', 'type', 'occurred_at', 'cwd', 'project', 'plan_dirs', 'payload']
 const PROJECT_FIELDS = ['id', 'workspace', 'repo_root', 'branch', 'worktree']
+const MAX_OFFSET_HOURS = 15
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/
 
 // ── Primitive checks ─────────────────────────────────────────────────────
@@ -188,7 +191,8 @@ export function parseRfc3339(text: string): number | null {
   const offsetHours = m[10] === undefined ? 0 : Number(m[10])
   const offsetMinutes = m[11] === undefined ? 0 : Number(m[11])
   if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return null
-  if (offsetHours > 23 || offsetMinutes > 59) return null
+  // PostgreSQL reads a zone displacement of at most 15:59; RFC 3339 allows up to 23:59.
+  if (offsetHours > MAX_OFFSET_HOURS || offsetMinutes > 59) return null
   const date = new Date(0)
   date.setUTCFullYear(year, month - 1, day)
   date.setUTCHours(hour, minute, second, millis)
@@ -225,7 +229,7 @@ export function parseCaptureEventsRequest(body: unknown, now: Date): ParsedCaptu
   let rawEvents: unknown[]
   try {
     const envelope = object(body, 'body', ['client', 'events'])
-    client = parseClient(envelope.client)
+    client = parseClient(postgresText(envelope.client, 'client'))
     rawEvents = array(envelope.events, 'events', CAPTURE_EVENTS_MIN, CAPTURE_EVENTS_MAX)
   } catch (err) {
     if (err instanceof InvalidField) return { error: err.message }
@@ -234,14 +238,33 @@ export function parseCaptureEventsRequest(body: unknown, now: Date): ParsedCaptu
   const events: ValidEvent[] = []
   const rejected: Rejection[] = []
   rawEvents.forEach((raw, index) => {
+    let event = raw
     try {
-      events.push({ index, event: parseEvent(raw, now) })
+      event = postgresText(raw, '')
+      events.push({ index, event: parseEvent(event, now) })
     } catch (err) {
       if (!(err instanceof InvalidField)) throw err
-      rejected.push({ index, ...echoedIds(raw), reason: err.message })
+      rejected.push({ index, ...echoedIds(event), reason: err.message })
     }
   })
   return { client, events, rejected }
+}
+
+/**
+ * PostgreSQL's text and jsonb refuse U+0000 and unpaired surrogates, and one
+ * such character fails the whole insert. Replacing them with U+FFFD before
+ * any rule runs means the rules, the scrubber and storage all see the text
+ * that is stored. Two keys that become equal would lose one of the two
+ * values, so that rejects the event, naming the object holding them.
+ */
+function postgresText(value: unknown, base: string): unknown {
+  try {
+    return toPostgresText(value)
+  } catch (err) {
+    if (!(err instanceof PostgresTextKeyCollision)) throw err
+    const path = [base, err.path].filter((p) => p !== '').join(err.path.startsWith('[') ? '' : '.')
+    return fail(path || 'event', 'has keys that are equal once U+0000 and unpaired surrogates become U+FFFD')
+  }
 }
 
 function echoedIds(raw: unknown): { session_id: string | null; event_uuid: string | null } {
@@ -351,6 +374,10 @@ function parseOrigin(value: unknown, occurredMs: number): PromptOrigin {
 function parseUserPrompt(value: unknown, occurredMs: number): UserPromptPayload {
   const p = object(value, 'payload', ['text', 'transcript_line'], ['truncated', 'origin'])
   const text = string(p.text, 'payload.text', { max: Infinity, notBlank: true })
+  // Only the head is stored, and the stored text must not be blank either.
+  if (text.length > USER_PROMPT_TEXT_MAX_CHARS && text.slice(0, USER_PROMPT_TEXT_MAX_CHARS).trim().length === 0) {
+    fail('payload.text', `must not be blank in its first ${USER_PROMPT_TEXT_MAX_CHARS} characters`)
+  }
   if (p.truncated !== undefined && p.truncated !== true) fail('payload.truncated', 'may only be true')
   const origin = p.origin === undefined ? undefined : parseOrigin(p.origin, occurredMs)
   if (p.transcript_line === null && origin === undefined) {
@@ -459,7 +486,7 @@ function parseLedgerDecision(value: unknown): LedgerDecisionPayload {
     by: oneOf(p.by, 'payload.by', DECISION_BY),
     ...(p.quote !== undefined ? { quote: string(p.quote, 'payload.quote', { notBlank: true }) } : {}),
     ...(p.source !== undefined
-      ? { source: string(p.source, 'payload.source', { min: 1, max: DECISION_QUOTE_SOURCE_MAX_CHARS }) }
+      ? { source: string(p.source, 'payload.source', { min: 1, max: DECISION_QUOTE_SOURCE_MAX_CHARS, notBlank: true }) }
       : {}),
   }
   if (decision.by === 'mk' && (decision.quote === undefined || decision.source === undefined)) {
@@ -509,7 +536,7 @@ const REGISTER_FIELDS = [
 function parseRegisterEntry(value: unknown): RegisterEntryPayload {
   const p = object(value, 'payload', REGISTER_FIELDS)
   return {
-    id: string(p.id, 'payload.id', { pattern: REGISTER_ID_PATTERN }),
+    id: string(p.id, 'payload.id', { max: REGISTER_ID_MAX_CHARS, pattern: REGISTER_ID_PATTERN }),
     status: string(p.status, 'payload.status', { pattern: REGISTER_STATUS_PATTERN }),
     subject: string(p.subject, 'payload.subject', { min: 1, max: REGISTER_SUBJECT_MAX_CHARS }),
     said_at: timestamp(p.said_at, 'payload.said_at').text,
@@ -525,6 +552,7 @@ function parseRegisterEntry(value: unknown): RegisterEntryPayload {
       max: REGISTER_TRIGGER_ITEM_MAX_CHARS,
     }),
     supersedes: stringArray(p.supersedes, 'payload.supersedes', REGISTER_SUPERSEDES_MAX, {
+      max: REGISTER_ID_MAX_CHARS,
       pattern: REGISTER_ID_PATTERN,
     }),
     restated: stringArray(p.restated, 'payload.restated', REGISTER_RESTATED_MAX, {

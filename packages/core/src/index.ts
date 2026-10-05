@@ -30,7 +30,7 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
-export { EMBEDDING_BATCH_MAX, MATERIALIZE_LIMIT_MAX, SCAN_TARGETS } from './items/capture-store.js'
+export { EMBEDDING_BATCH_MAX, MATERIALIZE_LIMIT_MAX, SCAN_TARGETS, sqlstateOf } from './items/capture-store.js'
 export type {
   CaptureSecretHit,
   CaptureStore,
@@ -44,6 +44,7 @@ export type {
   StoredEvent,
 } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
+export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {

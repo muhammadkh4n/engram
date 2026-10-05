@@ -199,12 +199,17 @@ function jsonTexts(value: unknown): string[] {
   return []
 }
 
+/**
+ * The SQLSTATE rides along as `code` (read with sqlstateOf), so a caller can
+ * tell a refused value (classes 22 and 23) from a failure worth retrying.
+ */
 function toStoreError(operation: string, error: PgError): Error {
   const code = error.code || 'unknown'
   const message = error.message ?? ''
   if (CONSTRAINT_CODES.has(code)) {
     const constraint = VIOLATED_CONSTRAINT.exec(message)?.[1] ?? NAME_PREFIX.exec(message)?.[1] ?? 'unknown'
-    return new ItemConstraintError(constraint, message)
+    return Object.assign(new ItemConstraintError(constraint, message), { code })
   }
-  return new Error(`${operation} failed (${code}): ${message}`)
+  const err = new Error(`${operation} failed (${code}): ${message}`)
+  return error.code ? Object.assign(err, { code: error.code }) : err
 }
