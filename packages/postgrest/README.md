@@ -200,7 +200,15 @@ Re-apply `bm25.sql` (same flags as above), then reload PostgREST's schema cache 
 
 pg_textsearch writes `k1` and `b` into each index's metapage when the index is built. `ALTER INDEX … SET (b = …)` only rewrites the stored options, and scores keep the old value until a rebuild. So before creating the indexes, `bm25.sql` drops any of the five whose stored options (`pg_class.reloptions`) are not exactly `text_config=english, k1=1.2, b=0.4`, and builds it again. While an index is rebuilt, writes to its table wait. An index that already has these options is kept, so applying the file again rebuilds nothing.
 
-To go back to the default `b`, drop the five BM25 indexes, then apply the earlier `bm25.sql`, which creates them with the default options.
+To go back to the default `b`, drop the five BM25 indexes, then apply the earlier `bm25.sql` (the version before `b = 0.4`; `git log --reverse -S 'b = 0.4' -- packages/postgrest/bm25.sql` names the commit that introduced it, and its parent holds that version), which creates the four tier indexes with the default options. That file predates the item store and creates no index on `memory_items`, so recreate `idx_items_bm25` with the default options yourself, in the same transaction:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_items_bm25 ON public.memory_items
+  USING bm25 (search_text) WITH (text_config = 'english')
+  WHERE forgotten_at IS NULL;
+```
+
+The current `bm25.sql` defines `idx_items_bm25`; the statement above is its definition without `k1` and `b`. Applying the current `bm25.sql` again rebuilds all five indexes with `k1 = 1.2, b = 0.4`.
 
 ### Rollback
 
