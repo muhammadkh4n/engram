@@ -733,6 +733,31 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       }
     }, TEST_TIMEOUT_MS)
 
+    it('checks the forget lock in pg_locks once for a forget of 500 descendants', async () => {
+      const root = artifact('feat: the event bus', 0)
+      const descendants = Array.from({ length: 500 }, (_, i) => observation(`Consumer ${i} reads the event bus.`, [root.id]))
+      await insertItems([root])
+      await insertItems(descendants)
+      const session = await pg.session()
+      try {
+        // Counted per transaction in pg_stat_xact_user_functions; setting it needs a superuser.
+        await session.run("SET track_functions = 'pl';")
+        await session.run('SET ROLE service_role;')
+        await session.run('BEGIN;')
+        const effects = JSON.parse(await session.run(forgetQuery([root.id], 'the bus was replaced'))) as Effect[]
+        const reads = await session.run(
+          `SELECT coalesce(sum(calls), 0) FROM pg_catalog.pg_stat_xact_user_functions
+            WHERE schemaname = 'public' AND funcname = 'engram_forget_lock_held';`,
+        )
+        await session.run('COMMIT;')
+
+        expect(effects).toHaveLength(501)
+        expect(Number(reads)).toBe(1)
+      } finally {
+        await session.close()
+      }
+    }, TEST_TIMEOUT_MS)
+
     it('returns no row for an unknown or an already forgotten id', async () => {
       const a = artifact('chore: tidy', 0)
       await insertItems([a])
@@ -784,6 +809,51 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await retire([a.id], 'too late')).toEqual([])
       expect(await unretire([b.id])).toEqual([])
     }, TEST_TIMEOUT_MS)
+
+    it.each(['engram_retire_items', 'engram_unretire_items'] as const)(
+      'lets %s and a concurrent forget over overlapping rows both finish, without a deadlock',
+      async (fn) => {
+        // Ids rise in creation order: root < derived. The forget locks root, then derived; the other
+        // transaction acts on derived first and root second, the reverse order.
+        const root = artifact('feat: the scheduler', 0)
+        const derived = observation('The scheduler runs every night.', [root.id])
+        await insertItems([root, derived])
+        if (fn === 'engram_unretire_items') await retire([root.id, derived.id], 'parked')
+        const call = (id: string) =>
+          fn === 'engram_retire_items'
+            ? `SELECT * FROM public.engram_retire_items(${uuidArray([id])}, 'superseded by the queue');`
+            : `SELECT * FROM public.engram_unretire_items(${uuidArray([id])});`
+        const actor = await pg.session()
+        const forgetter = await pg.session()
+        const outcome = (run: Promise<string>) => run.then((out) => out, (error: Error) => error.message)
+        try {
+          for (const session of [actor, forgetter]) {
+            await session.run('SET ROLE service_role;')
+            await session.run('\\set VERBOSITY verbose')
+          }
+          const forgetterPid = await forgetter.run('SELECT pg_backend_pid();')
+          await actor.run('BEGIN;')
+          await actor.run(call(derived.id))
+          const forgetting = outcome(forgetter.run(forgetQuery([root.id], 'the scheduler was removed')))
+          await waitUntilLockWait(pg, forgetterPid)
+          const acting = await outcome(actor.run(call(root.id)))
+          const committing = await outcome(actor.run('COMMIT;'))
+          const forgot = await forgetting
+
+          expect(acting).not.toMatch(/40P01|deadlock/)
+          expect(committing).not.toMatch(/ERROR/)
+          expect(forgot).not.toMatch(/40P01|deadlock/)
+          expect(JSON.parse(forgot) as Effect[]).toEqual([
+            { itemId: root.id, effect: 'forgotten', via: null },
+            { itemId: derived.id, effect: 'forgotten', via: root.id },
+          ])
+        } finally {
+          await actor.close()
+          await forgetter.close()
+        }
+      },
+      TEST_TIMEOUT_MS,
+    )
 
     it('refuses 51 ids and a blank reason', async () => {
       const ids = Array.from({ length: 51 }, () => newId())

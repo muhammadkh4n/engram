@@ -3,7 +3,7 @@
  * calls and with what arguments, camelCase items mapped to the snake_case
  * columns and back, ids generated where the caller left them out, the 500
  * item cap and the 50 id cap enforced before any request, rolled-back calls
- * retried, and database refusals turned into
+ * retried, every request asking PostgREST for UTC, and database refusals turned into
  * ItemConstraintError without the error's `details` (which can carry the
  * failing row).
  */
@@ -480,7 +480,7 @@ describe('PostgRestItemStore write RPCs', () => {
   })
 })
 
-describe('PostgRestItemStore retries of a rolled-back insert, forget or supersede', () => {
+describe('PostgRestItemStore retries of a rolled-back write', () => {
   function pgError(code: string, message: string): PgError {
     return { code, message, details: null, hint: null }
   }
@@ -551,7 +551,27 @@ describe('PostgRestItemStore retries of a rolled-back insert, forget or supersed
     expect(rpcCalls).toHaveLength(3)
   })
 
-  it('does not retry a refused rule, or the other write RPCs', async () => {
+  it('retries a retire and an unretire that were rolled back and returns their ids', async () => {
+    const retire = mockClient({
+      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: [ID_A], error: null }),
+    })
+    await expect(storeWith(retire.client).retireItems([ID_A], 'stale')).resolves.toEqual([ID_A])
+    expect(retire.rpcCalls).toEqual([
+      { fn: 'engram_retire_items', args: { p_ids: [ID_A], p_reason: 'stale' } },
+      { fn: 'engram_retire_items', args: { p_ids: [ID_A], p_reason: 'stale' } },
+    ])
+
+    const unretire = mockClient({
+      rpc: sequence(
+        { data: null, error: pgError('40001', 'could not serialize access due to concurrent update') },
+        { data: [ID_A], error: null },
+      ),
+    })
+    await expect(storeWith(unretire.client).unretireItems([ID_A])).resolves.toEqual([ID_A])
+    expect(unretire.rpcCalls).toHaveLength(2)
+  })
+
+  it('does not retry a refused rule, or the invariant counts read', async () => {
     const refused = mockClient({
       rpc: sequence(
         { data: null, error: pgError('23514', 'engram_supersede_item: p_new did not occur later than p_old') },
@@ -561,11 +581,11 @@ describe('PostgRestItemStore retries of a rolled-back insert, forget or supersed
     await expect(storeWith(refused.client).supersedeItem(ID_A, ID_B)).rejects.toSatisfy(isItemConstraintError)
     expect(refused.rpcCalls).toHaveLength(1)
 
-    const retire = mockClient({
-      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: [ID_A], error: null }),
+    const counts = mockClient({
+      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: [], error: null }),
     })
-    await expect(storeWith(retire.client).retireItems([ID_A], 'stale')).rejects.toThrow('retireItems failed (40P01)')
-    expect(retire.rpcCalls).toHaveLength(1)
+    await expect(storeWith(counts.client).invariantCounts()).rejects.toThrow('invariantCounts failed (40P01)')
+    expect(counts.rpcCalls).toHaveLength(1)
   })
 })
 
@@ -656,5 +676,28 @@ describe('PostgRestItemStore error mapping', () => {
     await expect(storeWith(client).getItems([ID_A])).rejects.toThrow(
       /^getItems failed \(42501\): permission denied for table memory_items$/,
     )
+  })
+})
+
+describe('PostgRestItemStore request time zone', () => {
+  it('asks PostgREST for UTC on reads and on RPC calls', async () => {
+    const prefer: Array<string | null> = []
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      prefer.push(new Headers(init?.headers).get('Prefer'))
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const store = new PostgRestItemStore({ url: 'http://127.0.0.1:3000', key: 'test-key' })
+      await store.getItems([ID_A])
+      await store.retireItems([ID_A], 'stale')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    for (const value of prefer) {
+      expect(value?.split(',').map((part) => part.trim())).toContain('timezone=UTC')
+    }
   })
 })

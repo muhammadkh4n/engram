@@ -55,6 +55,11 @@ export interface RealPgOptions {
    * Without it the container has no network at all.
    */
   withPostgrest?: boolean
+  /**
+   * The server's TimeZone, an IANA name. initdb writes the TZ it runs under
+   * into postgresql.conf, so every session starts in it. Default: UTC.
+   */
+  timeZone?: string
 }
 
 export interface RealPg {
@@ -223,6 +228,7 @@ export async function startRealPg(options: RealPgOptions = {}): Promise<RealPg> 
       '-e', `POSTGRES_DB=${DATABASE}`,
       // A throwaway cluster needs no durable initdb; its fsync pass alone takes ~20 s.
       '-e', 'POSTGRES_INITDB_ARGS=--no-sync',
+      ...(options.timeZone ? ['-e', `TZ=${options.timeZone}`] : []),
       realPgImage,
     ],
     { env: { ...process.env, POSTGRES_PASSWORD: randomSecret() } },

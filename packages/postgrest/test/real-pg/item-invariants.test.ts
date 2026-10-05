@@ -932,6 +932,36 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await column(child.id, 'forgotten_at IS NULL')).toBe('t')
     }, TEST_TIMEOUT_MS)
 
+    it('keeps a passed forget-lock check only while the lock that passed it is held', async () => {
+      const [first, second, third, fourth] = ['one', 'two', 'three', 'four'].map((n) =>
+        artifact(`ci: runner ${n} forgotten by hand`, { occurredAt: at(10) }),
+      )
+      await commit(first!, second!, third!, fourth!)
+      const NOT_UNDER_LOCK = /memory_items_before_update: forgotten_at is set only while the transaction holds the forget lock exclusively/
+      // The lock taken under the savepoint goes with it, and so does the remembered check.
+      await expectOwnerRefusal(
+        [
+          'BEGIN;',
+          'SAVEPOINT tst_held;',
+          `SELECT pg_advisory_xact_lock(${FORGET_LOCK_KEY});`,
+          bareForgetSql(first!.id, 'tst: under the savepoint'),
+          'ROLLBACK TO SAVEPOINT tst_held;',
+          bareForgetSql(second!.id, 'tst: after the rollback'),
+          'COMMIT;',
+        ].join('\n'),
+        NOT_UNDER_LOCK,
+      )
+      // A value set for the whole session, or left by an earlier transaction, names another transaction.
+      await expectOwnerRefusal(
+        `SET engram.forget_lock_xact = '1';\n${forgetSql(third!.id, 'tst: under the lock')}\n${bareForgetSql(fourth!.id, 'tst: next transaction')}`,
+        NOT_UNDER_LOCK,
+      )
+      expect(await column(first!.id, 'forgotten_at IS NULL')).toBe('t')
+      expect(await column(second!.id, 'forgotten_at IS NULL')).toBe('t')
+      expect(await column(third!.id, 'forgotten_reason')).toBe('tst: under the lock')
+      expect(await column(fourth!.id, 'forgotten_at IS NULL')).toBe('t')
+    }, TEST_TIMEOUT_MS)
+
     it('refuses setting superseded_by in the UPDATE that forgets the item', async () => {
       const a = artifact('ci: one runner', { occurredAt: at(10) })
       const b = artifact('ci: two runners', { occurredAt: at(20) })

@@ -80,12 +80,18 @@ export class PostgRestItemStore implements ItemStore {
   private readonly client: PostgrestClient
 
   constructor(opts: PostgRestItemStoreOptions) {
-    // Same headers as PostgRestStorageAdapter: bare PostgREST reads the
-    // bearer token, Supabase's gateway also requires `apikey`.
+    // Same auth headers as PostgRestStorageAdapter: bare PostgREST reads the
+    // bearer token, Supabase's gateway also requires `apikey`. PostgreSQL
+    // renders a timestamptz in the session TimeZone, and in a zone like
+    // America/New_York a time before standard time carries a local-mean-time
+    // offset with seconds (-04:56:02) that Date cannot parse; with
+    // `timezone=UTC` PostgREST runs every request in UTC, so every time comes
+    // back with a +00:00 offset whatever the server's TimeZone is.
     this.client = new PostgrestClient(opts.url, {
       headers: {
         Authorization: `Bearer ${opts.key}`,
         apikey: opts.key,
+        Prefer: 'timezone=UTC',
       },
     })
   }
@@ -150,7 +156,7 @@ export class PostgRestItemStore implements ItemStore {
   async retireItems(ids: readonly string[], reason: string): Promise<string[]> {
     const pIds = idsForCall('retireItems', ids)
     if (pIds.length === 0) return []
-    const { data, error } = await this.client.rpc('engram_retire_items', { p_ids: pIds, p_reason: reason })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_retire_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('retireItems', error)
     return (data ?? []) as string[]
   }
@@ -158,7 +164,7 @@ export class PostgRestItemStore implements ItemStore {
   async unretireItems(ids: readonly string[]): Promise<string[]> {
     const pIds = idsForCall('unretireItems', ids)
     if (pIds.length === 0) return []
-    const { data, error } = await this.client.rpc('engram_unretire_items', { p_ids: pIds })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_unretire_items', { p_ids: pIds })
     if (error) throw toStoreError('unretireItems', error)
     return (data ?? []) as string[]
   }
@@ -175,7 +181,8 @@ export class PostgRestItemStore implements ItemStore {
    * Any other error, or success, returns at once. Each call is one
    * transaction, so a rolled-back call applied nothing, and the callers are
    * safe to repeat: insert is idempotent on the event key, forget acts on
-   * live items only, supersede returns false once done.
+   * live items only, retire and unretire act only on items still in the
+   * other state, supersede returns false once done.
    */
   private async rpcRetryingRollbacks(fn: string, args: Record<string, unknown>): Promise<RpcResult> {
     let result: RpcResult = { data: null, error: null }

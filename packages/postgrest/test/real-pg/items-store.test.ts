@@ -10,7 +10,8 @@
  * - forget, retire, unretire, supersede and the invariant counts round-trip;
  * - the table is closed to a request without a token, and to a direct write
  *   with the service-role token: writes go through the RPCs only;
- * - times at both ends of years 1 to 9999 read back as the same instants.
+ * - times at both ends of years 1 to 9999 read back as the same instants,
+ *   also from a server whose TimeZone is not UTC.
  */
 import { createHash } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -317,5 +318,40 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
 
     expect(stored!.occurredAt.toISOString()).toBe('0001-01-01T00:00:00.000Z')
     expect(stored!.retiredAt!.toISOString()).toBe('9999-12-31T23:59:59.999Z')
+  }, TEST_TIMEOUT_MS)
+})
+
+describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore on a server whose TimeZone is not UTC', () => {
+  let pg: RealPg
+  let store: PostgRestItemStore
+
+  beforeAll(async () => {
+    pg = await startRealPg({ withPostgrest: true, timeZone: 'America/New_York' })
+    await pg.applySchema()
+    const endpoint = await pg.startPostgrest()
+    store = new PostgRestItemStore({ url: endpoint.url, key: endpoint.serviceJwt })
+  }, SETUP_TIMEOUT_MS)
+
+  afterAll(async () => {
+    await pg?.stop()
+  }, TEST_TIMEOUT_MS)
+
+  it('runs every new session in America/New_York', async () => {
+    expect(await pg.psql('SHOW TimeZone;')).toBe('America/New_York')
+  }, TEST_TIMEOUT_MS)
+
+  // Before standard time zones (1883 here) the zone's offset is local mean
+  // time, rendered with seconds (-04:56:02), which Date cannot parse.
+  it('reads an item from 1800 back as the same instant', async () => {
+    const item = commit('chore: a commit from before standard time', 0, {
+      occurredAt: new Date('1800-01-01T12:00:00Z'),
+    })
+    await store.insertItems([item])
+    await store.retireItems([item.id!], 'tst: retired to read a second time back')
+
+    const [stored] = await store.getItems([item.id!])
+
+    expect(stored!.occurredAt.toISOString()).toBe('1800-01-01T12:00:00.000Z')
+    expect(stored!.retiredAt).toBeInstanceOf(Date)
   }, TEST_TIMEOUT_MS)
 })

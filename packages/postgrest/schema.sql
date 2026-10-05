@@ -2043,6 +2043,32 @@ END; $$;
 
 
 --
+-- Name: engram_forget_lock_held(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- True when this backend holds the forget lock (advisory key
+-- 7308892986227385959, taken by pg_advisory_xact_lock) exclusively in the
+-- current database. pg_locks has no column for the key itself: a bigint key
+-- is split into classid (high 32 bits) and objid (low 32 bits), objsubid 1.
+-- A session-level hold of the same key matches too; it serializes forgets
+-- the same way.
+CREATE OR REPLACE FUNCTION public.engram_forget_lock_held() RETURNS boolean
+    LANGUAGE plpgsql
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks l
+     WHERE l.locktype = 'advisory' AND l.pid = pg_catalog.pg_backend_pid() AND l.granted
+       AND l.mode = 'ExclusiveLock'
+       AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
+       AND l.classid::bigint = (7308892986227385959 >> 32)
+       AND l.objid::bigint = (7308892986227385959 & 4294967295)
+       AND l.objsubid = 1);
+END; $$;
+
+
+--
 -- Name: memory_items_before_update(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2073,6 +2099,13 @@ END; $$;
 --   take row locks in an order no other forget path shares and could
 --   deadlock with them; taking the lock here would come after this row's
 --   lock and have the same effect. A direct UPDATE that forgets is refused.
+--   A transaction-level advisory lock is held until the transaction ends, so
+--   a positive answer is kept for the rest of the transaction in the
+--   transaction-local setting engram.forget_lock_xact, holding
+--   txid_current(): a forget of N rows reads pg_locks once, not N times. A
+--   rolled-back savepoint reverts the setting with any lock taken under it,
+--   and the txid comparison ignores a value left by SET at session level or
+--   by an earlier transaction.
 -- memory_items_supersession still re-checks the target at commit, which
 -- catches a target forgotten by another transaction after this check.
 -- valid_to is derived again from superseded_by whenever either is in the
@@ -2116,15 +2149,12 @@ BEGIN
       MESSAGE = format('%s: forgotten_at and forgotten_reason are set once', TG_NAME);
   END IF;
   IF OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
-                      WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid() AND l.granted
-                        AND l.mode = 'ExclusiveLock'
-                        AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database())
-                        AND l.classid::bigint = (7308892986227385959 >> 32)
-                        AND l.objid::bigint = (7308892986227385959 & 4294967295)
-                        AND l.objsubid = 1) THEN
-    RAISE EXCEPTION USING ERRCODE = 'check_violation',
-      MESSAGE = format('%s: forgotten_at is set only while the transaction holds the forget lock exclusively', TG_NAME);
+     AND pg_catalog.current_setting('engram.forget_lock_xact', true) IS DISTINCT FROM pg_catalog.txid_current()::text THEN
+    IF NOT public.engram_forget_lock_held() THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation',
+        MESSAGE = format('%s: forgotten_at is set only while the transaction holds the forget lock exclusively', TG_NAME);
+    END IF;
+    PERFORM pg_catalog.set_config('engram.forget_lock_xact', pg_catalog.txid_current()::text, true);
   END IF;
   IF OLD.forgotten_at IS NOT NULL
      AND (NEW.superseded_by IS DISTINCT FROM OLD.superseded_by
@@ -2628,11 +2658,12 @@ END; $$;
 -- advisory lock 7308892986227385959 (the ASCII bytes of "engramfg") before
 -- it locks any row. Two forgets over overlapping closures would otherwise
 -- lock each other's rows in passes with no common order and deadlock.
--- engram_supersede_item, and every insert of a row with lineage, hold the
--- same key shared, so they wait for a forget instead of deadlocking with it
--- and still run side by side. memory_items_before_update refuses forgotten_at
--- from any transaction that does not hold the key exclusively, so every
--- forget path takes its locks in this one order.
+-- engram_supersede_item, engram_retire_items, engram_unretire_items and
+-- every insert of a row with lineage hold the same key shared, so they wait
+-- for a forget instead of deadlocking with it and still run side by side.
+-- memory_items_before_update refuses forgotten_at from any transaction that
+-- does not hold the key exclusively, so every forget path takes its locks in
+-- this one order.
 CREATE OR REPLACE FUNCTION public.engram_forget_items(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2750,6 +2781,12 @@ END; $$;
 
 -- Retires 1 to 50 live, unretired items: they stay stored and keep their
 -- lineage, and readers leave them out by default. Returns the ids it retired.
+-- Locks follow engram_supersede_item's order: the forget advisory key
+-- (7308892986227385959) shared, then the listed rows FOR UPDATE in id order.
+-- An UPDATE alone would lock rows in scan order while a forget, holding the
+-- key exclusively, locks the same rows in id order, and the two could each
+-- wait on a row the other holds; with the key a running forget finishes
+-- first, and retires and unretires still run side by side.
 CREATE OR REPLACE FUNCTION public.engram_retire_items(p_ids uuid[], p_reason text) RETURNS SETOF uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2763,6 +2800,8 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_retire_items: p_reason must be non-blank and at most 2000 characters';
   END IF;
+  PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
+  PERFORM 1 FROM public.memory_items i WHERE i.id = ANY (p_ids) ORDER BY i.id FOR UPDATE;
   RETURN QUERY
   WITH retired AS (
     UPDATE public.memory_items m
@@ -2779,7 +2818,8 @@ END; $$;
 --
 
 -- Clears both retire columns on 1 to 50 live, retired items. Returns the ids
--- it unretired.
+-- it unretired. It takes its locks in engram_retire_items's order, for the
+-- same reason.
 CREATE OR REPLACE FUNCTION public.engram_unretire_items(p_ids uuid[]) RETURNS SETOF uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -2789,6 +2829,8 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_unretire_items: p_ids must hold 1 to 50 ids and no NULL';
   END IF;
+  PERFORM pg_advisory_xact_lock_shared(7308892986227385959);
+  PERFORM 1 FROM public.memory_items i WHERE i.id = ANY (p_ids) ORDER BY i.id FOR UPDATE;
   RETURN QUERY
   WITH unretired AS (
     UPDATE public.memory_items m
@@ -3269,6 +3311,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double 
 REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_forget_lock_held() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
@@ -3315,6 +3358,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_forget_lock_held() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_insert_items(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_invariant_counts() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM %I', role_name);
@@ -3351,6 +3395,7 @@ GRANT EXECUTE ON FUNCTION public.engram_decay_semantic_gradient(uuid[], double p
 GRANT EXECUTE ON FUNCTION public.engram_digest_fact_failure(uuid, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_episode_kind(jsonb, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_forget_items(uuid[], text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_forget_lock_held() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_insert_items(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_invariant_counts() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_role;
