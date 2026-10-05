@@ -10,7 +10,12 @@
  * could not read): text scrubbed by a partial registry would keep the
  * secrets it missed, and the client's spool holds the events until a retry.
  *
- * 500 and 503 mean only "retry later". A value PostgreSQL refuses (SQLSTATE
+ * Every step for one event before storage (nesting bound, U+FFFD replacement,
+ * validation, scope, scrubbing) runs inside one boundary: whatever throws
+ * there rejects that event alone, since it would throw again on every retry.
+ *
+ * 500 and 503 mean only "retry later", and come only from the store or a
+ * registry that is not ready. A value PostgreSQL refuses (SQLSTATE
  * class 22, data exception, or 23, integrity violation) fails on every retry,
  * so it must not hold up its batch: the events are then stored one at a time
  * and each refused one is rejected as `storage:<sqlstate>`.
@@ -18,9 +23,15 @@
 
 import { sqlstateOf } from '@engram-mem/core'
 import type { CaptureSecretHit, CaptureStore, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
-import { parseCaptureEventsRequest } from './validate.js'
+import {
+  describeInternalError,
+  eventRejection,
+  internalReason,
+  parseCaptureEnvelope,
+  parseCaptureEvent,
+} from './validate.js'
 import { resolveEventScope, type ProjectRegistry } from './project-registry.js'
-import { scrubEvent } from './scrub.js'
+import { scrubEvent, type ScrubbedEvent } from './scrub.js'
 import type { CaptureClient, CaptureEvent, Rejection, ValidEvent } from './contract.js'
 
 export const CAPTURE_EVENTS_FAILED_MESSAGE = 'capture events failed; retry later'
@@ -35,6 +46,8 @@ export interface CaptureEventsRouteDeps {
   status: () => SecretRegistryStatus
   log: (line: string) => void
   now?: () => Date
+  /** Defaults to scrubEvent with the server's secret registry. */
+  scrub?: (event: CaptureEvent) => Promise<ScrubbedEvent>
 }
 
 export interface CaptureEventsAccepted {
@@ -91,7 +104,7 @@ function toStoredEvent(
   client: CaptureClient,
   event: CaptureEvent,
   scope: { projectId: string | null; workspaceId: string | null; rejected: { project?: string; workspace?: string } },
-  masked: Awaited<ReturnType<typeof scrubEvent>>['masked'],
+  masked: ScrubbedEvent['masked'],
 ): StoredEvent {
   const scrub: Record<string, unknown> = { masked }
   if (scope.rejected.project !== undefined) scrub.project_rejected = scope.rejected.project
@@ -126,34 +139,31 @@ export async function runCaptureEventsRequest(
   deps: CaptureEventsRouteDeps,
   body: unknown,
 ): Promise<CaptureEventsResponse> {
-  const parsed = parseCaptureEventsRequest(body, (deps.now ?? (() => new Date()))())
-  if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
+  let envelope: ReturnType<typeof parseCaptureEnvelope>
+  try {
+    envelope = parseCaptureEnvelope(body)
+  } catch (err) {
+    deps.log(`capture events: the envelope failed validation: ${describeInternalError(err)}`)
+    return { status: 400, body: { error: internalReason(err) } }
+  }
+  if ('error' in envelope) return { status: 400, body: { error: envelope.error } }
 
   const registry = deps.ready()
   const degraded = degradedReason(deps.status())
   noteDegraded(deps, degraded)
   if (registry === null || degraded !== null) return unavailableCaptureEventsResponse()
 
-  const rejected: Rejection[] = [...parsed.rejected]
+  const now = (deps.now ?? (() => new Date()))()
+  const rejected: Rejection[] = []
   const toStore: Array<{ valid: ValidEvent; stored: StoredEvent }> = []
-  try {
-    for (const valid of parsed.events) {
-      const scope = resolveEventScope(registry, valid.event)
-      if ('reject' in scope) {
-        rejected.push({
-          index: valid.index,
-          session_id: valid.event.session_id,
-          event_uuid: valid.event.event_uuid,
-          reason: scope.reject,
-        })
-        continue
-      }
-      const scrubbed = await scrubEvent(valid.event)
-      toStore.push({ valid, stored: toStoredEvent(parsed.client, scrubbed.event, scope, scrubbed.masked) })
+  for (const [index, raw] of envelope.events.entries()) {
+    try {
+      const prepared = await prepareEvent(deps, registry, envelope.client, raw, now)
+      if ('reason' in prepared) rejected.push({ index, ...prepared })
+      else toStore.push({ valid: { index, event: prepared.event }, stored: prepared.stored })
+    } catch (err) {
+      rejected.push(eventRejection(index, raw, err, deps.log))
     }
-  } catch (err) {
-    deps.log(`capture events: scrub failed: ${describeError(err)}`)
-    return failedCaptureEventsResponse()
   }
 
   const outcome = toStore.length > 0 ? await storeEvents(deps, toStore) : { accepted: 0, duplicates: 0, refused: [] }
@@ -161,6 +171,21 @@ export async function runCaptureEventsRequest(
   rejected.push(...outcome.refused)
   rejected.sort((a, b) => a.index - b.index)
   return { status: 200, body: { accepted: outcome.accepted, duplicates: outcome.duplicates, rejected } }
+}
+
+/** One event's steps before storage; the caller's boundary handles anything they throw. */
+async function prepareEvent(
+  deps: CaptureEventsRouteDeps,
+  registry: ProjectRegistry,
+  client: CaptureClient,
+  raw: unknown,
+  now: Date,
+): Promise<{ event: CaptureEvent; stored: StoredEvent } | Omit<Rejection, 'index'>> {
+  const event = parseCaptureEvent(raw, now)
+  const scope = resolveEventScope(registry, event)
+  if ('reject' in scope) return { session_id: event.session_id, event_uuid: event.event_uuid, reason: scope.reject }
+  const scrubbed = await (deps.scrub ?? scrubEvent)(event)
+  return { event, stored: toStoredEvent(client, scrubbed.event, scope, scrubbed.masked) }
 }
 
 const DATA_ERROR_CLASSES = new Set(['22', '23'])

@@ -23,6 +23,7 @@ import {
   CAPTURE_EVENTS_MAX,
   CAPTURE_EVENTS_MIN,
   CAPTURE_EVENT_UUID_PATTERN,
+  CAPTURE_NESTING_MAX_LEVELS,
   CAPTURE_FREE_TEXT_MAX_CHARS,
   CAPTURE_OCCURRED_AT_MAX_FUTURE_MS,
   CAPTURE_OCCURRED_AT_MIN_MS,
@@ -218,36 +219,137 @@ function parseClient(value: unknown): CaptureClient {
   }
 }
 
+export interface CaptureEnvelope {
+  client: CaptureClient
+  /** The events as sent; each is checked on its own by parseCaptureEvent. */
+  events: unknown[]
+}
+
 /**
- * Validate a capture events body. `now` is the receipt time that bounds
- * `occurred_at`. Returns `{ error }` when the envelope is invalid and nothing
- * may be stored; otherwise the valid events and one rejection per invalid
- * event, each carrying its position in `events`.
+ * Validate the envelope of a capture events body. Returns `{ error }` when it
+ * is invalid and nothing may be stored. Throws only for a defect in this
+ * code, never for anything a client can send.
  */
-export function parseCaptureEventsRequest(body: unknown, now: Date): ParsedCaptureEvents {
-  let client: CaptureClient
-  let rawEvents: unknown[]
+export function parseCaptureEnvelope(body: unknown): CaptureEnvelope | { error: string } {
   try {
     const envelope = object(body, 'body', ['client', 'events'])
-    client = parseClient(postgresText(envelope.client, 'client'))
-    rawEvents = array(envelope.events, 'events', CAPTURE_EVENTS_MIN, CAPTURE_EVENTS_MAX)
+    const client = parseClient(postgresText(withinNesting(envelope.client, 'client'), 'client'))
+    const events = array(envelope.events, 'events', CAPTURE_EVENTS_MIN, CAPTURE_EVENTS_MAX)
+    return { client, events }
   } catch (err) {
     if (err instanceof InvalidField) return { error: err.message }
     throw err
   }
+}
+
+/**
+ * Validate one event as sent. `now` is the receipt time that bounds
+ * `occurred_at`. The nesting bound runs first, then the U+FFFD replacement,
+ * then the field rules, so every rule sees the text that is stored. Throws an
+ * error that `eventRejection` turns into the event's rejection.
+ */
+export function parseCaptureEvent(raw: unknown, now: Date): CaptureEvent {
+  return parseEvent(postgresText(withinNesting(raw, ''), ''), now)
+}
+
+/**
+ * The rejection of event `index` after any of its steps before storage threw.
+ * A validation failure carries its reason. Anything else is a defect that
+ * would fail the same way on every retry, so it rejects this event alone as
+ * `internal:<error name>`; the message may quote a value that has not been
+ * scrubbed, so only the name and the stack frames are logged.
+ */
+export function eventRejection(index: number, raw: unknown, err: unknown, log: (line: string) => void): Rejection {
+  if (err instanceof InvalidField) return { index, ...echoedIds(raw), reason: err.message }
+  const reason = internalReason(err)
+  log(`capture events: event ${index} failed before storage: ${describeInternalError(err)}`)
+  return { index, ...echoedIds(raw), reason }
+}
+
+const ERROR_NAME = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+
+/** `internal:<error name>`: the name says which defect, and it never quotes a value. */
+export function internalReason(err: unknown): string {
+  const name = err instanceof Error ? err.name : ''
+  return `internal:${ERROR_NAME.test(name) ? name : 'unknown'}`
+}
+
+/** The error's name and stack frames, without its message. */
+export function describeInternalError(err: unknown): string {
+  const name = internalReason(err).slice('internal:'.length)
+  const stack = err instanceof Error && typeof err.stack === 'string' ? err.stack : ''
+  const frames = stack.split('\n').filter((line) => /^\s+at /.test(line))
+  return [name, ...frames].join('\n')
+}
+
+/**
+ * Validate a capture events body: the envelope, then each event through the
+ * same rejection rule the route applies. Returns `{ error }` when the
+ * envelope is invalid; otherwise the valid events and one rejection per
+ * refused event, each carrying its position in `events`.
+ */
+export function parseCaptureEventsRequest(
+  body: unknown,
+  now: Date,
+  log: (line: string) => void = (line) => console.error(line),
+): ParsedCaptureEvents {
+  const envelope = parseCaptureEnvelope(body)
+  if ('error' in envelope) return envelope
   const events: ValidEvent[] = []
   const rejected: Rejection[] = []
-  rawEvents.forEach((raw, index) => {
-    let event = raw
+  envelope.events.forEach((raw, index) => {
     try {
-      event = postgresText(raw, '')
-      events.push({ index, event: parseEvent(event, now) })
+      events.push({ index, event: parseCaptureEvent(raw, now) })
     } catch (err) {
-      if (!(err instanceof InvalidField)) throw err
-      rejected.push({ index, ...echoedIds(event), reason: err.message })
+      rejected.push(eventRejection(index, raw, err, log))
     }
   })
-  return { client, events, rejected }
+  return { client: envelope.client, events, rejected }
+}
+
+interface NestingFrame {
+  value: object
+  level: number
+  parent: NestingFrame | null
+  step: string
+}
+
+function nestingPath(base: string, frame: NestingFrame): string {
+  const steps: string[] = []
+  for (let f: NestingFrame | null = frame; f !== null; f = f.parent) steps.push(f.step)
+  const path = (base + steps.reverse().join('')).replace(/^\./, '')
+  return path || 'event'
+}
+
+/**
+ * Refuses a value nested deeper than CAPTURE_NESTING_MAX_LEVELS with an
+ * explicit stack, so the check itself cannot overflow. The path names
+ * identifier keys and writes any other key by its position, `[#n]`, since a
+ * key may be user text.
+ */
+function withinNesting(value: unknown, base: string): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const stack: NestingFrame[] = [{ value, level: 1, parent: null, step: '' }]
+  while (stack.length > 0) {
+    const frame = stack.pop()!
+    if (frame.level > CAPTURE_NESTING_MAX_LEVELS) {
+      throw new InvalidField(`${nestingPath(base, frame)}: nested deeper than ${CAPTURE_NESTING_MAX_LEVELS} levels`)
+    }
+    const children: Array<[unknown, string]> = Array.isArray(frame.value)
+      ? frame.value.map((child, i): [unknown, string] => [child, `[${i}]`])
+      : Object.keys(frame.value).map((key, i): [unknown, string] => [
+          (frame.value as Json)[key],
+          ECHOABLE_KEY.test(key) ? `.${key}` : `[#${i}]`,
+        ])
+    // Pushed last to first, so the first too-deep path in document order is the one named.
+    for (let i = children.length - 1; i >= 0; i--) {
+      const [child, step] = children[i]!
+      if (child !== null && typeof child === 'object') {
+        stack.push({ value: child, level: frame.level + 1, parent: frame, step })
+      }
+    }
+  }
+  return value
 }
 
 /**
@@ -267,9 +369,10 @@ function postgresText(value: unknown, base: string): unknown {
   }
 }
 
-function echoedIds(raw: unknown): { session_id: string | null; event_uuid: string | null } {
+/** The ids a rejection echoes, as stored text would hold them; a non-string or overlong id is null. */
+export function echoedIds(raw: unknown): { session_id: string | null; event_uuid: string | null } {
   const echo = (v: unknown): string | null =>
-    typeof v === 'string' && v.length <= CAPTURE_SESSION_ID_MAX_CHARS ? v : null
+    typeof v === 'string' && v.length <= CAPTURE_SESSION_ID_MAX_CHARS ? toPostgresText(v) : null
   return isPlainObject(raw)
     ? { session_id: echo(raw.session_id), event_uuid: echo(raw.event_uuid) }
     : { session_id: null, event_uuid: null }
