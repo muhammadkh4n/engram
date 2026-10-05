@@ -30,7 +30,8 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
-export type { CaptureStore, ProjectRow } from './items/capture-store.js'
+export { SCAN_TARGETS } from './items/capture-store.js'
+export type { CaptureStore, ProjectRow, ScanRow, ScanTarget } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
@@ -84,6 +85,21 @@ export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
 export { findSecretCandidates } from './ingest/secret-candidates.js'
+export {
+  createSecretRegistry,
+  defaultSecretRegistry,
+  resetDefaultSecretRegistry,
+  MIN_SECRET_LENGTH,
+  PROCESS_SECRET_ENV_NAMES,
+  SECRET_SOURCES_ENV,
+} from './ingest/secret-registry.js'
+export type {
+  KnownValueSpan,
+  SecretRegistry,
+  SecretRegistryOptions,
+  SecretRegistryStatus,
+} from './ingest/secret-registry.js'
+export type { NamedValue } from './ingest/secret-source-formats.js'
 export type { SecretCandidate } from './ingest/secret-candidates.js'
 export { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 export type { ScrubbedMessage } from './ingest/scrub-message.js'

@@ -105,3 +105,104 @@ describe('PostgRestCaptureStore.syncProjects', () => {
     expect(seen[0]!.get('apikey')).toBe('test-key')
   })
 })
+
+describe('PostgRestCaptureStore.scanPage', () => {
+  interface Call {
+    table: string
+    columns?: string
+    gt?: [string, string]
+    order?: [string, unknown]
+    limit?: number
+  }
+
+  function scanStoreWith(result: Result) {
+    const calls: Call[] = []
+    const from = vi.fn((table: string) => {
+      const call: Call = { table }
+      calls.push(call)
+      const builder = {
+        select(columns: string) {
+          call.columns = columns
+          return builder
+        },
+        gt(column: string, value: string) {
+          call.gt = [column, value]
+          return builder
+        },
+        order(column: string, opts: unknown) {
+          call.order = [column, opts]
+          return builder
+        },
+        limit(n: number) {
+          call.limit = n
+          return Promise.resolve(result)
+        },
+      }
+      return builder
+    })
+    const store = new PostgRestCaptureStore({ url: 'http://127.0.0.1:3000', key: 'test-key' })
+    ;(store as unknown as { client: PostgrestClient }).client = { from } as unknown as PostgrestClient
+    return { store, calls }
+  }
+
+  it('reads items by id ascending with content, context, search_text and the source keys and strings', async () => {
+    const row = {
+      id: '00000000-0000-4000-8000-0000000000a1',
+      content: 'the content',
+      context: null,
+      search_text: 'the search text',
+      source: { type: 'transcript', line: 4, tools: [{ name: 'Bash', ref: 'ls -la' }] },
+    }
+    const { store, calls } = scanStoreWith({ data: [row], error: null })
+    await expect(store.scanPage('memory_items', null, 500)).resolves.toEqual([
+      {
+        id: row.id,
+        texts: ['the content', 'the search text', 'type', 'transcript', 'line', 'tools', 'name', 'Bash', 'ref', 'ls -la'],
+      },
+    ])
+    expect(calls).toEqual([
+      {
+        table: 'memory_items',
+        columns: 'id,content,context,search_text,source',
+        order: ['id', { ascending: true }],
+        limit: 500,
+      },
+    ])
+  })
+
+  it('reads capture events after the given id with payload, cwd, project and plan_dirs', async () => {
+    const row = {
+      id: 42,
+      payload: { answers: { 'Which port?': '8080' } },
+      cwd: '/srv/sample-repo',
+      project: { id: 'sample-repo', branch: null },
+      plan_dirs: ['/home/dev/plans/sample-plan'],
+    }
+    const { store, calls } = scanStoreWith({ data: [row], error: null })
+    await expect(store.scanPage('memory_capture_events', '41', 500)).resolves.toEqual([
+      {
+        id: '42',
+        texts: ['answers', 'Which port?', '8080', '/srv/sample-repo', 'id', 'sample-repo', 'branch', '/home/dev/plans/sample-plan'],
+      },
+    ])
+    expect(calls[0]).toMatchObject({ table: 'memory_capture_events', gt: ['id', '41'], limit: 500 })
+  })
+
+  it('reports an error with its code and message only', async () => {
+    const { store } = scanStoreWith({
+      data: null,
+      error: { code: '42501', message: 'permission denied for table memory_items', details: SECRET_ROW, hint: null },
+    })
+    const err = await store.scanPage('memory_items', null, 10).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe('scanPage failed (42501): permission denied for table memory_items')
+    expect((err as Error).message).not.toContain('hunter-two')
+  })
+
+  it('refuses a limit outside 1 to 1000', async () => {
+    const { store, calls } = scanStoreWith({ data: [], error: null })
+    await expect(store.scanPage('memory_items', null, 0)).rejects.toThrow('limit must be an integer from 1 to 1000')
+    await expect(store.scanPage('memory_items', null, 1001)).rejects.toThrow('limit must be an integer from 1 to 1000')
+    expect(calls).toEqual([])
+  })
+})

@@ -6,8 +6,8 @@
  * Only rules that are right whenever they fire redact:
  *   - values registered from this machine's secret files, in any spelling (secret-registry.ts)
  *   - known token formats, private keys and connection strings (secretlint)
- *   - self-identifying formats: PEM private-key blocks with a base64 body
- *     (including truncated ones), JWTs, OpenRouter keys, Anthropic
+ *   - self-identifying formats: PEM private-key blocks and OpenPGP private-key
+ *     blocks with a base64 body (including truncated ones), JWTs, OpenRouter keys, Anthropic
  *     OAuth/admin tokens, the credential of an `Authorization: Bearer|Basic`
  *     header and URL userinfo passwords
  *   - values under credential-named keys, only when the whole text is
@@ -103,6 +103,44 @@ function pemSpans(text: string): DetectedSpan[] {
   return spans
 }
 
+// An OpenPGP (RFC 4880 ASCII armor) private-key block: `Key: value` armor
+// headers, a blank line, base64 lines, a `=XXXX` CRC-24 checksum line, the
+// END line. Same body rules as PEM: the header alone is prose, and a block
+// cut off after its first full body line is still key material.
+const PGP_BEGIN_RE = /-----BEGIN PGP PRIVATE KEY BLOCK-----/g
+const PGP_END = '-----END PGP PRIVATE KEY BLOCK-----'
+const PGP_CHECKSUM = '=[A-Za-z0-9+/]{4}'
+const PGP_HEADERS_RE = new RegExp(
+  String.raw`(?:${PEM_LINE_BREAK}[A-Za-z][A-Za-z0-9-]*:[ \t][^\r\n\\]*)*(?:${PEM_LINE_BREAK}(?=${PEM_LINE_BREAK}))?`,
+  'y',
+)
+const PGP_SHORT_LINE_RE = new RegExp(
+  String.raw`${PEM_BREAK}[A-Za-z0-9+/]+={0,2}(?=${PEM_BREAK}(?:${PGP_CHECKSUM}|${PGP_END})|\s*$|["'\x60\\])`,
+  'y',
+)
+const PGP_CHECKSUM_RE = new RegExp(String.raw`${PEM_BREAK}${PGP_CHECKSUM}(?![A-Za-z0-9+/=])`, 'y')
+const PGP_END_RE = new RegExp(String.raw`(?:${PEM_BREAK})?${PGP_END}`, 'y')
+
+function pgpBlockEnd(text: string, headerEnd: number): number | null {
+  const bodyStart = skip(PGP_HEADERS_RE, text, headerEnd)
+  let end = skip(PEM_FULL_LINE_RE, text, bodyStart)
+  if (end === bodyStart) return null
+  for (let next = skip(PEM_FULL_LINE_RE, text, end); next !== end; next = skip(PEM_FULL_LINE_RE, text, end)) end = next
+  end = skip(PGP_SHORT_LINE_RE, text, end)
+  end = skip(PGP_CHECKSUM_RE, text, end)
+  return skip(PGP_END_RE, text, end)
+}
+
+function pgpSpans(text: string): DetectedSpan[] {
+  const spans: DetectedSpan[] = []
+  for (const m of text.matchAll(PGP_BEGIN_RE)) {
+    const start = m.index ?? 0
+    const end = pgpBlockEnd(text, start + m[0].length)
+    if (end !== null) spans.push({ start, end, kind: 'private-key', rank: OWN_RANK })
+  }
+  return spans
+}
+
 function urlPasswordSpans(text: string): DetectedSpan[] {
   return urlPasswords(text, 0, text.length)
     .filter((p) => !p.isPlaceholder)
@@ -127,15 +165,20 @@ function knownFormatSpans(text: string): DetectedSpan[] {
   )
 }
 
-// `Authorization: Bearer <token>` in a raw header, a curl `-H "…"`, JSON or
-// a JS object; `Proxy-Authorization` carries the same credential. Only the
-// RFC 7235 token68 credential after the scheme is redacted, never the rest
-// of the line, and only when it is at least 8 characters and not a plain
-// word: "Authorization: Bearer tokens must be rotated" and "Authorization:
-// Basic authentication is off" are prose. A reference (`$TOKEN`, `${token}`,
-// `' + token`) or a placeholder (`<token>`) starts with a character token68
-// does not allow, so it yields no credential.
-const AUTH_CREDENTIAL_RE = /(?<![\w-])(?:proxy-)?authorization["'`]?[ \t]*[:=][ \t]*["'`]?(?:bearer|basic)[ \t]+([A-Za-z0-9\-._~+/]+=*)/gi
+// `Authorization: Bearer <token>` in a raw header, a curl `-H "…"`, JSON
+// (escaped once or more inside another string), a JS object, an nginx
+// `proxy_set_header Authorization "…"`, a Go `Header.Set("Authorization",
+// "…")` or a Ruby/PHP `'Authorization' => '…'`; `Proxy-Authorization`
+// carries the same credential. Between the name and the scheme: an optional
+// quote, possibly backslash-escaped, then `:`, `=`, `=>` or `,`, or
+// whitespace alone. Only the RFC 7235 token68 credential after the scheme is
+// redacted, never the rest of the line, and only when it is at least 8
+// characters and not a plain word: "Authorization: Bearer tokens must be
+// rotated" and "Authorization: Basic authentication is off" are prose. A
+// reference (`$TOKEN`, `${token}`, `' + token`) or a placeholder (`<token>`)
+// starts with a character token68 does not allow, so it yields no credential.
+const AUTH_CREDENTIAL_RE =
+  /(?<![\w-])(?:proxy-)?authorization(?:\\*["'`])?(?:[ \t]*(?:=>|[:=,])[ \t]*|[ \t]+)(?:\\*["'`])?(?:bearer|basic)[ \t]+([A-Za-z0-9\-._~+/]+=*)/gi
 const MIN_CREDENTIAL_LENGTH = 8
 const PLAIN_WORD_RE = /^[A-Za-z][a-z]*$/
 
@@ -207,6 +250,7 @@ export async function detectSecrets(text: string): Promise<DetectedSecret[]> {
     ...narrowUrlSpans(text, await secretlintSpans(text)),
     ...structuredSpans(text),
     ...pemSpans(text),
+    ...pgpSpans(text),
     ...urlPasswordSpans(text),
     ...authorizationSpans(text),
     ...knownFormatSpans(text),
