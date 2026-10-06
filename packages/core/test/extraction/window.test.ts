@@ -103,8 +103,8 @@ const PROMPT_MESSAGE = [
   'No SQLite fallback.',
 ].join('\n')
 
-const Q1 = 'Which store backs capture?'
-const Q2 = 'Run the backfill now?'
+const STORE_QUESTION = 'Which store backs capture?'
+const BACKFILL_QUESTION = 'Run the backfill now?'
 
 const DIALOG_WINDOW: RawExtractionWindow = {
   anchor: {
@@ -114,7 +114,7 @@ const DIALOG_WINDOW: RawExtractionWindow = {
     project_id: null,
     workspace_id: 'tst-ws',
     content: 'Postgres only\nNo SQLite anywhere.\n\nLater\n\nShip it.',
-    context: `[Store] ${Q1}\n- Postgres only: One store, no fallback\n- Postgres and SQLite\n\n${Q2}\n- Yes\n- Later: After the deploy`,
+    context: `[Store] ${STORE_QUESTION}\n- Postgres only: One store, no fallback\n- Postgres and SQLite\n\n${BACKFILL_QUESTION}\n- Yes\n- Later: After the deploy`,
     occurred_at: '2026-10-02T12:30:00Z',
     source: { type: 'transcript', event_key: 'tst-key-12' },
   },
@@ -122,7 +122,7 @@ const DIALOG_WINDOW: RawExtractionWindow = {
     payload: {
       questions: [
         {
-          question: Q1,
+          question: STORE_QUESTION,
           header: 'Store',
           options: [
             { label: 'Postgres only', description: 'One store, no fallback' },
@@ -131,14 +131,14 @@ const DIALOG_WINDOW: RawExtractionWindow = {
           multiSelect: false,
         },
         {
-          question: Q2,
+          question: BACKFILL_QUESTION,
           header: '',
           options: [{ label: 'Yes' }, { label: 'Later', description: 'After the deploy' }],
           multiSelect: false,
         },
       ],
-      answers: { [Q1]: 'Postgres only', [Q2]: 'Later' },
-      notes: { [Q1]: 'No SQLite anywhere.' },
+      answers: { [STORE_QUESTION]: 'Postgres only', [BACKFILL_QUESTION]: 'Later' },
+      notes: { [STORE_QUESTION]: 'No SQLite anywhere.' },
       response: 'Ship it.',
     },
     plan_dirs: [],
@@ -181,13 +181,13 @@ const DIALOG_MESSAGE = [
   'none',
   '',
   'utt-1 (MK, 2026-10-02T12:30:00.000Z):',
-  `QUESTION q-1: ${Q1}`,
+  `QUESTION q-1: ${STORE_QUESTION}`,
   'OPTION: Postgres only — One store, no fallback',
   'OPTION: Postgres and SQLite',
   'ANSWER: Postgres only',
   'NOTES: No SQLite anywhere.',
   '',
-  `QUESTION q-2: ${Q2}`,
+  `QUESTION q-2: ${BACKFILL_QUESTION}`,
   'OPTION: Yes',
   'OPTION: Later — After the deploy',
   'ANSWER: Later',
@@ -326,8 +326,8 @@ describe('buildWindow', () => {
     expect(w.turn).toBeNull()
     expect(w.utterance!.content).toBe('Postgres only\nNo SQLite anywhere.\n\nLater\n\nShip it.')
     expect(w.utterance!.dialog!.questions.map((q) => [q.alias, q.question, q.notes])).toEqual([
-      ['q-1', Q1, 'No SQLite anywhere.'],
-      ['q-2', Q2, null],
+      ['q-1', STORE_QUESTION, 'No SQLite anywhere.'],
+      ['q-2', BACKFILL_QUESTION, null],
     ])
   })
 
