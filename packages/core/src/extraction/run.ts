@@ -7,12 +7,18 @@
  * on each, calls the model, gates the reply and commits the accepted items
  * with the run's close in one transaction. A run that does not commit is
  * closed as failed with its class:
- * - `transient` (an empty reply, a provider or network fault): not counted
- *   against the anchor, and the tick stops, since the next window would most
- *   likely meet the same fault;
+ * - `transient` (an empty or moderated reply, a provider or network fault);
  * - `held` (a reply cut off at its cap, an unreadable reply, a refused
- *   commit): counted; the store backs the anchor off and leaves it after the
- *   third, so the session's later anchors run.
+ *   commit).
+ * Every failure backs its anchor off (60 s doubled per earlier failure of
+ * either class, capped at 6 h), so a window that keeps failing never stays at
+ * the head of the oldest-first queue. An anchor is left after
+ * EXTRACTION_HELD_FAILURES_MAX held or EXTRACTION_TRANSIENT_FAILURES_MAX
+ * transient failures, and its session's later anchors run.
+ *
+ * One failing window never ends a tick: a single transient failure goes on to
+ * the next anchor. Two transient failures in a row end it, since the provider
+ * itself is then most likely down and every further call would fail too.
  *
  * Log lines carry id prefixes, statuses, counts and durations, never text.
  */
@@ -46,6 +52,12 @@ export const SESSION_IDLE_MS = 30 * 60_000
 export const EXTRACTION_WINDOWS_PER_TICK = 20
 /** A run still `running` after this long was abandoned by its process. */
 export const EXTRACTION_STALE_RUN_MS = 10 * 60_000
+/** Held failures after which an anchor is no longer pending (the pending RPC holds the same number). */
+export const EXTRACTION_HELD_FAILURES_MAX = 3
+/** Transient failures after which an anchor is no longer pending (the pending RPC holds the same number). */
+export const EXTRACTION_TRANSIENT_FAILURES_MAX = 6
+/** Transient failures in a row that end a tick. */
+const TRANSIENT_FAILURES_IN_A_ROW_MAX = 2
 /** Longest error message a run row or a log line keeps. */
 const ERROR_MESSAGE_MAX_CHARS = 500
 const ID_PREFIX_CHARS = 8
@@ -196,6 +208,7 @@ async function runWindows(
   // An anchor handed out twice in one tick (held by another process, gone)
   // is not retried here; a fetch that brings nothing new ends the tick.
   const seen = new Set<string>()
+  let transientInARow = 0
   while (counts.windows < EXTRACTION_WINDOWS_PER_TICK) {
     const pending = await deps.store.extractionPending({
       version: EXTRACTOR_VERSION,
@@ -213,7 +226,12 @@ async function runWindows(
       if (status === 'succeeded') counts.succeeded += 1
       else if (status === 'held') counts.held += 1
       else if (status === 'transient') counts.transient += 1
-      if (status === 'transient') return
+      if (status === 'transient') transientInARow += 1
+      else if (status !== 'gone') transientInARow = 0
+      if (transientInARow >= TRANSIENT_FAILURES_IN_A_ROW_MAX) {
+        deps.log('extraction: two transient failures in a row, so the tick ends; the provider may be down')
+        return
+      }
       if (counts.windows >= EXTRACTION_WINDOWS_PER_TICK) return
     }
   }
@@ -234,12 +252,17 @@ async function runWindow(
 
   if (anchor.runningRunId !== null) {
     if (!isStale(anchor, now())) return 'skipped'
-    await store.extractionFail(anchor.runningRunId, {
+    // The closed run is a transient failure like any other, so the anchor now
+    // waits out the backoff it sets; a window that kills its worker every
+    // time is left after EXTRACTION_TRANSIENT_FAILURES_MAX tries.
+    const closed = await store.extractionFail(anchor.runningRunId, {
       error: `the run was still running after ${EXTRACTION_STALE_RUN_MS} ms`,
       failure: 'transient',
       stats: { anchor_kind: anchor.anchorKind },
     })
     line('stale_closed', '')
+    if (closed) logIfExhausted(log, anchor, 'transient')
+    return 'skipped'
   }
 
   const runId = await store.extractionBegin({
@@ -276,6 +299,7 @@ async function runWindow(
       stats: { anchor_kind: anchor.anchorKind, ...callStats(call) },
     })
     line(failure, ` error=${errorLabel(err)}`)
+    logIfExhausted(log, anchor, failure)
     return failure
   }
 
@@ -300,8 +324,23 @@ async function runWindow(
       stats: commit?.stats ?? { anchor_kind: anchor.anchorKind, ...callStats(result.call) },
     })
     line('held', ` error=${errorLabel(err)}`)
+    logIfExhausted(log, anchor, 'held')
     return 'held'
   }
+}
+
+/**
+ * Names the anchor when the failure just recorded is its last: the pending
+ * read no longer hands it out, and its session's later anchors run.
+ */
+function logIfExhausted(log: (line: string) => void, anchor: PendingAnchor, failure: ExtractionErrorClass): void {
+  const held = anchor.heldFailures + (failure === 'held' ? 1 : 0)
+  const transient = anchor.failures - anchor.heldFailures + (failure === 'transient' ? 1 : 0)
+  if (held < EXTRACTION_HELD_FAILURES_MAX && transient < EXTRACTION_TRANSIENT_FAILURES_MAX) return
+  log(
+    `extraction: session=${prefix(anchor.sessionId)} anchor=${prefix(anchor.anchorId)} exhausted` +
+      ` held=${held} transient=${transient}; it is not tried again at this extractor version`,
+  )
 }
 
 function isStale(anchor: PendingAnchor, now: Date): boolean {

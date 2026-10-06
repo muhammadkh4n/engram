@@ -11,7 +11,9 @@ import type {
 } from '../../src/items/capture-store.js'
 import { EXTRACTOR_VERSION } from '../../src/extraction/prompt.js'
 import {
+  EXTRACTION_HELD_FAILURES_MAX,
   EXTRACTION_STALE_RUN_MS,
+  EXTRACTION_TRANSIENT_FAILURES_MAX,
   EXTRACTION_WINDOWS_PER_TICK,
   runExtractionTick,
   SESSION_IDLE_MS,
@@ -19,12 +21,13 @@ import {
   type ExtractionTickResult,
 } from '../../src/extraction/run.js'
 import type { RawExtractionWindow } from '../../src/extraction/window.js'
-import { factExtractionBackoffMs } from '../../src/utils/backoff.js'
+import { FACT_EXTRACTION_BACKOFF_MAX_MS, factExtractionBackoffMs } from '../../src/utils/backoff.js'
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const T0 = Date.parse('2026-10-01T09:00:00Z')
 const PRIVATE_TEXT = 'Use TST-77 for the capture route work.'
 const MAX_HELD = 3
+const MAX_TRANSIENT = 6
 
 interface FakeAnchor {
   id: string
@@ -47,10 +50,11 @@ interface FakeRun {
 }
 
 /**
- * Holds anchors and runs and hands out pending anchors by the window RPC's
- * rules: per session the earliest anchor with no succeeded run and fewer than
- * three held failures at the version, only once the backoff after its last
- * held failure has passed; sessions oldest first.
+ * Holds anchors and runs and hands out pending anchors by the pending RPC's
+ * rules: per session the earliest anchor with no succeeded run, fewer than
+ * three held and fewer than six transient failures at the version, only once
+ * the backoff for its failure count (both classes) has passed since its last
+ * failure; sessions oldest first.
  */
 class FakeStore implements ExtractionStore {
   readonly anchors: FakeAnchor[] = []
@@ -90,10 +94,16 @@ class FakeStore implements ExtractionStore {
     return this.runs.filter((r) => r.anchorId === anchorId)
   }
 
+  failedRuns(anchorId: string, version: string): FakeRun[] {
+    return this.runs.filter((r) => r.anchorId === anchorId && r.version === version && r.status === 'failed')
+  }
+
   heldFailures(anchorId: string, version: string): FakeRun[] {
-    return this.runs.filter(
-      (r) => r.anchorId === anchorId && r.version === version && r.status === 'failed' && r.failure === 'held',
-    )
+    return this.failedRuns(anchorId, version).filter((r) => r.failure === 'held')
+  }
+
+  transientFailures(anchorId: string, version: string): FakeRun[] {
+    return this.failedRuns(anchorId, version).filter((r) => r.failure === 'transient')
   }
 
   async extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]> {
@@ -103,16 +113,20 @@ class FakeStore implements ExtractionStore {
     const open = this.anchors
       .filter((a) => {
         const runs = this.runsOf(a.id).filter((r) => r.version === query.version)
-        return !runs.some((r) => r.status === 'succeeded') && this.heldFailures(a.id, query.version).length < MAX_HELD
+        return (
+          !runs.some((r) => r.status === 'succeeded') &&
+          this.heldFailures(a.id, query.version).length < MAX_HELD &&
+          this.transientFailures(a.id, query.version).length < MAX_TRANSIENT
+        )
       })
       .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id))
     const firstPerSession = new Map<string, FakeAnchor>()
     for (const anchor of open) if (!firstPerSession.has(anchor.sessionId)) firstPerSession.set(anchor.sessionId, anchor)
     const due = [...firstPerSession.values()].filter((a) => {
-      const held = this.heldFailures(a.id, query.version)
-      if (held.length === 0) return true
-      const last = Math.max(...held.map((r) => (r.finishedAt ?? r.startedAt).getTime()))
-      return query.now.getTime() >= last + factExtractionBackoffMs(held.length)
+      const failed = this.failedRuns(a.id, query.version)
+      if (failed.length === 0) return true
+      const last = Math.max(...failed.map((r) => (r.finishedAt ?? r.startedAt).getTime()))
+      return query.now.getTime() >= last + factExtractionBackoffMs(failed.length)
     })
     return due
       .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id))
@@ -124,7 +138,8 @@ class FakeStore implements ExtractionStore {
           sessionId: a.sessionId,
           anchorKind: 'user_prompt',
           occurredAt: a.occurredAt,
-          failures: this.heldFailures(a.id, query.version).length,
+          failures: this.failedRuns(a.id, query.version).length,
+          heldFailures: this.heldFailures(a.id, query.version).length,
           runningRunId: running?.id ?? null,
           runningStartedAt: running?.startedAt ?? null,
         }
@@ -214,13 +229,16 @@ function statementReply(quote: string): string {
 }
 
 type Reply = Partial<CompleteJsonResult> | Error
+/** Answers each request by what it renders, e.g. by a marker in the anchor's text. */
+type Responder = (req: CompleteJsonRequest) => Reply
 
-function adapter(replies: Reply[], fallback: Reply = { text: EMPTY_LISTS }) {
+function adapter(replies: Reply[] | Responder, fallback: Reply = { text: EMPTY_LISTS }) {
   const requests: CompleteJsonRequest[] = []
   const intelligence: IntelligenceAdapter = {
     async completeJson(req) {
       requests.push(req)
-      const next = replies.length > 0 ? replies.shift()! : fallback
+      const next =
+        typeof replies === 'function' ? replies(req) : replies.length > 0 ? replies.shift()! : fallback
       if (next instanceof Error) throw next
       return { text: '', finishReason: 'stop', model: 'tst-model', ...next }
     },
@@ -228,7 +246,7 @@ function adapter(replies: Reply[], fallback: Reply = { text: EMPTY_LISTS }) {
   return { intelligence, requests }
 }
 
-function setup(replies: Reply[] = [], fallback?: Reply) {
+function setup(replies: Reply[] | Responder = [], fallback?: Reply) {
   const clock = { now: T0 }
   const store = new FakeStore(clock)
   const { intelligence, requests } = adapter(replies, fallback)
@@ -245,23 +263,106 @@ function setup(replies: Reply[] = [], fallback?: Reply) {
 }
 
 describe('runExtractionTick', () => {
-  it('fails an empty reply as transient, counts nothing and stops the tick', async () => {
-    const { store, requests, logs, tick } = setup([{ text: '  ' }])
+  it('fails an empty reply as transient, backs its anchor off and goes on to the next session', async () => {
+    const { clock, store, requests, logs, tick } = setup([{ text: '  ' }])
     const first = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
-    store.addAnchor('tst-session-2', T0 - 60_000)
+    const second = store.addAnchor('tst-session-2', T0 - 60_000)
 
     const result = await tick()
 
-    expect(requests).toHaveLength(1)
+    expect(requests).toHaveLength(2)
     expect(store.runsOf(first.id)).toMatchObject([{ status: 'failed', failure: 'transient', model: 'tst-chat-model' }])
     expect(store.heldFailures(first.id, EXTRACTOR_VERSION)).toHaveLength(0)
-    expect(result).toEqual({ windows: 1, succeeded: 0, held: 0, transient: 1, full: false })
-    expect((await store.extractionPending(pendingQuery(T0)))[0]!.failures).toBe(0)
+    expect(store.commits.map((c) => c.anchorId)).toEqual([second.id])
+    expect(result).toEqual({ windows: 2, succeeded: 1, held: 0, transient: 1, full: false })
+    expect(await store.extractionPending(pendingQuery(clock.now + factExtractionBackoffMs(1) - 1))).toEqual([])
+    expect(await store.extractionPending(pendingQuery(clock.now + factExtractionBackoffMs(1)))).toMatchObject([
+      { anchorId: first.id, failures: 1, heldFailures: 0 },
+    ])
     expect(logs.join('\n')).not.toContain(PRIVATE_TEXT)
   })
 
+  it.each([
+    ['a moderated reply with no content', (): Reply => ({ text: '', finishReason: 'content_filter' })],
+    ['a 403 flagged refusal', (): Reply => Object.assign(new Error('flagged by moderation'), { status: 403 })],
+  ])('extracts other sessions past an anchor answered with %s, which waits out its backoff', async (_name, refuse) => {
+    const { clock, store, requests, tick } = setup((req) =>
+      req.user.includes('MODERATED') ? refuse() : { text: statementReply('Use TST-77') },
+    )
+    const moderated = store.addAnchor('tst-session-1', T0 - 4 * 60_000, 'MODERATED: Use TST-77 here.')
+    const behind = store.addAnchor('tst-session-1', T0 - 60_000)
+    const other = store.addAnchor('tst-session-2', T0 - 3 * 60_000)
+    const third = store.addAnchor('tst-session-3', T0 - 2 * 60_000)
+
+    const first = await tick()
+    expect(first).toMatchObject({ windows: 3, succeeded: 2, transient: 1 })
+    expect(store.commits.map((c) => c.anchorId)).toEqual([other.id, third.id])
+    const failedAt = clock.now
+
+    // Inside the backoff nothing runs: the session's later anchor waits for it.
+    clock.now = failedAt + factExtractionBackoffMs(1) - 1000
+    await tick()
+    expect(requests).toHaveLength(3)
+    expect(store.runsOf(behind.id)).toHaveLength(0)
+
+    clock.now = failedAt + factExtractionBackoffMs(1)
+    await tick()
+    expect(requests).toHaveLength(4)
+    expect(store.transientFailures(moderated.id, EXTRACTOR_VERSION)).toHaveLength(2)
+    expect(store.runsOf(behind.id)).toHaveLength(0)
+  })
+
+  it('makes at most two calls in a tick when every call fails', async () => {
+    const down = Object.assign(new Error('upstream unavailable'), { status: 503 })
+    const { store, requests, logs, tick } = setup(() => down)
+    for (let i = 0; i < 6; i++) store.addAnchor(`tst-session-${i}`, T0 - (10 - i) * 60_000)
+
+    const result = await tick()
+
+    expect(requests).toHaveLength(2)
+    expect(result).toEqual({ windows: 2, succeeded: 0, held: 0, transient: 2, full: false })
+    expect(logs.some((l) => /two transient failures in a row/.test(l))).toBe(true)
+  })
+
+  it('goes on after a single transient failure, so failures apart never end the tick', async () => {
+    const { store, requests, tick } = setup((req) =>
+      req.user.includes('FLAKY') ? Object.assign(new Error('upstream'), { status: 503 }) : { text: EMPTY_LISTS },
+    )
+    store.addAnchor('tst-session-1', T0 - 4 * 60_000, 'FLAKY one')
+    store.addAnchor('tst-session-2', T0 - 3 * 60_000, 'steady one')
+    store.addAnchor('tst-session-3', T0 - 2 * 60_000, 'FLAKY two')
+    store.addAnchor('tst-session-4', T0 - 60_000, 'steady two')
+
+    const result = await tick()
+
+    expect(requests).toHaveLength(4)
+    expect(result).toMatchObject({ windows: 4, succeeded: 2, transient: 2 })
+  })
+
+  it('exhausts an anchor at its sixth transient failure, logs it, and runs the next anchor of its session', async () => {
+    const { clock, store, logs, tick } = setup((req) =>
+      req.user.includes('MODERATED') ? { text: '', finishReason: 'content_filter' } : { text: EMPTY_LISTS },
+    )
+    const stuck = store.addAnchor('tst-session-1', T0 - 2 * 60_000, 'MODERATED: Use TST-77 here.')
+    const next = store.addAnchor('tst-session-1', T0 - 60_000)
+
+    for (let n = 1; n <= MAX_TRANSIENT; n++) {
+      await tick()
+      expect(store.transientFailures(stuck.id, EXTRACTOR_VERSION)).toHaveLength(n)
+      if (n < MAX_TRANSIENT) expect(store.commits).toEqual([])
+      clock.now += factExtractionBackoffMs(n)
+    }
+
+    expect(store.commits.map((c) => c.anchorId)).toEqual([next.id])
+    const exhausted = logs.filter((l) => l.includes('exhausted'))
+    expect(exhausted).toEqual([expect.stringContaining(`anchor=${stuck.id.slice(0, 8)}`)])
+    expect(exhausted[0]).toContain('transient=6')
+    expect(EXTRACTION_TRANSIENT_FAILURES_MAX).toBe(MAX_TRANSIENT)
+    expect(EXTRACTION_HELD_FAILURES_MAX).toBe(MAX_HELD)
+  })
+
   it('holds an unparseable reply, exhausts the anchor at its third failure, then runs the next anchor', async () => {
-    const { clock, store, requests, tick } = setup([
+    const { clock, store, requests, logs, tick } = setup([
       { text: 'not json at all' },
       { text: 'still not json' },
       { text: '{"statements": [' },
@@ -284,6 +385,9 @@ describe('runExtractionTick', () => {
     expect(third).toMatchObject({ windows: 2, held: 1, succeeded: 1 })
     expect(store.commits.map((c) => c.anchorId)).toEqual([next.id])
     expect(requests).toHaveLength(4)
+    const exhausted = logs.filter((l) => l.includes('exhausted'))
+    expect(exhausted).toEqual([expect.stringContaining(`anchor=${stuck.id.slice(0, 8)}`)])
+    expect(exhausted[0]).toContain('held=3')
   })
 
   it('holds a reply cut off at its token cap and a refused commit', async () => {
@@ -341,8 +445,8 @@ describe('runExtractionTick', () => {
     expect(store.commits).toHaveLength(25)
   })
 
-  it('closes a stale running run as transient and runs the anchor again; a live run is left alone', async () => {
-    const { store, requests, tick } = setup()
+  it('closes a stale running run as transient and runs the anchor after its backoff; a live run is left alone', async () => {
+    const { clock, store, requests, tick } = setup()
     const stale = store.addAnchor('tst-session-1', T0 - 30 * 60_000)
     const live = store.addAnchor('tst-session-2', T0 - 20 * 60_000)
     const staleRun = store.addRun(stale.id, { startedAt: new Date(T0 - EXTRACTION_STALE_RUN_MS) })
@@ -352,11 +456,16 @@ describe('runExtractionTick', () => {
 
     expect(staleRun).toMatchObject({ status: 'failed', failure: 'transient' })
     expect(store.heldFailures(stale.id, EXTRACTOR_VERSION)).toHaveLength(0)
-    expect(store.commits.map((c) => c.anchorId)).toEqual([stale.id])
+    expect(store.runsOf(stale.id)).toHaveLength(1)
     expect(liveRun.status).toBe('running')
     expect(store.runsOf(live.id)).toHaveLength(1)
+    expect(requests).toHaveLength(0)
+    expect(result).toMatchObject({ windows: 0 })
+
+    clock.now += factExtractionBackoffMs(1)
+    await tick()
+    expect(store.commits.map((c) => c.anchorId)).toEqual([stale.id])
     expect(requests).toHaveLength(1)
-    expect(result).toMatchObject({ windows: 1, succeeded: 1 })
   })
 
   it('stores the run with its rejection counts when the gate rejects every item', async () => {
@@ -425,7 +534,7 @@ describe('runExtractionTick', () => {
     const anchor = store.addAnchor('tst-session-1', T0 - 60_000)
 
     await tick()
-    clock.now += 1000
+    clock.now += factExtractionBackoffMs(1)
     await tick()
 
     expect(store.runsOf(anchor.id).map((r) => r.failure)).toEqual(['transient', 'held'])
@@ -448,3 +557,83 @@ describe('runExtractionTick', () => {
 function pendingQuery(now: number): ExtractionPendingQuery {
   return { version: EXTRACTOR_VERSION, limit: 100, idleMs: SESSION_IDLE_MS, now: new Date(now) }
 }
+
+type Behavior = 'good' | 'transient' | 'held'
+const BEHAVIORS: Behavior[] = ['good', 'transient', 'held']
+const PROPERTY_SEEDS = 50
+
+/** A small deterministic PRNG, so each seed replays the same scenario. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+async function runSeededScenario(seed: number): Promise<void> {
+  const random = mulberry32(seed)
+  const int = (lo: number, hi: number): number => lo + Math.floor(random() * (hi - lo + 1))
+  let outage = false
+  const down = (): Error => Object.assign(new Error('upstream unavailable'), { status: 503 })
+  const { clock, store, requests, tick } = setup((req) => {
+    if (outage) return down()
+    if (req.user.includes('[transient]')) return { text: '', finishReason: 'content_filter' }
+    if (req.user.includes('[held]')) return { text: 'not json' }
+    return { text: EMPTY_LISTS }
+  })
+  const behaviorOf = new Map<string, Behavior>()
+  const sessions = int(1, 4)
+  for (let s = 0; s < sessions; s++) {
+    const anchors = int(1, 3)
+    for (let a = 0; a < anchors; a++) {
+      const behavior = BEHAVIORS[int(0, 2)]!
+      const anchor = store.addAnchor(`tst-session-${s}`, T0 - int(1, 600) * 60_000, `[${behavior}] request ${s}.${a}`)
+      behaviorOf.set(anchor.id, behavior)
+    }
+  }
+  const good = [...behaviorOf].filter(([, b]) => b === 'good').map(([id]) => id)
+  const bad = behaviorOf.size - good.length
+  const context = `seed ${seed}: ${sessions} sessions, ${behaviorOf.size} anchors, ${bad} bad`
+
+  const outageTicks = int(0, 3)
+  outage = true
+  for (let i = 0; i < outageTicks; i++) {
+    clock.now += FACT_EXTRACTION_BACKOFF_MAX_MS + 1000
+    const before = requests.length
+    await tick()
+    expect(requests.length - before, `${context}, outage tick ${i}`).toBeLessThanOrEqual(2)
+  }
+  outage = false
+
+  const tickLimit = bad * 7 + 2
+  for (let i = 0; i < tickLimit; i++) {
+    clock.now += FACT_EXTRACTION_BACKOFF_MAX_MS + 1000
+    await tick()
+  }
+  const committed = new Set(store.commits.map((c) => c.anchorId))
+  expect(good.filter((id) => !committed.has(id)), `${context}: good anchors left after ${tickLimit} ticks`).toEqual([])
+
+  // A run begun on an anchor never starts inside the backoff its earlier
+  // failures set.
+  for (const anchorId of behaviorOf.keys()) {
+    const runs = store.runsOf(anchorId)
+    runs.forEach((run, i) => {
+      const failed = runs.slice(0, i).filter((r) => r.status === 'failed')
+      if (failed.length === 0) return
+      const last = Math.max(...failed.map((r) => r.finishedAt!.getTime()))
+      expect(run.startedAt.getTime(), `${context}: run ${i} of ${anchorId}`).toBeGreaterThanOrEqual(
+        last + factExtractionBackoffMs(failed.length),
+      )
+    })
+  }
+}
+
+describe('runExtractionTick over seeded failure mixes', () => {
+  it('extracts every good anchor within bad × 7 + 2 ticks of an outage, with two calls per outage tick at most', async () => {
+    for (let seed = 1; seed <= PROPERTY_SEEDS; seed++) await runSeededScenario(seed)
+  })
+})

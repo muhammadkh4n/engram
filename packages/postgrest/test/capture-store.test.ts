@@ -486,7 +486,8 @@ describe('PostgRestCaptureStore extraction', () => {
       session_id: 'sess-1',
       anchor_kind: 'trailing',
       occurred_at: '2026-09-14T09:00:00+00:00',
-      failures: 1,
+      failures: 3,
+      held_failures: 1,
       running_run_id: RUN,
       running_started_at: '2026-09-14T09:05:00+00:00',
     }
@@ -504,7 +505,8 @@ describe('PostgRestCaptureStore extraction', () => {
         sessionId: 'sess-1',
         anchorKind: 'trailing',
         occurredAt: new Date('2026-09-14T09:00:00.000Z'),
-        failures: 1,
+        failures: 3,
+        heldFailures: 1,
         runningRunId: RUN,
         runningStartedAt: new Date('2026-09-14T09:05:00.000Z'),
       },
@@ -522,6 +524,14 @@ describe('PostgRestCaptureStore extraction', () => {
     expect(calls).toEqual([])
     const bad = { anchor_item_id: ANCHOR, session_id: 'sess-1', anchor_kind: 'assistant_turn', occurred_at: NOW.toISOString(), failures: 0, running_run_id: null, running_started_at: null }
     await expect(storeWith({ data: [bad], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const moreHeldThanFailed = { ...bad, anchor_kind: 'user_prompt', failures: 1, held_failures: 2 }
+    await expect(storeWith({ data: [moreHeldThanFailed], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const noHeldCount = { ...bad, anchor_kind: 'user_prompt' }
+    await expect(storeWith({ data: [noHeldCount], error: null }).store.extractionPending(query)).rejects.toThrow(
       'extractionPending failed: the RPC returned an unexpected row',
     )
     const halfOpen = { ...bad, anchor_kind: 'user_prompt', running_run_id: RUN }

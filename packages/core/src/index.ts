@@ -315,6 +315,8 @@ export {
   SESSION_IDLE_MS,
   EXTRACTION_WINDOWS_PER_TICK,
   EXTRACTION_STALE_RUN_MS,
+  EXTRACTION_HELD_FAILURES_MAX,
+  EXTRACTION_TRANSIENT_FAILURES_MAX,
 } from './extraction/run.js'
 export type {
   ExtractWindowDeps,

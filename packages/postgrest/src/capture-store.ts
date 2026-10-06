@@ -345,6 +345,7 @@ export class PostgRestCaptureStore implements CaptureStore {
 function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
   const unexpected = new Error('extractionPending failed: the RPC returned an unexpected row')
   const { anchor_item_id: anchorId, session_id: sessionId, anchor_kind: anchorKind, failures } = row
+  const heldFailures = row.held_failures
   const runningRunId = row.running_run_id
   const occurredAt = parseTime(row.occurred_at)
   const isOpen = runningRunId !== null
@@ -356,6 +357,8 @@ function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
     !ANCHOR_KINDS.has(anchorKind) ||
     occurredAt === null ||
     !isCount(failures) ||
+    !isCount(heldFailures) ||
+    heldFailures > failures ||
     (isOpen && (typeof runningRunId !== 'string' || runningStartedAt === null)) ||
     (!isOpen && row.running_started_at !== null)
   ) {
@@ -367,6 +370,7 @@ function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
     anchorKind: anchorKind as AnchorKind,
     occurredAt,
     failures,
+    heldFailures,
     runningRunId: isOpen ? (runningRunId as string) : null,
     runningStartedAt,
   }

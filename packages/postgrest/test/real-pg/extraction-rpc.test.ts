@@ -146,12 +146,17 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(await store.extractionFail(run, { error: 'unparseable reply', failure: 'held', stats: {} })).toBe(true)
   }
 
+  async function transientFailure(anchorId: string, sessionId: string): Promise<void> {
+    const run = await begin(anchorId, sessionId)
+    expect(await store.extractionFail(run, { error: 'provider unavailable', failure: 'transient', stats: {} })).toBe(true)
+  }
+
   async function succeed(anchorId: string, sessionId: string): Promise<void> {
     const run = await begin(anchorId, sessionId)
     await store.extractionCommit(run, { subjects: [], items: [], stats: {} })
   }
 
-  /** The latest held failure's end, in ms with microseconds kept. */
+  /** The latest failure's end, in ms with microseconds kept. */
   async function lastFailureMs(anchorId: string): Promise<number> {
     return Number(
       await pg.psql(
@@ -208,7 +213,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     }
   }
 
-  it('returns each session\'s earliest due anchor, oldest first, backing off held failures only', async () => {
+  it('returns each session\'s earliest due anchor, oldest first, backing off every failure', async () => {
     const [a1, a2, b1] = await seed([
       prompt('sess-a', 'First request in session a.', 0),
       prompt('sess-a', 'Second request in session a.', 2),
@@ -242,22 +247,49 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       [b1, 0],
     ])
 
-    // A transient failure neither counts nor backs off.
-    const flaky = await begin(b1!, 'sess-b')
-    await store.extractionFail(flaky, { error: 'provider unavailable', failure: 'transient', stats: {} })
-    expect((await pending(new Date(Math.ceil(failedAt) + 60_000))).map((p) => [p.anchorId, p.failures])).toEqual([
-      [a1, 1],
-      [b1, 0],
+    // A transient failure backs its anchor off too, and counts apart from
+    // the held ones.
+    await transientFailure(b1!, 'sess-b')
+    const flakyAt = await lastFailureMs(b1!)
+    expect((await pending(new Date(Math.floor(flakyAt) + 59_000))).map((p) => p.anchorId)).not.toContain(b1)
+    const both = await pending(new Date(Math.ceil(flakyAt) + 60_000))
+    expect(both.map((p) => [p.anchorId, p.failures, p.heldFailures])).toEqual([
+      [a1, 1, 1],
+      [b1, 1, 0],
+    ])
+
+    // The backoff follows the count of both classes: a held failure after a
+    // transient one waits 120 seconds.
+    await heldFailure(b1!, 'sess-b')
+    const mixedAt = await lastFailureMs(b1!)
+    expect((await pending(new Date(Math.floor(mixedAt) + 119_000))).map((p) => p.anchorId)).not.toContain(b1)
+    expect((await pending(new Date(Math.ceil(mixedAt) + 120_000))).map((p) => [p.anchorId, p.failures, p.heldFailures])).toEqual([
+      [a1, 1, 1],
+      [b1, 2, 1],
     ])
 
     // The third held failure exhausts the earlier anchor, and the later one
-    // of its session runs; a succeeded anchor leaves its session too.
+    // of its session runs.
     await heldFailure(a1!, 'sess-a')
     await heldFailure(a1!, 'sess-a')
-    await succeed(b1!, 'sess-b')
     const later = new Date(Date.now() + 24 * 60 * 60_000)
+    expect((await pending(later)).map((p) => [p.anchorId, p.failures])).toEqual([
+      [b1, 2],
+      [a2, 0],
+    ])
+
+    // Five transient failures leave an anchor pending; the sixth exhausts it.
+    for (let i = 0; i < 4; i++) await transientFailure(b1!, 'sess-b')
+    expect((await pending(later)).map((p) => [p.anchorId, p.failures, p.heldFailures])).toEqual([
+      [b1, 6, 1],
+      [a2, 0, 0],
+    ])
+    await transientFailure(b1!, 'sess-b')
     expect((await pending(later)).map((p) => [p.anchorId, p.failures])).toEqual([[a2, 0]])
-    expect(await pending(later, 20)).toHaveLength(1)
+
+    // A succeeded anchor leaves its session too.
+    await succeed(a2!, 'sess-a')
+    expect(await pending(later, 20)).toEqual([])
   }, TEST_TIMEOUT_MS)
 
   it('makes a trailing turn pending after session_end or the idle time, and not before', async () => {

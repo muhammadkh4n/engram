@@ -705,6 +705,7 @@ function anchor(n: number): PendingAnchor {
     anchorKind: 'user_prompt',
     occurredAt: new Date('2026-10-01T09:00:00Z'),
     failures: 0,
+    heldFailures: 0,
     runningRunId: null,
     runningStartedAt: null,
   }
