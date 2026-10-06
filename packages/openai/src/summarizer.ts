@@ -24,7 +24,9 @@ import {
   FactExtractionError,
   SUPERSESSION_NEW_FACT_KEY,
   UnclassifiableReplyError,
+  cutWholeChars,
   isSupersessionFactKind,
+  tailWholeChars,
 } from '@engram-mem/core'
 import { extractJsonReply } from './json-reply.js'
 import { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
@@ -231,7 +233,7 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
     `Current project: ${opts.project ?? 'global'}`,
   ]
   if (opts.priorTurn) {
-    parts.push(`Prior turn (context only): ${opts.priorTurn.slice(0, 500)}`)
+    parts.push(`Prior turn (context only): ${cutWholeChars(opts.priorTurn, 500)}`)
   }
   parts.push('', 'Turn to classify:', content)
   return parts.join('\n')
@@ -701,7 +703,7 @@ export class OpenAISummarizer {
         model: this.model,
         messages: [
           { role: 'system', content: ENTITY_SYSTEM_PROMPT },
-          { role: 'user', content: trimmed.slice(0, 6000) },
+          { role: 'user', content: cutWholeChars(trimmed, 6000) },
         ],
         max_tokens: 500,
         temperature: 0.1,
@@ -876,7 +878,7 @@ export class OpenAISummarizer {
     opts: { conversationContext: string; speakerRole?: string },
   ): Promise<string> {
     if (chunk.trim().length === 0) return ''
-    const context = opts.conversationContext.slice(-2000)
+    const context = tailWholeChars(opts.conversationContext, 2000)
     if (context.trim().length === 0) {
       // First turn or no prior context — nothing to situate against.
       return ''
@@ -908,7 +910,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
 
       const raw = resp.choices[0]?.message?.content?.trim() ?? ''
       // Guardrail: keep it bounded and scrub accidental markdown wrappers.
-      return raw.replace(/^["'`*_]+|["'`*_]+$/g, '').slice(0, 400)
+      return cutWholeChars(raw.replace(/^["'`*_]+|["'`*_]+$/g, ''), 400)
     } catch (err) {
       process.stderr.write(
         `[openai] contextualizeChunk failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -934,7 +936,7 @@ Respond with only the preamble sentences. No JSON, no markdown, no quotes.`,
     const candidates = documents.slice(0, RERANK_MAX_CANDIDATES)
 
     const docList = candidates
-      .map((d, i) => `[${i}] ${d.content.slice(0, 300)}`)
+      .map((d, i) => `[${i}] ${cutWholeChars(d.content, 300)}`)
       .join('\n')
 
     try {

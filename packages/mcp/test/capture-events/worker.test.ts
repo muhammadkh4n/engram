@@ -287,6 +287,30 @@ describe('startCaptureWorker', () => {
     expect(findPostgresUnsafeText(f.failures[0])).toBeNull()
   })
 
+  it('hands the embedder only well-formed text, on the batch and the one-at-a-time path', async () => {
+    const items = [
+      // An emoji whose surrogate pair straddles the embed cap: units 5999 and 6000.
+      { id: '00000000-0000-4000-8000-00000000f001', searchText: `${'a'.repeat(EMBED_MAX_CHARS - 1)}😀tail` },
+      { id: '00000000-0000-4000-8000-00000000f002', searchText: 'a sample item with a lone \uD83D surrogate and a \u0000 byte' },
+      { id: '00000000-0000-4000-8000-00000000f003', searchText: 'the sample text the model refuses' },
+    ]
+    const f = fakes({
+      pending: async () => items,
+      embedBatch: async (texts) => {
+        if (texts.includes(items[2]!.searchText)) throw new EmbeddingInputError(400, "400 Invalid 'input'")
+        return texts.map(() => vector())
+      },
+    })
+    const worker = startCaptureWorker(f.opts)
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+
+    const wellFormed = ['a'.repeat(EMBED_MAX_CHARS - 1), 'a sample item with a lone \uFFFD surrogate and a \uFFFD byte', items[2]!.searchText]
+    expect(f.embedded).toEqual([wellFormed, [wellFormed[0]], [wellFormed[1]], [wellFormed[2]]])
+    for (const texts of f.embedded) expect(findPostgresUnsafeText(texts)).toBeNull()
+    expect(f.written[0]!.map((r) => r.id)).toEqual([items[0]!.id, items[1]!.id])
+  })
+
   it('counts no refusal against any item when the provider refuses every input, over 10 passes', async () => {
     const store = itemStore(PENDING)
     const f = fakes({
