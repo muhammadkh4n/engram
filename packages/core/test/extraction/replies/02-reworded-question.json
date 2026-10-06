@@ -1,0 +1,57 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000201",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "yes",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:20Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-201"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "yes",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000200",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "A malformed capture event currently stops the worker.\nShould a poison event be retried three times?",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [],
+        "event_key": "tst-key-200"
+      }
+    },
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"yes\",\"question\":\"Should poison events be retried 3 times?\",\"kind\":\"ruling\",\"standing\":false,\"scope\":\"project\",\"subject\":{\"new\":\"poison events\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}"
+}
