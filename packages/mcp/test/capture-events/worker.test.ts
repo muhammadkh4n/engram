@@ -11,23 +11,35 @@
  * own, and renews its claims while a pass runs and not after it; a full
  * batch runs the next tick at once; stop waits for a tick in
  * flight up to its grace; shutdown resolves 0 after a clean stop or at the
- * grace, and 1 when a step throws.
+ * grace, and 1 when a step throws. A tick that held the lock runs extraction
+ * after its embedding pass, and a full extraction budget runs the next tick
+ * at once.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   EMBED_MAX_CHARS,
   EMBEDDING_ATTEMPTS_MAX,
   EMBEDDING_CLAIM_LEASE_SECONDS,
+  EXTRACTION_WINDOWS_PER_TICK,
   EmbeddingInputError,
   findPostgresUnsafeText,
 } from '@engram-mem/core'
-import type { EmbeddingFailure, ItemEmbedding, MaterializeResult, PendingEmbedding } from '@engram-mem/core'
+import type {
+  EmbeddingFailure,
+  ExtractionBegin,
+  ExtractionStore,
+  ItemEmbedding,
+  MaterializeResult,
+  PendingAnchor,
+  PendingEmbedding,
+} from '@engram-mem/core'
 import {
   WORKER_EMBED_BACKOFF_MAX_MS,
   WORKER_EMBED_CLAIM_RENEW_MS,
   WORKER_INTERVAL_MS,
   startCaptureWorker,
   type CaptureWorkerEmbedder,
+  type CaptureWorkerExtraction,
   type CaptureWorkerOptions,
 } from '../../src/capture-events/worker.js'
 import { SHUTDOWN_GRACE_MS, shutdown, type ShutdownDeps } from '../../src/http-server.js'
@@ -591,6 +603,44 @@ describe('startCaptureWorker', () => {
     expect(f.logs.join('\n')).not.toContain('plum-orchard')
   })
 
+  it('runs extraction after the embedding pass of a tick that held the lock, with the chat model', async () => {
+    const f = fakes()
+    const { extraction, begun } = extractionFakes(f.calls, [anchor(1)])
+    const worker = startCaptureWorker({ ...f.opts, extraction })
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+
+    expect(f.calls).toEqual([
+      'materialize(200)',
+      'pendingEmbeddings(32)',
+      'embeddingFailedCount',
+      'extractionPending',
+      'extractionBegin',
+      'extractionPending',
+    ])
+    expect(begun.map((b) => b.model)).toEqual(['tst-chat-model'])
+  })
+
+  it('runs no extraction in a tick whose materialize call did not get the lock', async () => {
+    const f = fakes({ materialize: async () => ({ locked: false }) })
+    const { extraction } = extractionFakes(f.calls, [anchor(1)])
+    const worker = startCaptureWorker({ ...f.opts, extraction })
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+    expect(f.calls).toEqual(['materialize(200)'])
+  })
+
+  it('runs the next tick at once after a full extraction budget', async () => {
+    const f = fakes()
+    const anchors = Array.from({ length: EXTRACTION_WINDOWS_PER_TICK }, (_, i) => anchor(i + 1))
+    const { extraction } = extractionFakes(f.calls, anchors)
+    const worker = startCaptureWorker({ ...f.opts, extraction })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.calls.filter((c) => c.startsWith('materialize'))).toHaveLength(2)
+    await worker.stop(1000)
+  })
+
   it('stop waits for a tick in flight and schedules nothing after it', async () => {
     const gate = deferred<MaterializeResult>()
     const f = fakes({ materialize: () => gate.promise })
@@ -646,6 +696,55 @@ function fakeServer(opts: { openConnection?: boolean } = {}) {
     },
   }
   return { calls, httpServer: server as unknown as ShutdownDeps['httpServer'] }
+}
+
+function anchor(n: number): PendingAnchor {
+  return {
+    anchorId: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+    sessionId: `tst-session-${n}`,
+    anchorKind: 'user_prompt',
+    occurredAt: new Date('2026-10-01T09:00:00Z'),
+    failures: 0,
+    runningRunId: null,
+    runningStartedAt: null,
+  }
+}
+
+/**
+ * An extraction store handing out `anchors` once, then nothing. Each begun
+ * run reads a window that is gone, so it closes without a model call.
+ */
+function extractionFakes(calls: string[], anchors: PendingAnchor[]) {
+  const begun: ExtractionBegin[] = []
+  let handedOut = false
+  const store: ExtractionStore = {
+    extractionPending: async () => {
+      calls.push('extractionPending')
+      if (handedOut) return []
+      handedOut = true
+      return anchors
+    },
+    extractionBegin: async (run) => {
+      calls.push('extractionBegin')
+      begun.push(run)
+      return anchors.length > 1 ? `run-${begun.length}` : null
+    },
+    extractionWindow: async () => null,
+    extractionFail: async () => true,
+    extractionCommit: async () => {
+      throw new Error('no commit expected')
+    },
+  }
+  const extraction: CaptureWorkerExtraction = {
+    store,
+    intelligence: {
+      completeJson: async () => {
+        throw new Error('no model call expected')
+      },
+    },
+    model: 'tst-chat-model',
+  }
+  return { extraction, begun }
 }
 
 describe('shutdown', () => {

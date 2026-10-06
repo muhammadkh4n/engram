@@ -3,23 +3,8 @@ import type { IntelligenceAdapter } from '../adapters/intelligence.js'
 import { classifyExtractionError, isCredentialError } from '../adapters/intelligence.js'
 import type { Digest } from '../types.js'
 import { extractDigestFacts } from './fact-candidates.js'
+import { factExtractionBackoffMs } from '../utils/backoff.js'
 import type { FactCandidate } from './fact-candidates.js'
-
-/** Backoff after a digest's first failed unit. */
-export const FACT_EXTRACTION_BACKOFF_BASE_MS = 60_000
-/** Longest backoff: a digest failing for hours is still tried four times a day. */
-export const FACT_EXTRACTION_BACKOFF_MAX_MS = 6 * 60 * 60 * 1000
-
-/**
- * How long a digest waits before its next extraction after its `failures`-th
- * failed unit: 60 s doubled per earlier failure, capped at 6 h. Counted or
- * not, every failure lengthens it, so a digest that keeps failing yields the
- * head of the oldest-first queue to the digests behind it.
- */
-export function factExtractionBackoffMs(failures: number): number {
-  const exponent = Math.max(0, Math.floor(failures) - 1)
-  return Math.min(FACT_EXTRACTION_BACKOFF_BASE_MS * 2 ** exponent, FACT_EXTRACTION_BACKOFF_MAX_MS)
-}
 
 export interface ExtractionCounts {
   extractionFailed: number
