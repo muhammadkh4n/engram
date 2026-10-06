@@ -12,7 +12,7 @@ import type { CaptureEvent } from '../../src/capture/events.js'
 import { CAPTURE_CLIENT_NAME } from '../../src/capture/events.js'
 import { type ForwardedInput, HOOK_AT_ENV, type WorkerKind } from '../../src/capture/hook-input.js'
 import { DRAIN_BACKOFF_BASE_MS, loadSpoolState, spoolRoot } from '../../src/capture/spool.js'
-import { cursorRoot } from '../../src/capture/transcript-cursor.js'
+import { cursorRoot, loadCursor } from '../../src/capture/transcript-cursor.js'
 import { runWorker, SWEEP_IDLE_MS, type WorkerResult } from '../../src/capture/worker.js'
 import { runGitCommitCapture } from '../../src/hooks/git-commit.js'
 import { type CaptureStub, type CaptureStubRequest, startCaptureStub } from './stub-server.js'
@@ -364,8 +364,11 @@ describe('what a session sends', () => {
     utimesSync(crashed, idle, idle)
     const before = stub.received.length
 
-    const own = writeTranscript(projectDir, SESSION, [])
+    // An interactive start has no transcript file until its first message.
+    const own = join(projectDir, `${SESSION}.jsonl`)
     await hook('session-start', input(own, { source: 'startup' }))
+    expect(existsSync(own)).toBe(false)
+    expect(await loadCursor(cursorRoot(env), CRASHED)).not.toBeNull()
 
     const fromSweep = eventsOf(stub.received.slice(before))
     expect(fromSweep.filter((e) => TRANSCRIPT_TYPES.has(e.type)).map((e) => [e.session_id, e.type, e.event_uuid])).toEqual([

@@ -52,6 +52,8 @@ export interface WorkerResult {
   drain: DrainResult | null
   /** Steps that threw, by step name; the error's code or name only. */
   failures: string[]
+  /** A session-start that had no directory to sweep: no transcript_path and no file found by session id. */
+  noSweepDirectory?: true
 }
 
 interface Counts {
@@ -215,6 +217,16 @@ export async function sweepTranscripts(dir: string, env: Env, now = Date.now()):
   return total
 }
 
+/**
+ * The directory session-start sweeps: that of the hook's `transcript_path`
+ * whether or not the file exists yet (Claude Code writes it at the session's
+ * first message), else that of the file found by session id, else null.
+ */
+function sweepDirectory(input: ForwardedInput, transcript: string | null): string | null {
+  if (input.transcript_path) return dirname(resolve(input.transcript_path))
+  return transcript === null ? null : dirname(transcript)
+}
+
 const SESSION_EVENT: Partial<Record<WorkerKind, SessionEventType>> = {
   'pre-compact': 'pre_compact',
   'session-end': 'session_end',
@@ -231,6 +243,7 @@ export async function runWorker(kind: WorkerKind, input: ForwardedInput, env: En
   const occurredAt = hookTime(env)
   const total: Counts = { events: 0, files: 0, redactions: 0 }
   const failures: string[] = []
+  let noSweepDirectory = false
   const step = async (name: string, run: () => Promise<Counts | void>): Promise<void> => {
     try {
       const counts = await run()
@@ -247,8 +260,10 @@ export async function runWorker(kind: WorkerKind, input: ForwardedInput, env: En
     }
     const type = SESSION_EVENT[kind]
     if (type !== undefined) await step('event', () => spoolSessionEvent(type, kind, input, env, occurredAt))
-    if (transcript !== null && kind === 'session-start') {
-      await step('sweep', () => sweepTranscripts(dirname(transcript), env))
+    if (kind === 'session-start') {
+      const dir = sweepDirectory(input, transcript)
+      if (dir === null) noSweepDirectory = true
+      else await step('sweep', () => sweepTranscripts(dir, env))
     }
   }
 
@@ -256,7 +271,7 @@ export async function runWorker(kind: WorkerKind, input: ForwardedInput, env: En
   await step('drain', async () => {
     drain = await drainSpool({ env, deadlineMs: started + WORKER_DRAIN_BUDGET_MS })
   })
-  return { ...total, drain, failures }
+  return { ...total, drain, failures, ...(noSweepDirectory ? { noSweepDirectory: true as const } : {}) }
 }
 
 function drainSummary(drain: DrainResult | null): string {
@@ -271,9 +286,10 @@ function drainSummary(drain: DrainResult | null): string {
 export function workerLogLine(kind: WorkerKind, input: ForwardedInput, result: WorkerResult, ms: number): string {
   const session = (input.session_id ?? '-').slice(0, 8)
   const failed = result.failures.length > 0 ? ` failed=${result.failures.join(',')}` : ''
+  const sweep = result.noSweepDirectory ? ' sweep: no directory' : ''
   return (
     `worker ${kind} session=${session} events=${result.events} files=${result.files} ` +
-    `redactions=${result.redactions} ${drainSummary(result.drain)} ms=${ms}${failed}`
+    `redactions=${result.redactions} ${drainSummary(result.drain)} ms=${ms}${failed}${sweep}`
   )
 }
 

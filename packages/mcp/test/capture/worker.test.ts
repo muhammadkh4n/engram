@@ -13,7 +13,7 @@ import { eventUuidFromParts } from '../../src/capture/event-uuid.js'
 import { HOOK_AT_ENV, HOOK_INPUT_ENV } from '../../src/capture/hook-input.js'
 import { spoolRoot } from '../../src/capture/spool.js'
 import { cursorRoot, loadCursor } from '../../src/capture/transcript-cursor.js'
-import { runWorker, sweepTranscripts, SWEEP_IDLE_MS, SWEEP_MAX_FILES } from '../../src/capture/worker.js'
+import { runWorker, sweepTranscripts, SWEEP_IDLE_MS, SWEEP_MAX_FILES, workerLogLine } from '../../src/capture/worker.js'
 import { runDrainCli } from '../../src/capture/drain-cli.js'
 import { startCaptureStub } from './stub-server.js'
 import { assistantText, at, humanPrompt, turnEnd, uuid, writeTranscript } from './transcripts.js'
@@ -233,6 +233,34 @@ describe('the sweep', () => {
     await runWorker('session-start', { session_id: SESSION, transcript_path: own, cwd: home, source: 'startup' }, env)
 
     expect(spooled().some((e) => e.session_id === OTHER && e.type === 'assistant_turn')).toBe(true)
+  })
+
+  it('session-start sweeps the directory of its transcript_path before that file exists', async () => {
+    const now = Date.now()
+    setSince(now - 3 * SWEEP_IDLE_MS)
+    touch(sessionTranscript(dir(), OTHER), now - SWEEP_IDLE_MS - 60_000)
+    const own = join(dir(), `${SESSION}.jsonl`)
+
+    const result = await runWorker('session-start', { session_id: SESSION, transcript_path: own, cwd: home, source: 'startup' }, env)
+
+    expect(existsSync(own)).toBe(false)
+    expect(result.failures).toEqual([])
+    expect(spooled().filter((e) => e.session_id === OTHER && e.type === 'assistant_turn')).toHaveLength(2)
+    expect(await loadCursor(cursorRoot(env), OTHER)).not.toBeNull()
+    expect(workerLogLine('session-start', { session_id: SESSION }, result, 1)).not.toContain('sweep: no directory')
+  })
+
+  it('session-start with neither a transcript_path nor a file found by session id logs that it had no directory', async () => {
+    const now = Date.now()
+    setSince(now - 3 * SWEEP_IDLE_MS)
+    touch(sessionTranscript(dir(), OTHER), now - SWEEP_IDLE_MS - 60_000)
+    const input = { session_id: SESSION, cwd: home, source: 'startup' }
+
+    const result = await runWorker('session-start', input, env)
+
+    expect(result.failures).toEqual([])
+    expect(await loadCursor(cursorRoot(env), OTHER)).toBeNull()
+    expect(workerLogLine('session-start', input, result, 1)).toMatch(/ sweep: no directory$/)
   })
 })
 
