@@ -1,0 +1,59 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000401",
+      "kind": "user_answer",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "ok",
+      "context": "[Spool] Drop the old spool after the cutover?\n- Drop it\n- Keep it",
+      "occurred_at": "2026-10-01T09:01:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 5,
+        "event_key": "tst-key-401"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "questions": [
+          {
+            "question": "Drop the old spool after the cutover?",
+            "header": "Spool",
+            "options": [
+              {
+                "label": "Drop it"
+              },
+              {
+                "label": "Keep it"
+              }
+            ],
+            "multiSelect": false
+          }
+        ],
+        "answers": {
+          "Drop the old spool after the cutover?": "ok"
+        },
+        "transcript_line": 5
+      },
+      "plan_dirs": []
+    },
+    "turn": null,
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"ok\",\"question\":\"Drop the old spool after the cutover?\",\"kind\":\"ruling\",\"standing\":false,\"scope\":\"project\",\"subject\":{\"new\":\"old spool\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}"
+}
