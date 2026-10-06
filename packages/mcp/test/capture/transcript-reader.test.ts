@@ -14,6 +14,7 @@ import {
   at,
   compactBoundary,
   compactSummary,
+  type AskQuestionInput,
   type Entry,
   humanPrompt,
   notification,
@@ -283,6 +284,29 @@ describe('answers', () => {
   it('emits nothing for a dialog that timed out or that holds no answer', async () => {
     expect(await answerOf({ answers: { 'Which store should the worker read?': 'Postgres' }, afkTimeoutMs: 60_000 })).toEqual([])
     expect(await answerOf({ answers: {} })).toEqual([])
+  })
+
+  it('turns the response of an answered dialog with no parsable question into a prompt', async () => {
+    const events = await eventsOf([
+      humanPrompt(uuid(1), at(1), 'set up the worker'),
+      askResult(uuid(2), at(2), 'toolu_gone', [{ header: 'no question text' } as unknown as AskQuestionInput], {
+        answers: {},
+        response: 'read from the replica instead',
+      }),
+    ])
+    expect(events.filter((e) => e.type === 'user_answer')).toEqual([])
+    expect(prompts(events)).toEqual([
+      { text: 'set up the worker', transcript_line: 1 },
+      { text: 'read from the replica instead', transcript_line: 2 },
+    ])
+  })
+
+  it('emits nothing for an answered dialog with no parsable question and a blank response', async () => {
+    const events = await eventsOf([
+      humanPrompt(uuid(1), at(1), 'set up the worker'),
+      askResult(uuid(2), at(2), 'toolu_gone', [], { answers: {}, response: '  ' }),
+    ])
+    expect(prompts(events)).toEqual([{ text: 'set up the worker', transcript_line: 1 }])
   })
 
   it('turns the feedback typed into a rejected dialog into an answer', async () => {

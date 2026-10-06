@@ -297,8 +297,16 @@ function toolResultEvent(entry: Json, callOf: (id: string) => ToolCall | undefin
     if (maybeDialog && isObject(result) && Array.isArray(result.questions) && isObject(result.answers)) {
       // A dialog that timed out was resolved by the CLI, not by the user.
       if (result.afkTimeoutMs !== undefined) return null
-      const payload = answerPayload(call ? call.questions : askQuestions(result), result, line)
-      return payload && { type: 'user_answer', payload }
+      const questions = call ? call.questions : askQuestions(result)
+      const payload = answerPayload(questions, result, line)
+      if (payload) return { type: 'user_answer', payload }
+      // An answer must name a question; with none to name, the text the user
+      // typed into the dialog is kept as a prompt, as for a rejected dialog.
+      const response = result.response
+      if (questions.length === 0 && typeof response === 'string' && !isBlank(response)) {
+        return { type: 'user_prompt', payload: promptPayload(response, line) }
+      }
+      return null
     }
     const feedback = entry.userFeedback
     if (block.is_error !== true || entry.toolDenialKind !== 'user-rejected') continue
