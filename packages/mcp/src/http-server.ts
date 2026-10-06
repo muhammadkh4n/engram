@@ -11,10 +11,11 @@ import {
   getCaptureDeps,
   recallOutputPolicyAtStartup,
   captureModelFromEnv,
+  chatIntelligenceOptionsFromEnv,
   parseSalienceThresholdEnv,
 } from './server-core.js'
 import { defaultSecretRegistry, EMBED_TEXT_VERSION } from '@engram-mem/core'
-import { OpenAIEmbeddingService } from '@engram-mem/openai'
+import { OpenAIEmbeddingService, openaiIntelligence } from '@engram-mem/openai'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { createRequestListener, loadHttpConfig } from './http-app.js'
 import { loadProjectRegistry, startProjectSync, type ProjectRegistry, type ProjectSync } from './capture-events/project-registry.js'
@@ -172,6 +173,14 @@ export async function main(): Promise<void> {
       store,
       embedder,
       embeddingModel: `text-embedding-3-small:${embedder.dimensions()}:v${EMBED_TEXT_VERSION}`,
+      extraction: {
+        store,
+        intelligence: openaiIntelligence({
+          apiKey: captureEventsConfig.openaiApiKey,
+          ...chatIntelligenceOptionsFromEnv(),
+        }),
+        model: captureModel,
+      },
       log,
     })
   }

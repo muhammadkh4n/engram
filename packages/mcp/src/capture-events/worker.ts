@@ -26,6 +26,13 @@
  * WORKER_EMBED_BACKOFF_MAX_MS. Materialization keeps its own interval through
  * a backoff: only the embedding step waits.
  *
+ * A tick that held the lock then runs extraction windows (runExtractionTick):
+ * after the embedding pass, so a slow model call never delays embedding the
+ * utterances just materialized; the items it stores are embedded by the next
+ * tick. Extraction keeps its own failure records and backoff in the run
+ * table, and a tick that used its whole window budget schedules the next one
+ * at once.
+ *
  * The loop is a self-scheduling timeout, so ticks never overlap, and all of
  * its state lives in the returned handle. Log lines carry counts, error codes
  * and messages only, never stored text.
@@ -34,9 +41,13 @@ import {
   buildTextToEmbed,
   EMBEDDING_ERROR_MAX_CHARS,
   isEmbeddingInputError,
+  runExtractionTick,
   scrubSecrets,
   type CaptureStore,
   type EmbeddingFailure,
+  type ExtractionStore,
+  type ExtractionTickResult,
+  type IntelligenceAdapter,
   type MaterializeResult,
   type PendingEmbedding,
 } from '@engram-mem/core'
@@ -64,8 +75,18 @@ export interface CaptureWorkerOptions {
   embedder: CaptureWorkerEmbedder
   /** Stored with every vector: `<model>:<dimensions>:v<embed text version>`. */
   embeddingModel: string
+  /** Extraction runs only when given. */
+  extraction?: CaptureWorkerExtraction
   intervalMs?: number
   log: (line: string) => void
+}
+
+export interface CaptureWorkerExtraction {
+  store: ExtractionStore
+  /** The chat adapter; without completeJson, extraction logs once and stays off. */
+  intelligence: IntelligenceAdapter | undefined
+  /** The configured chat model, recorded on each run. */
+  model: string
 }
 
 export interface CaptureWorker {
@@ -223,6 +244,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
       }
     }
     await refreshEmbedFailed(embedded.recorded)
+    const extracted = await extract()
 
     const happened = result.processed + result.failed + result.skipped + embedded.written + embedded.recorded > 0
     if (happened || result.dead !== lastDead || embedFailed !== lastEmbedFailed) {
@@ -235,7 +257,18 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     lastDead = result.dead
     lastEmbedFailed = embedFailed
     const embeddedFull = embedded.read >= WORKER_EMBED_BATCH && embedded.error === null && embedded.refusedAll === null
-    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull }
+    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull || extracted.full }
+  }
+
+  const extract = async (): Promise<Pick<ExtractionTickResult, 'full'>> => {
+    if (opts.extraction === undefined) return { full: false }
+    const { store: extractionStore, intelligence, model } = opts.extraction
+    try {
+      return await runExtractionTick({ store: extractionStore, intelligence, model, log })
+    } catch (err) {
+      log(`capture worker: extraction failed: ${describeError(err)}`)
+      return { full: false }
+    }
   }
 
   /** The interval doubled once per consecutive failed embedding pass, capped. */

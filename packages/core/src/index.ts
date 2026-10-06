@@ -83,7 +83,7 @@ export {
   factExtractionBackoffMs,
   FACT_EXTRACTION_BACKOFF_BASE_MS,
   FACT_EXTRACTION_BACKOFF_MAX_MS,
-} from './consolidation/extraction-run.js'
+} from './utils/backoff.js'
 export { statementClock, factStatementClock, epochMs } from './consolidation/statement-time.js'
 export type { StatementClock, FactClock, FactSources } from './consolidation/statement-time.js'
 export type {
@@ -300,6 +300,29 @@ export type {
   WindowSubject,
   WindowListedItem,
 } from './extraction/window.js'
+export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
+export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
+export { buildCommitPayload, extractionEventKey } from './extraction/persist.js'
+export type { ExtractionItemClass } from './extraction/persist.js'
+export {
+  extractWindow,
+  runExtractionTick,
+  extractionFailureClass,
+  isExtractionReplyError,
+  ExtractionReplyError,
+  SESSION_IDLE_MS,
+  EXTRACTION_WINDOWS_PER_TICK,
+  EXTRACTION_STALE_RUN_MS,
+} from './extraction/run.js'
+export type {
+  ExtractWindowDeps,
+  ExtractWindowResult,
+  ExtractionCall,
+  ExtractionReplyFault,
+  ExtractionStore,
+  ExtractionTickDeps,
+  ExtractionTickResult,
+} from './extraction/run.js'
 export { orderSubjects, normalizeLabel, labelKey } from './extraction/subjects.js'
 export type { OrderableSubject } from './extraction/subjects.js'
 export {
