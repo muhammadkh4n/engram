@@ -116,7 +116,7 @@ async function elapse(ms: number): Promise<void> {
 }
 
 /**
- * P1 and P2, which a proxy refuses, then G, which the route accepts, listed
+ * Two files a proxy refuses, then a good file the route accepts, listed
  * in that order. Each has a backoff entry that ended a moment ago, written
  * without `alone` as a state file from before that field existed.
  */
