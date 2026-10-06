@@ -13,6 +13,8 @@ import {
   writeSpoolBatch,
 } from '../../src/capture/spool.js'
 import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from '../../src/ingest/private-files.js'
+import { captureLogPath } from '../../src/capture/log.js'
+import { CAPTURE_FREE_TEXT_MAX_CHARS, USER_PROMPT_TEXT_MAX_CHARS } from '../../src/capture-events/contract.js'
 import { acceptAll, type CaptureStub, startCaptureStub } from './stub-server.js'
 import { at, TEST_BRANCH, TEST_CWD, uuid } from './transcripts.js'
 
@@ -22,6 +24,8 @@ const TOKEN = 'test-capture-token'
 const SECRET = 'zr4-dead-letter-secret-8812'
 // A quote, a backslash and a tab: inside a JSON line the value appears only in its escaped spelling.
 const ESCAPED_SECRET = 'qk7"dead\\letter\tvalue-3390'
+// Eight characters, so its placeholder is longer than the value it masks.
+const SHORT_SECRET = 'Kq7wZ3xP'
 
 // The secret registry is built once per process from process.env, on the
 // first scrub, so its source must be in place before any test runs.
@@ -29,7 +33,7 @@ const registryDir = mkdtempSync(join(tmpdir(), 'engram-spool-registry-'))
 const savedEnv = { SOURCES: process.env.ENGRAM_SECRET_SOURCES_FILE, CACHE: process.env.XDG_CACHE_HOME }
 
 beforeAll(() => {
-  writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ FIXTURE_SECRET: SECRET, FIXTURE_ESCAPED_SECRET: ESCAPED_SECRET }))
+  writeFileSync(join(registryDir, 'secrets.json'), JSON.stringify({ FIXTURE_SECRET: SECRET, FIXTURE_ESCAPED_SECRET: ESCAPED_SECRET, FIXTURE_SHORT_SECRET: SHORT_SECRET }))
   writeFileSync(join(registryDir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
   process.env.ENGRAM_SECRET_SOURCES_FILE = join(registryDir, 'sources.json')
   process.env.XDG_CACHE_HOME = join(registryDir, 'cache')
@@ -94,6 +98,15 @@ function deadLetters(): Array<{ at: string; status?: number; reason: string; eve
     .trimEnd()
     .split('\n')
     .map((line) => JSON.parse(line))
+}
+
+/** The capture log's drain-stop lines. */
+function stopLines(): string[] {
+  const path = captureLogPath(env)
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line.includes('spool drain stopped'))
 }
 
 async function until(condition: () => boolean): Promise<void> {
@@ -420,6 +433,72 @@ describe('drainSpool', () => {
       expect(raw).not.toContain('rexvps')
       expect(raw).not.toContain('tst-pass')
     }
+  })
+
+  it('logs a repeated bad_url stop once and writes its state once', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    const badEnv = { ...env, ENGRAM_SERVER_URL: 'rexvps:3850' }
+    await drainSpool({ env: badEnv })
+    const firstState = readFileSync(join(root, '.state.json'), 'utf8')
+    await drainSpool({ env: badEnv })
+    const result = await drainSpool({ env: badEnv })
+    expect(result).toMatchObject({ stopped: 'bad_url', remaining: 1 })
+    expect(stopLines()).toHaveLength(1)
+    expect(readFileSync(join(root, '.state.json'), 'utf8')).toBe(firstState)
+  })
+
+  it('logs a stop again after a drain gets through', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    const badEnv = { ...env, ENGRAM_SERVER_URL: 'rexvps:3850' }
+    await drainSpool({ env: badEnv })
+    expect(await drainSpool({ env })).toMatchObject({ files_sent: 1, remaining: 0 })
+    await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    await drainSpool({ env: badEnv })
+    expect(stopLines()).toHaveLength(2)
+  })
+
+  it('logs a stop again when a different condition came between', async () => {
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    const badEnv = { ...env, ENGRAM_SERVER_URL: 'rexvps:3850' }
+    await drainSpool({ env: badEnv })
+    stub.reply = { status: 200, body: { accepted: 0, duplicates: 0, rejected: [] } }
+    expect((await drainSpool({ env })).stopped).toBe('ack_mismatch')
+    await drainSpool({ env: badEnv })
+    expect(stopLines().map((l) => l.replace(/^\S+ /, ''))).toEqual([
+      'spool drain stopped: bad_url',
+      'spool drain stopped: ack_mismatch',
+      'spool drain stopped: bad_url',
+    ])
+  })
+
+  it('logs a repeated ack_mismatch once', async () => {
+    await writeSpoolBatch(SESSION, prompts(1, 2), { root })
+    stub.reply = { status: 200, body: { accepted: 1, duplicates: 0, rejected: [] } }
+    for (let i = 0; i < 3; i++) expect((await drainSpool({ env })).stopped).toBe('ack_mismatch')
+    expect(stopLines()).toHaveLength(1)
+  })
+
+  it('re-fits a cap-length prompt whose value the drain masks into a longer placeholder', async () => {
+    const text = `${'a'.repeat(USER_PROMPT_TEXT_MAX_CHARS - SHORT_SECRET.length)}${SHORT_SECRET}`
+    await writeSpoolBatch(SESSION, [{ ...prompt(1), payload: { text, transcript_line: 1 } }], { root })
+    const result = await drainSpool({ env })
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 0, remaining: 0 })
+    const sent = stub.received[0]!.body.events[0]!.payload as { text: string; truncated?: boolean }
+    expect(sent.text.length).toBeLessThanOrEqual(USER_PROMPT_TEXT_MAX_CHARS)
+    expect(sent.text).toBe('a'.repeat(USER_PROMPT_TEXT_MAX_CHARS - SHORT_SECRET.length))
+    expect(sent.truncated).toBe(true)
+  })
+
+  it('re-fits a cap-length assistant text whose value the drain masks into a longer placeholder', async () => {
+    const text = `${SHORT_SECRET}${'a'.repeat(CAPTURE_FREE_TEXT_MAX_CHARS - SHORT_SECRET.length)}`
+    const turn: CaptureEvent = { ...prompt(1), type: 'assistant_turn', payload: { text, transcript_line: 1, tools: [] } }
+    await writeSpoolBatch(SESSION, [turn], { root })
+    const result = await drainSpool({ env })
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 0, remaining: 0 })
+    const sent = stub.received[0]!.body.events[0]!.payload as { text: string }
+    expect(sent.text.length).toBe(CAPTURE_FREE_TEXT_MAX_CHARS)
+    expect(sent.text.startsWith('[REDACTED:')).toBe(true)
+    expect(sent.text).not.toContain(SHORT_SECRET)
   })
 
   it('starts no request once the deadline has passed', async () => {

@@ -25,7 +25,7 @@ import { appendPrivateFile, ensurePrivateDir, openPrivateHandle } from '../inges
 import { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 import { captureClientInfo, sessionFileName, type CaptureClient, type CaptureEvent } from './events.js'
 import { appendCaptureLog } from './log.js'
-import { BATCH_BYTES_MAX } from './route-fit.js'
+import { BATCH_BYTES_MAX, readyForRoute } from './route-fit.js'
 import { acquireFileLease, type FileLease, writePrivateFileAtomic } from './transcript-cursor.js'
 
 type Env = Record<string, string | undefined>
@@ -213,6 +213,12 @@ export interface SpoolState {
   next_attempt_at: string | null
   /** Files backing off alone, by `<session dir>/<file name>`; only files still in the spool. */
   files: Record<string, FileBackoff>
+  /**
+   * A stop that sets no backoff (`bad_url`, `ack_mismatch`) as last logged.
+   * Each drain would hit it again, so a repeat is neither logged nor saved;
+   * another failure or a send the server settles clears it.
+   */
+  standing_stop: string | null
 }
 
 const INITIAL_STATE: SpoolState = {
@@ -223,6 +229,7 @@ const INITIAL_STATE: SpoolState = {
   failures: 0,
   next_attempt_at: null,
   files: {},
+  standing_stop: null,
 }
 
 const isTimeOrNull = (v: unknown): v is string | null => v === null || (typeof v === 'string' && !Number.isNaN(Date.parse(v)))
@@ -251,8 +258,11 @@ export async function loadSpoolState(root: string): Promise<SpoolState> {
       (s.last_error === null || typeof s.last_error === 'string') &&
       isCount(s.failures) &&
       isTimeOrNull(s.next_attempt_at) &&
-      isFileBackoffs(s.files)
-    return valid ? ({ ...s, files: s.files ?? {} } as unknown as SpoolState) : { ...INITIAL_STATE }
+      isFileBackoffs(s.files) &&
+      (s.standing_stop === undefined || s.standing_stop === null || typeof s.standing_stop === 'string')
+    return valid
+      ? ({ ...s, files: s.files ?? {}, standing_stop: s.standing_stop ?? null } as unknown as SpoolState)
+      : { ...INITIAL_STATE }
   } catch {
     return { ...INITIAL_STATE }
   }
@@ -311,6 +321,8 @@ interface SendContext {
   endpoint: string
   token: string
   client: CaptureClient
+  /** Receives the route parser's line for a defect; it names no value. */
+  log: (line: string) => void
 }
 
 type Outcome =
@@ -342,11 +354,16 @@ async function unsendableLine(line: string, reason: string, at: string): Promise
 }
 
 /**
- * Parses and scrubs a batch. Scrubbing is pure and the secret registry never
- * throws, so an event that makes `scrubEvent` throw is malformed and would be
- * refused by the route; it is dead-lettered rather than sent unscrubbed.
+ * Parses, scrubs and fits a batch. Scrubbing is pure and the secret registry
+ * never throws, so an event that makes `scrubEvent` throw is malformed and
+ * would be refused by the route; it is dead-lettered rather than sent
+ * unscrubbed. The producer fitted each event to the route's caps after its
+ * own scrub, but this scrub may mask more (a registry that gained a value),
+ * and a placeholder longer than its value can push a capped text over its
+ * cap; the event is fitted again so the route never refuses it for that.
  */
-async function prepareBatch(raw: string, at: string): Promise<Prepared> {
+async function prepareBatch(raw: string, at: string, log: (line: string) => void): Promise<Prepared> {
+  const now = new Date()
   const prepared: Prepared = { lines: [], events: [], unsendable: [] }
   for (const line of raw.split('\n')) {
     if (line.length === 0) continue
@@ -357,11 +374,19 @@ async function prepareBatch(raw: string, at: string): Promise<Prepared> {
       prepared.unsendable.push(await unsendableLine(line, 'invalid_json', at))
       continue
     }
+    let scrubbed: CaptureEvent
     try {
-      prepared.events.push((await scrubEvent(parsed as CaptureEvent)).event)
-      prepared.lines.push(line)
+      scrubbed = (await scrubEvent(parsed as CaptureEvent)).event
     } catch {
       prepared.unsendable.push(await unsendableLine(line, 'unscrubbable_event', at))
+      continue
+    }
+    const check = readyForRoute(scrubbed, { now, log })
+    if (check.ok) {
+      prepared.events.push(check.event)
+      prepared.lines.push(line)
+    } else {
+      prepared.unsendable.push({ at, reason: clip(check.reason), event: scrubbed })
     }
   }
   return prepared
@@ -463,7 +488,7 @@ async function sendBatch(ctx: SendContext, batch: Batch): Promise<Outcome> {
     throw err
   }
   const at = new Date().toISOString()
-  const { lines, events, unsendable } = await prepareBatch(raw, at)
+  const { lines, events, unsendable } = await prepareBatch(raw, at, ctx.log)
   if (events.length === 0) {
     await settle(ctx, batch, unsendable)
     return { kind: 'dead', dead: unsendable.length }
@@ -584,7 +609,7 @@ class Drain {
     } catch {
       // A configuration error, not a transient one: no backoff, and no URL
       // text in the state file or the log, since a URL can carry credentials.
-      await this.error('bad_url')
+      await this.stop('bad_url')
       return 'bad_url'
     }
     const next = this.state.next_attempt_at
@@ -596,7 +621,13 @@ class Drain {
       await this.fail(`no_token: ${err instanceof Error ? err.message : 'unreadable'}`)
       return 'no_token'
     }
-    const ctx: SendContext = { root: this.root, endpoint, token, client: this.opts.client ?? captureClientInfo() }
+    const ctx: SendContext = {
+      root: this.root,
+      endpoint,
+      token,
+      client: this.opts.client ?? captureClientInfo(),
+      log: (line) => appendCaptureLog(this.opts.env, line),
+    }
     for (let pass = 0; pass < DRAIN_MAX_PASSES; pass++) {
       const batches = pass === 0 ? first : await listBatches(this.root)
       if (batches.length === 0) break
@@ -623,6 +654,7 @@ class Drain {
       this.sends++
       const outcome = await sendBatch(ctx, batch)
       if (outcome.kind !== 'retry') this.suspect = null
+      if (outcome.kind !== 'retry' && outcome.kind !== 'mismatch') await this.gotThrough()
       switch (outcome.kind) {
         case 'acked':
           this.tally.files_sent++
@@ -642,7 +674,7 @@ class Drain {
           await this.forget(key)
           break
         case 'mismatch':
-          await this.error('ack_mismatch')
+          await this.stop('ack_mismatch')
           return 'ack_mismatch'
         case 'retry':
           this.keptForRetry = true
@@ -703,9 +735,25 @@ class Drain {
       last_error: clip(message),
       last_error_at: new Date().toISOString(),
       files: withEntry(this.state.files, key, entry),
+      standing_stop: null,
     }
     await saveSpoolState(this.root, this.state)
     appendCaptureLog(this.opts.env, `spool file backed off after ${attempts} failed send(s): ${clip(message)}`)
+  }
+
+  /** The server settled a file: a standing stop no longer holds. */
+  private async gotThrough(): Promise<void> {
+    if (this.state.standing_stop === null) return
+    this.state = { ...this.state, standing_stop: null }
+    await saveSpoolState(this.root, this.state)
+  }
+
+  /** A stop with no backoff, recorded and logged once while its text holds. */
+  private async stop(message: string): Promise<void> {
+    const text = clip(message)
+    if (this.state.standing_stop === text) return
+    this.state = { ...this.state, standing_stop: text }
+    await this.error(message)
   }
 
   private async error(message: string): Promise<void> {
@@ -717,7 +765,7 @@ class Drain {
   /** A retryable failure of the server: every batch stays and the next attempt backs off. */
   private async fail(message: string): Promise<void> {
     const failures = this.state.failures + 1
-    this.state = { ...this.state, failures, next_attempt_at: nextAttemptAt(failures, Date.now()) }
+    this.state = { ...this.state, failures, next_attempt_at: nextAttemptAt(failures, Date.now()), standing_stop: null }
     await this.error(message)
   }
 }
