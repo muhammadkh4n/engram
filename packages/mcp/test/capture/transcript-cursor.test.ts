@@ -34,6 +34,15 @@ afterEach(() => {
 
 // Only the renewal interval and the clock are faked: lock files are real, so
 // their I/O completes on real time and `until` polls it with a real setTimeout.
+/** The session's request directory: one complete file per request a waiting reader left. */
+function againDir(): string {
+  return join(root, `${SESSION}.again`)
+}
+
+function againRequests(): string[] {
+  return existsSync(againDir()) ? readdirSync(againDir()).filter((n) => !n.startsWith('.')) : []
+}
+
 function fakeRenewalClock(): void {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
 }
@@ -124,12 +133,12 @@ describe('withReaderLock', () => {
     )
     expect(second).toBeUndefined()
     expect(ranSecond).toBe(false)
-    expect(existsSync(join(root, `${SESSION}.again`))).toBe(true)
+    expect(againRequests()).toHaveLength(1)
 
     gate.resolve()
     expect(await holder).toBe(2)
     expect(reads).toBe(2)
-    expect(existsSync(join(root, `${SESSION}.again`))).toBe(false)
+    expect(againRequests()).toEqual([])
     expect(existsSync(join(root, `${SESSION}.lock`))).toBe(false)
   })
 
@@ -146,21 +155,35 @@ describe('withReaderLock', () => {
     }
     expect(await withReaderLock(root, SESSION, never, { waitMs: 30, forceClose: true })).toBeUndefined()
     expect(await withReaderLock(root, SESSION, never, { waitMs: 30 })).toBeUndefined()
+    // Each waiter publishes its own request; none appends to another's.
+    expect(againRequests()).toHaveLength(2)
 
     gate.resolve()
     await holder
     expect(requests).toEqual([false, true])
-    expect(readdirSync(root).filter((n) => n.includes('again'))).toEqual([])
+    expect(againRequests()).toEqual([])
   })
 
   it('applies a close request a waiter left after the last holder finished to the next first read', async () => {
-    mkdirSync(root, { recursive: true })
-    writeFileSync(join(root, `${SESSION}.again`), 'close\n')
+    mkdirSync(againDir(), { recursive: true })
+    writeFileSync(join(againDir(), 'leftover'), 'close\n')
     const requests: boolean[] = []
     await withReaderLock(root, SESSION, async (_lease, read) => {
       requests.push(read.forceClose)
     })
     expect(requests).toEqual([true])
+  })
+
+  it('takes only whole requests: one still being written under its temp name is left alone', async () => {
+    mkdirSync(againDir(), { recursive: true })
+    const partial = join(againDir(), '.4242-0a1b2c3d.4242.5e6f7a8b.tmp')
+    writeFileSync(partial, 'clo')
+    const requests: boolean[] = []
+    await withReaderLock(root, SESSION, async (_lease, read) => {
+      requests.push(read.forceClose)
+    })
+    expect(requests).toEqual([false])
+    expect(readFileSync(partial, 'utf8')).toBe('clo')
   })
 
   it('keeps the lock through a read longer than its stale age; a second reader touches .again and returns', async () => {
@@ -193,7 +216,7 @@ describe('withReaderLock', () => {
 
     expect(second).toBeUndefined()
     expect(ranSecond).toBe(false)
-    expect(existsSync(join(root, `${SESSION}.again`))).toBe(true)
+    expect(againRequests()).toHaveLength(1)
     gate.resolve()
     expect(await holder).toBe(2)
     expect(existsSync(lock)).toBe(false)
@@ -205,14 +228,15 @@ describe('withReaderLock', () => {
     const result = await withReaderLock(root, SESSION, async (lease) => {
       reads += 1
       writeFileSync(lock, 'another-holder\n')
-      writeFileSync(join(root, `${SESSION}.again`), '')
+      mkdirSync(againDir(), { recursive: true })
+      writeFileSync(join(againDir(), 'waiting'), 'read\n')
       expect(await lease.renew()).toBe(false)
       return reads
     })
 
     expect(result).toBe(1)
     expect(reads).toBe(1)
-    expect(existsSync(join(root, `${SESSION}.again`))).toBe(true)
+    expect(againRequests()).toEqual(['waiting'])
     expect(readFileSync(lock, 'utf8')).toBe('another-holder\n')
   })
 
