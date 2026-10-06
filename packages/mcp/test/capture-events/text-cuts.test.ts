@@ -1,8 +1,10 @@
 /**
- * Every text cut in the capture route and the PostgREST store goes through
- * cutWholeChars: a raw `.slice(0, n)` or `.substring(0, n)` on a string counts
- * UTF-16 units and can keep the first half of a surrogate pair, which
- * PostgreSQL refuses. A raw cut is allowed only where the allowlist names it
+ * Every text cut on the write path goes through cutWholeChars or
+ * tailWholeChars: the capture route, the PostgREST store, core's ingestion
+ * and text helpers and the OpenAI adapter. A raw `.slice(`, `.substring(` or
+ * `.substr(` on a string counts UTF-16 units and can keep one half of a
+ * surrogate pair, which PostgreSQL refuses and an embedding provider receives
+ * as malformed text. A raw cut is allowed only where the allowlist names it
  * with the reason it cannot split a pair.
  */
 import { readdirSync, readFileSync } from 'node:fs'
@@ -11,8 +13,14 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const REPO = fileURLToPath(new URL('../../../../', import.meta.url))
-const SCANNED = ['packages/mcp/src/capture-events', 'packages/postgrest/src']
-const RAW_CUT = /\.(?:slice|substring)\(\s*0\s*,/
+const SCANNED = [
+  'packages/mcp/src/capture-events',
+  'packages/postgrest/src',
+  'packages/core/src/ingestion',
+  'packages/core/src/text',
+  'packages/openai/src',
+]
+const RAW_CUT = /\.(?:slice|substring|substr)\(/
 
 interface Allowed {
   file: string
@@ -29,8 +37,38 @@ const ALLOWED: readonly Allowed[] = [
   },
   {
     file: 'packages/mcp/src/capture-events/validate.ts',
+    line: 'm.slice(1, 7)',
+    reason: 'cuts the array of regular-expression groups, not a string',
+  },
+  {
+    file: 'packages/mcp/src/capture-events/validate.ts',
     line: ".padEnd(3, '0').slice(0, 3)",
     reason: 'the fraction-of-second digits of a timestamp the pattern matched, ASCII only',
+  },
+  {
+    file: 'packages/mcp/src/capture-events/validate.ts',
+    line: ".slice('internal:'.length)",
+    reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
+  },
+  {
+    file: 'packages/mcp/src/capture-events/project-registry.ts',
+    line: ".slice('project:'.length)",
+    reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
+  },
+  {
+    file: 'packages/mcp/src/capture-events/project-registry.ts',
+    line: ".slice('workspace:'.length)",
+    reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
+  },
+  {
+    file: 'packages/postgrest/src/adapter.ts',
+    line: 'ids.slice(i, i + GET_BY_IDS_BATCH_SIZE)',
+    reason: 'cuts an array of ids, not a string',
+  },
+  {
+    file: 'packages/postgrest/src/items.ts',
+    line: 'wanted.slice(i, i + GET_CHUNK_SIZE)',
+    reason: 'cuts an array of ids, not a string',
   },
   {
     file: 'packages/postgrest/src/semantic.ts',
@@ -39,8 +77,53 @@ const ALLOWED: readonly Allowed[] = [
   },
   {
     file: 'packages/postgrest/src/semantic.ts',
+    line: 'updates.slice(start, start + GRADIENT_CHUNK_SIZE)',
+    reason: 'cuts an array of updates, not a string',
+  },
+  {
+    file: 'packages/postgrest/src/semantic.ts',
     line: '}).slice(0, opts?.limit ?? 10)',
     reason: 'cuts an array of results, not a string',
+  },
+  {
+    file: 'packages/core/src/text/cut-text.ts',
+    line: 'return text.slice(0, end)',
+    reason: 'the head cut itself: end is moved back off a high surrogate',
+  },
+  {
+    file: 'packages/core/src/text/cut-text.ts',
+    line: 'return text.slice(start)',
+    reason: 'the tail cut itself: start is moved forward off a low surrogate',
+  },
+  {
+    file: 'packages/openai/src/summarizer.ts',
+    line: 'documents.slice(0, RERANK_MAX_CANDIDATES)',
+    reason: 'cuts an array of documents, not a string',
+  },
+  {
+    file: 'packages/openai/src/summarizer.ts',
+    line: '.slice(0, MAX_EXPANSION_TERMS)',
+    reason: 'cuts an array of terms, not a string',
+  },
+  {
+    file: 'packages/openai/src/json-reply.ts',
+    line: 'text.slice(open + FENCE.length, close)',
+    reason: 'both ends sit at an ASCII code fence found by indexOf',
+  },
+  {
+    file: 'packages/openai/src/json-reply.ts',
+    line: 'inner.slice(0, newline)',
+    reason: 'ends at a newline found by indexOf',
+  },
+  {
+    file: 'packages/openai/src/json-reply.ts',
+    line: 'inner.slice(newline + 1)',
+    reason: 'starts after a newline found by indexOf',
+  },
+  {
+    file: 'packages/openai/src/json-reply.ts',
+    line: 'text.slice(start, end + 1)',
+    reason: 'starts at an ASCII bracket and ends after its ASCII match',
   },
 ]
 
@@ -63,12 +146,12 @@ function rawCuts(): Array<{ file: string; line: string; at: string }> {
   )
 }
 
-describe('text cuts in the capture route and the PostgREST store', () => {
-  it('finds source files to scan in both directories', () => {
+describe('text cuts on the write path', () => {
+  it('finds source files to scan in every directory', () => {
     for (const dir of SCANNED) expect(sourceFiles(join(REPO, dir)).length).toBeGreaterThan(0)
   })
 
-  it('cut strings only through cutWholeChars, outside the allowlist', () => {
+  it('cut strings only through cutWholeChars or tailWholeChars, outside the allowlist', () => {
     const unexplained = rawCuts()
       .filter((cut) => !ALLOWED.some((a) => a.file === cut.file && cut.line.includes(a.line)))
       .map((cut) => `${cut.at}: ${cut.line.trim()}`)

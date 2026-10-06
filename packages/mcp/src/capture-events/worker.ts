@@ -49,6 +49,7 @@ import {
   EMBEDDING_ERROR_MAX_CHARS,
   isEmbeddingInputError,
   scrubSecrets,
+  toPostgresText,
   type CaptureStore,
   type EmbeddingFailure,
   type MaterializeResult,
@@ -136,6 +137,15 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   /** Date.now() before which no embedding pass runs. */
   let embedNotBefore = 0
 
+  /**
+   * Sends `texts` to the provider with each U+0000 and unpaired surrogate
+   * replaced by U+FFFD. A lone surrogate has no UTF-8 encoding: a provider
+   * either refuses the request or embeds text other than what was stored, so
+   * no cut or stored text upstream is trusted to be well-formed here.
+   */
+  const embedWellFormed = (texts: string[]): Promise<number[][]> =>
+    embedder.embedBatch(texts.map((text) => toPostgresText(text)))
+
   const checkedVectors = (vectors: number[][], expected: number): number[][] => {
     if (vectors.length !== expected) {
       throw new Error(`the embedder returned ${vectors.length} vectors for ${expected} texts`)
@@ -164,7 +174,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     const failures: EmbeddingFailure[] = []
     for (let i = 0; i < pending.length; i++) {
       try {
-        vectors.push(checkedVectors(await embedder.embedBatch([texts[i]!]), 1)[0]!)
+        vectors.push(checkedVectors(await embedWellFormed([texts[i]!]), 1)[0]!)
       } catch (err) {
         if (!isEmbeddingInputError(err)) return { vectors, failures, error: err }
         failures.push({ id: pending[i]!.id, error: await failureText(err) })
@@ -203,7 +213,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     let refusals: EmbeddingFailure[] = []
     let error: unknown = null
     try {
-      vectors = checkedVectors(await embedder.embedBatch(texts), pending.length)
+      vectors = checkedVectors(await embedWellFormed(texts), pending.length)
     } catch (err) {
       if (!isEmbeddingInputError(err)) throw err
       if (pending.length === 1) {

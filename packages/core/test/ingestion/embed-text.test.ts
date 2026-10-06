@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { findPostgresUnsafeText } from '../../src/text/postgres-text.js'
 import { sqliteAdapter } from '@engram-mem/sqlite'
 import { createMemory } from '../../src/create-memory.js'
 import type { IntelligenceAdapter } from '../../src/adapters/intelligence.js'
@@ -103,6 +104,50 @@ describe('buildTextToEmbed — isolated and short messages', () => {
 
   it('falls back to the clean text for a short message without raw string content', () => {
     expect(buildTextToEmbed({ cleanText: 'ok' })).toBe('ok')
+  })
+})
+
+describe('buildTextToEmbed — every cut keeps whole characters', () => {
+  // An emoji whose surrogate pair straddles the cap: units 5999 and 6000.
+  const straddling = `${'x'.repeat(EMBED_MAX_CHARS - 1)}😀tail`
+
+  function expectWellFormed(out: string): void {
+    expect(findPostgresUnsafeText(out)).toBeNull()
+  }
+
+  it('cuts a preamble and message before a pair the cap would split', () => {
+    const preamble = 'A sample preamble.'
+    const prefix = `${preamble}\n\n`
+    const message = `${'x'.repeat(EMBED_MAX_CHARS - prefix.length - 1)}😀tail`
+    const out = buildTextToEmbed({ cleanText: message, preamble })
+    expect(out).toBe(`${prefix}${'x'.repeat(EMBED_MAX_CHARS - prefix.length - 1)}`)
+    expectWellFormed(out)
+  })
+
+  it('starts the context after a pair its budget would split', () => {
+    const message = 'a sample message long enough to take context'
+    const turns = [`an earlier turn 😀${'c'.repeat(EMBED_CONTEXT_MAX_CHARS - 1)}`]
+    const out = buildTextToEmbed({ cleanText: message, contextTurns: turns })
+    expect(out).toBe(`${'c'.repeat(EMBED_CONTEXT_MAX_CHARS - 1)}\n${message}`)
+    expectWellFormed(out)
+  })
+
+  it('cuts a message with no room for context before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: straddling, contextTurns: ['an earlier turn'] })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
+  })
+
+  it('cuts a long isolated message before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: straddling })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
+  })
+
+  it('cuts the raw content of a short message before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: 'ok', rawContent: straddling })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
   })
 })
 
