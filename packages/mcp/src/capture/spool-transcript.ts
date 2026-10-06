@@ -14,7 +14,7 @@ import { type CaptureRegistry, loadCaptureRegistry, resolveEventProject } from '
 import { appendCaptureLog } from './log.js'
 import { readyForRoute } from './route-fit.js'
 import { spoolRoot, writeDeadLetters, writeSpoolBatch } from './spool.js'
-import { cursorRoot, type FileLease, loadCursor, saveCursor, withReaderLock } from './transcript-cursor.js'
+import { cursorRoot, type FileLease, loadCursor, type ReadRequest, saveCursor, withReaderLock } from './transcript-cursor.js'
 import { readTranscriptEvents } from './transcript-reader.js'
 
 type Env = Record<string, string | undefined>
@@ -60,7 +60,8 @@ function projectResolver(registry: CaptureRegistry): (cwd: string | null, branch
 /**
  * Spools the transcript's new events under the session's reader lock and
  * returns counts only. A reader that could not take the lock returns zeros:
- * the holder reads once more for it. A failed spool write throws and leaves
+ * the holder reads once more for it, closing the final turn when this call
+ * asked for that. A failed spool write throws and leaves
  * the cursor where it was. A reader whose lock was taken over mid-read keeps
  * the batch it wrote, whose events the server drops as repeats, and saves no
  * cursor, which could land behind the one the new holder saves.
@@ -73,9 +74,9 @@ export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions
   const total: SpoolTranscriptResult = { events: 0, files: 0, redactions: 0, dead: 0 }
   const log = (line: string): void => appendCaptureLog(opts.env, line)
 
-  const once = async (lease: FileLease): Promise<void> => {
+  const once = async (lease: FileLease, request: ReadRequest): Promise<void> => {
     const cursor = await loadCursor(cursors, sessionId)
-    const read = await readTranscriptEvents(path, cursor, { resolveProject, forceClose: opts.forceClose })
+    const read = await readTranscriptEvents(path, cursor, { resolveProject, forceClose: request.forceClose })
     const now = new Date()
     const ready: CaptureEvent[] = []
     const refused: Array<{ reason: string; event: CaptureEvent }> = []
@@ -101,7 +102,7 @@ export async function spoolTranscript(path: string, opts: SpoolTranscriptOptions
     await saveCursor(cursors, sessionId, read.cursor)
   }
 
-  await withReaderLock(cursors, sessionId, once)
+  await withReaderLock(cursors, sessionId, once, { forceClose: opts.forceClose })
   return total
 }
 

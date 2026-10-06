@@ -17,7 +17,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { scrubSecrets } from '@engram-mem/core'
 import { CAPTURE_EVENTS_MAX } from '../capture-events/contract.js'
 import { scrubEvent } from '../capture-events/scrub.js'
@@ -137,6 +137,11 @@ interface Batch {
   path: string
 }
 
+/** A batch file's key in `.state.json`: `<session dir>/<file name>`. */
+function batchKey(batch: Batch): string {
+  return `${batch.dir}/${basename(batch.path)}`
+}
+
 async function listNames(dir: string): Promise<string[]> {
   try {
     return await fs.readdir(dir)
@@ -188,6 +193,14 @@ async function removeStaleTmp(root: string): Promise<void> {
 
 // ── State and dead letters ───────────────────────────────────────────────
 
+/** One batch file that failed on its own while the server answered for others. */
+export interface FileBackoff {
+  /** Failed sends since the file last got an answer that settled it. */
+  attempts: number
+  /** The file is skipped until then. */
+  next_attempt_at: string
+}
+
 /** The drainer's health, read by capture health checks. Times are ISO 8601. */
 export interface SpoolState {
   v: 1
@@ -195,8 +208,11 @@ export interface SpoolState {
   last_error_at: string | null
   /** Clipped to 300 characters; never carries event text. */
   last_error: string | null
+  /** Failures of the server as a whole; its backoff, `next_attempt_at`, holds back every file. */
   failures: number
   next_attempt_at: string | null
+  /** Files backing off alone, by `<session dir>/<file name>`; only files still in the spool. */
+  files: Record<string, FileBackoff>
 }
 
 const INITIAL_STATE: SpoolState = {
@@ -206,9 +222,23 @@ const INITIAL_STATE: SpoolState = {
   last_error: null,
   failures: 0,
   next_attempt_at: null,
+  files: {},
 }
 
 const isTimeOrNull = (v: unknown): v is string | null => v === null || (typeof v === 'string' && !Number.isNaN(Date.parse(v)))
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+
+function isFileBackoff(v: unknown): v is FileBackoff {
+  if (v === null || typeof v !== 'object') return false
+  const f = v as Record<string, unknown>
+  return isCount(f.attempts) && typeof f.next_attempt_at === 'string' && !Number.isNaN(Date.parse(f.next_attempt_at))
+}
+
+/** A state file written before files backed off alone has no `files`; that reads as none. */
+function isFileBackoffs(v: unknown): v is Record<string, FileBackoff> | undefined {
+  if (v === undefined) return true
+  return v !== null && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every(isFileBackoff)
+}
 
 /** The saved state, or the initial state when there is none or it cannot be used. */
 export async function loadSpoolState(root: string): Promise<SpoolState> {
@@ -219,11 +249,10 @@ export async function loadSpoolState(root: string): Promise<SpoolState> {
       isTimeOrNull(s.last_ack_at) &&
       isTimeOrNull(s.last_error_at) &&
       (s.last_error === null || typeof s.last_error === 'string') &&
-      typeof s.failures === 'number' &&
-      Number.isSafeInteger(s.failures) &&
-      s.failures >= 0 &&
-      isTimeOrNull(s.next_attempt_at)
-    return valid ? (s as unknown as SpoolState) : { ...INITIAL_STATE }
+      isCount(s.failures) &&
+      isTimeOrNull(s.next_attempt_at) &&
+      isFileBackoffs(s.files)
+    return valid ? ({ ...s, files: s.files ?? {} } as unknown as SpoolState) : { ...INITIAL_STATE }
   } catch {
     return { ...INITIAL_STATE }
   }
@@ -343,8 +372,6 @@ interface Ack {
   duplicates: number
   rejected: Array<{ index: unknown; reason: unknown }>
 }
-
-const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
 
 function parseAck(body: unknown): Ack | null {
   if (body === null || typeof body !== 'object') return null
@@ -523,9 +550,20 @@ interface Tally {
   dead: number
 }
 
+/** The last file that failed on its own, and its backoff entry from before that failure. */
+interface Suspect {
+  key: string
+  previous: FileBackoff | undefined
+}
+
 class Drain {
   private state: SpoolState = { ...INITIAL_STATE }
   readonly tally: Tally = { files_sent: 0, accepted: 0, duplicates: 0, rejected: 0, dead: 0 }
+  /** Set when a file failed and no later file has been answered yet: a second failure then blames the server. */
+  private suspect: Suspect | null = null
+  private keptForRetry = false
+  private sends = 0
+  private skipped = 0
 
   constructor(
     private readonly root: string,
@@ -539,6 +577,7 @@ class Drain {
     const serverUrl = this.opts.env.ENGRAM_SERVER_URL
     if (!this.opts.endpoint && !serverUrl) return 'no_url'
     this.state = await loadSpoolState(this.root)
+    this.forgetGoneFiles(first)
     let endpoint: string
     try {
       endpoint = this.opts.endpoint ?? captureEventsEndpoint(serverUrl as string)
@@ -564,17 +603,26 @@ class Drain {
       const stop = await this.pass(ctx, batches)
       if (stop !== null) return stop
     }
-    return null
+    if (this.keptForRetry) return 'retry_later'
+    // Every file is waiting out a backoff of its own.
+    return this.sends === 0 && this.skipped > 0 ? 'backoff' : null
   }
 
   private async pass(ctx: SendContext, batches: Batch[]): Promise<DrainStop | null> {
     const queue = [...batches]
     for (let batch = queue.shift(); batch !== undefined; batch = queue.shift()) {
       if (this.opts.deadlineMs !== undefined && Date.now() >= this.opts.deadlineMs) return 'deadline'
+      const key = batchKey(batch)
+      if (this.backingOff(key)) {
+        this.skipped++
+        continue
+      }
       // The lease renews itself while a request is in flight; checking it
       // before each file stops this drainer once another has taken over.
       if (!(await this.lease.renew())) return 'lock_lost'
+      this.sends++
       const outcome = await sendBatch(ctx, batch)
+      if (outcome.kind !== 'retry') this.suspect = null
       switch (outcome.kind) {
         case 'acked':
           this.tally.files_sent++
@@ -582,29 +630,82 @@ class Drain {
           this.tally.duplicates += outcome.duplicates
           this.tally.rejected += outcome.rejected
           this.tally.dead += outcome.dead
-          await this.acked()
+          await this.acked(key)
           break
         case 'split':
           this.tally.dead += outcome.dead
+          await this.forget(key)
           queue.unshift(...outcome.batches)
           break
         case 'dead':
           this.tally.dead += outcome.dead
+          await this.forget(key)
           break
         case 'mismatch':
           await this.error('ack_mismatch')
           return 'ack_mismatch'
         case 'retry':
-          await this.fail(outcome.error)
-          return 'retry_later'
+          this.keptForRetry = true
+          if (this.suspect !== null) {
+            // Two files in a row failed: the server is down, not the first file.
+            this.state = { ...this.state, files: withEntry(this.state.files, this.suspect.key, this.suspect.previous) }
+            await this.fail(outcome.error)
+            return 'retry_later'
+          }
+          await this.backOffFile(key, outcome.error)
+          break
       }
     }
     return null
   }
 
-  private async acked(): Promise<void> {
-    this.state = { ...this.state, last_ack_at: new Date().toISOString(), failures: 0, next_attempt_at: null }
+  private backingOff(key: string): boolean {
+    const entry = this.state.files[key]
+    return entry !== undefined && Date.parse(entry.next_attempt_at) > Date.now()
+  }
+
+  /** Drops backoff entries of files no longer in the spool, so the state never outgrows it. */
+  private forgetGoneFiles(batches: readonly Batch[]): void {
+    const present = new Set(batches.map(batchKey))
+    const kept = Object.entries(this.state.files).filter(([key]) => present.has(key))
+    this.state = { ...this.state, files: Object.fromEntries(kept) }
+  }
+
+  /** The file was settled; it no longer backs off. */
+  private async forget(key: string): Promise<void> {
+    if (this.state.files[key] === undefined) return
+    this.state = { ...this.state, files: withEntry(this.state.files, key, undefined) }
     await saveSpoolState(this.root, this.state)
+  }
+
+  private async acked(key: string): Promise<void> {
+    this.state = {
+      ...this.state,
+      last_ack_at: new Date().toISOString(),
+      failures: 0,
+      next_attempt_at: null,
+      files: withEntry(this.state.files, key, undefined),
+    }
+    await saveSpoolState(this.root, this.state)
+  }
+
+  /**
+   * One file failed while nothing yet says the server is down: that file
+   * waits out a backoff of its own and the drain goes on to the next file.
+   */
+  private async backOffFile(key: string, message: string): Promise<void> {
+    const previous = this.state.files[key]
+    const attempts = (previous?.attempts ?? 0) + 1
+    const entry: FileBackoff = { attempts, next_attempt_at: nextAttemptAt(attempts, Date.now()) }
+    this.suspect = { key, previous }
+    this.state = {
+      ...this.state,
+      last_error: clip(message),
+      last_error_at: new Date().toISOString(),
+      files: withEntry(this.state.files, key, entry),
+    }
+    await saveSpoolState(this.root, this.state)
+    appendCaptureLog(this.opts.env, `spool file backed off after ${attempts} failed send(s): ${clip(message)}`)
   }
 
   private async error(message: string): Promise<void> {
@@ -613,7 +714,7 @@ class Drain {
     appendCaptureLog(this.opts.env, `spool drain stopped: ${clip(message)}`)
   }
 
-  /** A retryable failure: the batch stays and the next attempt backs off. */
+  /** A retryable failure of the server: every batch stays and the next attempt backs off. */
   private async fail(message: string): Promise<void> {
     const failures = this.state.failures + 1
     this.state = { ...this.state, failures, next_attempt_at: nextAttemptAt(failures, Date.now()) }
@@ -621,11 +722,24 @@ class Drain {
   }
 }
 
+/** `files` with `key` set to `entry`, or without `key` when `entry` is undefined. */
+function withEntry(
+  files: Record<string, FileBackoff>,
+  key: string,
+  entry: FileBackoff | undefined,
+): Record<string, FileBackoff> {
+  const { [key]: _old, ...rest } = files
+  return entry === undefined ? rest : { ...rest, [key]: entry }
+}
+
 /**
  * Sends the spool's batch files to the capture route. One drainer runs at a
  * time; a second returns `locked` at once, and a drainer whose lock was taken
- * over returns `lock_lost` before its next file. Nothing is sent before the backoff
- * set by the last retryable failure has passed.
+ * over returns `lock_lost` before its next file. A file that fails for any
+ * reason but the route's own refusal backs off alone while the drain goes on,
+ * so one file a proxy keeps refusing stalls no other; when the next file sent
+ * fails too, the server is down, and nothing is sent before that backoff has
+ * passed. `retry_later` means some file was kept for a later retry.
  */
 export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
   const root = opts.root ?? spoolRoot(opts.env)

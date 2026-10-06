@@ -343,6 +343,13 @@ export async function acquireFileLease(path: string, opts: FileLockOptions): Pro
   return token === undefined ? undefined : new RenewingLease(path, token, opts.staleMs)
 }
 
+/** What a read is asked to do. A close request is the stronger one: it also closes a turn still open at EOF. */
+export interface ReadRequest {
+  forceClose: boolean
+}
+
+const CLOSE_REQUEST = 'close'
+
 /** Removes `path`; true when it existed. */
 async function consume(path: string): Promise<boolean> {
   try {
@@ -354,44 +361,76 @@ async function consume(path: string): Promise<boolean> {
   }
 }
 
-async function touch(path: string): Promise<void> {
+/** Leaves a request for the holder: a close appends a line, a read only makes sure the file exists. */
+async function leaveRequest(path: string, request: ReadRequest): Promise<void> {
   const handle = await openPrivateHandle(path, 'a')
-  await handle.close()
+  try {
+    if (request.forceClose) await handle.appendFile(`${CLOSE_REQUEST}\n`)
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Takes every request waiting in `.again`, or null when none is. The file is
+ * renamed before it is read, so a request appended while it is read lands in
+ * a new `.again` that the next take finds, instead of being removed unread.
+ */
+async function takeRequests(againPath: string): Promise<ReadRequest | null> {
+  const taken = `${againPath}.taken`
+  try {
+    await fs.rename(againPath, taken)
+  } catch (err) {
+    if (isErrno(err, 'ENOENT')) return null
+    throw err
+  }
+  const lines = (await fs.readFile(taken, 'utf8')).split('\n')
+  await consume(taken)
+  return { forceClose: lines.includes(CLOSE_REQUEST) }
 }
 
 /**
  * Runs `fn` holding `<root>/<dir>.lock` as a lease, so a read longer than the
  * lock's stale age keeps it. A reader that cannot take the lock within the
- * wait touches `<dir>.again` and returns undefined: the holder finds that
- * file after its read, removes it and reads once more before it releases the
- * lock, so the lines that reader came for are not left unread. `fn` gets the
- * lease and must not save a cursor once it is lost, since the holder that took
- * the lock over may already have saved a later one; a lost lease reads no
- * more and leaves `.again` to that holder.
+ * wait leaves its request in `<dir>.again` and returns undefined: the holder
+ * takes that file after its read and reads once more before it releases the
+ * lock, so the lines that reader came for are not left unread. Every read is
+ * asked for the strongest request among the caller's and the ones waiting, so
+ * a session end that found the lock busy still closes the final turn. `fn`
+ * gets the lease and must not save a cursor once it is lost, since the holder
+ * that took the lock over may already have saved a later one; a lost lease
+ * reads no more and leaves `.again` to that holder.
  */
 export async function withReaderLock<T>(
   root: string,
   sessionId: string,
-  fn: (lease: FileLease) => Promise<T>,
-  opts: Partial<FileLockOptions> = {},
+  fn: (lease: FileLease, read: ReadRequest) => Promise<T>,
+  opts: Partial<FileLockOptions> & { forceClose?: boolean } = {},
 ): Promise<T | undefined> {
   ensurePrivateDir(root)
   const name = sessionFileName(sessionId)
   const lockPath = join(root, `${name}.lock`)
   const againPath = join(root, `${name}.again`)
+  const own: ReadRequest = { forceClose: opts.forceClose === true }
   const lease = await acquireFileLease(lockPath, {
     staleMs: opts.staleMs ?? READER_LOCK_STALE_MS,
     waitMs: opts.waitMs ?? READER_LOCK_WAIT_MS,
   })
   if (lease === undefined) {
-    await touch(againPath)
+    await leaveRequest(againPath, own)
     return undefined
   }
+  const strongest = (waiting: ReadRequest | null): ReadRequest => ({
+    forceClose: own.forceClose || waiting?.forceClose === true,
+  })
   try {
     // A leftover from an earlier holder is covered by this first read.
-    await consume(againPath)
-    let result = await fn(lease)
-    while (!lease.lost && (await consume(againPath))) result = await fn(lease)
+    let result = await fn(lease, strongest(await takeRequests(againPath)))
+    while (!lease.lost) {
+      const waiting = await takeRequests(againPath)
+      if (waiting === null) break
+      result = await fn(lease, strongest(waiting))
+    }
     return result
   } finally {
     await lease.release()
