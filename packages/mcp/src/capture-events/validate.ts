@@ -47,6 +47,7 @@ import {
   GIT_SHA_PATTERN,
   ITEM_ID_PATTERN,
   DECISION_BY,
+  QUOTE_SAID_AS,
   DECISION_CLASSES,
   DECISION_ID_MAX_CHARS,
   RULING_PHASE_MAX_CHARS,
@@ -589,8 +590,10 @@ function parseGitCommit(value: unknown): GitCommitPayload {
   }
 }
 
+const DECISION_QUOTE_FIELDS = ['quote', 'source', 'said_as', 'question'] as const
+
 function parseLedgerDecision(value: unknown): LedgerDecisionPayload {
-  const p = object(value, 'payload', ['plan', 'id', 'class', 'trigger', 'ruling', 'by'], ['quote', 'source'])
+  const p = object(value, 'payload', ['plan', 'id', 'class', 'trigger', 'ruling', 'by'], [...DECISION_QUOTE_FIELDS])
   const decision: LedgerDecisionPayload = {
     plan: string(p.plan, 'payload.plan', { pattern: PLAN_SLUG_PATTERN }),
     id: string(p.id, 'payload.id', { min: 1, max: DECISION_ID_MAX_CHARS }),
@@ -598,15 +601,22 @@ function parseLedgerDecision(value: unknown): LedgerDecisionPayload {
     trigger: string(p.trigger, 'payload.trigger'),
     ruling: string(p.ruling, 'payload.ruling', { notBlank: true }),
     by: oneOf(p.by, 'payload.by', DECISION_BY),
-    ...(p.quote !== undefined ? { quote: string(p.quote, 'payload.quote', { notBlank: true }) } : {}),
-    ...(p.source !== undefined
-      ? { source: string(p.source, 'payload.source', { min: 1, max: DECISION_QUOTE_SOURCE_MAX_CHARS, notBlank: true }) }
-      : {}),
   }
-  if (decision.by === 'mk' && (decision.quote === undefined || decision.source === undefined)) {
-    fail('payload', 'with by "mk" requires quote and source')
+  const present = DECISION_QUOTE_FIELDS.filter((k) => Object.hasOwn(p, k))
+  if (decision.by === 'session') {
+    if (present.length > 0) fail('payload', 'with by "session" carries no quote, source, said_as or question')
+    return decision
   }
-  return decision
+  if (present.length < DECISION_QUOTE_FIELDS.length) {
+    fail('payload', 'with by "mk" requires quote, source, said_as and question')
+  }
+  return {
+    ...decision,
+    quote: string(p.quote, 'payload.quote', { notBlank: true }),
+    source: string(p.source, 'payload.source', { min: 1, max: DECISION_QUOTE_SOURCE_MAX_CHARS, notBlank: true }),
+    said_as: oneOf(p.said_as, 'payload.said_as', QUOTE_SAID_AS),
+    question: nullableString(p.question, 'payload.question'),
+  }
 }
 
 function parseLedgerRuling(value: unknown): LedgerRulingPayload {
@@ -643,7 +653,7 @@ function parseScope(value: unknown): string {
 }
 
 const REGISTER_FIELDS = [
-  'id', 'status', 'subject', 'said_at', 'quote', 'question', 'verified',
+  'id', 'status', 'subject', 'said_at', 'quote', 'said_as', 'question', 'verified',
   'applies_to', 'triggers', 'supersedes', 'restated', 'scope', 'file',
 ]
 
@@ -655,6 +665,7 @@ function parseRegisterEntry(value: unknown): RegisterEntryPayload {
     subject: string(p.subject, 'payload.subject', { min: 1, max: REGISTER_SUBJECT_MAX_CHARS }),
     said_at: timestamp(p.said_at, 'payload.said_at').text,
     quote: string(p.quote, 'payload.quote', { notBlank: true }),
+    said_as: oneOf(p.said_as, 'payload.said_as', QUOTE_SAID_AS),
     question: nullableString(p.question, 'payload.question'),
     verified: string(p.verified, 'payload.verified', { min: 1, max: REGISTER_VERIFIED_MAX_CHARS }),
     applies_to: stringArray(p.applies_to, 'payload.applies_to', REGISTER_APPLIES_TO_MAX, {

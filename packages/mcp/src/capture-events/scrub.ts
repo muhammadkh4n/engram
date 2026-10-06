@@ -48,6 +48,7 @@ const PAYLOAD_IDENTIFIER_KEYS: ReadonlySet<string> = new Set([
   'task',
   'status',
   'said_at',
+  'said_as',
   'scope',
   'supersedes',
   'item_id',

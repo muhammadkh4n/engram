@@ -3568,11 +3568,16 @@ BEGIN
                               format('%s %s (class %s)', p ->> 'plan', p ->> 'id', p ->> 'class')
                                 || CASE WHEN (p ->> 'trigger') ~ '\S' THEN ': ' || (p ->> 'trigger') ELSE '' END,
                               p ->> 'ruling',
-                              CASE WHEN (p ->> 'quote') ~ '\S' THEN format('MK: "%s"', p ->> 'quote') END);
+                              CASE WHEN (p ->> 'quote') ~ '\S' THEN
+                                CASE WHEN (p ->> 'said_as') = 'choice' THEN 'MK chose: "' ELSE 'MK: "' END
+                                  || (p ->> 'quote') || '"'
+                                  || CASE WHEN (p ->> 'question') ~ '\S' THEN v_dot || 'answering: "' || (p ->> 'question') || '"' ELSE '' END
+                              END);
         v_version_of := format('ledger-decision:%s:%s', p ->> 'plan', p ->> 'id');
         v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
         v_source := jsonb_build_object('type', 'ledger', 'plan', p -> 'plan', 'decision_id', p -> 'id', 'class', p -> 'class',
-                                       'by', p -> 'by', 'quote', p -> 'quote', 'quote_source', p -> 'source');
+                                       'by', p -> 'by', 'quote', p -> 'quote', 'quote_source', p -> 'source',
+                                       'said_as', p -> 'said_as', 'question', p -> 'question');
 
       WHEN 'ledger_ruling' THEN
         v_class := 'artifact';
@@ -3588,7 +3593,8 @@ BEGIN
         v_class := 'artifact';
         v_kind := 'ruling_entry';
         v_content := concat(p ->> 'id', v_dot, p ->> 'status', v_dot, p ->> 'subject', v_dot,
-                            'MK, ', p ->> 'said_at', ': "', p ->> 'quote', '"',
+                            CASE WHEN (p ->> 'said_as') = 'choice' THEN 'MK chose, ' ELSE 'MK, ' END,
+                            p ->> 'said_at', ': "', p ->> 'quote', '"',
                             CASE WHEN (p ->> 'question') ~ '\S' THEN v_dot || 'answering: "' || (p ->> 'question') || '"' END);
         v_context := CASE WHEN (p ->> 'question') ~ '\S' THEN p ->> 'question' END;
         v_search := concat_ws(E'\n', v_content,
@@ -3599,7 +3605,7 @@ BEGIN
         v_version_of := 'register:' || (p ->> 'id');
         v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
         v_source := jsonb_build_object('type', 'register', 'id', p -> 'id', 'status', p -> 'status', 'subject', p -> 'subject',
-                                       'scope', p -> 'scope', 'file', p -> 'file', 'said_at', p -> 'said_at',
+                                       'scope', p -> 'scope', 'file', p -> 'file', 'said_at', p -> 'said_at', 'said_as', p -> 'said_as',
                                        'verified', p -> 'verified', 'applies_to', p -> 'applies_to', 'triggers', p -> 'triggers',
                                        'supersedes', p -> 'supersedes', 'restated', p -> 'restated');
 
