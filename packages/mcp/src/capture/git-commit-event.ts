@@ -74,6 +74,20 @@ function currentBranch(dir: string): string | null {
 }
 
 /**
+ * The full sha `rev` names, or null when it names no commit: `rev-parse
+ * --verify --quiet` exits 1 for an unknown revision and on an unborn HEAD,
+ * which is an answer, not a git failure. Any other exit still throws.
+ */
+function resolveCommit(dir: string, rev: string): string | null {
+  try {
+    return gitText(dir, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`]) || null
+  } catch (err) {
+    if (err instanceof GitCallError && err.status === 1) return null
+    throw err
+  }
+}
+
+/**
  * The files `sha` changed, NUL-separated so names stay byte-exact. A merge
  * is diffed against its first parent with a plain two-tree diff, which every
  * git version runs; the default combined diff would list nothing for it.
@@ -119,8 +133,8 @@ export function buildGitCommitEvent(
   const checkout = detectCheckout(dir)
   if (checkout === null || rev.length === 0 || rev.startsWith('-')) return null
   try {
-    const sha = gitText(dir, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`])
-    if (!sha) return null
+    const sha = resolveCommit(dir, rev)
+    if (sha === null) return null
     const message = commitObjectMessage(git(dir, ['cat-file', 'commit', sha]).toString('utf8'))
     if (message === null || message.trim().length === 0) return null
     const [authoredAt, committedAt, parentLine = ''] = gitText(dir, ['show', '-s', '--format=%aI%n%cI%n%P', sha]).split('\n')

@@ -70,6 +70,19 @@ function withGitWrapper<T>(calls: string, failDiffTree: boolean, fn: () => T): T
   }
 }
 
+/** Points the env at an empty, valid project registry, so a built event writes no registry line to capture.log. */
+function useEmptyRegistry(): void {
+  mkdirSync(env.HOME!, { recursive: true })
+  writeFileSync(join(env.HOME!, 'registry.json'), JSON.stringify({ version: 1, workspaces: {}, projects: {} }))
+  env.ENGRAM_PROJECT_REGISTRY_FILE = '~/registry.json'
+}
+
+/** The capture.log lines written so far; none when the file was never created. */
+function captureLogLines(): string[] {
+  const path = captureLogPath(env)
+  return existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : []
+}
+
 beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'engram-git-commit-')))
   env = { HOME: join(root, 'home') }
@@ -169,6 +182,20 @@ describe('buildGitCommitEvent', () => {
     expect(log[0]).toMatch(/git diff-tree exited 129$/)
   })
 
+  it('gives a commit made on a detached HEAD a null branch and logs nothing', () => {
+    useEmptyRegistry()
+    const repo = initRepo('engram')
+    commit(repo, 'base\n', { 'a.txt': 'a\n' })
+    git(repo, 'checkout', '-q', '--detach')
+    const sha = commit(repo, 'detached work\n', { 'b.txt': 'b\n' })
+
+    const event = buildGitCommitEvent(repo, 'HEAD', { env })
+
+    expect(event!.payload.sha).toBe(sha)
+    expect(event!.project).toMatchObject({ id: 'engram', branch: null })
+    expect(captureLogLines()).toEqual([])
+  })
+
   it('names the main repository from a linked worktree, with the worktree set', () => {
     const repo = initRepo('engram')
     commit(repo, 'init\n')
@@ -227,6 +254,19 @@ describe('buildGitCommitEvent', () => {
     commit(repo, 'one\n')
     expect(buildGitCommitEvent(repo, 'no-such-branch', { env })).toBeNull()
     expect(buildGitCommitEvent(repo, '--all', { env })).toBeNull()
+  })
+
+  it('gives null with no capture.log line for an unknown revision and for a repository with no commits', () => {
+    useEmptyRegistry()
+    const empty = initRepo('empty')
+    expect(buildGitCommitEvent(empty, 'HEAD', { env })).toBeNull()
+
+    const repo = initRepo('engram')
+    commit(repo, 'one\n')
+    expect(buildGitCommitEvent(repo, 'no-such-branch', { env })).toBeNull()
+    expect(buildGitCommitEvent(repo, '0123456789abcdef0123456789abcdef01234567', { env })).toBeNull()
+
+    expect(captureLogLines()).toEqual([])
   })
 
   it('gives null for a blank message', () => {
