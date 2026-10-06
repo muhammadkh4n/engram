@@ -13,6 +13,7 @@
  */
 import { normalizeQuote, quoteOccursIn } from '../items/quote.js'
 import { exactSpan } from './normalize.js'
+import { labelKey, normalizeLabel } from './subjects.js'
 import type {
   ExtractionRejection,
   ObservationKind,
@@ -348,13 +349,13 @@ function subjectAliasKnown(aliases: Aliases, subject: ProposedSubject): boolean 
 
 function subjectLabelValid(subject: ProposedSubject): boolean {
   if (!('new' in subject)) return true
-  const length = [...subject.new.trim()].length
+  const length = [...normalizeLabel(subject.new)].length
   return length >= SUBJECT_LABEL_MIN_CHARS && length <= SUBJECT_LABEL_MAX_CHARS
 }
 
 /**
  * A listed alias resolves to its subject. A new label reuses the first listed
- * subject with the same label ignoring case; otherwise the commit creates it
+ * subject with the same label ignoring case and runs of whitespace; otherwise the commit creates it
  * under the item's stored project, where its upsert on the label index also
  * reuses an unlisted subject of that label.
  */
@@ -368,9 +369,9 @@ function resolveSubject(
     const listed = aliases.subjects.get(subject.id)!
     return { kind: 'listed', id: listed.id, label: listed.label }
   }
-  const label = subject.new.trim()
-  const lower = label.toLowerCase()
-  const listed = window.subjects.find((s) => s.label.toLowerCase() === lower)
+  const label = normalizeLabel(subject.new)
+  const key = labelKey(label)
+  const listed = window.subjects.find((s) => labelKey(s.label) === key)
   return listed ? { kind: 'listed', id: listed.id, label: listed.label } : { kind: 'new', label, projectId }
 }
 

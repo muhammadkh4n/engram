@@ -325,6 +325,16 @@ describe('gateWindow: subjects', () => {
     expect(statement!.subject).toEqual({ kind: 'listed', id: uuid(21), label: 'capture route' })
   })
 
+  it('reuses a listed subject for a new label that differs only in runs of whitespace', () => {
+    const [statement] = gate(PROMPT, [stmt({ subject: { new: '  Capture \t ROUTE ' } })]).statements
+    expect(statement!.subject).toEqual({ kind: 'listed', id: uuid(21), label: 'capture route' })
+  })
+
+  it('stores a new label with its inner whitespace collapsed and its case kept', () => {
+    const [statement] = gate(PROMPT, [stmt({ subject: { new: 'Event   Spool' } })]).statements
+    expect(statement!.subject).toEqual({ kind: 'new', label: 'Event Spool', projectId: 'tst-repo' })
+  })
+
   it("asks for a new subject under the item's stored project", () => {
     const result = gate(
       PROMPT,

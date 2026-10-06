@@ -6,6 +6,8 @@
  * way every time, so a recorded run can be re-run on the same input.
  */
 
+import { orderSubjects } from './subjects.js'
+
 export const SUBJECT_LISTING_LIMIT = 150
 export const RECENT_LISTING_LIMIT = 40
 export const LISTED_CONTENT_MAX_CHARS = 500
@@ -15,7 +17,6 @@ export const EARLIER_TEXT_MARKER = '[earlier text not shown]'
 const MAX_TOKENS_BASE = 800
 const MAX_TOKENS_PER_1000_CHARS = 120
 const MAX_TOKENS_CEILING = 6000
-const MIN_SHARED_WORD_LENGTH = 4
 
 export type UtteranceKind = 'user_prompt' | 'user_answer' | 'assistant_turn'
 /** `trailing`: an assistant turn with no later MK utterance in its session. */
@@ -180,7 +181,7 @@ export function buildWindow(raw: RawExtractionWindow): ExtractionWindow {
   const turnRow = anchorKind === 'trailing' ? anchor : anchorKind === 'user_prompt' ? raw.turn ?? null : null
   const turn = turnRow ? toTurn(turnRow, raw.observed === true) : null
 
-  const windowWords = wordsOf([utterance?.content, utterance?.context, turn?.content].filter(isString).join('\n'))
+  const windowText = [utterance?.content, utterance?.context, turn?.content].filter(isString).join('\n')
   const rawSubjects = raw.subjects ?? []
   const labelById = new Map(rawSubjects.map((s) => [s.id, s.label]))
 
@@ -193,7 +194,7 @@ export function buildWindow(raw: RawExtractionWindow): ExtractionWindow {
     planSlug: planSlugOf(raw.anchor_event?.plan_dirs),
     utterance,
     turn,
-    subjects: listSubjects(rawSubjects, windowWords),
+    subjects: listSubjects(rawSubjects, windowText),
     statements: listItems(raw.statements ?? [], 'stmt', labelById),
     observations: listItems(raw.observations ?? [], 'obs', labelById),
     projects: (raw.projects ?? []).map((p) => ({ id: p.id, kind: p.kind })),
@@ -329,26 +330,9 @@ function planSlugOf(planDirs: string[] | null | undefined): string | null {
   return slug === '' ? null : slug
 }
 
-/**
- * Up to SUBJECT_LISTING_LIMIT subjects: those whose label shares a word of
- * four or more letters with the window text first, then the most recently
- * used, then by label. Labels compare by code unit, not by locale, so the
- * order is the same on every host.
- */
-function listSubjects(subjects: RawWindowSubject[], windowWords: ReadonlySet<string>): WindowSubject[] {
-  const ranked = subjects.map((s) => ({
-    subject: s,
-    overlaps: [...wordsOf(s.label)].some((w) => windowWords.has(w)),
-    usedAt: s.last_used_at ? Date.parse(s.last_used_at) : Number.NEGATIVE_INFINITY,
-  }))
-  ranked.sort(
-    (a, b) =>
-      Number(b.overlaps) - Number(a.overlaps) ||
-      compareNumbersDesc(a.usedAt, b.usedAt) ||
-      compareStrings(a.subject.label, b.subject.label) ||
-      compareStrings(a.subject.id, b.subject.id),
-  )
-  return ranked.slice(0, SUBJECT_LISTING_LIMIT).map(({ subject }, i) => ({
+/** Up to SUBJECT_LISTING_LIMIT subjects in the listing order, aliased by position. */
+function listSubjects(subjects: RawWindowSubject[], windowText: string): WindowSubject[] {
+  return orderSubjects(subjects, windowText, SUBJECT_LISTING_LIMIT).map((subject, i) => ({
     alias: `subj-${i + 1}`,
     id: subject.id,
     label: subject.label,
@@ -420,14 +404,6 @@ function renderDialog(dialog: WindowDialog): string {
 /** Listing lines stay on one line, so every listed item starts its own line. */
 function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
-}
-
-function wordsOf(text: string): Set<string> {
-  const words = new Set<string>()
-  for (const match of text.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    if ([...match[0]].length >= MIN_SHARED_WORD_LENGTH) words.add(match[0])
-  }
-  return words
 }
 
 function cutCodePoints(text: string, max: number): string {

@@ -289,6 +289,8 @@ export type {
   WindowSubject,
   WindowListedItem,
 } from './extraction/window.js'
+export { orderSubjects, normalizeLabel, labelKey } from './extraction/subjects.js'
+export type { OrderableSubject } from './extraction/subjects.js'
 export {
   parseReply,
   REJECTION_RULES,
