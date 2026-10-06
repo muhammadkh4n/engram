@@ -1,3 +1,7 @@
+import type { ExtractionErrorClass } from '../adapters/intelligence.js'
+import type { AnchorKind, RawExtractionWindow } from '../extraction/window.js'
+import type { EntityType, ItemKind, ItemSource, RegisterStatus, Speaker } from './types.js'
+
 /**
  * One row of `memory_projects`: a project or a workspace that items and
  * capture events may name. A workspace belongs to no workspace itself.
@@ -110,6 +114,119 @@ export interface ScanRow {
   texts: string[]
 }
 
+/** The most anchors one pending read returns. */
+export const EXTRACTION_PENDING_LIMIT_MAX = 1000
+/** The most subjects one window lists before the listing order cuts them. */
+export const EXTRACTION_WINDOW_SUBJECTS_MAX = 1000
+/** The most current statements, and observations, one window lists. */
+export const EXTRACTION_WINDOW_RECENT_MAX = 200
+/** The most items one extraction commit stores. */
+export const EXTRACTION_COMMIT_ITEMS_MAX = 500
+
+/** What decides which anchors are next. */
+export interface ExtractionPendingQuery {
+  /** Runs count only at this extractor version. */
+  version: string
+  /** 1 to EXTRACTION_PENDING_LIMIT_MAX. */
+  limit: number
+  /** A session with no capture event for this long has ended (a whole number of seconds, at least one). */
+  idleMs: number
+  /** The time due-ness and idleness are judged at. */
+  now: Date
+}
+
+/**
+ * The next anchor of one session: its earliest anchor still pending, due now.
+ * `failures` counts its held failures at the version asked. A run still open
+ * on it is named by `runningRunId`; a new run cannot begin until that one is
+ * closed.
+ */
+export interface PendingAnchor {
+  anchorId: string
+  sessionId: string
+  anchorKind: AnchorKind
+  occurredAt: Date
+  failures: number
+  runningRunId: string | null
+  runningStartedAt: Date | null
+}
+
+/** A run to open on one anchor. */
+export interface ExtractionBegin {
+  anchorId: string
+  /** The anchor's session. */
+  sessionId: string
+  version: string
+  /** The model asked, or null when unknown. */
+  model: string | null
+}
+
+/** How a run failed. `stats` holds counts only, never text. */
+export interface ExtractionFailure {
+  error: string
+  failure: ExtractionErrorClass
+  stats: Record<string, unknown>
+}
+
+/** A subject the commit creates under `projectId`, or reuses there by label. */
+export interface ExtractionNewSubject {
+  /** Names the subject inside one payload; items point at it with `subjectKey`. */
+  key: string
+  projectId: string | null
+  label: string
+}
+
+export interface ExtractionEntity {
+  entity: string
+  entityType: EntityType
+}
+
+/**
+ * One item an extraction commit stores. Its subject is either a listed one
+ * (`subjectId`) or a new one of the same payload (`subjectKey`), never both.
+ * The commit sets its extraction run; the database sets `content_hash`.
+ */
+export interface ExtractionItem {
+  id: string
+  class: 'mk_statement' | 'observation'
+  kind: ItemKind
+  speaker: Speaker
+  trust: number
+  projectId: string | null
+  workspaceId: string | null
+  planSlug: string | null
+  sessionId: string | null
+  subjectId: string | null
+  subjectKey: string | null
+  content: string
+  searchText: string
+  context: string | null
+  occurredAt: Date
+  standing: boolean | null
+  registerStatus: RegisterStatus | null
+  source: ItemSource
+  lineage: readonly string[]
+  entities: readonly ExtractionEntity[]
+}
+
+/** Everything one run stores, in one transaction. `stats` holds counts only, never text. */
+export interface ExtractionCommit {
+  subjects: readonly ExtractionNewSubject[]
+  items: readonly ExtractionItem[]
+  stats: Record<string, unknown>
+}
+
+/**
+ * What a commit stored. `itemIds` holds one id per item in input order; an
+ * item whose event key was already stored counts in `duplicates` and its id
+ * is the stored item's.
+ */
+export interface ExtractionCommitResult {
+  itemIds: string[]
+  subjectsCreated: number
+  duplicates: number
+}
+
 /**
  * Server-side storage for capture: the project registry rows the route checks
  * event scope against, the stored events and their materialization into
@@ -185,6 +302,39 @@ export interface CaptureStore {
    * null), by id ascending. Read only.
    */
   scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]>
+
+  /**
+   * Up to `limit` anchors to extract next, oldest first and at most one per
+   * session: each session's earliest anchor with no succeeded run and fewer
+   * than 3 held failures at `version`, and only once the backoff for its held
+   * failures has passed. Anchors are MK utterances, and a trailing assistant
+   * turn once its session has ended or been idle for `idleMs`.
+   */
+  extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]>
+
+  /**
+   * The window around an anchor as the RPC returns it, or null when the
+   * anchor is gone (missing or forgotten). Lists up to `subjectLimit` active
+   * subjects of its scope and up to `recentLimit` current statements and
+   * observations.
+   */
+  extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null>
+
+  /**
+   * Opens a running run on the anchor and returns its id, or null when a run
+   * at that version is already running or has succeeded.
+   */
+  extractionBegin(run: ExtractionBegin): Promise<string | null>
+
+  /** Closes a running run as failed. False when the run was no longer running. */
+  extractionFail(runId: string, failure: ExtractionFailure): Promise<boolean>
+
+  /**
+   * Stores the run's subjects, items and entities and closes it as
+   * succeeded, all or nothing. A refused item fails the whole call and leaves
+   * the run running for the caller to fail.
+   */
+  extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult>
 }
 
 const SQLSTATE = /^[0-9A-Z]{5}$/
