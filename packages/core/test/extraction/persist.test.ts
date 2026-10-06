@@ -8,7 +8,7 @@ import { parseReply } from '../../src/extraction/reply.js'
 import { buildWindow, type ExtractionWindow, type RawExtractionWindow } from '../../src/extraction/window.js'
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[8-9a-b][0-9a-f]{3}-[0-9a-f]{12}$/
 const RUN = uuid(90)
 
 const QUESTION = 'Should the capture route keep Postgres as its only store?'
