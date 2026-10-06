@@ -658,27 +658,60 @@ describe('PostgRestItemStore error mapping', () => {
     expect(unique.message).not.toContain('Key (')
   })
 
-  it('reports any other error as a plain failure with its code and message only', async () => {
+  it('names the item function that refused an argument (22023) from its message prefix', async () => {
     const err = await refusal({
       code: '22023',
-      message: 'engram_insert_items: object 1 has the key superseded_by, which is not an insert column',
+      message: 'engram_insert_items: object 2: lineage names a forgotten item',
       details: SECRET_ROW,
-      hint: 'remove the key',
+      hint: null,
+    })
+
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint?: string }).constraint).toBe('engram_insert_items')
+    expect(err.message).toBe('engram_insert_items: object 2: lineage names a forgotten item')
+  })
+
+  it('reports a 22023 not raised by an item function as a plain failure', async () => {
+    const unprefixed = await refusal({
+      code: '22023',
+      message: 'invalid value for parameter "TimeZone": "Mars/Base"',
+      details: SECRET_ROW,
+      hint: null,
+    })
+    const otherFunction = await refusal({
+      code: '22023',
+      message: 'engram_vector_search: p_limit must be positive',
+      details: SECRET_ROW,
+      hint: null,
+    })
+
+    expect(isItemConstraintError(unprefixed)).toBe(false)
+    expect(unprefixed.message).toBe('insertItems failed (22023): invalid value for parameter "TimeZone": "Mars/Base"')
+    expect(isItemConstraintError(otherFunction)).toBe(false)
+    expect(otherFunction.message).toBe('insertItems failed (22023): engram_vector_search: p_limit must be positive')
+  })
+
+  it('reports any other error as a plain failure with its code and message only', async () => {
+    const err = await refusal({
+      code: '42883',
+      message: 'function public.engram_insert_items(p_items => jsonb) does not exist',
+      details: SECRET_ROW,
+      hint: 'apply the schema',
     })
 
     expect(isItemConstraintError(err)).toBe(false)
     expect(err.message).toBe(
-      'insertItems failed (22023): engram_insert_items: object 1 has the key superseded_by, which is not an insert column',
+      'insertItems failed (42883): function public.engram_insert_items(p_items => jsonb) does not exist',
     )
   })
 
   it('names the operation that failed', async () => {
     const { client } = mockClient({
-      rpc: { data: null, error: { code: '22023', message: 'engram_supersede_item: p_old names no item', details: SECRET_ROW, hint: null } },
+      rpc: { data: null, error: { code: '42501', message: 'permission denied for function engram_supersede_item', details: SECRET_ROW, hint: null } },
     })
 
     await expect(storeWith(client).supersedeItem(ID_A, ID_B)).rejects.toThrow(
-      /^supersedeItem failed \(22023\): engram_supersede_item: p_old names no item$/,
+      /^supersedeItem failed \(42501\): permission denied for function engram_supersede_item$/,
     )
   })
 

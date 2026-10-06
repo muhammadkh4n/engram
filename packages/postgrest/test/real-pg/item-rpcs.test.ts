@@ -283,6 +283,25 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       expect(await rowCount([u2.id])).toBe(0)
     }, TEST_TIMEOUT_MS)
 
+    it('checks a statement quote against the stored item its rewritten lineage names', async () => {
+      const u1 = utterance('Rotate the deploy keys every quarter.')
+      await insertItems([u1])
+      const u2 = utterance('Rotate the deploy keys every quarter.', { source: u1.source })
+      const s = statement('Rotate the deploy keys', [u2.id])
+      expect(await insertItems([u2, s])).toEqual([
+        { ord: 1, id: u1.id, inserted: false, forgotten: false },
+        { ord: 2, id: s.id, inserted: true, forgotten: false },
+      ])
+      expect(await row(s.id, 'lineage')).toEqual({ lineage: [u1.id] })
+      expect(await rowCount([u2.id])).toBe(0)
+
+      const u3 = utterance('Rotate the deploy keys every quarter.', { source: u1.source })
+      const misquoted = statement('Rotate the deploy keys monthly', [u3.id])
+      const refusal = await insertRefusal([u3, misquoted])
+      expect(refusal).toMatch(/memory_items_lineage: /)
+      expect(await rowCount([u3.id, misquoted.id])).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
     it('resolves a lineage naming an object skipped as a repeat of an earlier one in the same call', async () => {
       const first = utterance('Archive the old dashboards.')
       const replay = { ...first, id: newId() }

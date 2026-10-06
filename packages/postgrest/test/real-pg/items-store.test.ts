@@ -200,6 +200,24 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     expect(await storedCount([said.id!, misquoted.id!])).toBe(0)
   }, TEST_TIMEOUT_MS)
 
+  it('refuses a lineage naming a forgotten item through a replay as a rule of the insert function', async () => {
+    const said = utterance('Retire the legacy webhook.', { id: newId() })
+    await store.insertItems([said])
+    await store.forgetItems([said.id!], 'said in the wrong session')
+    const replay = { ...said, id: newId() }
+    const derived = statement('Retire the legacy webhook', [replay.id!], { id: newId() })
+
+    const err = await store.insertItems([replay, derived]).then(
+      () => { throw new Error('expected a refusal') },
+      (e: unknown) => e,
+    )
+
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint: string }).constraint).toBe('engram_insert_items')
+    expect((err as Error).message).toBe('engram_insert_items: object 2: lineage names a forgotten item')
+    expect(await storedCount([replay.id!, derived.id!])).toBe(0)
+  }, TEST_TIMEOUT_MS)
+
   it('reads embeddings back as numbers', async () => {
     const embedding = Array.from({ length: 1536 }, (_, i) => (i % 7) / 8 - 0.375)
     const item = commit('build: pin the toolchain', 0, { embedding, embeddingModel: 'tst-embedder' })
@@ -268,11 +286,12 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     expect(restored).toMatchObject({ supersededBy: null, validTo: null })
   }, TEST_TIMEOUT_MS)
 
-  it('reports an argument error as a plain failure', async () => {
+  it('names the item function that refused an argument', async () => {
     const err = (await store.supersedeItem(newId(), newId()).catch((e: unknown) => e)) as Error
 
-    expect(isItemConstraintError(err)).toBe(false)
-    expect(err.message).toMatch(/^supersedeItem failed \(22023\): engram_supersede_item: /)
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint: string }).constraint).toBe('engram_supersede_item')
+    expect(err.message).toBe('engram_supersede_item: p_old names no item')
   }, TEST_TIMEOUT_MS)
 
   it('reads every invariant count as zero on a store that keeps the rules', async () => {
