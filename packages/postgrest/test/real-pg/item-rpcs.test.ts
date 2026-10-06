@@ -298,7 +298,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       const u3 = utterance('Rotate the deploy keys every quarter.', { source: u1.source })
       const misquoted = statement('Rotate the deploy keys monthly', [u3.id])
       const refusal = await insertRefusal([u3, misquoted])
-      expect(refusal).toMatch(/memory_items_lineage: /)
+      expect(refusal).toMatch(/ERROR:\s+23514: memory_items_lineage: the quote does not occur in an mk utterance of its lineage/)
       expect(await rowCount([u3.id, misquoted.id])).toBe(0)
     }, TEST_TIMEOUT_MS)
 
