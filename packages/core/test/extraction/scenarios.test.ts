@@ -83,6 +83,7 @@ class OneWindowStore implements ExtractionStore {
         anchorKind: anchor.kind === 'assistant_turn' ? 'trailing' : anchor.kind,
         occurredAt: new Date(anchor.occurred_at),
         failures: 0,
+        heldFailures: 0,
         runningRunId: null,
         runningStartedAt: null,
       },

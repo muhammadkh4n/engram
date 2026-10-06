@@ -137,9 +137,10 @@ export interface ExtractionPendingQuery {
 
 /**
  * The next anchor of one session: its earliest anchor still pending, due now.
- * `failures` counts its held failures at the version asked. A run still open
- * on it is named by `runningRunId`; a new run cannot begin until that one is
- * closed.
+ * `failures` counts its failed runs of both classes at the version asked (the
+ * count its backoff follows), `heldFailures` the held ones among them. A run
+ * still open on it is named by `runningRunId`; a new run cannot begin until
+ * that one is closed.
  */
 export interface PendingAnchor {
   anchorId: string
@@ -147,6 +148,7 @@ export interface PendingAnchor {
   anchorKind: AnchorKind
   occurredAt: Date
   failures: number
+  heldFailures: number
   runningRunId: string | null
   runningStartedAt: Date | null
 }
@@ -305,9 +307,10 @@ export interface CaptureStore {
 
   /**
    * Up to `limit` anchors to extract next, oldest first and at most one per
-   * session: each session's earliest anchor with no succeeded run and fewer
-   * than 3 held failures at `version`, and only once the backoff for its held
-   * failures has passed. Anchors are MK utterances, and a trailing assistant
+   * session: each session's earliest anchor with no succeeded run, fewer
+   * than 3 held and fewer than 6 transient failures at `version`, and only
+   * once the backoff for its failures of both classes has passed since the
+   * latest. Anchors are MK utterances, and a trailing assistant
    * turn once its session has ended or been idle for `idleMs`.
    */
   extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]>

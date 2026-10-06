@@ -3836,9 +3836,9 @@ END; $$;
 -- capture event. memory_extraction_runs records each attempt at one anchor and
 -- extractor version: inserted as running before the model call, closed as
 -- succeeded by engram_extraction_commit or as failed by engram_extraction_fail.
--- A failure's stats.failure is 'held' when it counts against the anchor (the
--- reply or the commit failed) and 'transient' when it does not (the provider
--- failed, not the window).
+-- A failure's stats.failure is 'held' when the reply or the commit failed and
+-- 'transient' when the call did (an empty or moderated reply, a provider or
+-- network fault). Both back the anchor off; each class has its own limit.
 --
 
 --
@@ -3848,17 +3848,20 @@ END; $$;
 -- The anchors to extract next at p_version, at most one per session: each
 -- session's earliest pending anchor by (occurred_at, id), returned only when
 -- it is due, ordered by occurred_at and cut at p_limit (1 to 1000). An anchor
--- is pending while it has no succeeded run and fewer than 3 held failures, so
--- a later anchor waits behind a pending earlier one, due or not, and an
--- exhausted anchor no longer holds its session back. It is due when it has no
--- held failure, or once p_now reaches the latest held failure's end plus the
--- backoff for its count n: 60 seconds doubled n - 1 times, capped at 6 hours,
--- the schedule the worker's own backoff uses. Due-ness is decided here, before
--- the limit, so sessions waiting out a backoff never crowd due ones out.
--- failures is the held count; running_run_id and running_started_at name a
--- run still open on the anchor, which the caller closes as failed once it is
--- stale (its worker died) before beginning a new one.
-CREATE OR REPLACE FUNCTION public.engram_extraction_pending(p_version text, p_limit integer, p_idle_seconds integer, p_now timestamp with time zone) RETURNS TABLE(anchor_item_id uuid, session_id text, anchor_kind text, occurred_at timestamp with time zone, failures integer, running_run_id uuid, running_started_at timestamp with time zone)
+-- is pending while it has no succeeded run, fewer than 3 held failures and
+-- fewer than 6 transient ones, so a later anchor waits behind a pending
+-- earlier one, due or not, and an exhausted anchor no longer holds its session
+-- back. It is due when it has no failure, or once p_now reaches the latest
+-- failure's end plus the backoff for its count n of failures of both classes:
+-- 60 seconds doubled n - 1 times, capped at 6 hours, the schedule the worker's
+-- own backoff uses. A window that keeps failing, whatever the class, so
+-- yields the head of the oldest-first queue to the sessions behind it. Due-ness
+-- is decided here, before the limit, so sessions waiting out a backoff never
+-- crowd due ones out. failures counts both classes and held_failures the held
+-- ones; running_run_id and running_started_at name a run still open on the
+-- anchor, which the caller closes as failed once it is stale (its worker died)
+-- before beginning a new one.
+CREATE OR REPLACE FUNCTION public.engram_extraction_pending(p_version text, p_limit integer, p_idle_seconds integer, p_now timestamp with time zone) RETURNS TABLE(anchor_item_id uuid, session_id text, anchor_kind text, occurred_at timestamp with time zone, failures integer, held_failures integer, running_run_id uuid, running_started_at timestamp with time zone)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -3898,24 +3901,28 @@ BEGIN
   ), run AS (
     SELECT r.anchor_item_id AS aid,
            bool_or(r.status = 'succeeded') AS succeeded,
+           (count(*) FILTER (WHERE r.status = 'failed'))::integer AS failed,
            (count(*) FILTER (WHERE r.status = 'failed' AND r.stats ->> 'failure' = 'held'))::integer AS held,
-           max(coalesce(r.finished_at, r.started_at)) FILTER (WHERE r.status = 'failed' AND r.stats ->> 'failure' = 'held') AS last_held,
+           max(coalesce(r.finished_at, r.started_at)) FILTER (WHERE r.status = 'failed') AS last_failed,
            (array_agg(r.id ORDER BY r.started_at DESC, r.id DESC) FILTER (WHERE r.status = 'running'))[1] AS running_id,
            max(r.started_at) FILTER (WHERE r.status = 'running') AS running_at
       FROM public.memory_extraction_runs r
      WHERE r.extractor_version = p_version AND r.anchor_item_id IS NOT NULL
      GROUP BY r.anchor_item_id
   ), pending AS (
-    SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.held, 0) AS held, r.last_held, r.running_id, r.running_at,
+    SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.failed, 0) AS failed, coalesce(r.held, 0) AS held, r.last_failed,
+           r.running_id, r.running_at,
            row_number() OVER (PARTITION BY a.sid ORDER BY a.t_at, a.id) AS place
       FROM anchor a
       LEFT JOIN run r ON r.aid = a.id
-     WHERE NOT coalesce(r.succeeded, false) AND coalesce(r.held, 0) < 3
+     WHERE NOT coalesce(r.succeeded, false)
+       AND coalesce(r.held, 0) < 3
+       AND coalesce(r.failed, 0) - coalesce(r.held, 0) < 6
   )
-  SELECT p.id, p.sid, p.kind, p.t_at, p.held, p.running_id, p.running_at
+  SELECT p.id, p.sid, p.kind, p.t_at, p.failed, p.held, p.running_id, p.running_at
     FROM pending p
    WHERE p.place = 1
-     AND (p.held = 0 OR p_now >= p.last_held + make_interval(secs => least(60 * power(2, p.held - 1), 21600)))
+     AND (p.failed = 0 OR p_now >= p.last_failed + make_interval(secs => least(60 * power(2, p.failed - 1), 21600)))
    ORDER BY p.t_at, p.id
    LIMIT p_limit;
 END; $$;
