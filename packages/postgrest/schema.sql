@@ -2543,9 +2543,18 @@ END; $$;
 -- table is empty here exactly when the triggers are new or no event is
 -- pending or dead, and counting then is right in both cases.
 --
+-- The lock is ACCESS EXCLUSIVE, the mode DROP TRIGGER needs, taken before any
+-- other statement so the block never upgrades a lock it holds. A materialize
+-- pass reads the events and then updates them; a weaker lock that blocks
+-- writes (SHARE ROW EXCLUSIVE) would be granted beside the pass's read, the
+-- DROP TRIGGER would then wait on that read, and the pass's UPDATE would wait
+-- on the lock already held: a deadlock that rolls back the pass or stops the
+-- apply partway. Asked for first, the lock simply waits for the pass to
+-- commit.
+--
 
 DO $$ BEGIN
-  LOCK TABLE public.memory_capture_events IN SHARE ROW EXCLUSIVE MODE;
+  LOCK TABLE public.memory_capture_events IN ACCESS EXCLUSIVE MODE;
   DROP TRIGGER IF EXISTS memory_capture_events_count ON public.memory_capture_events;
   CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();
   DROP TRIGGER IF EXISTS memory_capture_events_count_truncate ON public.memory_capture_events;
