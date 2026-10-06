@@ -69,7 +69,9 @@ export function buildGitCommitEvent(
     if (message === null || message.trim().length === 0) return null
     const [authoredAt, committedAt] = gitText(dir, ['show', '-s', '--format=%aI%n%cI', sha]).split('\n')
     if (!authoredAt || !committedAt) return null
-    const files = git(dir, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '-z', sha])
+    // A merge commit lists nothing under the default combined diff; against its
+    // first parent it lists every file the merge brought into the branch.
+    const files = git(dir, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '--diff-merges=first-parent', '-z', sha])
       .toString('utf8')
       .split('\0')
       .filter((f) => f.length > 0)

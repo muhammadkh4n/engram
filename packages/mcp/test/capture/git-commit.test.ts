@@ -100,6 +100,21 @@ describe('buildGitCommitEvent', () => {
     expect(buildGitCommitEvent(repo, 'HEAD', { env })!.payload.files).toEqual(['src/a.ts', 'src/b.ts'])
   })
 
+  it('a conflicted merge, resolved and committed, lists the files it changed against its first parent', () => {
+    const repo = initRepo('engram')
+    commit(repo, 'base\n', { 'shared.txt': 'base\n', 'kept.txt': 'kept\n' })
+    git(repo, 'switch', '-q', '-c', 'topic')
+    commit(repo, 'topic side\n', { 'shared.txt': 'topic\n', 'topic only.txt': 't\n' })
+    git(repo, 'switch', '-q', 'main')
+    commit(repo, 'main side\n', { 'shared.txt': 'main\n' })
+    expect(() => git(repo, 'merge', '-q', '--no-edit', 'topic')).toThrow()
+
+    const sha = commit(repo, 'merge topic into main\n', { 'shared.txt': 'resolved\n' })
+
+    expect(git(repo, 'rev-list', '--parents', '-n', '1', sha).trim().split(' ')).toHaveLength(3)
+    expect(buildGitCommitEvent(repo, sha, { env })!.payload.files).toEqual(['shared.txt', 'topic only.txt'])
+  })
+
   it('names the main repository from a linked worktree, with the worktree set', () => {
     const repo = initRepo('engram')
     commit(repo, 'init\n')
