@@ -237,6 +237,24 @@ export function supersessionRuleOutcome(earlierKind: unknown, laterKind: unknown
   return 'retire'
 }
 
+/** One JSON-mode chat call: a system and a user message, nothing else. */
+export interface CompleteJsonRequest {
+  /** Names the call site in logs; never sent to the model. */
+  label: string
+  system: string
+  user: string
+  maxTokens: number
+}
+
+export interface CompleteJsonResult {
+  /** The reply text exactly as received ('' when the reply held none). */
+  text: string
+  /** The provider's finish reason ('stop', 'length', …), or null when absent. */
+  finishReason: string | null
+  /** The model that answered, as the provider reports it. */
+  model: string
+}
+
 export interface IntelligenceAdapter {
   embed?(text: string): Promise<number[]>
   embedBatch?(texts: string[]): Promise<number[][]>
@@ -382,6 +400,13 @@ export interface IntelligenceAdapter {
     excerpt: string,
     opts: { kind: 'session-summary' | 'pre-compact' },
   ): Promise<{ memory: string; context: string }>
+  /**
+   * One chat call in JSON mode at temperature 0. The reply text is returned
+   * unparsed, with its finish reason, so the caller owns the reply schema and
+   * decides what an empty or cut-off reply means. A failed call (API,
+   * network, auth, rate limit) rejects with its own error, unchanged.
+   */
+  completeJson?(req: CompleteJsonRequest): Promise<CompleteJsonResult>
 }
 
 /**

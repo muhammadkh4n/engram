@@ -98,6 +98,7 @@ export type { AnalysisContext } from './intent/analyzer.js'
 export { INTENT_PATTERNS, STRATEGY_TABLE, classifyMode, selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 export { generateId } from './utils/id.js'
 export { estimateTokens } from './utils/tokens.js'
+export { extractJsonReply } from './utils/json-reply.js'
 export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
 export { parseContent } from './ingestion/content-parser.js'
@@ -170,6 +171,8 @@ export type {
   SupersessionRuleOutcome,
   FactExtractionErrorKind,
   ExtractionErrorClass,
+  CompleteJsonRequest,
+  CompleteJsonResult,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,
@@ -252,3 +255,59 @@ export { createMemory } from './create-memory.js'
 export { synthesize } from './synthesis/index.js'
 export type { SynthesizeInput } from './synthesis/index.js'
 export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'
+
+// Extraction: the window, the versioned prompt and the reply parser
+export { EXTRACTOR_VERSION, EXTRACTION_SYSTEM_PROMPT } from './extraction/prompt.js'
+export {
+  buildWindow,
+  renderUserMessage,
+  extractionMaxTokens,
+  shownTurnText,
+  SUBJECT_LISTING_LIMIT,
+  RECENT_LISTING_LIMIT,
+  LISTED_CONTENT_MAX_CHARS,
+  TURN_MAX_CHARS,
+  EARLIER_TEXT_MARKER,
+} from './extraction/window.js'
+export type {
+  AnchorKind,
+  UtteranceKind,
+  RawExtractionWindow,
+  RawWindowUtterance,
+  RawWindowEvent,
+  RawWindowSubject,
+  RawWindowItem,
+  RawWindowProject,
+  RawWindowTool,
+  ExtractionWindow,
+  WindowUtterance,
+  WindowTurn,
+  WindowTool,
+  WindowDialog,
+  WindowDialogQuestion,
+  WindowDialogOption,
+  WindowSubject,
+  WindowListedItem,
+} from './extraction/window.js'
+export {
+  parseReply,
+  REJECTION_RULES,
+  STATEMENT_KINDS,
+  OBSERVATION_KINDS,
+  STATEMENT_SCOPES,
+  EVIDENCE_TYPES,
+} from './extraction/reply.js'
+export type {
+  ParsedReply,
+  ProposedStatement,
+  ProposedObservation,
+  ProposedSubject,
+  ProposedEvidence,
+  ExtractionRejection,
+  RejectionRule,
+  StatementKind,
+  ObservationKind,
+  StatementScope,
+  EvidenceType,
+  ItemSide,
+} from './extraction/reply.js'
