@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { captureClientInfo, type CaptureEvent } from '../../src/capture/events.js'
 import {
   DRAIN_BACKOFF_BASE_MS,
@@ -9,6 +9,7 @@ import {
   drainSpool,
   loadSpoolState,
   spoolRoot,
+  type SpoolState,
   writeSpoolBatch,
 } from '../../src/capture/spool.js'
 import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from '../../src/ingest/private-files.js'
@@ -104,6 +105,17 @@ async function until(condition: () => boolean): Promise<void> {
 }
 
 const sentUuids = (request: CaptureStub['received'][number]) => request.body.events.map((e) => e.event_uuid)
+
+/** A batch file's key in the drainer's state: `<session dir>/<file name>`. */
+function fileKey(path: string): string {
+  return `${basename(dirname(path))}/${basename(path)}`
+}
+
+/** Rewrites the state so the file's own backoff ended a moment ago. */
+function expireFileBackoff(state: SpoolState, key: string): void {
+  const files = { ...state.files, [key]: { ...state.files[key]!, next_attempt_at: new Date(Date.now() - 1).toISOString() } }
+  writeFileSync(join(root, '.state.json'), JSON.stringify({ ...state, files }))
+}
 
 describe('writeSpoolBatch', () => {
   it('writes owner-only batch files of at most 500 events, named by time, pid and random hex', async () => {
@@ -207,31 +219,85 @@ describe('drainSpool', () => {
     expect((await loadSpoolState(root)).last_error).toBe('ack_mismatch')
   })
 
-  it('keeps the file on a 500, doubles the backoff over two failures and sends nothing inside it', async () => {
-    await writeSpoolBatch(SESSION, prompts(1, 1), { root })
+  it('keeps a file answered 500, doubles its own backoff over two failures and sends nothing inside it', async () => {
+    const [path] = await writeSpoolBatch(SESSION, prompts(1, 1), { root })
+    const key = fileKey(path!)
     stub.reply = { status: 500, body: { error: 'capture failed', retryable: true } }
 
     const t1 = Date.now()
     expect((await drainSpool({ env })).stopped).toBe('retry_later')
     const first = await loadSpoolState(root)
-    expect(first.failures).toBe(1)
-    const firstDelay = Date.parse(first.next_attempt_at!) - t1
+    expect(first.failures).toBe(0)
+    expect(first.next_attempt_at).toBeNull()
+    expect(first.files[key]!.attempts).toBe(1)
+    const firstDelay = Date.parse(first.files[key]!.next_attempt_at) - t1
     expect(firstDelay).toBeGreaterThanOrEqual(DRAIN_BACKOFF_BASE_MS)
     expect(firstDelay).toBeLessThan(DRAIN_BACKOFF_BASE_MS + 5_000)
 
     expect((await drainSpool({ env })).stopped).toBe('backoff')
     expect(stub.received).toHaveLength(1)
 
-    writeFileSync(join(root, '.state.json'), JSON.stringify({ ...first, next_attempt_at: new Date(Date.now() - 1).toISOString() }))
+    expireFileBackoff(first, key)
     const t2 = Date.now()
     expect((await drainSpool({ env })).stopped).toBe('retry_later')
     const second = await loadSpoolState(root)
-    expect(second.failures).toBe(2)
-    const secondDelay = Date.parse(second.next_attempt_at!) - t2
+    expect(second.files[key]!.attempts).toBe(2)
+    const secondDelay = Date.parse(second.files[key]!.next_attempt_at) - t2
     expect(secondDelay).toBeGreaterThanOrEqual(2 * DRAIN_BACKOFF_BASE_MS)
     expect(secondDelay).toBeLessThan(2 * DRAIN_BACKOFF_BASE_MS + 5_000)
     expect(stub.received).toHaveLength(2)
     expect(batchFiles(sessionDir())).toHaveLength(1)
+  })
+
+  it('backs off one file a proxy keeps refusing with an HTML 403 and drains the others', async () => {
+    const [a] = await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    const [b] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    const [c] = await writeSpoolBatch(SESSION, [prompt(3)], { root })
+    stub.reply = (request) =>
+      sentUuids(request).includes(uuid(2))
+        ? { status: 403, body: null, html: '<html><body><h1>403 Forbidden</h1></body></html>' }
+        : acceptAll(request)
+
+    const before = Date.now()
+    const result = await drainSpool({ env })
+    expect(stub.received.map(sentUuids)).toEqual([[uuid(1)], [uuid(2)], [uuid(3)]])
+    expect(result).toMatchObject({ files_sent: 2, accepted: 2, dead: 0, remaining: 1, stopped: 'retry_later' })
+    expect(batchFiles(sessionDir())).toEqual([fileKey(b!).split('/')[1]])
+    expect(deadLetters()).toEqual([])
+    const state = await loadSpoolState(root)
+    expect(state.failures).toBe(0)
+    expect(state.next_attempt_at).toBeNull()
+    expect(Object.keys(state.files)).toEqual([fileKey(b!)])
+    expect(state.files[fileKey(b!)]!.attempts).toBe(1)
+    expect(Date.parse(state.files[fileKey(b!)]!.next_attempt_at)).toBeGreaterThanOrEqual(before + DRAIN_BACKOFF_BASE_MS)
+    expect([a, c].every((p) => !existsSync(p!))).toBe(true)
+
+    // A file inside its own backoff is skipped; once the backoff is over, it is sent and forgotten.
+    await writeSpoolBatch(SESSION, [prompt(4)], { root })
+    expect(await drainSpool({ env })).toMatchObject({ files_sent: 1, remaining: 1, stopped: null })
+    expect(stub.received.slice(3).map(sentUuids)).toEqual([[uuid(4)]])
+    expireFileBackoff(await loadSpoolState(root), fileKey(b!))
+    stub.reply = acceptAll
+    expect(await drainSpool({ env })).toMatchObject({ files_sent: 1, remaining: 0, stopped: null })
+    expect((await loadSpoolState(root)).files).toEqual({})
+  })
+
+  it('stops after two files with the global backoff when every file is answered 502', async () => {
+    for (let n = 1; n <= 3; n++) await writeSpoolBatch(SESSION, [prompt(n)], { root })
+    stub.reply = { status: 502, body: null, html: '<html><body><h1>502 Bad Gateway</h1></body></html>' }
+
+    const before = Date.now()
+    const result = await drainSpool({ env })
+    expect(stub.received.map(sentUuids)).toEqual([[uuid(1)], [uuid(2)]])
+    expect(result).toMatchObject({ files_sent: 0, dead: 0, remaining: 3, stopped: 'retry_later' })
+    const state = await loadSpoolState(root)
+    expect(state.failures).toBe(1)
+    expect(Date.parse(state.next_attempt_at!)).toBeGreaterThanOrEqual(before + DRAIN_BACKOFF_BASE_MS)
+    // The server was down, not the first file: no file carries a backoff of its own.
+    expect(state.files).toEqual({})
+
+    expect((await drainSpool({ env })).stopped).toBe('backoff')
+    expect(stub.received).toHaveLength(2)
   })
 
   it('dead-letters every event of a file answered 400, with the status and the error', async () => {
@@ -251,7 +317,9 @@ describe('drainSpool', () => {
     const result = await drainSpool({ env })
     expect(result).toMatchObject({ files_sent: 0, dead: 0, remaining: 1, stopped: 'retry_later' })
     expect(deadLetters()).toEqual([])
-    expect((await loadSpoolState(root)).failures).toBe(1)
+    const state = await loadSpoolState(root)
+    expect(state.failures).toBe(0)
+    expect(Object.values(state.files).map((f) => f.attempts)).toEqual([1])
   })
 
   it('keeps the file on a 400 that is not the route\'s JSON error', async () => {
@@ -259,7 +327,7 @@ describe('drainSpool', () => {
     stub.reply = { status: 400, body: null, html: '<html><body><h1>400 Bad Request</h1></body></html>' }
     expect(await drainSpool({ env })).toMatchObject({ dead: 0, remaining: 1, stopped: 'retry_later' })
 
-    writeFileSync(join(root, '.state.json'), JSON.stringify({ ...(await loadSpoolState(root)), next_attempt_at: null }))
+    writeFileSync(join(root, '.state.json'), JSON.stringify({ ...(await loadSpoolState(root)), files: {} }))
     stub.reply = { status: 400, body: { message: 'bad request' } }
     expect(await drainSpool({ env })).toMatchObject({ dead: 0, remaining: 1, stopped: 'retry_later' })
     expect(deadLetters()).toEqual([])

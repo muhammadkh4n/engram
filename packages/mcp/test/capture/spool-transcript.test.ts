@@ -23,7 +23,20 @@ import {
 
 // Every read passes through unchanged; a test may run `afterRead` between
 // the read and the spool write, to act while the reader holds its lock.
-const readerHook = vi.hoisted(() => ({ afterRead: null as null | (() => void) }))
+const readerHook = vi.hoisted(() => ({ afterRead: null as null | (() => void | Promise<void>) }))
+// A test may shorten how long a second reader waits for the lock.
+const lockHook = vi.hoisted(() => ({ waitMs: null as null | number }))
+
+vi.mock('../../src/capture/transcript-cursor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/capture/transcript-cursor.js')>()
+  return {
+    ...actual,
+    withReaderLock: (...args: Parameters<typeof actual.withReaderLock>) => {
+      const [root, sessionId, fn, opts] = args
+      return actual.withReaderLock(root, sessionId, fn, lockHook.waitMs === null ? opts : { ...opts, waitMs: lockHook.waitMs })
+    },
+  }
+})
 
 vi.mock('../../src/capture/transcript-reader.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/capture/transcript-reader.js')>()
@@ -31,7 +44,7 @@ vi.mock('../../src/capture/transcript-reader.js', async (importOriginal) => {
     ...actual,
     readTranscriptEvents: async (...args: Parameters<typeof actual.readTranscriptEvents>) => {
       const read = await actual.readTranscriptEvents(...args)
-      readerHook.afterRead?.()
+      await readerHook.afterRead?.()
       return read
     },
   }
@@ -73,6 +86,7 @@ beforeEach(() => {
 
 afterEach(() => {
   readerHook.afterRead = null
+  lockHook.waitMs = null
   rmSync(home, { recursive: true, force: true })
 })
 
@@ -172,6 +186,31 @@ describe('spoolTranscript', () => {
 
     expect(await spoolTranscript(path, { env })).toMatchObject({ events: 1 })
     expect(await spoolTranscript(path, { env, forceClose: true })).toMatchObject({ events: 1 })
+    expect(batchEvents().map((e) => e.type)).toEqual(['user_prompt', 'assistant_turn'])
+  })
+
+  it('keeps a close request made while another reader holds the lock past the wait', async () => {
+    const path = writeTranscript(transcripts, SESSION, [
+      humanPrompt(uuid(1), at(1), 'open prompt'),
+      assistantText(uuid(2), at(2), 'partial reply'),
+    ])
+    lockHook.waitMs = 50
+    let entered!: () => void
+    const reading = new Promise<void>((resolve) => (entered = resolve))
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    readerHook.afterRead = async () => {
+      readerHook.afterRead = null
+      entered()
+      await gate
+    }
+
+    const holder = spoolTranscript(path, { env })
+    await reading
+    expect(await spoolTranscript(path, { env, forceClose: true })).toEqual({ events: 0, files: 0, redactions: 0, dead: 0 })
+    release()
+
+    expect(await holder).toMatchObject({ events: 2 })
     expect(batchEvents().map((e) => e.type)).toEqual(['user_prompt', 'assistant_turn'])
   })
 

@@ -11,7 +11,7 @@ export {
   type ReadTranscriptOptions,
   type ReadTranscriptResult,
 } from './transcript-reader.js'
-export { cursorRoot, loadCursor, saveCursor, type TranscriptCursor, withReaderLock } from './transcript-cursor.js'
+export { cursorRoot, loadCursor, type ReadRequest, saveCursor, type TranscriptCursor, withReaderLock } from './transcript-cursor.js'
 export { planDirsAfter } from './plan-dirs.js'
 export {
   type DrainOptions,

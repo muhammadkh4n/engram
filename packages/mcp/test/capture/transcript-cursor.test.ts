@@ -133,6 +133,36 @@ describe('withReaderLock', () => {
     expect(existsSync(join(root, `${SESSION}.lock`))).toBe(false)
   })
 
+  it('carries the strongest waiting request through .again: a close beats a read', async () => {
+    const gate = deferred()
+    const requests: boolean[] = []
+    const holder = withReaderLock(root, SESSION, async (_lease, read) => {
+      requests.push(read.forceClose)
+      if (requests.length === 1) await gate.promise
+    })
+    await new Promise((r) => setTimeout(r, 20))
+    const never = async () => {
+      throw new Error('a reader that gave up must not read')
+    }
+    expect(await withReaderLock(root, SESSION, never, { waitMs: 30, forceClose: true })).toBeUndefined()
+    expect(await withReaderLock(root, SESSION, never, { waitMs: 30 })).toBeUndefined()
+
+    gate.resolve()
+    await holder
+    expect(requests).toEqual([false, true])
+    expect(readdirSync(root).filter((n) => n.includes('again'))).toEqual([])
+  })
+
+  it('applies a close request a waiter left after the last holder finished to the next first read', async () => {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, `${SESSION}.again`), 'close\n')
+    const requests: boolean[] = []
+    await withReaderLock(root, SESSION, async (_lease, read) => {
+      requests.push(read.forceClose)
+    })
+    expect(requests).toEqual([true])
+  })
+
   it('keeps the lock through a read longer than its stale age; a second reader touches .again and returns', async () => {
     fakeRenewalClock()
     const lock = join(root, `${SESSION}.lock`)
