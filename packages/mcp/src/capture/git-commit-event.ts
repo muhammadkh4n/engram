@@ -10,6 +10,7 @@ import { resolve } from 'node:path'
 import { type CaptureEventOf, GIT_FILES_MAX } from '../capture-events/contract.js'
 import { detectCheckout } from '../ingest/project-detect.js'
 import { loadCaptureRegistry, resolveEventProject } from './event-project.js'
+import { appendCaptureLog } from './log.js'
 import { eventUuidFromParts } from './event-uuid.js'
 
 type Env = Record<string, string | undefined>
@@ -22,16 +23,71 @@ export interface BuildGitCommitEventOptions {
   env?: Env
 }
 
+/** A git call that did not exit 0: its subcommand and exit code (null when killed or never run). */
+class GitCallError extends Error {
+  constructor(
+    readonly subcommand: string,
+    readonly status: number | null,
+    readonly detail: string,
+  ) {
+    super(`git ${subcommand} ${status === null ? `failed: ${detail}` : `exited ${status}`}`)
+    this.name = 'GitCallError'
+  }
+}
+
 function git(cwd: string, args: readonly string[]): Buffer {
-  return execFileSync('git', args, {
-    cwd,
-    stdio: ['ignore', 'pipe', 'ignore'],
-    maxBuffer: GIT_OUTPUT_MAX_BYTES,
-  })
+  try {
+    return execFileSync('git', args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: GIT_OUTPUT_MAX_BYTES,
+    })
+  } catch (err) {
+    const e = err as { status?: unknown; signal?: unknown; code?: unknown }
+    const detail = typeof e.signal === 'string' ? e.signal : typeof e.code === 'string' ? e.code : 'error'
+    throw new GitCallError(args[0] ?? '', typeof e.status === 'number' ? e.status : null, detail)
+  }
 }
 
 function gitText(cwd: string, args: readonly string[]): string {
   return git(cwd, args).toString('utf8').trim()
+}
+
+/** The capture-log line for a failed build: the git call and its exit code, never the revision, message or file names. */
+function failureLine(err: unknown): string {
+  if (err instanceof GitCallError) return `git-commit event: ${err.message}`
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return `git-commit event failed: ${typeof code === 'string' ? code : err instanceof Error ? err.name : 'error'}`
+}
+
+/**
+ * The checked-out branch, or null on a detached HEAD, where `symbolic-ref`
+ * exits 1. `symbolic-ref` runs on every git; `branch --show-current` needs 2.22.
+ */
+function currentBranch(dir: string): string | null {
+  try {
+    return gitText(dir, ['symbolic-ref', '--quiet', '--short', 'HEAD']) || null
+  } catch (err) {
+    if (err instanceof GitCallError && err.status === 1) return null
+    throw err
+  }
+}
+
+/**
+ * The files `sha` changed, NUL-separated so names stay byte-exact. A merge
+ * is diffed against its first parent with a plain two-tree diff, which every
+ * git version runs; the default combined diff would list nothing for it.
+ */
+function changedFiles(dir: string, sha: string, parents: readonly string[]): string[] {
+  const args =
+    parents.length > 1
+      ? ['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', parents[0]!, sha]
+      : ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '-z', sha]
+  return git(dir, args)
+    .toString('utf8')
+    .split('\0')
+    .filter((f) => f.length > 0)
+    .slice(0, GIT_FILES_MAX)
 }
 
 /**
@@ -67,16 +123,10 @@ export function buildGitCommitEvent(
     if (!sha) return null
     const message = commitObjectMessage(git(dir, ['cat-file', 'commit', sha]).toString('utf8'))
     if (message === null || message.trim().length === 0) return null
-    const [authoredAt, committedAt] = gitText(dir, ['show', '-s', '--format=%aI%n%cI', sha]).split('\n')
+    const [authoredAt, committedAt, parentLine = ''] = gitText(dir, ['show', '-s', '--format=%aI%n%cI%n%P', sha]).split('\n')
     if (!authoredAt || !committedAt) return null
-    // A merge commit lists nothing under the default combined diff; against its
-    // first parent it lists every file the merge brought into the branch.
-    const files = git(dir, ['diff-tree', '--no-commit-id', '--name-only', '-r', '--root', '--diff-merges=first-parent', '-z', sha])
-      .toString('utf8')
-      .split('\0')
-      .filter((f) => f.length > 0)
-      .slice(0, GIT_FILES_MAX)
-    const branch = gitText(dir, ['branch', '--show-current']) || null
+    const files = changedFiles(dir, sha, parentLine.split(' ').filter((p) => p.length > 0))
+    const branch = currentBranch(dir)
     const repo = checkout.repo
     return {
       session_id: `git:${repo}`,
@@ -88,7 +138,8 @@ export function buildGitCommitEvent(
       plan_dirs: [],
       payload: { repo, sha, message, files, authored_at: authoredAt },
     }
-  } catch {
+  } catch (err) {
+    appendCaptureLog(opts.env ?? process.env, failureLine(err))
     return null
   }
 }

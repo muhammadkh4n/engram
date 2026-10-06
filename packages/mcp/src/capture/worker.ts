@@ -52,7 +52,7 @@ export interface WorkerResult {
   drain: DrainResult | null
   /** Steps that threw, by step name; the error's code or name only. */
   failures: string[]
-  /** A session-start that had no directory to sweep: no transcript_path and no file found by session id. */
+  /** A session-start that had no directory to sweep: none named by transcript_path or found by session id, or one not created yet. */
   noSweepDirectory?: true
 }
 
@@ -189,13 +189,24 @@ interface SweepCandidate {
  * Catches up the sessions in the transcript's directory that ended without
  * a SessionEnd: the top-level `*.jsonl` files modified at or after `.since`
  * whose size passes their cursor, newest first, at most SWEEP_MAX_FILES. A
- * file idle for SWEEP_IDLE_MS or more has its open turn closed.
+ * file idle for SWEEP_IDLE_MS or more has its open turn closed. Null when
+ * `dir` does not exist: a project's first session can start before Claude
+ * Code creates its transcript folder, and then no session there can need
+ * catching up. Any other read error throws.
  */
-export async function sweepTranscripts(dir: string, env: Env, now = Date.now()): Promise<Counts> {
+export async function sweepTranscripts(dir: string, env: Env, now = Date.now()): Promise<Counts | null> {
+  // .since is taken first so the first run fixes the bound even when it finds no folder.
   const since = await sweepSince(env)
+  let entries
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw err
+  }
   const cursors = cursorRoot(env)
   const candidates: SweepCandidate[] = []
-  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+  for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
     const path = join(dir, entry.name)
     let stat
@@ -263,7 +274,12 @@ export async function runWorker(kind: WorkerKind, input: ForwardedInput, env: En
     if (kind === 'session-start') {
       const dir = sweepDirectory(input, transcript)
       if (dir === null) noSweepDirectory = true
-      else await step('sweep', () => sweepTranscripts(dir, env))
+      else
+        await step('sweep', async () => {
+          const counts = await sweepTranscripts(dir, env)
+          if (counts === null) noSweepDirectory = true
+          return counts ?? undefined
+        })
     }
   }
 
