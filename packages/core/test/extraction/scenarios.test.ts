@@ -39,7 +39,7 @@ const SCENARIOS = [
 type ScenarioName = (typeof SCENARIOS)[number]
 
 const RUN_ID = '00000000-0000-4000-8000-000000000900'
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[8-9a-b][0-9a-f]{3}-[0-9a-f]{12}$/
 
 function load(name: ScenarioName): RecordedScenario {
   return JSON.parse(readFileSync(new URL(`./replies/${name}.json`, import.meta.url), 'utf8')) as RecordedScenario
