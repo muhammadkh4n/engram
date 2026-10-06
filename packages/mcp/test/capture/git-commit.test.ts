@@ -5,11 +5,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { buildGitCommitEvent, commitObjectMessage } from '../../src/capture/git-commit-event.js'
 import { eventUuidFromParts } from '../../src/capture/event-uuid.js'
+import { captureLogPath } from '../../src/capture/log.js'
 import { spoolRoot } from '../../src/capture/spool.js'
 import { runGitCommitCapture } from '../../src/hooks/git-commit.js'
 
@@ -46,6 +47,27 @@ function initRepo(name: string): string {
   mkdirSync(dir)
   git(dir, 'init', '-q', '-b', 'main')
   return dir
+}
+
+/**
+ * Runs `fn` with a `git` first on PATH that records each call's arguments in
+ * `calls` and runs the real git, or, with `failDiffTree`, exits 129 (git's
+ * code for an unknown option) on `diff-tree`.
+ */
+function withGitWrapper<T>(calls: string, failDiffTree: boolean, fn: () => T): T {
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  const bin = join(root, 'git-wrapper-bin')
+  mkdirSync(bin, { recursive: true })
+  const fail = failDiffTree ? `[ "$1" = diff-tree ] && exit 129\n` : ''
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\n${fail}exec '${realGit}' "$@"\n`)
+  chmodSync(join(bin, 'git'), 0o755)
+  const savedPath = process.env.PATH
+  process.env.PATH = `${bin}${delimiter}${savedPath ?? ''}`
+  try {
+    return fn()
+  } finally {
+    process.env.PATH = savedPath
+  }
 }
 
 beforeEach(() => {
@@ -113,6 +135,38 @@ describe('buildGitCommitEvent', () => {
 
     expect(git(repo, 'rev-list', '--parents', '-n', '1', sha).trim().split(' ')).toHaveLength(3)
     expect(buildGitCommitEvent(repo, sha, { env })!.payload.files).toEqual(['shared.txt', 'topic only.txt'])
+  })
+
+  it('runs no git option that needs a recent git, for a root, a plain and a merge commit', () => {
+    const repo = initRepo('engram')
+    commit(repo, 'base\n', { 'shared.txt': 'base\n' })
+    git(repo, 'switch', '-q', '-c', 'topic')
+    commit(repo, 'topic side\n', { 'topic.txt': 't\n' })
+    git(repo, 'switch', '-q', 'main')
+    commit(repo, 'main side\n', { 'main.txt': 'm\n' })
+    git(repo, 'merge', '-q', '--no-edit', 'topic')
+    const calls = join(root, 'git-calls.txt')
+
+    const files = withGitWrapper(calls, false, () =>
+      ['HEAD~2', 'HEAD^1', 'HEAD'].map((rev) => buildGitCommitEvent(repo, rev, { env })!.payload.files),
+    )
+
+    expect(files).toEqual([['shared.txt'], ['main.txt'], ['topic.txt']])
+    const lines = readFileSync(calls, 'utf8').split('\n').filter(Boolean)
+    expect(lines.some((l) => l.startsWith('diff-tree'))).toBe(true)
+    expect(lines.filter((l) => l.includes('--diff-merges'))).toEqual([])
+  })
+
+  it('logs one capture.log line with the exit code when git fails, and gives null', () => {
+    const repo = initRepo('engram')
+    commit(repo, 'one\n', { 'a.txt': 'a\n' })
+
+    const event = withGitWrapper(join(root, 'git-calls.txt'), true, () => buildGitCommitEvent(repo, 'HEAD', { env }))
+
+    expect(event).toBeNull()
+    const log = readFileSync(captureLogPath(env), 'utf8').split('\n').filter(Boolean)
+    expect(log).toHaveLength(1)
+    expect(log[0]).toMatch(/git diff-tree exited 129$/)
   })
 
   it('names the main repository from a linked worktree, with the worktree set', () => {

@@ -262,6 +262,30 @@ describe('the sweep', () => {
     expect(await loadCursor(cursorRoot(env), OTHER)).toBeNull()
     expect(workerLogLine('session-start', input, result, 1)).toMatch(/ sweep: no directory$/)
   })
+
+  it('session-start whose transcript folder does not exist yet logs that it had no directory', async () => {
+    setSince(Date.now() - 3_600_000)
+    const input = { session_id: SESSION, transcript_path: join(projects, '-work-new', `${SESSION}.jsonl`), cwd: home, source: 'startup' }
+
+    const result = await runWorker('session-start', input, env)
+
+    expect(existsSync(join(projects, '-work-new'))).toBe(false)
+    expect(result.failures).toEqual([])
+    expect(workerLogLine('session-start', input, result, 1)).toMatch(/ sweep: no directory$/)
+  })
+
+  it('a sweep folder that cannot be read for another reason still fails', async () => {
+    setSince(Date.now() - 3_600_000)
+    const notADir = join(projects, 'plain-file')
+    mkdirSync(projects, { recursive: true })
+    writeFileSync(notADir, 'x')
+    const input = { session_id: SESSION, transcript_path: join(notADir, `${SESSION}.jsonl`), cwd: home, source: 'startup' }
+
+    const result = await runWorker('session-start', input, env)
+
+    expect(result.failures).toEqual(['sweep:ENOTDIR'])
+    expect(workerLogLine('session-start', input, result, 1)).not.toContain('sweep: no directory')
+  })
 })
 
 describe('the worker process', () => {
