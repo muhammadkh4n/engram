@@ -54,7 +54,6 @@ export function clip(message: string): string {
 
 export const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
 
-
 // ── Writing ──────────────────────────────────────────────────────────────
 
 let lastBatchMs = 0

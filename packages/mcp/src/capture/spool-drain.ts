@@ -5,7 +5,7 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { ensurePrivateDir } from '../ingest/private-files.js'
 import { captureEventsEndpoint, readCaptureToken } from './endpoint.js'
 import { captureClientInfo, type CaptureClient } from './events.js'
@@ -34,12 +34,17 @@ const LOCK_FILE = '.drain.lock'
 
 // ── State ────────────────────────────────────────────────────────────────
 
-/** One batch file that failed on its own while the server answered for others. */
+/** One batch file that failed without the route's verdict, backing off on its own. */
 export interface FileBackoff {
   /** Failed sends since the file last got an answer that settled it. */
   attempts: number
   /** The file is skipped until then. */
   next_attempt_at: string
+  /**
+   * Known to fail alone: it failed in a drain in which the server settled
+   * another file's send, so its failures say nothing about the server.
+   */
+  alone: boolean
 }
 
 /** The drainer's health, read by capture health checks. Times are ISO 8601. */
@@ -75,16 +80,30 @@ const INITIAL_STATE: SpoolState = {
 
 const isTimeOrNull = (v: unknown): v is string | null => v === null || (typeof v === 'string' && !Number.isNaN(Date.parse(v)))
 
-function isFileBackoff(v: unknown): v is FileBackoff {
+/** An entry saved before `alone` existed has none; it reads as `false`. */
+type SavedFileBackoff = Omit<FileBackoff, 'alone'> & { alone?: boolean }
+
+function isFileBackoff(v: unknown): v is SavedFileBackoff {
   if (v === null || typeof v !== 'object') return false
   const f = v as Record<string, unknown>
-  return isCount(f.attempts) && typeof f.next_attempt_at === 'string' && !Number.isNaN(Date.parse(f.next_attempt_at))
+  return (
+    isCount(f.attempts) &&
+    typeof f.next_attempt_at === 'string' &&
+    !Number.isNaN(Date.parse(f.next_attempt_at)) &&
+    (f.alone === undefined || typeof f.alone === 'boolean')
+  )
 }
 
 /** A state file written before files backed off alone has no `files`; that reads as none. */
-function isFileBackoffs(v: unknown): v is Record<string, FileBackoff> | undefined {
+function isFileBackoffs(v: unknown): v is Record<string, SavedFileBackoff> | undefined {
   if (v === undefined) return true
   return v !== null && typeof v === 'object' && !Array.isArray(v) && Object.values(v).every(isFileBackoff)
+}
+
+function withAloneRead(files: Record<string, SavedFileBackoff> | undefined): Record<string, FileBackoff> {
+  const read = ([key, f]: [string, SavedFileBackoff]) =>
+    [key, { attempts: f.attempts, next_attempt_at: f.next_attempt_at, alone: f.alone ?? false }] as const
+  return Object.fromEntries(Object.entries(files ?? {}).map(read))
 }
 
 /** The saved state, or the initial state when there is none or it cannot be used. */
@@ -100,9 +119,9 @@ export async function loadSpoolState(root: string): Promise<SpoolState> {
       isTimeOrNull(s.next_attempt_at) &&
       isFileBackoffs(s.files) &&
       (s.standing_stop === undefined || s.standing_stop === null || typeof s.standing_stop === 'string')
-    return valid
-      ? ({ ...s, files: s.files ?? {}, standing_stop: s.standing_stop ?? null } as unknown as SpoolState)
-      : { ...INITIAL_STATE }
+    if (!valid) return { ...INITIAL_STATE }
+    const files = withAloneRead(s.files as Record<string, SavedFileBackoff> | undefined)
+    return { ...s, files, standing_stop: s.standing_stop ?? null } as unknown as SpoolState
   } catch {
     return { ...INITIAL_STATE }
   }
@@ -183,8 +202,12 @@ interface Tally {
 class Drain {
   private state: SpoolState = { ...INITIAL_STATE }
   readonly tally: Tally = { files_sent: 0, accepted: 0, duplicates: 0, rejected: 0, dead: 0 }
-  /** The last request failed without the route's verdict; a second failure in a row blames the server. */
-  private lastSendFailed = false
+  /** The file whose send just failed without the route's verdict; a second failure in a row ends the drain. */
+  private lastFailedKey: string | null = null
+  /** The server settled a send (an ack or its own refusal) in this drain. */
+  private settledSend = false
+  /** Files that failed in this drain; a settled send marks them known to fail alone. */
+  private readonly failedHere = new Set<string>()
   private keptForRetry = false
   private sends = 0
   private skipped = 0
@@ -250,7 +273,7 @@ class Drain {
       const outcome = await sendBatch(ctx, batch)
       switch (outcome.kind) {
         case 'acked':
-          this.lastSendFailed = false
+          this.lastFailedKey = null
           this.tally.files_sent++
           this.tally.accepted += outcome.accepted
           this.tally.duplicates += outcome.duplicates
@@ -259,13 +282,13 @@ class Drain {
           await this.acked(key)
           break
         case 'split':
-          this.lastSendFailed = false
+          this.lastFailedKey = null
           this.tally.dead += outcome.dead
           await this.forget(key)
           queue.unshift(...outcome.batches)
           break
         case 'dead':
-          this.lastSendFailed = false
+          this.lastFailedKey = null
           this.tally.dead += outcome.dead
           await this.refused(key)
           break
@@ -277,41 +300,53 @@ class Drain {
         case 'mismatch':
           await this.stop('ack_mismatch')
           return 'ack_mismatch'
-        case 'retry':
+        case 'retry': {
           this.keptForRetry = true
           await this.backOffFile(key, outcome.error)
-          if (this.lastSendFailed) {
-            // Two sends in a row failed: the server may be down. Both files
-            // keep their own backoff, so a guess about the server never
-            // sends them first again.
-            await this.fail(outcome.error)
-            return 'retry_later'
-          }
-          this.lastSendFailed = true
-          break
+          const previous = this.lastFailedKey
+          this.lastFailedKey = key
+          if (previous === null) break
+          // Two sends in a row failed, so the drain ends. Only failures no
+          // file's own record explains blame the server: a file known to
+          // fail alone says nothing about it, and a drain in which the server
+          // settled a send has marked every failing file so.
+          if (!this.isAlone(previous) && !this.isAlone(key)) await this.fail(outcome.error)
+          return 'retry_later'
+        }
       }
     }
     return null
   }
 
   /**
-   * Files that never failed first, then files whose own backoff is over;
-   * files inside their backoff are skipped. A file that failed alone is the
-   * likeliest to fail again, so it never stands in front of the files behind
-   * it, and once the server's backoff ends the first requests go to files
-   * that can show whether the server is back.
+   * Each file by its own record: files that never failed, then files whose
+   * backoff is over and that are not known to fail alone, then files known to
+   * fail alone; within a group the fewest attempts first and the oldest file
+   * on a tie. Files inside their own backoff are skipped. A file goes back
+   * behind the files that failed less often each time it fails, so a run of
+   * failing files cannot keep a good file behind them from being sent, and
+   * files known to fail alone go last, where they cannot end a drain before
+   * the files that can show whether the server is back.
    */
   private sendOrder(batches: readonly Batch[]): Batch[] {
-    const fresh: Batch[] = []
-    const retried: Batch[] = []
     const now = Date.now()
+    const ranked: Array<{ batch: Batch; group: number; attempts: number; name: string }> = []
     for (const batch of batches) {
       const entry = this.state.files[batchKey(batch)]
-      if (entry === undefined) fresh.push(batch)
-      else if (Date.parse(entry.next_attempt_at) > now) this.skipped++
-      else retried.push(batch)
+      if (entry !== undefined && Date.parse(entry.next_attempt_at) > now) {
+        this.skipped++
+        continue
+      }
+      const group = entry === undefined ? 0 : entry.alone ? 2 : 1
+      ranked.push({ batch, group, attempts: entry?.attempts ?? 0, name: basename(batch.path) })
     }
-    return [...fresh, ...retried]
+    // Batch file names start with their 13-digit write time, so name order is age order.
+    ranked.sort((a, b) => a.group - b.group || a.attempts - b.attempts || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    return ranked.map((r) => r.batch)
+  }
+
+  private isAlone(key: string): boolean {
+    return this.state.files[key]?.alone === true
   }
 
   /** Drops backoff entries of files no longer in the spool, so the state never outgrows it. */
@@ -335,7 +370,7 @@ class Drain {
       last_ack_at: new Date().toISOString(),
       failures: 0,
       next_attempt_at: null,
-      files: withEntry(this.state.files, key, undefined),
+      files: this.settled(key),
       standing_stop: null,
     }
     await saveSpoolState(this.root, this.state)
@@ -343,15 +378,42 @@ class Drain {
 
   /** The route refused the file, which settles it: a standing stop no longer holds. */
   private async refused(key: string): Promise<void> {
-    if (this.state.files[key] === undefined && this.state.standing_stop === null) return
-    this.state = { ...this.state, files: withEntry(this.state.files, key, undefined), standing_stop: null }
+    const files = this.settled(key)
+    const unchanged =
+      this.state.standing_stop === null &&
+      Object.keys(files).length === Object.keys(this.state.files).length &&
+      Object.entries(files).every(([k, f]) => f === this.state.files[k])
+    if (unchanged) return
+    this.state = { ...this.state, files, standing_stop: null }
     await saveSpoolState(this.root, this.state)
   }
 
-  /** The file failed without the route's verdict: it waits out a backoff of its own. */
+  /**
+   * `files` once the server settled `key`'s send: `key` leaves, and every
+   * file that failed earlier in this drain is known to fail alone.
+   */
+  private settled(key: string): Record<string, FileBackoff> {
+    this.settledSend = true
+    const files = withEntry(this.state.files, key, undefined)
+    return Object.fromEntries(
+      Object.entries(files).map(([k, f]) => [k, this.failedHere.has(k) && !f.alone ? { ...f, alone: true } : f]),
+    )
+  }
+
+  /**
+   * The file failed without the route's verdict: it waits out a backoff of
+   * its own, and is known to fail alone once the server settled another send
+   * in this drain.
+   */
   private async backOffFile(key: string, message: string): Promise<void> {
-    const attempts = (this.state.files[key]?.attempts ?? 0) + 1
-    const entry: FileBackoff = { attempts, next_attempt_at: nextAttemptAt(attempts, Date.now()) }
+    const previous = this.state.files[key]
+    const attempts = (previous?.attempts ?? 0) + 1
+    const entry: FileBackoff = {
+      attempts,
+      next_attempt_at: nextAttemptAt(attempts, Date.now()),
+      alone: previous?.alone === true || this.settledSend,
+    }
+    this.failedHere.add(key)
     this.state = {
       ...this.state,
       last_error: clip(message),
@@ -388,11 +450,21 @@ class Drain {
 /**
  * Sends the spool's batch files to the capture route. One drainer runs at a
  * time; a second returns `locked` at once, and a drainer whose lock was taken
- * over returns `lock_lost` before its next file. A file that fails for any
- * reason but the route's own refusal backs off alone while the drain goes on,
- * so one file a proxy keeps refusing stalls no other; when the next file sent
- * fails too, the drain ends and nothing is sent before the server's backoff
- * has passed. `retry_later` means some file was kept for a later retry.
+ * over returns `lock_lost` before its next file.
+ *
+ * A file that fails for any reason but the route's own refusal is kept and
+ * backs off alone (`attempts + 1`, its own `next_attempt_at`), and the drain
+ * goes on. A file that fails in a drain in which the server settles another
+ * file's send, before or after it, becomes known to fail alone. A second
+ * failure in a row ends the drain; it raises the server's backoff only when
+ * neither file is known to fail alone, so a drain that settles any send
+ * never raises it.
+ *
+ * Files go out by their own record: files that never failed, then files
+ * whose backoff is over and that are not known to fail alone, then files
+ * known to fail alone; the fewest attempts first within each, the oldest
+ * file on a tie. A file inside its own backoff is skipped. `retry_later`
+ * means some file was kept for a later retry.
  */
 export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
   const root = opts.root ?? spoolRoot(opts.env)

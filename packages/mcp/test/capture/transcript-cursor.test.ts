@@ -32,8 +32,6 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-// Only the renewal interval and the clock are faked: lock files are real, so
-// their I/O completes on real time and `until` polls it with a real setTimeout.
 /** The session's request directory: one complete file per request a waiting reader left. */
 function againDir(): string {
   return join(root, `${SESSION}.again`)
@@ -43,6 +41,8 @@ function againRequests(): string[] {
   return existsSync(againDir()) ? readdirSync(againDir()).filter((n) => !n.startsWith('.')) : []
 }
 
+// Only the renewal interval and the clock are faked: lock files are real, so
+// their I/O completes on real time and `until` polls it with a real setTimeout.
 function fakeRenewalClock(): void {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
 }
