@@ -2533,20 +2533,23 @@ END; $$;
 -- Only processed_at and attempts move an event between pending, dead and
 -- processed, so updates of other columns skip the count.
 --
+-- A database that stored events before the counts existed starts from a count
+-- of them. The triggers and that seed share one transaction, opened by the
+-- table lock: applied with a plain psql -f, separate statements would commit
+-- the triggers first, an ingest or materialize landing before the seed would
+-- write a delta row, the seed would see a non-empty counts table and be
+-- skipped, and pending would stay short by every event stored before the
+-- triggers. Under the lock no event changes until the commit, so the counts
+-- table is empty here exactly when the triggers are new or no event is
+-- pending or dead, and counting then is right in both cases.
+--
 
-DROP TRIGGER IF EXISTS memory_capture_events_count ON public.memory_capture_events;
-CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();
-
-DROP TRIGGER IF EXISTS memory_capture_events_count_truncate ON public.memory_capture_events;
-CREATE TRIGGER memory_capture_events_count_truncate AFTER TRUNCATE ON public.memory_capture_events FOR EACH STATEMENT EXECUTE FUNCTION public.memory_capture_events_count();
-
--- A database that stored events before the counts existed starts from a
--- count of them. Once the triggers exist the counts table is empty only when
--- no event is pending or dead, so counting then is always right; the table
--- lock keeps an ingest from landing between the count and this transaction's
--- end.
 DO $$ BEGIN
   LOCK TABLE public.memory_capture_events IN SHARE ROW EXCLUSIVE MODE;
+  DROP TRIGGER IF EXISTS memory_capture_events_count ON public.memory_capture_events;
+  CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();
+  DROP TRIGGER IF EXISTS memory_capture_events_count_truncate ON public.memory_capture_events;
+  CREATE TRIGGER memory_capture_events_count_truncate AFTER TRUNCATE ON public.memory_capture_events FOR EACH STATEMENT EXECUTE FUNCTION public.memory_capture_events_count();
   IF NOT EXISTS (SELECT 1 FROM public.memory_capture_event_counts) THEN
     INSERT INTO public.memory_capture_event_counts (pending, dead)
     SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)

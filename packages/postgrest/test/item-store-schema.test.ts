@@ -251,7 +251,7 @@ describe('memory_items triggers', () => {
   })
 
   it('creates exactly these triggers, each once', () => {
-    const created = [...schema.matchAll(/^CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
+    const created = [...schema.matchAll(/^[ \t]*CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
     expect(created).toEqual([...TRIGGER_NAMES, ...CAPTURE_TRIGGERS.map(([name]) => name)])
   })
 

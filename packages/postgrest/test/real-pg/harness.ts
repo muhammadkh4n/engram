@@ -67,8 +67,12 @@ export interface RealPg {
   psql(sql: string): Promise<string>
   /** Runs SQL as postgres after SET ROLE <role>. */
   psqlAs(role: string, sql: string): Promise<string>
-  /** Applies a SQL file in one transaction with ON_ERROR_STOP. */
-  apply(path: string): Promise<ApplyResult>
+  /**
+   * Applies a SQL file with ON_ERROR_STOP, in one transaction by default.
+   * With `singleTransaction: false` each statement commits on its own, as a
+   * plain `psql -f` does.
+   */
+  apply(path: string, options?: { singleTransaction?: boolean }): Promise<ApplyResult>
   /** Applies schema.sql, then bm25.sql. */
   applySchema(): Promise<void>
   /** pg_dump --schema-only without the per-dump \restrict / \unrestrict lines. */
@@ -286,9 +290,10 @@ export async function startRealPg(options: RealPgOptions = {}): Promise<RealPg> 
     throw error
   }
 
-  const apply = async (path: string): Promise<ApplyResult> => {
+  const apply = async (path: string, options: { singleTransaction?: boolean } = {}): Promise<ApplyResult> => {
     const sql = await readFile(path, 'utf8')
-    const result = await execPsql(['-X', '-1', '-v', 'ON_ERROR_STOP=1', '-f', '-'], sql)
+    const transactionFlags = options.singleTransaction === false ? [] : ['-1']
+    const result = await execPsql(['-X', ...transactionFlags, '-v', 'ON_ERROR_STOP=1', '-f', '-'], sql)
     if (result.code !== 0) {
       throw new Error(`Applying ${path} failed (exit ${result.code}): ${result.stderr.trim()}`)
     }
