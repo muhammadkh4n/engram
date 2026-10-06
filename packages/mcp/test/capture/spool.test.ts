@@ -3,15 +3,14 @@ import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { captureClientInfo, type CaptureEvent } from '../../src/capture/events.js'
+import { spoolRoot, writeSpoolBatch } from '../../src/capture/spool.js'
 import {
   DRAIN_BACKOFF_BASE_MS,
   DRAIN_LOCK_STALE_MS,
   drainSpool,
   loadSpoolState,
-  spoolRoot,
   type SpoolState,
-  writeSpoolBatch,
-} from '../../src/capture/spool.js'
+} from '../../src/capture/spool-drain.js'
 import { PRIVATE_DIR_MODE, PRIVATE_FILE_MODE } from '../../src/ingest/private-files.js'
 import { captureLogPath } from '../../src/capture/log.js'
 import { CAPTURE_FREE_TEXT_MAX_CHARS, USER_PROMPT_TEXT_MAX_CHARS } from '../../src/capture-events/contract.js'
@@ -122,6 +121,17 @@ const sentUuids = (request: CaptureStub['received'][number]) => request.body.eve
 /** A batch file's key in the drainer's state: `<session dir>/<file name>`. */
 function fileKey(path: string): string {
   return `${basename(dirname(path))}/${basename(path)}`
+}
+
+/** Rewrites the state as it reads `ms` later: every backoff time moves `ms` earlier. */
+async function elapse(ms: number): Promise<void> {
+  const state = await loadSpoolState(root)
+  const earlier = (time: string) => new Date(Date.parse(time) - ms).toISOString()
+  const files = Object.fromEntries(
+    Object.entries(state.files).map(([key, entry]) => [key, { ...entry, next_attempt_at: earlier(entry.next_attempt_at) }]),
+  )
+  const next = state.next_attempt_at === null ? null : earlier(state.next_attempt_at)
+  writeFileSync(join(root, '.state.json'), JSON.stringify({ ...state, next_attempt_at: next, files }))
 }
 
 /** Rewrites the state so the file's own backoff ended a moment ago. */
@@ -295,22 +305,58 @@ describe('drainSpool', () => {
     expect((await loadSpoolState(root)).files).toEqual({})
   })
 
-  it('stops after two files with the global backoff when every file is answered 502', async () => {
-    for (let n = 1; n <= 3; n++) await writeSpoolBatch(SESSION, [prompt(n)], { root })
+  it('stops after two files with the global backoff when every file is answered 502, keeping both files\' backoffs', async () => {
+    const paths: string[] = []
+    for (let n = 1; n <= 4; n++) paths.push(...(await writeSpoolBatch(SESSION, [prompt(n)], { root })))
     stub.reply = { status: 502, body: null, html: '<html><body><h1>502 Bad Gateway</h1></body></html>' }
 
     const before = Date.now()
     const result = await drainSpool({ env })
     expect(stub.received.map(sentUuids)).toEqual([[uuid(1)], [uuid(2)]])
-    expect(result).toMatchObject({ files_sent: 0, dead: 0, remaining: 3, stopped: 'retry_later' })
+    expect(result).toMatchObject({ files_sent: 0, dead: 0, remaining: 4, stopped: 'retry_later' })
     const state = await loadSpoolState(root)
     expect(state.failures).toBe(1)
     expect(Date.parse(state.next_attempt_at!)).toBeGreaterThanOrEqual(before + DRAIN_BACKOFF_BASE_MS)
-    // The server was down, not the first file: no file carries a backoff of its own.
-    expect(state.files).toEqual({})
+    expect(Object.keys(state.files).sort()).toEqual([fileKey(paths[0]!), fileKey(paths[1]!)].sort())
 
     expect((await drainSpool({ env })).stopped).toBe('backoff')
     expect(stub.received).toHaveLength(2)
+
+    // Once the server's backoff is over, a drain still sends at most two requests.
+    await elapse(DRAIN_BACKOFF_BASE_MS + 1_000)
+    expect((await drainSpool({ env })).stopped).toBe('retry_later')
+    expect(stub.received.slice(2).map(sentUuids)).toEqual([[uuid(3)], [uuid(4)]])
+    expect(Object.keys((await loadSpoolState(root)).files)).toHaveLength(4)
+  })
+
+  it('sends the good files behind three adjacent files a proxy keeps refusing, and never undoes a file\'s backoff', async () => {
+    const paths: string[] = []
+    for (let n = 1; n <= 5; n++) paths.push(...(await writeSpoolBatch(SESSION, [prompt(n)], { root })))
+    const refused = new Set([uuid(1), uuid(2), uuid(3)])
+    stub.reply = (request) =>
+      sentUuids(request).some((u) => refused.has(u as string))
+        ? { status: 403, body: null, html: '<html><body><h1>403 Forbidden</h1></body></html>' }
+        : acceptAll(request)
+    const refusedKeys = paths.slice(0, 3).map(fileKey).sort()
+
+    expect((await drainSpool({ env })).stopped).toBe('retry_later')
+    expect(stub.received.map(sentUuids)).toEqual([[uuid(1)], [uuid(2)]])
+    const first = await loadSpoolState(root)
+    expect(first.failures).toBe(1)
+    expect(Object.keys(first.files).sort()).toEqual(refusedKeys.slice(0, 2))
+
+    for (let drain = 2; drain <= 3; drain++) {
+      await elapse(DRAIN_BACKOFF_BASE_MS + 1_000)
+      await drainSpool({ env })
+    }
+
+    const sent = stub.received.flatMap(sentUuids)
+    expect(sent).toEqual(expect.arrayContaining([uuid(4), uuid(5)]))
+    expect(batchFiles(sessionDir())).toEqual(paths.slice(0, 3).map((p) => basename(p)))
+    const last = await loadSpoolState(root)
+    expect(Object.keys(last.files).sort()).toEqual(refusedKeys)
+    expect(last.files[fileKey(paths[0]!)]!.attempts).toBe(2)
+    expect(deadLetters()).toEqual([])
   })
 
   it('dead-letters every event of a file answered 400, with the status and the error', async () => {
@@ -469,6 +515,18 @@ describe('drainSpool', () => {
       'spool drain stopped: ack_mismatch',
       'spool drain stopped: bad_url',
     ])
+  })
+
+  it('keeps a standing stop through a drain that only dead-letters locally', async () => {
+    mkdirSync(sessionDir(), { recursive: true })
+    writeFileSync(join(sessionDir(), '0000000000001-1-00000000.jsonl'), '{not json\n')
+    const badEnv = { ...env, ENGRAM_SERVER_URL: 'rexvps:3850' }
+    await drainSpool({ env: badEnv })
+    expect(await drainSpool({ env })).toMatchObject({ dead: 1, remaining: 0 })
+    expect(stub.received).toHaveLength(0)
+    await writeSpoolBatch(SESSION, [prompt(1)], { root })
+    expect((await drainSpool({ env: badEnv })).stopped).toBe('bad_url')
+    expect(stopLines()).toHaveLength(1)
   })
 
   it('logs a repeated ack_mismatch once', async () => {
