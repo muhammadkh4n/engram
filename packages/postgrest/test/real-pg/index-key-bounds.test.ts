@@ -361,6 +361,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       'memory_capture_events_session_event_key: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_capture_events_session_event_key: event_uuid': '512 by memory_capture_events_event_uuid_check',
       'idx_extraction_runs_session: session_id': '1024 by memory_extraction_runs_session_id_check',
+      'idx_extraction_runs_anchor_version: extractor_version': '256 by memory_extraction_runs_extractor_version_check',
       'idx_item_entities_type_entity: entity_type': '7 by memory_item_entities_entity_type_check',
       'idx_item_entities_type_entity: entity': '2000 by memory_item_entities_entity_check',
       'memory_item_entities_pkey: entity': '2000 by memory_item_entities_entity_check',
