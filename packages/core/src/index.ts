@@ -41,6 +41,7 @@ export {
   MATERIALIZE_LIMIT_MAX,
   SCAN_TARGETS,
   sqlstateOf,
+  isDataRefusal,
 } from './items/capture-store.js'
 export type {
   CaptureSecretHit,

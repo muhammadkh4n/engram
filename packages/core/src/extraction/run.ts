@@ -8,29 +8,36 @@
  * with the run's close in one transaction. A run that does not commit is
  * closed as failed with its class:
  * - `transient` (an empty or moderated reply, a provider or network fault);
- * - `held` (a reply cut off at its cap, an unreadable reply, a refused
- *   commit).
+ * - `held` (a reply cut off at its cap, an unreadable reply, a window that
+ *   cannot be built, a commit the store refused).
  * Every failure backs its anchor off (60 s doubled per earlier failure,
  * counted or not, capped at 6 h), so a window that keeps failing never stays
  * at the head of the oldest-first queue.
  *
  * A failure counts toward the anchor's limit (EXTRACTION_HELD_FAILURES_MAX
  * held, EXTRACTION_TRANSIENT_FAILURES_MAX transient) only on direct proof that
- * the provider is up, never by what other windows did:
- * - the call was answered (an empty, moderated, cut-off or unreadable reply,
- *   or a rejected request), so the failure is the window's own;
- * - the call went unanswered (5xx, 408, 429, 404, 409, 401-403, a network
- *   fault, an open circuit), and one minimal probe sent at once to the same
- *   adapter and model was answered.
+ * the service at fault is up, never by what other windows did:
+ * - the model call was answered (an empty, moderated, cut-off or unreadable
+ *   reply, or an HTTP status the provider refused the request with), so the
+ *   failure is the window's own;
+ * - the model call went unanswered (5xx, 408, 429, 404, 409, 401-403, a
+ *   network fault, an open circuit, an error with no status), and one minimal
+ *   probe sent at once to the same adapter and model was answered: it
+ *   resolved, or the provider refused it with an HTTP status;
+ * - the store refused this window's data (a SQLSTATE in class 22 or 23) when
+ *   reading the window or committing it.
  * When the probe goes unanswered too, the provider is down: the failure backs
  * the anchor off uncounted and the tick ends, so an outage tick makes two
- * calls and an outage of any length exhausts no anchor. An exhausted anchor no
+ * calls and an outage of any length exhausts no anchor. Any other store
+ * failure (no SQLSTATE, a PostgREST code, a timeout) is the store being down
+ * or slow: it is not counted either, and the tick ends. An exhausted anchor no
  * longer holds its session's later anchors back.
  *
  * Log lines carry id prefixes, statuses, counts and durations, never text.
  */
 import {
   classifyExtractionError,
+  isProviderRefusal,
   type CompleteJsonRequest,
   type CompleteJsonResult,
   type ExtractionErrorClass,
@@ -38,8 +45,10 @@ import {
 } from '../adapters/intelligence.js'
 import {
   EXTRACTION_WINDOW_SUBJECTS_MAX,
+  isDataRefusal,
   type CaptureStore,
   type ExtractionCommit,
+  type ExtractionCommitResult,
   type PendingAnchor,
 } from '../items/capture-store.js'
 import { gateWindow, type GateResult } from './gate.js'
@@ -52,6 +61,7 @@ import {
   RECENT_LISTING_LIMIT,
   renderUserMessage,
   type ExtractionWindow,
+  type RawExtractionWindow,
 } from './window.js'
 
 /** A session with no capture event for this long has ended. */
@@ -119,7 +129,7 @@ export function isExtractionReplyError(err: unknown): err is ExtractionReplyErro
   return err instanceof ExtractionReplyError || (err instanceof Error && err.name === 'ExtractionReplyError')
 }
 
-/** The failure class of anything a window's read, call or gate threw. */
+/** The failure class of anything a window's model call or reply check threw. */
 export function extractionFailureClass(err: unknown): ExtractionErrorClass {
   if (isExtractionReplyError(err)) return err.failure
   return classifyExtractionError(err)
@@ -191,8 +201,9 @@ export interface ExtractionTickResult {
 }
 
 /**
- * `outage`: the provider (an unanswered call and probe) or the store (an
- * unreadable window) is down; the failure is not counted and the tick ends.
+ * `outage`: the provider (an unanswered call and probe) or the store (a read
+ * or commit it did not refuse for the window's data) is down; the failure is
+ * not counted and the tick ends.
  */
 type WindowStatus = 'succeeded' | 'held' | 'transient' | 'outage' | 'gone' | 'skipped'
 
@@ -275,24 +286,32 @@ async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date)
   })
   if (runId === null) return 'skipped'
 
+  let raw: RawExtractionWindow | null
+  try {
+    raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT)
+  } catch (err) {
+    return failStore(deps, anchor, runId, err, {}, line)
+  }
+  if (raw === null) {
+    // Forgotten or deleted since it was handed out: nothing to extract, and
+    // the pending read no longer returns it.
+    await store.extractionFail(runId, {
+      error: 'the anchor is gone',
+      failure: 'transient',
+      counted: false,
+      stats: { anchor_kind: anchor.anchorKind },
+    })
+    line('gone', '')
+    return 'gone'
+  }
+
   let window: ExtractionWindow
   try {
-    const raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT)
-    if (raw === null) {
-      // Forgotten or deleted since it was handed out: nothing to extract, and
-      // the pending read no longer returns it.
-      await store.extractionFail(runId, {
-        error: 'the anchor is gone',
-        failure: 'transient',
-        counted: false,
-        stats: { anchor_kind: anchor.anchorKind },
-      })
-      line('gone', '')
-      return 'gone'
-    }
     window = buildWindow(raw)
   } catch (err) {
-    return failRead(deps, anchor, runId, err, line)
+    // What the store returned for this anchor cannot be read as a window, and
+    // reading it again returns the same: the window's own failure.
+    return failHeld(deps, anchor, runId, err, {}, line)
   }
 
   let result: ExtractWindowResult
@@ -323,40 +342,57 @@ async function closeStale(deps: TickDeps, anchor: PendingAnchor, runId: string, 
 }
 
 /**
- * The store could not read or the window could not be built; no model call
- * was made. An unreachable store says nothing about the window, so the
- * failure is not counted and the tick ends; anything else (a window that
- * cannot be built) is the window's own and is held.
+ * A store call for this window (the read or the commit) failed. It counts as
+ * held only when the store refused the window's data; anything else (no
+ * SQLSTATE, a PostgREST code, a timeout, a closed run) says nothing about the
+ * window, so it is not counted and the tick ends.
  */
-async function failRead(
+async function failStore(
   deps: TickDeps,
   anchor: PendingAnchor,
   runId: string,
   err: unknown,
+  stats: Record<string, unknown>,
   line: WindowLine,
 ): Promise<WindowStatus> {
-  const failure = classifyExtractionError(err)
-  const counted = failure === 'held'
+  if (isDataRefusal(err)) return failHeld(deps, anchor, runId, err, stats, line)
   await deps.store.extractionFail(runId, {
     error: describeError(err),
-    failure,
-    counted,
-    stats: { anchor_kind: anchor.anchorKind },
+    failure: 'transient',
+    counted: false,
+    stats: { anchor_kind: anchor.anchorKind, ...stats },
   })
-  line(failure, ` error=${errorLabel(err)} counted=${counted}`)
-  if (!counted) {
-    deps.log('extraction: the store could not read a window, so the tick ends')
-    return 'outage'
-  }
-  logIfExhausted(deps.log, anchor, failure)
-  return failure
+  line('transient', ` error=${errorLabel(err)} counted=false`)
+  deps.log('extraction: a store call for a window failed without refusing its data, so the tick ends')
+  return 'outage'
+}
+
+/** Closes the run as a counted held failure: the window's own, no probe. */
+async function failHeld(
+  deps: TickDeps,
+  anchor: PendingAnchor,
+  runId: string,
+  err: unknown,
+  stats: Record<string, unknown>,
+  line: WindowLine,
+): Promise<WindowStatus> {
+  const closed = await deps.store.extractionFail(runId, {
+    error: describeError(err),
+    failure: 'held',
+    counted: true,
+    stats: { anchor_kind: anchor.anchorKind, ...stats },
+  })
+  line('held', ` error=${errorLabel(err)} counted=true`)
+  if (closed) logIfExhausted(deps.log, anchor, 'held')
+  return 'held'
 }
 
 /**
  * The model call failed. A failure the provider answered (a reply that cannot
- * be used, a rejected request) counts. An unanswered one counts only when a
- * probe sent at once is answered; otherwise the provider is down, nothing is
- * counted and the tick ends.
+ * be used, a request refused with an HTTP status) counts. Any other one,
+ * including an error with no status, counts only when a probe sent at once is
+ * answered; otherwise the provider is down, nothing is counted and the tick
+ * ends.
  */
 async function failCall(
   deps: TickDeps,
@@ -366,10 +402,10 @@ async function failCall(
   line: WindowLine,
 ): Promise<WindowStatus> {
   const failure = extractionFailureClass(err)
-  const answered = isExtractionReplyError(err) || failure === 'held'
+  const answered = isExtractionReplyError(err) || isProviderRefusal(err)
   const counted = answered || (await providerAnswers(deps.intelligence))
   const call = isExtractionReplyError(err) ? err.call : null
-  await deps.store.extractionFail(runId, {
+  const closed = await deps.store.extractionFail(runId, {
     error: describeError(err),
     failure,
     counted,
@@ -380,19 +416,22 @@ async function failCall(
     deps.log('extraction: a window call and the probe after it went unanswered, so the tick ends; the provider is down')
     return 'outage'
   }
-  logIfExhausted(deps.log, anchor, failure)
+  if (closed) logIfExhausted(deps.log, anchor, failure)
   return failure
 }
 
-/** Sends the probe; true when the provider answered it in any way. */
+/**
+ * Sends the probe; true when the provider answered it: the call resolved,
+ * whatever its content, or the provider refused it with an HTTP status.
+ */
 async function providerAnswers(intelligence: IntelligenceAdapter): Promise<boolean> {
   const completeJson = intelligence.completeJson
   if (!completeJson) return false
   try {
     await completeJson.call(intelligence, PROBE_REQUEST)
     return true
-  } catch {
-    return false
+  } catch (err) {
+    return isProviderRefusal(err)
   }
 }
 
@@ -404,37 +443,36 @@ async function commitWindow(
   result: ExtractWindowResult,
   line: WindowLine,
 ): Promise<WindowStatus> {
-  let commit: ExtractionCommit | null = null
+  let commit: ExtractionCommit
   try {
     const payload = buildCommitPayload(window, result, runId)
     commit = {
       ...payload,
       stats: { anchor_kind: anchor.anchorKind, ...callStats(result.call), ...payload.stats },
     }
-    const stored = await deps.store.extractionCommit(runId, commit)
-    line(
-      'succeeded',
-      ` statements=${result.statements.length} observations=${result.observations.length}` +
-        ` rejected=${result.rejected.length} duplicates=${stored.duplicates} subjects_created=${stored.subjectsCreated}`,
-    )
-    return 'succeeded'
   } catch (err) {
-    await deps.store.extractionFail(runId, {
-      error: describeError(err),
-      failure: 'held',
-      counted: true,
-      stats: commit?.stats ?? { anchor_kind: anchor.anchorKind, ...callStats(result.call) },
-    })
-    line('held', ` error=${errorLabel(err)}`)
-    logIfExhausted(deps.log, anchor, 'held')
-    return 'held'
+    // The reply cannot be turned into a payload; the same reply fails the same way.
+    return failHeld(deps, anchor, runId, err, callStats(result.call), line)
   }
+  let stored: ExtractionCommitResult
+  try {
+    stored = await deps.store.extractionCommit(runId, commit)
+  } catch (err) {
+    return failStore(deps, anchor, runId, err, commit.stats, line)
+  }
+  line(
+    'succeeded',
+    ` statements=${result.statements.length} observations=${result.observations.length}` +
+      ` rejected=${result.rejected.length} duplicates=${stored.duplicates} subjects_created=${stored.subjectsCreated}`,
+  )
+  return 'succeeded'
 }
 
 /**
  * Names the anchor when the counted failure just recorded is its last: the
  * pending read no longer hands it out, and its session's later anchors run.
- * Only called for a counted failure; an uncounted one never exhausts.
+ * Only called for a counted failure that closed the run; an uncounted one, or
+ * one whose run was already closed elsewhere, never exhausts.
  */
 function logIfExhausted(log: (line: string) => void, anchor: PendingAnchor, failure: ExtractionErrorClass): void {
   const held = anchor.heldFailures + (failure === 'held' ? 1 : 0)

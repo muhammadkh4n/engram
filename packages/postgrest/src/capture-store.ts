@@ -310,7 +310,10 @@ export class PostgRestCaptureStore implements CaptureStore {
 
   async extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
     if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
-      throw new Error(`extractionCommit: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`)
+      throw refusedData(
+        `extractionCommit: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
+        INVALID_PARAMETER_VALUE,
+      )
     }
     const payload = {
       subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
@@ -405,11 +408,14 @@ function toCommitItem(item: ExtractionItem, index: number): Record<string, unkno
  */
 function isoTime(value: Date, position: number): string {
   if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
-    throw new Error(`extractionCommit failed: item ${position}: occurredAt is not a valid date`)
+    throw refusedData(`extractionCommit failed: item ${position}: occurredAt is not a valid date`, INVALID_DATETIME_FORMAT)
   }
   const year = value.getUTCFullYear()
   if (year < 1 || year > 9999) {
-    throw new Error(`extractionCommit failed: item ${position}: occurredAt has a year outside 1 to 9999`)
+    throw refusedData(
+      `extractionCommit failed: item ${position}: occurredAt has a year outside 1 to 9999`,
+      DATETIME_FIELD_OVERFLOW,
+    )
   }
   return value.toISOString()
 }
@@ -447,8 +453,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function refuseUnsafeText(operation: string, prefix: string, value: unknown): void {
   const path = findPostgresUnsafeText(value)
   if (path !== null) {
-    throw new Error(`${operation} failed: ${prefix}${path} holds U+0000 or an unpaired surrogate, which PostgreSQL cannot store`)
+    throw refusedData(
+      `${operation} failed: ${prefix}${path} holds U+0000 or an unpaired surrogate, which PostgreSQL cannot store`,
+      UNTRANSLATABLE_CHARACTER,
+    )
   }
+}
+
+const UNTRANSLATABLE_CHARACTER = '22P05'
+const INVALID_DATETIME_FORMAT = '22007'
+const DATETIME_FIELD_OVERFLOW = '22008'
+const INVALID_PARAMETER_VALUE = '22023'
+
+/**
+ * A value refused before it is sent carries the class 22 SQLSTATE PostgreSQL
+ * would refuse it with, so a caller reading sqlstateOf treats it as the
+ * refused data it is, not as a store fault worth retrying.
+ */
+function refusedData(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code })
 }
 
 function toMaterializeResult(data: unknown): MaterializeResult {
