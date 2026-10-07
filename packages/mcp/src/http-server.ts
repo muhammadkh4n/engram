@@ -17,10 +17,11 @@ import {
 } from './server-core.js'
 import { defaultSecretRegistry, EMBED_TEXT_VERSION } from '@engram-mem/core'
 import { OpenAIEmbeddingService, openaiIntelligence } from '@engram-mem/openai'
-import { PostgRestCaptureStore } from '@engram-mem/postgrest'
+import { PostgRestCaptureStore, PostgRestItemStore } from '@engram-mem/postgrest'
 import { createRequestListener, loadHttpConfig } from './http-app.js'
 import { loadProjectRegistry, startProjectSync, type ProjectRegistry, type ProjectSync } from './capture-events/project-registry.js'
 import type { CaptureEventsRouteDeps } from './capture-events/route.js'
+import type { DocumentsRouteDeps } from './documents-route.js'
 import { startCaptureWorker, type CaptureWorker } from './capture-events/worker.js'
 import { CAPTURE_SERVER_REQUIRED_ENV } from './capture-events/server-env.js'
 
@@ -114,6 +115,43 @@ export function captureEventsConfigFromEnv(env: NodeJS.ProcessEnv = process.env)
   }
 }
 
+export interface DocumentsConfig {
+  registry: ProjectRegistry
+  supabaseUrl: string
+  supabaseKey: string
+}
+
+/**
+ * What /documents/sync cannot run without: the registry that scopes a note,
+ * the scrubber's sources (a server without them could only answer 503) and
+ * the store.
+ */
+export const DOCUMENTS_SERVER_REQUIRED_ENV = [
+  'ENGRAM_PROJECT_REGISTRY_FILE',
+  'ENGRAM_SECRET_SOURCES_FILE',
+  'SUPABASE_URL',
+  'SUPABASE_KEY',
+] as const
+
+/**
+ * The documents-sync configuration, or null while ENGRAM_DOCUMENTS_TOKEN is
+ * unset. With the token set, a missing variable or an invalid project
+ * registry throws naming the variable.
+ */
+export function documentsConfigFromEnv(env: NodeJS.ProcessEnv = process.env): DocumentsConfig | null {
+  if (!env['ENGRAM_DOCUMENTS_TOKEN']) return null
+  for (const name of DOCUMENTS_SERVER_REQUIRED_ENV) {
+    if (!env[name]) throw new Error(`ENGRAM_DOCUMENTS_TOKEN is set, so ${name} is required`)
+  }
+  let registry: ProjectRegistry
+  try {
+    registry = loadProjectRegistry(env['ENGRAM_PROJECT_REGISTRY_FILE']!)
+  } catch (err) {
+    throw new Error(`ENGRAM_PROJECT_REGISTRY_FILE: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  return { registry, supabaseUrl: env['SUPABASE_URL']!, supabaseKey: env['SUPABASE_KEY']! }
+}
+
 async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   // MCP Streamable HTTP requires `Accept: application/json, text/event-stream`.
   // Some clients (notably Claude Code's HTTP MCP client) send only one of the two,
@@ -155,6 +193,7 @@ export async function main(): Promise<void> {
   }
 
   const captureEventsConfig = captureEventsConfigFromEnv()
+  const documentsConfig = documentsConfigFromEnv()
   let projectSync: ProjectSync | null = null
   let worker: CaptureWorker | null = null
   let captureEvents: CaptureEventsRouteDeps | undefined
@@ -189,6 +228,22 @@ export async function main(): Promise<void> {
     })
   }
 
+  let documents: DocumentsRouteDeps | undefined
+  if (documentsConfig !== null) {
+    // Both routes read one registry file, so a server running both shares
+    // the capture route's sync instead of writing the same rows twice.
+    if (projectSync === null) {
+      const syncStore = new PostgRestCaptureStore({ url: documentsConfig.supabaseUrl, key: documentsConfig.supabaseKey })
+      projectSync = startProjectSync(syncStore, documentsConfig.registry, log)
+    }
+    documents = {
+      store: new PostgRestItemStore({ url: documentsConfig.supabaseUrl, key: documentsConfig.supabaseKey }),
+      ready: projectSync.ready,
+      status: () => defaultSecretRegistry().status(),
+      log,
+    }
+  }
+
   const httpServer = http.createServer(
     createRequestListener(config, {
       mcp: handleMcp,
@@ -198,6 +253,7 @@ export async function main(): Promise<void> {
         log,
       },
       captureEvents,
+      documents,
     }),
   )
 

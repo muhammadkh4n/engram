@@ -2,13 +2,14 @@
  * captureEventsConfigFromEnv: off while ENGRAM_CAPTURE_TOKEN is unset; with
  * it set, every variable the route needs is required by name and the project
  * registry must load, so the server never starts with a route that can only
- * answer 503.
+ * answer 503. documentsConfigFromEnv follows the same rule for
+ * ENGRAM_DOCUMENTS_TOKEN.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { captureEventsConfigFromEnv } from '../src/http-server.js'
+import { captureEventsConfigFromEnv, documentsConfigFromEnv } from '../src/http-server.js'
 
 let dir: string
 let registryFile: string
@@ -77,6 +78,35 @@ describe('captureEventsConfigFromEnv', () => {
       /^ENGRAM_PROJECT_REGISTRY_FILE: /,
     )
     expect(() => captureEventsConfigFromEnv(env({ ENGRAM_PROJECT_REGISTRY_FILE: badRegistryFile }))).toThrow(
+      /^ENGRAM_PROJECT_REGISTRY_FILE: .*version/,
+    )
+  })
+})
+
+describe('documentsConfigFromEnv', () => {
+  const docsEnv = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv =>
+    env({ ENGRAM_CAPTURE_TOKEN: undefined, OPENAI_API_KEY: undefined, ENGRAM_DOCUMENTS_TOKEN: 'd'.repeat(32), ...overrides })
+
+  it('is null while ENGRAM_DOCUMENTS_TOKEN is unset', () => {
+    expect(documentsConfigFromEnv({})).toBeNull()
+    expect(documentsConfigFromEnv({ ENGRAM_DOCUMENTS_TOKEN: '' })).toBeNull()
+  })
+
+  it('loads the registry and the store settings without the capture variables', () => {
+    const config = documentsConfigFromEnv(docsEnv())
+    expect([...config!.registry.projects.keys()]).toEqual(['sample-repo'])
+    expect(config).toMatchObject({ supabaseUrl: 'http://127.0.0.1:3000', supabaseKey: 'test-service-key' })
+  })
+
+  it.each(['ENGRAM_PROJECT_REGISTRY_FILE', 'ENGRAM_SECRET_SOURCES_FILE', 'SUPABASE_URL', 'SUPABASE_KEY'])(
+    'throws naming %s when the token is set and it is missing',
+    (name) => {
+      expect(() => documentsConfigFromEnv(docsEnv({ [name]: undefined }))).toThrow(new RegExp(`${name} is required`))
+    },
+  )
+
+  it('throws naming the registry variable for an invalid registry file', () => {
+    expect(() => documentsConfigFromEnv(docsEnv({ ENGRAM_PROJECT_REGISTRY_FILE: badRegistryFile }))).toThrow(
       /^ENGRAM_PROJECT_REGISTRY_FILE: .*version/,
     )
   })
