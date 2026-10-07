@@ -4,8 +4,18 @@
  * its scope, plan and sections, per-note store failures, and the totals.
  */
 
-import { describe, it, expect, vi } from 'vitest'
-import type { DocumentNoteSyncResult, DocumentNoteWrite, ScrubResult } from '@engram-mem/core'
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  SECRET_SOURCES_ENV,
+  resetDefaultSecretRegistry,
+  scrubSecrets,
+  type DocumentNoteSyncResult,
+  type DocumentNoteWrite,
+  type ScrubResult,
+} from '@engram-mem/core'
 import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-events/project-registry.js'
 import {
   DOCUMENTS_FAILED_MESSAGE,
@@ -318,5 +328,62 @@ describe('runDocumentsRequest: store outcomes', () => {
     const statusSum = accepted.totals.applied + accepted.totals.unchanged + accepted.totals.stale +
       accepted.totals.rejected + accepted.totals.failed
     expect(statusSum).toBe(accepted.totals.notes)
+  })
+})
+
+// Made-up values; none is a real credential.
+const FM_PASSWORD = 'Zq7-made-up-not-real-91x'
+const FM_BEARER = 'Bearer Zq7madeupNotReal91xAbc'
+const FM_TOKEN = 'Zq7madeupTokenNotReal91xQw'
+const FM_REGISTERED = 'Kd4madeupRegisteredValue73pX'
+
+describe('runDocumentsRequest: frontmatter is scrubbed as structured data', () => {
+  let dir = ''
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'engram-documents-registry-'))
+    writeFileSync(join(dir, 'secrets.json'), JSON.stringify({ DEPLOY_SECRET: FM_REGISTERED }))
+    writeFileSync(join(dir, 'sources.json'), JSON.stringify({ sources: [{ path: 'secrets.json', format: 'json-keys' }] }))
+    vi.stubEnv(SECRET_SOURCES_ENV, join(dir, 'sources.json'))
+    resetDefaultSecretRegistry()
+  })
+  afterAll(() => {
+    vi.unstubAllEnvs()
+    resetDefaultSecretRegistry()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it.each([
+    ['a credential-named key', { db_password: FM_PASSWORD }, { db_password: '[REDACTED:db_password]' }],
+    ['an Authorization header', { Authorization: FM_BEARER }, { Authorization: '[REDACTED:Authorization]' }],
+    ['a nested credential key', { deploy: { api_token: FM_TOKEN } }, { deploy: { api_token: '[REDACTED:api_token]' } }],
+    [
+      'a credential key inside an array of objects',
+      { servers: [{ host: 'db.local', password: FM_PASSWORD }] },
+      { servers: [{ host: 'db.local', password: '[REDACTED:password]' }] },
+    ],
+    ['a registered value used as a key', { [FM_REGISTERED]: 'note' }, { '[REDACTED:DEPLOY_SECRET]': 'note' }],
+    ['a plain key and value', { title: 'Release notes', tags: ['plan'] }, { title: 'Release notes', tags: ['plan'] }],
+  ])('sends the store %s masked', async (_name, frontmatter, expected) => {
+    const d = deps({ scrub: scrubSecrets })
+    const out = await runDocumentsRequest(d, body(note('Engram/f.md', { frontmatter })))
+    expect(out.status).toBe(200)
+    expect(sent(d).frontmatter).toEqual(expected)
+  })
+
+  it('rejects a note whose frontmatter scrub breaks its shape, stores none of it, and still applies the others', async () => {
+    const scrub = async (text: string): Promise<ScrubResult> =>
+      text.includes('db_password') ? { text: '{"title":"x"}', redactions: [{ kind: 'stub' }] } : { text, redactions: [] }
+    const d = deps({ scrub })
+    const out = await runDocumentsRequest(d, body(
+      note('Engram/g.md', { frontmatter: { title: 'x', db_password: FM_PASSWORD } }),
+      note('Engram/h.md'),
+    ))
+    expect(out.status).toBe(200)
+    const accepted = out.body as DocumentsAccepted
+    expect(accepted.results[0]).toEqual({ path: 'Engram/g.md', status: 'rejected', reason: 'invalid:frontmatter' })
+    expect(accepted.results[1]).toMatchObject({ path: 'Engram/h.md', status: 'applied' })
+    expect(d.syncDocumentNote).toHaveBeenCalledTimes(1)
+    expect(sent(d).path).toBe('Engram/h.md')
+    expect(JSON.stringify(d.syncDocumentNote.mock.calls)).not.toContain(FM_PASSWORD)
   })
 })

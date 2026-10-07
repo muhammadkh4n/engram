@@ -23,6 +23,7 @@ import {
   DOCUMENT_SECTION_KINDS,
   DOCUMENT_SECTIONS_MAX,
   PostgresTextKeyCollision,
+  scrubJsonValue,
   scrubSecrets,
   sqlstateOf,
   toPostgresText,
@@ -349,22 +350,6 @@ async function scrubInto(text: string, field: string, scrub: Scrub, hits: Captur
   return result.text
 }
 
-async function scrubFrontmatter(value: unknown, scrub: Scrub): Promise<unknown> {
-  if (typeof value === 'string') return (await scrub(value)).text
-  if (Array.isArray(value)) {
-    const out: unknown[] = []
-    for (const inner of value) out.push(await scrubFrontmatter(inner, scrub))
-    return out
-  }
-  if (isPlainObject(value)) {
-    const entries: Array<[string, unknown]> = []
-    for (const [key, inner] of Object.entries(value)) entries.push([key, await scrubFrontmatter(inner, scrub)])
-    // fromEntries defines own properties, so a `__proto__` key stays data.
-    return Object.fromEntries(entries)
-  }
-  return value
-}
-
 /**
  * One section per heading section, scrubbed. Its ordinal counts the earlier
  * sections with the same (scrubbed) heading path, so a section added above
@@ -390,7 +375,19 @@ async function mapSections(path: string, sections: readonly CheckedSection[], sc
   return out
 }
 
-async function mapNote(note: CheckedNote, registry: ProjectRegistry, scrub: Scrub): Promise<DocumentNoteWrite> {
+/**
+ * The note's write, or the rule it breaks. Frontmatter is scrubbed as one JSON
+ * text so each value is read beside its key; a scrub that cannot give back the
+ * same structure rejects the note, since storing the unscrubbed object would
+ * keep the secrets and a retry would fail the same way.
+ */
+async function mapNote(note: CheckedNote, registry: ProjectRegistry, scrub: Scrub): Promise<DocumentNoteWrite | { reason: string }> {
+  let frontmatter: Record<string, unknown> | null = null
+  if (note.frontmatter !== null) {
+    const scrubbed = await scrubJsonValue(note.frontmatter, scrub)
+    if (!scrubbed.ok) return { reason: 'invalid:frontmatter' }
+    frontmatter = scrubbed.value as Record<string, unknown>
+  }
   const scope = resolveNoteScope(registry, note.segments)
   return {
     path: note.path,
@@ -398,7 +395,7 @@ async function mapNote(note: CheckedNote, registry: ProjectRegistry, scrub: Scru
     seenAt: note.seenAt,
     mtime: note.mtime,
     deleted: note.deleted,
-    frontmatter: (await scrubFrontmatter(note.frontmatter, scrub)) as Record<string, unknown> | null,
+    frontmatter,
     projectId: scope.projectId,
     workspaceId: scope.workspaceId,
     planSlug: planSlugOf(note.segments),
@@ -467,6 +464,7 @@ async function runNote(
   if ('reason' in checked) return { result: { path, status: 'rejected', reason: checked.reason }, ran: false }
   try {
     const note = await mapNote(checked, registry, deps.scrub ?? scrubSecrets)
+    if ('reason' in note) return { result: { path, status: 'rejected', reason: note.reason }, ran: false }
     return { result: storedResult(path, await deps.store.syncDocumentNote(note)), ran: true }
   } catch (err) {
     deps.log(`documents sync: note ${position} failed: ${errorLabel(err)}`)
