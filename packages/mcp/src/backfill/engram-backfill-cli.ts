@@ -12,6 +12,8 @@
  *     modified in the last hour are left to live capture.
  *   - history: the prompts in `--history-file` of every session that has no
  *     transcript left, pastes put back; a bang command is not a prompt.
+ *   - git: the user's non-merge commits on each registered repository's
+ *     default branch, each built as the post-commit hook builds it.
  *
  * Dry run by default: prints what would be sent, sends nothing and writes no
  * state. `--apply` spools to the backfill's own state directory and drains it
@@ -22,6 +24,7 @@
  * Usage:
  *   engram-backfill transcripts [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
  *   engram-backfill history [--history-file FILE] [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
+ *   engram-backfill git (--repo DIR | --repos-under DIR)... [--author-email EMAIL]... [--since ISO] [sending flags] [--apply] [--json]
  *
  * Sending flags:
  *   --target URL        the server (default ENGRAM_SERVER_URL); events go to its /capture/events
@@ -40,6 +43,7 @@ import { captureEventsEndpoint } from '../capture/endpoint.js'
 import { captureClientInfo } from '../capture/events.js'
 import { isEntryPoint } from '../ingest/entry-point.js'
 import { openPrivateHandle } from '../ingest/private-files.js'
+import { type GitSummary, runGit } from './git.js'
 import { type HistorySummary, runHistory } from './history.js'
 import { createProjectResolver, loadOverrides, loadResolverRegistry, type ProjectResolver } from './project-resolver.js'
 import { BACKFILL_CLIENT_NAME, type SendTarget } from './send.js'
@@ -56,7 +60,7 @@ import { runTranscripts, type TranscriptsSummary } from './transcripts.js'
 
 type Env = Record<string, string | undefined>
 
-export const COMMANDS = ['transcripts', 'history'] as const
+export const COMMANDS = ['transcripts', 'history', 'git'] as const
 export type BackfillCommand = (typeof COMMANDS)[number]
 
 export interface BackfillCliArgs {
@@ -70,9 +74,13 @@ export interface BackfillCliArgs {
   overrides: string | null
   projectsDir: string | null
   historyFile: string | null
+  since: string | null
+  repos: string[]
+  reposUnder: string[]
+  authorEmails: string[]
 }
 
-type BackfillSummary = TranscriptsSummary | HistorySummary
+type BackfillSummary = TranscriptsSummary | HistorySummary | GitSummary
 
 export interface CliIo {
   out: (text: string) => void
@@ -85,10 +93,13 @@ const USAGE =
   'engram-backfill — replay past sessions through the capture route (dry run by default)\n' +
   '  engram-backfill transcripts [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]\n' +
   '  engram-backfill history [--history-file FILE] [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]\n' +
+  '  engram-backfill git (--repo DIR | --repos-under DIR)... [--author-email EMAIL]... [--since ISO] [sending flags]\n' +
+  '                      [--apply] [--json]\n' +
   '  Commands:\n' +
   '  transcripts          Claude Code main-session transcripts, oldest first; files modified in\n' +
   '                       the last hour are left to live capture\n' +
   '  history              prompts from the history file of sessions with no transcript left\n' +
+  '  git                  your non-merge commits on each registered repository\'s default branch\n' +
   '  Sending flags:\n' +
   '  --target URL         the server (default ENGRAM_SERVER_URL)\n' +
   '  --token-file FILE    the capture token (default ENGRAM_CAPTURE_TOKEN_FILE, else ENGRAM_CAPTURE_TOKEN)\n' +
@@ -101,6 +112,11 @@ const USAGE =
   '  --history-file FILE  default ~/.claude/history.jsonl; pastes stored by hash are read from its paste-cache/\n' +
   '  --projects-dir DIR   the transcripts that decide which sessions are covered (default ~/.claude/projects)\n' +
   '  --overrides FILE     as for transcripts\n' +
+  '  git:\n' +
+  '  --repo DIR           a checkout to read (repeatable)\n' +
+  '  --repos-under DIR    read every main clone directly under DIR (repeatable)\n' +
+  '  --author-email EMAIL whose commits to send (repeatable; default each repository\'s user.email)\n' +
+  '  --since ISO          only commits after this time\n' +
   '  Common:\n' +
   '  --apply              send, and move cursors once the server acknowledged\n' +
   '  --json               print the summary as JSON\n'
@@ -113,6 +129,13 @@ const VALUE_FLAGS = {
   '--overrides': 'overrides',
   '--projects-dir': 'projectsDir',
   '--history-file': 'historyFile',
+  '--since': 'since',
+} as const satisfies Record<string, keyof BackfillCliArgs>
+
+const REPEATED_FLAGS = {
+  '--repo': 'repos',
+  '--repos-under': 'reposUnder',
+  '--author-email': 'authorEmails',
 } as const satisfies Record<string, keyof BackfillCliArgs>
 
 const SENDING_FLAGS = ['--target', '--token-file', '--registry', '--state-dir', '--apply', '--json']
@@ -121,6 +144,7 @@ const SENDING_FLAGS = ['--target', '--token-file', '--registry', '--state-dir', 
 const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
   transcripts: new Set([...SENDING_FLAGS, '--projects-dir', '--overrides']),
   history: new Set([...SENDING_FLAGS, '--history-file', '--projects-dir', '--overrides']),
+  git: new Set([...SENDING_FLAGS, '--repo', '--repos-under', '--author-email', '--since']),
 }
 
 function isCommand(value: string): value is BackfillCommand {
@@ -144,11 +168,15 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     overrides: null,
     projectsDir: null,
     historyFile: null,
+    since: null,
+    repos: [],
+    reposUnder: [],
+    authorEmails: [],
   }
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i]!
     if (!COMMAND_FLAGS[command].has(flag)) {
-      const known = flag in VALUE_FLAGS || SENDING_FLAGS.includes(flag)
+      const known = flag in VALUE_FLAGS || flag in REPEATED_FLAGS || SENDING_FLAGS.includes(flag)
       throw new UsageError(known ? `${command} does not take ${flag}` : `unknown flag "${flag}"`)
     }
     if (flag === '--apply') args.apply = true
@@ -156,9 +184,14 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     else {
       const value = rest[++i]?.trim()
       if (!value || value.startsWith('--')) throw new UsageError(`${flag} requires a value`)
-      args[VALUE_FLAGS[flag as keyof typeof VALUE_FLAGS]] = value
+      if (Object.hasOwn(REPEATED_FLAGS, flag)) args[REPEATED_FLAGS[flag as keyof typeof REPEATED_FLAGS]].push(value)
+      else args[VALUE_FLAGS[flag as keyof typeof VALUE_FLAGS]] = value
     }
   }
+  if (command === 'git' && args.repos.length === 0 && args.reposUnder.length === 0) {
+    throw new UsageError('git needs --repo or --repos-under')
+  }
+  if (args.since !== null && Number.isNaN(Date.parse(args.since))) throw new UsageError('--since must be an ISO date')
   return args
 }
 
@@ -217,7 +250,10 @@ function commandLines(s: BackfillSummary): string {
       `skipped_unchanged=${s.files.skipped_unchanged} not_reached=${s.files.not_reached}\n`
     )
   }
-  return `  entries: ${pairs({ ...s.entries })}\n`
+  if (s.command === 'history') return `  entries: ${pairs({ ...s.entries })}\n`
+  const repos = s.repos.map((r) => `    ${r.repo} ${r.branch} commits=${r.commits} (${r.path})\n`).join('')
+  const skipped = s.skipped.map((r) => `    ${r.repo ?? '-'} ${r.reason} (${r.path})\n`).join('')
+  return `  repos:\n${repos || '    none\n'}  skipped:\n${skipped || '    none\n'}  unreadable=${s.unreadable}\n`
 }
 
 export function formatSummary(s: BackfillSummary): string {
@@ -247,8 +283,19 @@ function runSource(args: BackfillCliArgs, ctx: CommandContext, send: SendTarget 
   if (args.command === 'transcripts') {
     return runTranscripts({ ...common, projectsDir, registry: ctx.registry, resolver: ctx.resolver, paths: ctx.paths })
   }
-  const historyFile = args.historyFile ? expandHome(args.historyFile, ctx.env) : join(home, '.claude', 'history.jsonl')
-  return runHistory({ ...common, historyFile, projectsDir, resolver: ctx.resolver })
+  if (args.command === 'history') {
+    const historyFile = args.historyFile ? expandHome(args.historyFile, ctx.env) : join(home, '.claude', 'history.jsonl')
+    return runHistory({ ...common, historyFile, projectsDir, resolver: ctx.resolver })
+  }
+  return runGit({
+    ...common,
+    repos: args.repos.map((p) => expandHome(p, ctx.env)),
+    reposUnder: args.reposUnder.map((p) => expandHome(p, ctx.env)),
+    authorEmails: args.authorEmails,
+    since: args.since,
+    registry: ctx.registry,
+    registryFile: ctx.registryFile,
+  })
 }
 
 async function runCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<BackfillSummary> {
