@@ -123,6 +123,8 @@ export const EXTRACTION_WINDOW_SUBJECTS_MAX = 1000
 export const EXTRACTION_WINDOW_RECENT_MAX = 200
 /** The most items one extraction commit stores. */
 export const EXTRACTION_COMMIT_ITEMS_MAX = 500
+/** The most candidates one candidate read returns per item. */
+export const EXTRACTION_CANDIDATES_LIMIT_MAX = 100
 
 /** What decides which anchors are next. */
 export interface ExtractionPendingQuery {
@@ -235,6 +237,54 @@ export interface ExtractionItem {
    */
   links?: readonly ExtractionLink[]
   linksRejected?: readonly ExtractionRejectedLink[]
+  /**
+   * Every current item on its subject the item was weighed against, with the
+   * targets its links name. The commit records, as a link race, any current
+   * item on that subject outside this list: it appeared after the read.
+   */
+  candidatesRead?: readonly string[]
+}
+
+/**
+ * One new item to be weighed against the current items on its subject: a
+ * stored subject, its class, time, words and event key, and the ids its own
+ * links already name, which are not read again.
+ */
+export interface ExtractionCandidateQuery {
+  subjectId: string
+  class: 'mk_statement' | 'observation'
+  occurredAt: Date
+  content: string
+  eventKey: string
+  exclude: readonly string[]
+}
+
+/** A current item a new one is weighed against. Times are UTC ISO 8601. */
+export interface ExtractionCandidate {
+  id: string
+  class: string
+  kind: string
+  subjectId: string | null
+  subjectLabel: string | null
+  content: string
+  occurredAt: string
+}
+
+/**
+ * What one item is weighed against. `stored` names the item that already
+ * holds its event key and `repeatOf` a current item of its class and subject
+ * holding the same words; either means it needs no decision, and then the
+ * lists are empty. Otherwise `read` lists every current item on its subject
+ * in the anchor's scope that occurred no later (minus the excluded ids),
+ * `total` counts them and `candidates` holds the newest of them, up to the
+ * limit asked.
+ */
+export interface ExtractionCandidateRead {
+  stored: string | null
+  repeatOf: string | null
+  total: number
+  read: string[]
+  candidates: ExtractionCandidate[]
 }
 
 /** Everything one run stores, in one transaction. `stats` holds counts only, never text. */
@@ -350,6 +400,18 @@ export interface CaptureStore {
    * observations.
    */
   extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null>
+
+  /**
+   * One read per item, in input order, of what that item must be weighed
+   * against (see ExtractionCandidateRead), up to `limit` (1 to
+   * EXTRACTION_CANDIDATES_LIMIT_MAX) candidates each; null when the anchor
+   * is gone. Scope is the anchor's, as the window lists it.
+   */
+  extractionCandidates(
+    anchorId: string,
+    items: readonly ExtractionCandidateQuery[],
+    limit: number,
+  ): Promise<ExtractionCandidateRead[] | null>
 
   /**
    * Opens a running run on the anchor and returns its id, or null when a run

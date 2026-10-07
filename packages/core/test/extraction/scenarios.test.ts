@@ -13,6 +13,8 @@ import { describe, expect, it } from 'vitest'
 import type { CompleteJsonRequest, IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type {
   ExtractionBegin,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionFailure,
@@ -94,6 +96,11 @@ class OneWindowStore implements ExtractionStore {
 
   async extractionWindow(): Promise<RawExtractionWindow | null> {
     return this.raw
+  }
+
+  /** Nothing is stored on any subject, so no item has candidates. */
+  async extractionCandidates(_anchorId: string, items: readonly ExtractionCandidateQuery[]): Promise<ExtractionCandidateRead[]> {
+    return items.map(() => ({ stored: null, repeatOf: null, total: 0, read: [], candidates: [] }))
   }
 
   async extractionBegin(_run: ExtractionBegin): Promise<string | null> {

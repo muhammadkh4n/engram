@@ -38,6 +38,7 @@ export {
   EXTRACTION_PENDING_LIMIT_MAX,
   EXTRACTION_WINDOW_RECENT_MAX,
   EXTRACTION_WINDOW_SUBJECTS_MAX,
+  EXTRACTION_CANDIDATES_LIMIT_MAX,
   MATERIALIZE_LIMIT_MAX,
   SCAN_TARGETS,
   sqlstateOf,
@@ -48,6 +49,9 @@ export type {
   CaptureStore,
   EmbeddingFailure,
   ExtractionBegin,
+  ExtractionCandidate,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionEntity,
@@ -271,7 +275,12 @@ export type { SynthesizeInput } from './synthesis/index.js'
 export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'
 
 // Extraction: the window, the versioned prompt and the reply parser
-export { EXTRACTOR_VERSION, EXTRACTION_SYSTEM_PROMPT } from './extraction/prompt.js'
+export {
+  EXTRACTOR_VERSION,
+  EXTRACTION_SYSTEM_PROMPT,
+  DECISION_SYSTEM_PROMPT,
+  DECISION_REPLY_SCHEMA,
+} from './extraction/prompt.js'
 export {
   buildWindow,
   renderUserMessage,
@@ -305,8 +314,29 @@ export type {
 } from './extraction/window.js'
 export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
-export { buildCommitPayload } from './extraction/persist.js'
-export type { ExtractionItemClass } from './extraction/persist.js'
+export { buildCommitPayload, draftCommit, draftLinks, finishCommit } from './extraction/persist.js'
+export type { ExtractionItemClass, CommitDraft, CommitDecisions } from './extraction/persist.js'
+export {
+  candidateQueries,
+  planDecisions,
+  renderDecisionMessage,
+  decisionMaxTokens,
+  parseDecisionReply,
+  decisionsOf,
+  DECISION_CANDIDATES_MAX,
+  DECISION_ITEM_MAX_CHARS,
+  DECISION_LABEL,
+  DECISION_RELATIONS,
+} from './extraction/decide.js'
+export type {
+  CandidateQueries,
+  DecisionCandidate,
+  AskedItem,
+  DecisionPlan,
+  ParsedDecision,
+  ParsedDecisions,
+  DecisionRelation,
+} from './extraction/decide.js'
 export {
   itemEventKey,
   sessionIndexEventKey,
@@ -328,6 +358,7 @@ export type {
 } from './extraction/links.js'
 export {
   extractWindow,
+  askDecisions,
   runExtractionTick,
   extractionFailureClass,
   isExtractionReplyError,
@@ -341,6 +372,7 @@ export {
 export type {
   ExtractWindowDeps,
   ExtractWindowResult,
+  DecisionCallResult,
   ExtractionCall,
   ExtractionReplyFault,
   ExtractionStore,

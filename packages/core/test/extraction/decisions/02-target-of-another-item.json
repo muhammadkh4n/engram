@@ -1,0 +1,97 @@
+{
+  "note": "The decision for item 0 names c-2, which is item 1's candidate.",
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-0000000d0002",
+      "kind": "user_prompt",
+      "session_id": "tst-session-d",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "Deploys go through the staging stack first. And the cache TTL is ten minutes.",
+      "context": null,
+      "occurred_at": "2026-10-05T11:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 5,
+        "event_key": "tst-key-0002"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "Deploys go through the staging stack first. And the cache TTL is ten minutes.",
+        "transcript_line": 5
+      },
+      "plan_dirs": []
+    },
+    "turn": null,
+    "observed": false,
+    "subjects": [
+      {
+        "id": "00000000-0000-4000-8000-0000000d0020",
+        "label": "deploys",
+        "project_id": "tst-repo",
+        "last_used_at": "2026-09-25T08:00:00Z"
+      },
+      {
+        "id": "00000000-0000-4000-8000-0000000d0030",
+        "label": "cache ttl",
+        "project_id": "tst-repo",
+        "last_used_at": "2026-09-26T08:00:00Z"
+      }
+    ],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"Deploys go through the staging stack first\",\"question\":null,\"kind\":\"ruling\",\"standing\":true,\"scope\":\"project\",\"subject\":{\"id\":\"subj-2\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]},{\"utterance_id\":\"utt-1\",\"quote\":\"the cache TTL is ten minutes\",\"question\":null,\"kind\":\"ruling\",\"standing\":true,\"scope\":\"project\",\"subject\":{\"id\":\"subj-1\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}",
+  "reads": [
+    {
+      "stored": null,
+      "repeatOf": null,
+      "total": 1,
+      "read": [
+        "00000000-0000-4000-8000-0000000d0021"
+      ],
+      "candidates": [
+        {
+          "id": "00000000-0000-4000-8000-0000000d0021",
+          "class": "mk_statement",
+          "kind": "ruling",
+          "subjectId": "00000000-0000-4000-8000-0000000d0020",
+          "subjectLabel": "deploys",
+          "content": "deploys go straight to production",
+          "occurredAt": "2026-09-25T08:00:00Z"
+        }
+      ]
+    },
+    {
+      "stored": null,
+      "repeatOf": null,
+      "total": 1,
+      "read": [
+        "00000000-0000-4000-8000-0000000d0031"
+      ],
+      "candidates": [
+        {
+          "id": "00000000-0000-4000-8000-0000000d0031",
+          "class": "mk_statement",
+          "kind": "ruling",
+          "subjectId": "00000000-0000-4000-8000-0000000d0030",
+          "subjectLabel": "cache ttl",
+          "content": "the cache TTL is five minutes",
+          "occurredAt": "2026-09-26T08:00:00Z"
+        }
+      ]
+    }
+  ],
+  "decision_reply": "{\"decisions\":[{\"item\":0,\"relation\":\"supersedes\",\"targets\":[\"c-1\",\"c-2\"],\"corrects\":[]},{\"item\":1,\"relation\":\"supersedes\",\"targets\":[\"c-2\"],\"corrects\":[]}]}"
+}

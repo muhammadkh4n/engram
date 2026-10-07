@@ -1,11 +1,12 @@
 /**
- * The extraction prompt. The model only proposes; the gate checks every item
- * it returns. Any change to the text below must come with a new
- * EXTRACTOR_VERSION: runs are keyed by version, so a changed prompt under an
- * old version would make recorded runs unreproducible. The version test pins
- * the text's sha256 to enforce that.
+ * The extraction prompts. The model only proposes; code checks every item and
+ * every decision it returns. Any change to the texts or the reply schema below
+ * must come with a new EXTRACTOR_VERSION: runs are keyed by version, so a
+ * changed prompt under an old version would make recorded runs
+ * unreproducible. The version test pins the sha256 of all three to enforce
+ * that.
  */
-export const EXTRACTOR_VERSION = 'extract-v1'
+export const EXTRACTOR_VERSION = 'extract-v2'
 
 export const EXTRACTION_SYSTEM_PROMPT = `You read one exchange between MK, the user, and an AI assistant, and you propose memory items. Code checks every
 item; an item that breaks a rule below is discarded.
@@ -52,3 +53,56 @@ Reply with only a JSON object of exactly this shape:
 "scope":"project","subject":{"id":"subj-1"},"applies_to":[],"supersedes":[],"restates":[],"corrects":[]}],
 "observations":[{"assistant_utterance_id":"turn-1","claim":"...","kind":"finding","subject":{"new":"..."},
 "evidence":[],"valid_at":null,"supersedes":[]}]}`
+
+
+/**
+ * The second call of a window: each new item that will be stored is weighed
+ * against the current items on its subject, which the first call's window may
+ * not have listed. Aliases c-N name the candidates; code maps them back and
+ * drops any that is not a candidate of the item it is given for.
+ */
+export const DECISION_SYSTEM_PROMPT = `You compare new memory items with the items already stored on the same subject and decide, for each new item,
+how it relates to them. Code checks every decision; a decision that breaks a rule below is discarded.
+
+Each NEW ITEM lists its CANDIDATES, newest first: the current items on its subject that are no newer than it. A
+statement is MK's own words, an observation is knowledge an AI assistant established, and a register entry is a
+recorded standing ruling.
+
+Give one decision per new item:
+- relation "supersedes": the new item changes, replaces or reverses what the targets say, so they stop being
+  current. Targets are candidates of the same type as the new item (a statement for a statement, an observation for
+  an observation), or register entries for a statement.
+- relation "restates": the new item says what the targets already say and adds nothing. Targets are candidates of the
+  same type as the new item, or register entries for a statement.
+- relation "independent": the new item neither changes nor repeats any candidate; targets is [].
+- corrects: for a new statement, the observation candidates MK's words say are wrong; [] otherwise. A correction is
+  recorded for MK to review; it does not end the observation.
+A new item about a different detail of the subject is independent of the candidates about other details. When unsure,
+choose "independent": a wrong supersession hides something still true. Use only the candidate ids listed under that
+item.
+
+Reply with only a JSON object of exactly this shape, one decision per new item:
+{"decisions":[{"item":0,"relation":"independent","targets":[],"corrects":[]}]}`
+
+/** The decision reply's schema; the decision parser enforces exactly this. */
+export const DECISION_REPLY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['decisions'],
+  properties: {
+    decisions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['item', 'relation', 'targets', 'corrects'],
+        properties: {
+          item: { type: 'integer', minimum: 0 },
+          relation: { enum: ['supersedes', 'restates', 'independent'] },
+          targets: { type: 'array', items: { type: 'string' } },
+          corrects: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+  },
+} as const

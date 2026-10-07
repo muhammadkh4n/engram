@@ -374,7 +374,16 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       status: 'succeeded',
       finished: true,
       error: null,
-      stats: { statements: { proposed: 0 }, subjects_created: 0, entities: 0, duplicates: 0, links_applied: 0, links_rejected: [], restatements: [] },
+      stats: {
+        statements: { proposed: 0 },
+        subjects_created: 0,
+        entities: 0,
+        duplicates: 0,
+        links_applied: 0,
+        links_rejected: [],
+        restatements: [],
+        link_race: [],
+      },
     })
     expect(await store.extractionBegin({ anchorId: p1!, sessionId: 'sess-r', version: VERSION, model: null })).toBeNull()
 
@@ -630,6 +639,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
         duplicates: 0,
         links_applied: 0,
         links_rejected: [],
+        link_race: [],
         restatements: [],
       },
     })

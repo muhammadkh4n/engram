@@ -603,6 +603,7 @@ function extractionFakes(calls: string[], anchors: PendingAnchor[]) {
       return anchors.length > 1 ? `run-${begun.length}` : null
     },
     extractionWindow: async () => null,
+    extractionCandidates: async () => null,
     extractionFail: async () => true,
     extractionCommit: async () => {
       throw new Error('no commit expected')

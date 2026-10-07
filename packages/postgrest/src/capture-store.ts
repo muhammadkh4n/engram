@@ -1,6 +1,7 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import {
   EMBEDDING_BATCH_MAX,
+  EXTRACTION_CANDIDATES_LIMIT_MAX,
   EXTRACTION_COMMIT_ITEMS_MAX,
   EXTRACTION_PENDING_LIMIT_MAX,
   EXTRACTION_WINDOW_RECENT_MAX,
@@ -15,6 +16,9 @@ import type {
   CaptureStore,
   EmbeddingFailure,
   ExtractionBegin,
+  ExtractionCandidate,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionFailure,
@@ -272,6 +276,44 @@ export class PostgRestCaptureStore implements CaptureStore {
     return window as unknown as RawExtractionWindow
   }
 
+  async extractionCandidates(
+    anchorId: string,
+    items: readonly ExtractionCandidateQuery[],
+    limit: number,
+  ): Promise<ExtractionCandidateRead[] | null> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > EXTRACTION_CANDIDATES_LIMIT_MAX) {
+      throw new Error(`extractionCandidates: limit must be an integer from 1 to ${EXTRACTION_CANDIDATES_LIMIT_MAX}`)
+    }
+    if (items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
+      throw refusedData(
+        `extractionCandidates: ${items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per read`,
+        INVALID_PARAMETER_VALUE,
+      )
+    }
+    // A malformed id names no utterance; PostgREST would refuse the whole call.
+    if (!isUuid(anchorId)) return null
+    const payload = items.map((item, index) => ({
+      subject_id: item.subjectId,
+      class: item.class,
+      occurred_at: isoTime(item.occurredAt, index + 1),
+      content: item.content,
+      event_key: item.eventKey,
+      exclude: [...item.exclude],
+    }))
+    refuseUnsafeText('extractionCandidates', '', payload)
+    const { data, error } = await this.client.rpc('engram_extraction_candidates', {
+      p_anchor: anchorId,
+      p_items: payload,
+      p_limit: limit,
+    })
+    if (error) throw toStoreError('extractionCandidates', error)
+    if (data === null) return null
+    if (!Array.isArray(data) || data.length !== items.length) {
+      throw new Error('extractionCandidates failed: the RPC returned no read per item')
+    }
+    return data.map(toCandidateRead)
+  }
+
   async extractionBegin(run: ExtractionBegin): Promise<string | null> {
     const { data, error } = await this.client.rpc('engram_extraction_begin', {
       p_anchor: run.anchorId,
@@ -327,6 +369,53 @@ export class PostgRestCaptureStore implements CaptureStore {
   }
 }
 
+function toCandidateRead(row: unknown): ExtractionCandidateRead {
+  const unexpected = new Error('extractionCandidates failed: the RPC returned an unexpected read')
+  if (!isRecord(row)) throw unexpected
+  const { stored, repeat_of: repeatOf, total, read, candidates } = row
+  if (
+    !isNullableUuid(stored) ||
+    !isNullableUuid(repeatOf) ||
+    !isCount(total) ||
+    !Array.isArray(read) ||
+    !read.every((id) => typeof id === 'string') ||
+    read.length !== total ||
+    !Array.isArray(candidates) ||
+    candidates.length > total
+  ) {
+    throw unexpected
+  }
+  return {
+    stored,
+    repeatOf,
+    total,
+    read: [...(read as string[])],
+    candidates: candidates.map((c) => toCandidate(c, unexpected)),
+  }
+}
+
+function toCandidate(value: unknown, unexpected: Error): ExtractionCandidate {
+  if (!isRecord(value)) throw unexpected
+  const { id, class: itemClass, kind, subject_id: subjectId, subject_label: subjectLabel, content } = value
+  const occurredAt = parseTime(value.occurred_at)
+  if (
+    typeof id !== 'string' ||
+    typeof itemClass !== 'string' ||
+    typeof kind !== 'string' ||
+    !(subjectId === null || typeof subjectId === 'string') ||
+    !(subjectLabel === null || typeof subjectLabel === 'string') ||
+    typeof content !== 'string' ||
+    occurredAt === null
+  ) {
+    throw unexpected
+  }
+  return { id, class: itemClass, kind, subjectId, subjectLabel, content, occurredAt: occurredAt.toISOString() }
+}
+
+function isNullableUuid(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && isUuid(value))
+}
+
 function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
   const unexpected = new Error('extractionPending failed: the RPC returned an unexpected row')
   const { anchor_item_id: anchorId, session_id: sessionId, anchor_kind: anchorKind, failures } = row
@@ -373,7 +462,8 @@ function parseTime(value: unknown): Date | null {
 
 /**
  * The item as the commit RPC takes it: engram_insert_items' columns plus
- * subject_key, entities, links and links_rejected. Only the set one of
+ * subject_key, entities, links, links_rejected and candidates_read (sent
+ * whenever the item was weighed, even against nothing). Only the set one of
  * subject_id and subject_key is sent, and the link lists only when non-empty.
  */
 function toCommitItem(item: ExtractionItem, index: number): Record<string, unknown> {
@@ -403,6 +493,7 @@ function toCommitItem(item: ExtractionItem, index: number): Record<string, unkno
   if (item.linksRejected && item.linksRejected.length > 0) {
     object.links_rejected = item.linksRejected.map((l) => ({ target: l.target, reason: l.reason }))
   }
+  if (item.candidatesRead !== undefined) object.candidates_read = [...item.candidatesRead]
   return object
 }
 

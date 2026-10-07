@@ -3,6 +3,8 @@ import { describe, it, expect } from 'vitest'
 import type { CompleteJsonRequest, CompleteJsonResult, IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type {
   ExtractionBegin,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionFailure,
@@ -179,6 +181,11 @@ class FakeStore implements ExtractionStore {
       observations: [],
       projects: [{ id: 'tst-repo', kind: 'project' }],
     }
+  }
+
+  /** Nothing is stored on any subject, so no item has candidates. */
+  async extractionCandidates(_anchorId: string, items: readonly ExtractionCandidateQuery[]): Promise<ExtractionCandidateRead[]> {
+    return items.map(() => ({ stored: null, repeatOf: null, total: 0, read: [], candidates: [] }))
   }
 
   async extractionBegin(run: ExtractionBegin): Promise<string | null> {

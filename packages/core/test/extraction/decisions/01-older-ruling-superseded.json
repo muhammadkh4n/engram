@@ -1,0 +1,82 @@
+{
+  "note": "The window lists no statement on the subject; the decision pass shows both current rulings.",
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-0000000d0001",
+      "kind": "user_prompt",
+      "session_id": "tst-session-d",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "Drop SQLite. Postgres only from here on.",
+      "context": null,
+      "occurred_at": "2026-10-04T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 5,
+        "event_key": "tst-key-0001"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "Drop SQLite. Postgres only from here on.",
+        "transcript_line": 5
+      },
+      "plan_dirs": []
+    },
+    "turn": null,
+    "observed": false,
+    "subjects": [
+      {
+        "id": "00000000-0000-4000-8000-0000000d0010",
+        "label": "storage backend",
+        "project_id": "tst-repo",
+        "last_used_at": "2026-09-20T10:00:00Z"
+      }
+    ],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"Postgres only from here on\",\"question\":null,\"kind\":\"ruling\",\"standing\":true,\"scope\":\"project\",\"subject\":{\"id\":\"subj-1\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}",
+  "reads": [
+    {
+      "stored": null,
+      "repeatOf": null,
+      "total": 2,
+      "read": [
+        "00000000-0000-4000-8000-0000000d0012",
+        "00000000-0000-4000-8000-0000000d0011"
+      ],
+      "candidates": [
+        {
+          "id": "00000000-0000-4000-8000-0000000d0012",
+          "class": "mk_statement",
+          "kind": "ruling",
+          "subjectId": "00000000-0000-4000-8000-0000000d0010",
+          "subjectLabel": "storage backend",
+          "content": "the embeddings live in pgvector",
+          "occurredAt": "2026-09-20T10:00:00Z"
+        },
+        {
+          "id": "00000000-0000-4000-8000-0000000d0011",
+          "class": "mk_statement",
+          "kind": "ruling",
+          "subjectId": "00000000-0000-4000-8000-0000000d0010",
+          "subjectLabel": "storage backend",
+          "content": "Postgres and SQLite both",
+          "occurredAt": "2026-09-10T10:00:00Z"
+        }
+      ]
+    }
+  ],
+  "decision_reply": "{\"decisions\":[{\"item\":0,\"relation\":\"supersedes\",\"targets\":[\"c-2\"],\"corrects\":[]}]}"
+}

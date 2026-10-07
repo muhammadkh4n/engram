@@ -20,52 +20,111 @@ import { toPostgresText } from '../text/postgres-text.js'
 import { generateId } from '../utils/id.js'
 import { observationEntities, statementEntities, type ExtractedEntity } from './entities.js'
 import type { GatedObservation, GatedStatement, GatedSubject, GateResult } from './gate.js'
-import { itemEventKey, validateLinks, type LinkProposal, type LinkSource, type LinkTarget } from './links.js'
+import {
+  itemEventKey,
+  validateLinks,
+  type LinkProposal,
+  type LinkSource,
+  type LinkTarget,
+  type LinkValidation,
+} from './links.js'
 import { labelKey } from './subjects.js'
 import type { ExtractionWindow, WindowListedItem } from './window.js'
 
 export type ExtractionItemClass = 'mk_statement' | 'observation'
 
-export function buildCommitPayload(window: ExtractionWindow, gated: GateResult, runId: string): ExtractionCommit {
+/**
+ * A commit before its links are settled: the item rows, the new subjects
+ * they name, and what the link rules need about each item and the window's
+ * listed targets. Items are indexed statements first, then observations, as
+ * the payload orders them.
+ */
+export interface CommitDraft {
+  subjects: ExtractionNewSubject[]
+  items: ExtractionItem[]
+  sources: LinkSource[]
+  /** The links the window's reply proposed, by item index. */
+  proposals: LinkProposal[]
+  /** The window's listed items, current when the window was read. */
+  targets: LinkTarget[]
+  stats: Record<string, unknown>
+}
+
+/**
+ * What the decision pass adds to a commit: its proposals, the candidates they
+ * may name, and per item index every current item it was weighed against.
+ */
+export interface CommitDecisions {
+  proposals: readonly LinkProposal[]
+  targets: readonly LinkTarget[]
+  reads: ReadonlyMap<number, readonly string[]>
+  stats: Record<string, unknown>
+}
+
+export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: string): CommitDraft {
   const subjects = new SubjectKeys()
   const statements = gated.statements.map((s) => statementItem(window, safeStatement(s), runId, subjects))
   const observations = gated.observations.map((o) => observationItem(window, safeObservation(o), runId, subjects))
+  const items = [...statements, ...observations]
+  const gatedItems = [...gated.statements, ...gated.observations]
   return {
     subjects: subjects.list(),
-    items: withLinks(window, gated, [...statements, ...observations]),
+    items,
+    sources: gatedItems.map((g, index) => ({
+      index,
+      class: items[index]!.class,
+      subjectId: items[index]!.subjectId,
+      subjectLabel: g.subject.label,
+      occurredAt: g.occurredAt,
+    })),
+    proposals: gatedItems.flatMap((g, index) => [
+      ...g.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
+      ...('restates' in g ? g.restates.map((target) => ({ item: index, rel: 'restates' as const, target })) : []),
+      ...('corrects' in g ? g.corrects.map((target) => ({ item: index, rel: 'corrects' as const, target })) : []),
+    ]),
+    targets: [
+      ...window.statements.map((t) => listedTarget(t, 'mk_statement')),
+      ...window.observations.map((t) => listedTarget(t, 'observation')),
+    ],
     stats: gateStats(gated),
   }
 }
 
+/** The links the window's reply alone settles. */
+export function draftLinks(draft: CommitDraft): LinkValidation {
+  return validateLinks(draft.sources, draft.proposals, draft.targets)
+}
+
 /**
- * Each item with the links the gate resolved for it, checked against the
- * window's listed items (current when the window was read). Items are
- * indexed statements first, then observations, as the payload orders them.
+ * The payload: each item with its links, checked in one pass over the
+ * reply's proposals and the decisions', so an item that would both supersede
+ * and restate is caught across the two. A proposal both make is checked once,
+ * as the reply's.
  */
-function withLinks(window: ExtractionWindow, gated: GateResult, items: ExtractionItem[]): ExtractionItem[] {
-  const gatedItems = [...gated.statements, ...gated.observations]
-  const sources: LinkSource[] = gatedItems.map((g, index) => ({
-    index,
-    class: items[index]!.class,
-    subjectId: items[index]!.subjectId,
-    subjectLabel: g.subject.label,
-    occurredAt: g.occurredAt,
-  }))
-  const proposals: LinkProposal[] = gatedItems.flatMap((g, index) => [
-    ...g.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
-    ...('restates' in g ? g.restates.map((target) => ({ item: index, rel: 'restates' as const, target })) : []),
-    ...('corrects' in g ? g.corrects.map((target) => ({ item: index, rel: 'corrects' as const, target })) : []),
-  ])
-  const targets = [
-    ...window.statements.map((t) => listedTarget(t, 'mk_statement')),
-    ...window.observations.map((t) => listedTarget(t, 'observation')),
-  ]
-  const { accepted, rejected } = validateLinks(sources, proposals, targets)
-  return items.map((item, index) => ({
-    ...item,
-    links: accepted.filter((l) => l.item === index).map((l) => ({ rel: l.rel, target: l.target })),
-    linksRejected: rejected.filter((l) => l.item === index).map((l) => ({ target: l.target, reason: l.reason })),
-  }))
+export function finishCommit(draft: CommitDraft, decisions?: CommitDecisions): ExtractionCommit {
+  const proposals = [...draft.proposals, ...(decisions?.proposals ?? [])]
+  const known = new Map(draft.targets.map((t) => [t.id, t]))
+  for (const target of decisions?.targets ?? []) if (!known.has(target.id)) known.set(target.id, target)
+  const { accepted, rejected } = validateLinks(draft.sources, proposals, [...known.values()])
+  const items = draft.items.map((item, index) => {
+    const read = decisions?.reads.get(index)
+    return {
+      ...item,
+      links: accepted.filter((l) => l.item === index).map((l) => ({ rel: l.rel, target: l.target })),
+      linksRejected: rejected.filter((l) => l.item === index).map((l) => ({ target: l.target, reason: l.reason })),
+      ...(read === undefined ? {} : { candidatesRead: [...read] }),
+    }
+  })
+  return { subjects: draft.subjects, items, stats: { ...draft.stats, ...(decisions?.stats ?? {}) } }
+}
+
+export function buildCommitPayload(
+  window: ExtractionWindow,
+  gated: GateResult,
+  runId: string,
+  decisions?: CommitDecisions,
+): ExtractionCommit {
+  return finishCommit(draftCommit(window, gated, runId), decisions)
 }
 
 /** The window lists only current items, so each is current as of its read. */
