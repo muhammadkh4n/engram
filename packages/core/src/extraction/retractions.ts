@@ -1,6 +1,6 @@
 /**
  * Assistant retractions, found without a model. When a run extracts an
- * assistant turn's observations, each sentence of the turn that says an
+ * assistant turn's observations, each sentence of that turn that says an
  * earlier claim is out of date, stale, no longer true, misread or wrong, and
  * names items by id, gives one `retracts` link from the turn to each named
  * item. The phrase list is fixed so the same turn always yields the same
@@ -25,9 +25,9 @@ const NEGATION = /^(?:not|never|\S*n['’]t)$/i
 const WORD_EDGE_PUNCTUATION = /^[^\p{L}\p{N}']+|[^\p{L}\p{N}'’]+$/gu
 
 export interface RetractionScan {
-  /** The links to apply, or null when no retracting sentence named an item. */
-  retractions: ExtractionRetractions | null
-  /** Retracting sentences none of whose ids resolve to an item in scope. */
+  /** The links to apply, one entry per turn whose retracting sentences named an item, oldest turn first. */
+  retractions: ExtractionRetractions[]
+  /** Retracting sentences, across the scanned turns, none of whose ids resolve to an item in scope. */
   unresolved: number
 }
 
@@ -58,15 +58,28 @@ export function idsIn(sentence: string): string[] {
 }
 
 /**
- * Scans the window's assistant turn when this run extracts its observations
- * (a turn already observed was scanned by the run that observed it). A named
- * id resolves when it is an item in the turn's scope that is neither
+ * Scans each of the window's assistant turns whose observations this run
+ * extracts (a turn already observed was scanned by the run that observed it).
+ * A named id resolves when it is an item in that turn's scope that is neither
  * forgotten nor a session index; the link rules then check each target.
  */
 export function scanRetractions(window: ExtractionWindow): RetractionScan {
-  const turn = window.turn
-  if (turn === null || turn.alreadyObserved) return { retractions: null, unresolved: 0 }
   const refs = new Map(window.turnRefs.map((ref) => [ref.id, ref]))
+  const retractions: ExtractionRetractions[] = []
+  let unresolved = 0
+  for (const turn of window.turns) {
+    if (turn.alreadyObserved) continue
+    const scan = scanTurn(turn, refs)
+    unresolved += scan.unresolved
+    if (scan.retractions !== null) retractions.push(scan.retractions)
+  }
+  return { retractions, unresolved }
+}
+
+function scanTurn(
+  turn: WindowTurn,
+  refs: ReadonlyMap<string, WindowTurnRef>,
+): { retractions: ExtractionRetractions | null; unresolved: number } {
   const targets: string[] = []
   let unresolved = 0
   for (const sentence of splitSentences(turn.content)) {

@@ -72,7 +72,8 @@ function eventsOf(
   scenario: RecordedScenario,
   answered?: { text: string; occurredAt: string },
 ): StoredEvent[] {
-  const { anchor, anchor_event: anchorEvent, turn } = scenario.window
+  const { anchor, anchor_event: anchorEvent } = scenario.window
+  const turn = scenario.window.turns?.[0]
   const { text, tools, occurredAt } = turn
     ? { text: turn.content, tools: turn.source?.tools ?? [], occurredAt: turn.occurred_at }
     : { text: answered!.text, tools: [], occurredAt: answered!.occurredAt }

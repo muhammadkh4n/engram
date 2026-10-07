@@ -258,7 +258,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('corrections, retractions and r
     await runExtractionTick({ store, intelligence, model: 'tst-model', log: () => {} })
 
     const window = requests.find((r) => r.label !== DECISION_LABEL && r.user.includes("no, that's stale"))!
-    expect(window.user).toContain('SHOWN TO THE ASSISTANT BEFORE turn-1:')
+    expect(window.user).toContain('SHOWN TO THE ASSISTANT BEFORE THE TURNS:')
     const run = await latestRun(now!)
     expect(run).toMatchObject({ status: 'succeeded', stats: { links_applied: 1, links_rejected: [] } })
     const [correction] = await created(run.id)

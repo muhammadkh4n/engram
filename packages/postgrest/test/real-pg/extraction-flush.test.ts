@@ -1,10 +1,12 @@
 /**
  * Every session is extracted, however short, on real Postgres behind a real
- * PostgREST: one MK utterance is a window on the next tick, the assistant
- * turns after a session's last MK utterance are flushed once it ends or goes
- * idle, a flushed turn is only context to a later window, and a tick with a
- * smaller budget than the backlog serves the most recently received sessions
- * first.
+ * PostgREST: one MK utterance is a window on the next tick, a prompt's window
+ * shows every turn before it that no run has extracted, turns beyond the
+ * window's character budget get an observation-only window that runs first,
+ * the assistant turns after a session's last MK prompt are flushed together
+ * once it ends or goes idle, a flushed turn is only context to a later window,
+ * and a tick with a smaller budget than the backlog serves the most recently
+ * received sessions first.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import {
@@ -21,21 +23,7 @@ const TEST_TIMEOUT_MS = 60_000
 
 const REPO = { id: 'tst-repo', workspace: 'tst-ws', repo_root: '/home/tester/tst-repo', branch: 'main', worktree: null }
 const BASE_MS = Date.parse('2026-10-01T09:00:00Z')
-const EMPTY_REPLY = '{"statements":[],"observations":[]}'
-const OBSERVATION_REPLY = JSON.stringify({
-  statements: [],
-  observations: [
-    {
-      assistant_utterance_id: 'turn-1',
-      claim: 'The tst-repo importer skips rows that have no id column.',
-      kind: 'fact',
-      subject: { new: 'tst-repo importer' },
-      evidence: [],
-      valid_at: null,
-      supersedes: [],
-    },
-  ],
-})
+const TURN_HEADER = /^(turn-\d+) \(ASSISTANT, [^)]*\):( \(already observed\))?\n(.*)$/gm
 
 let uuidCounter = 0
 function event(sessionId: string, type: string, payload: Record<string, unknown>, minutes: number): StoredEvent {
@@ -62,16 +50,36 @@ const turn = (sessionId: string, text: string, minutes: number): StoredEvent =>
 const sessionEnd = (sessionId: string, minutes: number): StoredEvent => event(sessionId, 'session_end', {}, minutes)
 
 /**
- * Proposes the importer finding for every window whose assistant turn is new
- * to extraction, and nothing otherwise.
+ * Proposes one observation per turn the window shows that is new to
+ * extraction: the turn's first line, from that turn's alias. Every new item
+ * weighed against stored ones is independent of them.
  */
 function scriptedModel() {
   const requests: CompleteJsonRequest[] = []
   const intelligence: IntelligenceAdapter = {
     async completeJson(req) {
+      if (req.label === 'extraction-decisions') {
+        const decisions = [...req.user.matchAll(/^NEW ITEM (\d+):/gm)].map((m) => ({
+          item: Number(m[1]),
+          relation: 'independent',
+          targets: [],
+          corrects: [],
+        }))
+        return { text: JSON.stringify({ decisions }), finishReason: 'stop', model: 'tst-model' }
+      }
       requests.push(req)
-      const freshTurn = /^turn-1 \(ASSISTANT, [^)]*\):$/m.test(req.user)
-      return { text: freshTurn ? OBSERVATION_REPLY : EMPTY_REPLY, finishReason: 'stop', model: 'tst-model' }
+      const observations = [...req.user.matchAll(TURN_HEADER)]
+        .filter((m) => m[2] === undefined)
+        .map((m) => ({
+          assistant_utterance_id: m[1],
+          claim: m[3],
+          kind: 'fact',
+          subject: { new: 'tst-repo importer' },
+          evidence: [],
+          valid_at: null,
+          supersedes: [],
+        }))
+      return { text: JSON.stringify({ statements: [], observations }), finishReason: 'stop', model: 'tst-model' }
     },
   }
   return { intelligence, requests }
@@ -137,6 +145,12 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction of short sessions a
   const count = (sql: string): Promise<number> => pg.psql(sql).then(Number)
   const observations = (): Promise<number> =>
     count(`SELECT count(*) FROM public.memory_items WHERE class = 'observation';`)
+
+  const sourcesOf = (anchorId: string): Promise<string> =>
+    pg.psql(
+      `SELECT stats -> 'observation_sources' FROM public.memory_extraction_runs
+        WHERE anchor_item_id = '${anchorId}' AND status = 'succeeded';`,
+    )
 
   async function succeededAnchors(): Promise<string[]> {
     const out = await pg.psql(
@@ -233,6 +247,83 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction of short sessions a
       expect(await tick()).toMatchObject({ windows: 1, succeeded: 1 })
       expect(await succeededAnchors()).toEqual([t1])
       expect(await observations()).toBe(1)
+      expect(await tick()).toMatchObject({ windows: 0 })
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'shows a prompt every turn before it that no run extracted, and extracts nothing on the next tick',
+    async () => {
+      const [p1, t1, t2, p2] = await seed([
+        prompt('tst-sess-many', 'Check the importer.', 0),
+        turn('tst-sess-many', 'The importer reads rows in batches of 500.', 1),
+        turn('tst-sess-many', 'The importer skips rows that have no id column.', 2),
+        prompt('tst-sess-many', 'Good, go on.', 3),
+      ])
+      const { tick, requests } = ticker()
+
+      expect(await tick()).toEqual({ windows: 2, succeeded: 2, held: 0, transient: 0, full: false })
+      expect(await succeededAnchors()).toEqual([p1, p2])
+      expect(requests[0]!.user).toContain('TURNS:\nnone')
+      expect(requests[1]!.user).toContain('turn-1 (ASSISTANT, 2026-10-01T09:01:00.000Z):\nThe importer reads rows')
+      expect(requests[1]!.user).toContain('turn-2 (ASSISTANT, 2026-10-01T09:02:00.000Z):\nThe importer skips rows')
+      expect(await sourcesOf(p2!)).toBe(`["${t1}", "${t2}"]`)
+      expect(await observations()).toBe(2)
+      expect(
+        await pg.psql(
+          `SELECT string_agg(lineage[1]::text, ',' ORDER BY occurred_at) FROM public.memory_items WHERE class = 'observation';`,
+        ),
+      ).toBe(`${t1},${t2}`)
+
+      expect(await tick()).toMatchObject({ windows: 0 })
+      expect(requests).toHaveLength(2)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'splits turns over the budget into an observation-only window that runs before the prompt',
+    async () => {
+      const filler = `\n${'x'.repeat(15_000)}`
+      const [t1, t2, p1] = await seed([
+        turn('tst-sess-big', `The importer reads rows in batches of 500.${filler}`, 0),
+        turn('tst-sess-big', `The importer skips rows that have no id column.${filler}`, 1),
+        prompt('tst-sess-big', 'Summarize.', 2),
+      ])
+      const { tick, requests } = ticker()
+
+      expect(await tick()).toEqual({ windows: 2, succeeded: 2, held: 0, transient: 0, full: false })
+      expect(await succeededAnchors()).toEqual([t1, p1])
+      expect(requests[0]!.user).toContain('turn-1 (ASSISTANT, 2026-10-01T09:00:00.000Z):\nThe importer reads rows')
+      expect(requests[0]!.user).not.toContain('The importer skips rows')
+      expect(requests[0]!.user).toContain('utt-1:\nnone')
+      expect(requests[1]!.user).toContain('turn-1 (ASSISTANT, 2026-10-01T09:01:00.000Z):\nThe importer skips rows')
+      expect(requests[1]!.user).not.toContain('(ASSISTANT, 2026-10-01T09:00:00.000Z)')
+      expect(requests[1]!.user).not.toContain('turn-2 (ASSISTANT')
+      expect(await sourcesOf(t1!)).toBe(`["${t1}"]`)
+      expect(await sourcesOf(p1!)).toBe(`["${t2}"]`)
+      expect(await observations()).toBe(2)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'flushes three trailing turns as one run with three observation sources',
+    async () => {
+      const [p1, t1, t2, t3] = await seed([
+        prompt('tst-sess-three', 'Check the importer.', 0),
+        turn('tst-sess-three', 'The importer reads rows in batches of 500.', 1),
+        turn('tst-sess-three', 'The importer skips rows that have no id column.', 2),
+        turn('tst-sess-three', 'The importer logs every skipped row.', 3),
+        sessionEnd('tst-sess-three', 4),
+      ])
+      const { tick } = ticker()
+
+      expect(await tick()).toEqual({ windows: 2, succeeded: 2, held: 0, transient: 0, full: false })
+      expect(await succeededAnchors()).toEqual([p1, t1])
+      expect(await sourcesOf(t1!)).toBe(`["${t1}", "${t2}", "${t3}"]`)
+      expect(await observations()).toBe(3)
       expect(await tick()).toMatchObject({ windows: 0 })
     },
     TEST_TIMEOUT_MS,

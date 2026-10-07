@@ -26,17 +26,18 @@ const RAW: RawExtractionWindow = {
     source: { event_key: 'tst-key-11' },
   },
   anchor_event: { payload: {}, plan_dirs: ['Active/tst-plan'] },
-  turn: {
-    id: uuid(10),
-    kind: 'assistant_turn',
-    session_id: 'tst-session-1',
-    project_id: 'tst-repo',
-    workspace_id: 'tst-ws',
-    content: `The capture route writes to Postgres in packages/core/src/a.ts.\n${QUESTION}`,
-    occurred_at: '2026-10-01T09:00:00Z',
-    source: { event_key: 'tst-key-10', tools: [{ name: 'Bash', ref: 'abc1234' }] },
-  },
-  observed: false,
+  turns: [
+    {
+      id: uuid(10),
+      kind: 'assistant_turn',
+      session_id: 'tst-session-1',
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
+      content: `The capture route writes to Postgres in packages/core/src/a.ts.\n${QUESTION}`,
+      occurred_at: '2026-10-01T09:00:00Z',
+      source: { event_key: 'tst-key-10', tools: [{ name: 'Bash', ref: 'abc1234' }] },
+    },
+  ],
   subjects: [{ id: uuid(21), label: 'capture route', project_id: 'tst-repo', last_used_at: '2026-09-01T00:00:00Z' }],
   statements: [],
   observations: [],
@@ -237,13 +238,17 @@ describe('buildCommitPayload', () => {
     expect(commit.subjects[0]!.label).toBe('nul � bytes')
   })
 
-  it('names the turn it extracts observations from, and none when the turn was already observed', () => {
+  it('names every turn it extracts observations from, and none already observed', () => {
     const reply = { statements: [statement({})], observations: [] }
-    expect(buildCommitPayload(window, gated(window, reply), RUN).stats['observation_sources']).toEqual([window.turn!.id])
-    const observed = { ...window, turn: { ...window.turn!, alreadyObserved: true } }
+    const turn = window.turns[0]!
+    expect(buildCommitPayload(window, gated(window, reply), RUN).stats['observation_sources']).toEqual([turn.id])
+    const observed = { ...window, turns: [{ ...turn, alreadyObserved: true }] }
     expect(buildCommitPayload(observed, gated(observed, reply), RUN).stats['observation_sources']).toEqual([])
-    const noTurn = { ...window, turn: null }
+    const noTurn = { ...window, turns: [] }
     expect(buildCommitPayload(noTurn, gated(noTurn, reply), RUN).stats['observation_sources']).toEqual([])
+    const earlier = { ...turn, id: uuid(9), alias: 'turn-1' }
+    const two = { ...window, turns: [earlier, { ...turn, alias: 'turn-2' }] }
+    expect(buildCommitPayload(two, gated(two, reply), RUN).stats['observation_sources']).toEqual([uuid(9), turn.id])
   })
 
   it('counts proposals, stores and rejections per side, never text', () => {
@@ -253,7 +258,7 @@ describe('buildCommitPayload', () => {
     }
     const { stats } = buildCommitPayload(window, gated(window, reply), RUN)
     expect(stats).toEqual({
-      observation_sources: [window.turn!.id],
+      observation_sources: [window.turns[0]!.id],
       statements: { proposed: 2, stored: 1, rejected: 1 },
       observations: { proposed: 3, stored: 1, rejected: 2, trust2: 0, trust3: 1 },
       rejected: [

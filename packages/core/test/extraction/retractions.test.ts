@@ -22,22 +22,23 @@ function ref(n: number, over: Partial<RawWindowTurnRef> = {}): RawWindowTurnRef 
   }
 }
 
-/** A trailing assistant turn, which is its own turn-1, with the items its text names. */
-function trailing(text: string, refs: RawWindowTurnRef[], observed = false): RawExtractionWindow {
+function turnRow(id: string, text: string) {
   return {
-    anchor: {
-      id: TURN_ID,
-      kind: 'assistant_turn',
-      session_id: 'tst-session-r',
-      project_id: 'tst-repo',
-      workspace_id: 'tst-ws',
-      content: text,
-      occurred_at: '2026-10-06T12:00:00Z',
-      source: { event_key: 'tst-key-900', tools: [] },
-    },
-    observed,
-    turn_refs: refs,
+    id,
+    kind: 'assistant_turn' as const,
+    session_id: 'tst-session-r',
+    project_id: 'tst-repo',
+    workspace_id: 'tst-ws',
+    content: text,
+    occurred_at: '2026-10-06T12:00:00Z',
+    source: { event_key: `tst-key-${id.slice(-3)}`, tools: [] },
   }
+}
+
+/** An observation-only window of one assistant turn, with the items its text names. */
+function trailing(text: string, refs: RawWindowTurnRef[]): RawExtractionWindow {
+  const turn = turnRow(TURN_ID, text)
+  return { anchor: turn, turns: [turn], turn_refs: refs }
 }
 
 const scan = (raw: RawExtractionWindow) => scanRetractions(buildWindow(raw))
@@ -81,21 +82,21 @@ describe('isRetraction', () => {
 describe('scanRetractions', () => {
   it('links the turn to an item it says was wrong', () => {
     const result = scan(trailing(`My earlier claim in ${uuid(1)} was wrong: the cap is 50.`, [ref(1)]))
-    expect(result).toEqual({ retractions: { from: TURN_ID, targets: [uuid(1)], rejected: [] }, unresolved: 0 })
+    expect(result).toEqual({ retractions: [{ from: TURN_ID, targets: [uuid(1)], rejected: [] }], unresolved: 0 })
   })
 
   it('matches ids in any case and names each target once', () => {
     const upper = uuid(1).toUpperCase()
     const result = scan(trailing(`${upper} is stale. So is ${uuid(1)}, which is outdated.`, [ref(1)]))
-    expect(result.retractions!.targets).toEqual([uuid(1)])
+    expect(result.retractions.map((r) => r.targets)).toEqual([[uuid(1)]])
   })
 
   it('makes no link when the phrase is negated', () => {
-    expect(scan(trailing(`item ${uuid(1)} is not stale`, [ref(1)]))).toEqual({ retractions: null, unresolved: 0 })
+    expect(scan(trailing(`item ${uuid(1)} is not stale`, [ref(1)]))).toEqual({ retractions: [], unresolved: 0 })
   })
 
   it('counts a retraction whose id names no item as unresolved', () => {
-    expect(scan(trailing(`The note ${uuid(2)} is out of date.`, []))).toEqual({ retractions: null, unresolved: 1 })
+    expect(scan(trailing(`The note ${uuid(2)} is out of date.`, []))).toEqual({ retractions: [], unresolved: 1 })
   })
 
   it('resolves no forgotten item, no session index and nothing outside the turn scope', () => {
@@ -106,26 +107,45 @@ describe('scanRetractions', () => {
         ref(5, { project_id: 'tst-far', workspace_id: 'tst-far-ws' }),
       ]),
     )
-    expect(result).toEqual({ retractions: null, unresolved: 3 })
+    expect(result).toEqual({ retractions: [], unresolved: 3 })
   })
 
   it('records a retraction of an item that is no longer current as not_current', () => {
     const result = scan(trailing(`${uuid(6)} is outdated.`, [ref(6, { superseded_by: uuid(7) })]))
-    expect(result.retractions).toEqual({
-      from: TURN_ID,
-      targets: [],
-      rejected: [{ target: uuid(6), reason: 'not_current' }],
-    })
+    expect(result.retractions).toEqual([
+      {
+        from: TURN_ID,
+        targets: [],
+        rejected: [{ target: uuid(6), reason: 'not_current' }],
+      },
+    ])
   })
 
   it('scans nothing when an earlier run already observed the turn', () => {
-    const turn = trailing(`${uuid(1)} is stale.`, [ref(1)]).anchor
+    const turn = turnRow(TURN_ID, `${uuid(1)} is stale.`)
     const prompt: RawExtractionWindow = {
       anchor: { ...turn, id: uuid(901), kind: 'user_prompt', content: 'ok', occurred_at: '2026-10-06T12:05:00Z' },
-      turn,
-      observed: true,
+      turns: [{ ...turn, observed: true }],
       turn_refs: [ref(1)],
     }
-    expect(scan(prompt)).toEqual({ retractions: null, unresolved: 0 })
+    expect(scan(prompt)).toEqual({ retractions: [], unresolved: 0 })
+  })
+
+  it('gives each extracted turn its own entry, from that turn, and skips an observed one', () => {
+    const observed = { ...turnRow(uuid(897), `${uuid(3)} is stale.`), observed: true }
+    const first = turnRow(uuid(898), `${uuid(1)} is out of date.`)
+    const second = turnRow(uuid(899), `I misread ${uuid(2)}. And ${uuid(5)} is stale.`)
+    const prompt: RawExtractionWindow = {
+      anchor: { ...first, id: uuid(901), kind: 'user_prompt', content: 'ok', occurred_at: '2026-10-06T12:05:00Z' },
+      turns: [observed, first, second],
+      turn_refs: [ref(1), ref(2), ref(3)],
+    }
+    expect(scan(prompt)).toEqual({
+      retractions: [
+        { from: uuid(898), targets: [uuid(1)], rejected: [] },
+        { from: uuid(899), targets: [uuid(2)], rejected: [] },
+      ],
+      unresolved: 1,
+    })
   })
 })

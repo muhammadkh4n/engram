@@ -58,7 +58,7 @@ const SCAN_COLUMNS: Record<ScanTarget, string> = {
 const SCAN_PAGE_MAX = 1000
 /** The counts a locked materialize call returns, each a non-negative integer. */
 const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead'] as const
-const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'trailing'])
+const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'turns'])
 const FAILURE_CLASSES: ReadonlySet<string> = new Set(['transient', 'held'])
 
 export interface PostgRestCaptureStoreOptions {
@@ -378,7 +378,7 @@ export class PostgRestCaptureStore implements CaptureStore {
     const payload = {
       subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
       items: commit.items.map(toCommitItem),
-      retractions: toCommitRetractions(commit.retractions ?? null),
+      retractions: toCommitRetractions(commit.retractions ?? []),
       stats: commit.stats,
     }
     refuseUnsafeText('extractionCommit', '', payload)
@@ -487,14 +487,13 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
 }
 
-/** The retractions as the commit RPC takes them, or null when the turn retracted nothing. */
-function toCommitRetractions(retractions: ExtractionRetractions | null): Record<string, unknown> | null {
-  if (retractions === null) return null
-  return {
-    from: retractions.from,
-    targets: [...retractions.targets],
-    rejected: retractions.rejected.map((l) => ({ target: l.target, reason: l.reason })),
-  }
+/** The retractions as the commit RPC takes them: one entry per retracting turn. */
+function toCommitRetractions(retractions: readonly ExtractionRetractions[]): Record<string, unknown>[] {
+  return retractions.map((r) => ({
+    from: r.from,
+    targets: [...r.targets],
+    rejected: r.rejected.map((l) => ({ target: l.target, reason: l.reason })),
+  }))
 }
 
 function isNullableUuid(value: unknown): value is string | null {

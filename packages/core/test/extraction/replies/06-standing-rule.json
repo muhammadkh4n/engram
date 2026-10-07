@@ -22,23 +22,25 @@
       },
       "plan_dirs": []
     },
-    "turn": {
-      "id": "00000000-0000-4000-8000-000000000600",
-      "kind": "assistant_turn",
-      "session_id": "tst-session-1",
-      "project_id": "tst-repo",
-      "workspace_id": "tst-ws",
-      "content": "The column rename is applied to schema.sql.",
-      "context": null,
-      "occurred_at": "2026-10-01T09:00:00Z",
-      "source": {
-        "type": "transcript",
-        "line": 2,
-        "tools": [],
-        "event_key": "tst-key-600"
+    "turns": [
+      {
+        "id": "00000000-0000-4000-8000-000000000600",
+        "kind": "assistant_turn",
+        "session_id": "tst-session-1",
+        "project_id": "tst-repo",
+        "workspace_id": "tst-ws",
+        "content": "The column rename is applied to schema.sql.",
+        "context": null,
+        "occurred_at": "2026-10-01T09:00:00Z",
+        "source": {
+          "type": "transcript",
+          "line": 2,
+          "tools": [],
+          "event_key": "tst-key-600"
+        },
+        "observed": false
       }
-    },
-    "observed": false,
+    ],
     "subjects": [
       {
         "id": "00000000-0000-4000-8000-000000000610",

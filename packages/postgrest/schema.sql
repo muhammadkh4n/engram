@@ -3938,9 +3938,9 @@ END; $$;
 
 --
 -- Extraction. A window is built around an anchor: every MK prompt or dialog
--- answer that is not forgotten, and an assistant turn that no MK utterance of
--- its session follows (a trailing turn) once its session has ended with no
--- later event or received nothing for p_idle_seconds. memory_extraction_runs records each attempt at one anchor and
+-- answer that is not forgotten, and the earliest assistant turn of each group
+-- of turns that is extracted without an MK utterance
+-- (engram_extraction_turn_groups). memory_extraction_runs records each attempt at one anchor and
 -- extractor version: inserted as running before the model call, closed as
 -- succeeded by engram_extraction_commit or as failed by engram_extraction_fail.
 -- A failure's stats.failure is 'held' when the reply or the commit failed and
@@ -3949,6 +3949,158 @@ END; $$;
 -- limit: only when the provider was shown to be up, so an outage backs
 -- anchors off without exhausting them. Every failure backs the anchor off.
 --
+
+--
+-- Name: engram_extraction_run_state(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Every anchor's runs at extractor version p_version, of session p_session
+-- (every session when NULL): whether one succeeded, how many failed (counted
+-- or not), the counted held and the counted transient failures, the latest
+-- failure's end, and the newest run still open with its start. An anchor is
+-- finished once a run succeeded or it is exhausted: 3 counted held failures
+-- or 6 counted transient ones. Only a counted failure exhausts an anchor, so
+-- an outage (stats.counted false) never does.
+CREATE OR REPLACE FUNCTION public.engram_extraction_run_state(p_version text, p_session text) RETURNS TABLE(anchor_item_id uuid, succeeded boolean, failed integer, held integer, transient integer, last_failed timestamp with time zone, running_run_id uuid, running_started_at timestamp with time zone, finished boolean)
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT s.aid, s.succeeded, s.failed, s.held, s.transient, s.last_failed, s.running_id, s.running_at,
+         s.succeeded OR s.held >= 3 OR s.transient >= 6
+    FROM (SELECT r.anchor_item_id AS aid,
+                 bool_or(r.status = 'succeeded') AS succeeded,
+                 (count(*) FILTER (WHERE r.status = 'failed'))::integer AS failed,
+                 (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "held", "counted": true}'))::integer AS held,
+                 (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "transient", "counted": true}'))::integer AS transient,
+                 max(coalesce(r.finished_at, r.started_at)) FILTER (WHERE r.status = 'failed') AS last_failed,
+                 (array_agg(r.id ORDER BY r.started_at DESC, r.id DESC) FILTER (WHERE r.status = 'running'))[1] AS running_id,
+                 max(r.started_at) FILTER (WHERE r.status = 'running') AS running_at
+            FROM public.memory_extraction_runs r
+           WHERE r.extractor_version = p_version AND r.anchor_item_id IS NOT NULL
+             AND (p_session IS NULL OR r.session_id = p_session)
+           GROUP BY r.anchor_item_id) s
+$$;
+
+
+--
+-- Name: engram_extraction_turn_groups(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The assistant turns the windows of session p_session show at extractor
+-- version p_version (every session when NULL), one row per turn and window,
+-- so the pending read and the window read compute the same windows and a
+-- retry rebuilds the same one:
+-- - A turn is observed once a succeeded run at p_version lists it in
+--   stats.observation_sources: each turn yields observations once per version.
+-- - An unobserved turn belongs to (owner_id) the first open user prompt of its
+--   session after it: one that is neither finished nor forgotten
+--   (engram_extraction_run_state). A turn no open prompt follows belongs to
+--   the session's flush (owner_id NULL). A finished prompt so passes the turns
+--   it never extracted to the next one, and a dialog answer shows no turn.
+-- - An open prompt also shows the latest turn before it when that turn is
+--   observed (observed true): context MK may be answering, never extracted
+--   again.
+-- - Each owner's turns are packed from the newest backward into groups of at
+--   most 24000 characters: a group takes the next turns that fit whole; a
+--   turn counts as at most 24000 (a window shows only the last 24000
+--   characters of a longer one), so a longer turn forms a group alone.
+-- - anchor_id names the window that shows the turn: the prompt for a prompt's
+--   newest group; for every other group, and every group of a flush, the
+--   group's earliest turn, an observation-only window that the session's
+--   (occurred_at, id) order runs before the prompt.
+-- Read only.
+CREATE OR REPLACE FUNCTION public.engram_extraction_turn_groups(p_version text, p_session text) RETURNS TABLE(session_id text, turn_id uuid, owner_id uuid, anchor_id uuid, observed boolean)
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_budget constant integer := 24000;
+  r record;
+  v_started boolean := false;
+  v_sid text;
+  v_owner uuid;
+  v_newest boolean := true;
+  v_used integer := 0;
+  v_turns uuid[] := '{}'::uuid[];
+  v_seen boolean[] := '{}'::boolean[];
+  v_anchor uuid;
+BEGIN
+  FOR r IN
+    WITH state AS (
+      SELECT st.anchor_item_id AS aid, st.finished
+        FROM public.engram_extraction_run_state(p_version, p_session) st
+    ), seen AS (
+      SELECT DISTINCT lower(x.v)::uuid AS id
+        FROM public.memory_extraction_runs rr
+       CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(rr.stats -> 'observation_sources') = 'array'
+                                                         THEN rr.stats -> 'observation_sources' ELSE '[]'::jsonb END) AS x(v)
+       WHERE rr.extractor_version = p_version AND rr.status = 'succeeded'
+         AND (p_session IS NULL OR rr.session_id = p_session)
+         AND x.v ~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+    ), open_prompt AS (
+      SELECT p.id, p.session_id AS sid, p.occurred_at AS t_at
+        FROM public.memory_items p
+        LEFT JOIN state st ON st.aid = p.id
+       WHERE p.class = 'utterance' AND p.kind = 'user_prompt' AND p.forgotten_at IS NULL
+         AND p.session_id IS NOT NULL AND (p_session IS NULL OR p.session_id = p_session)
+         AND NOT coalesce(st.finished, false)
+    ), unseen AS (
+      SELECT op.id, op.sid, op.t_at, true AS is_prompt, 0 AS len
+        FROM open_prompt op
+      UNION ALL
+      SELECT t.id, t.session_id, t.occurred_at, false, least(char_length(t.content), v_budget)
+        FROM public.memory_items t
+       WHERE t.class = 'utterance' AND t.kind = 'assistant_turn' AND t.forgotten_at IS NULL
+         AND t.session_id IS NOT NULL AND (p_session IS NULL OR t.session_id = p_session)
+         AND NOT EXISTS (SELECT 1 FROM seen sn WHERE sn.id = t.id)
+    ), banded AS (
+      -- Walking a session newest first, each open prompt starts a band that
+      -- holds the turns before it, back to the previous open prompt.
+      SELECT u.*, count(*) FILTER (WHERE u.is_prompt) OVER (PARTITION BY u.sid ORDER BY u.t_at DESC, u.id DESC) AS band
+        FROM unseen u
+    ), owned AS (
+      SELECT b.id, b.sid, b.t_at, b.len, b.is_prompt,
+             (array_agg(b.id) FILTER (WHERE b.is_prompt) OVER (PARTITION BY b.sid, b.band))[1] AS owner
+        FROM banded b
+    ), shown AS (
+      SELECT o.id, o.sid, o.t_at, o.len, o.owner, false AS was_seen
+        FROM owned o
+       WHERE NOT o.is_prompt
+      UNION ALL
+      SELECT c.id, op.sid, c.occurred_at, least(char_length(c.content), v_budget), op.id, true
+        FROM open_prompt op
+       CROSS JOIN LATERAL (SELECT t.id, t.occurred_at, t.content
+                             FROM public.memory_items t
+                            WHERE t.session_id = op.sid AND t.class = 'utterance' AND t.kind = 'assistant_turn'
+                              AND t.forgotten_at IS NULL AND (t.occurred_at, t.id) < (op.t_at, op.id)
+                            ORDER BY t.occurred_at DESC, t.id DESC
+                            LIMIT 1) c
+       WHERE EXISTS (SELECT 1 FROM seen sn WHERE sn.id = c.id)
+    )
+    SELECT sh.sid, sh.owner, sh.id, sh.len, sh.was_seen
+      FROM shown sh
+     ORDER BY sh.sid, sh.owner NULLS LAST, sh.t_at DESC, sh.id DESC
+  LOOP
+    IF v_started AND (r.sid IS DISTINCT FROM v_sid OR r.owner IS DISTINCT FROM v_owner OR v_used + r.len > v_budget) THEN
+      v_anchor := CASE WHEN v_newest AND v_owner IS NOT NULL THEN v_owner ELSE v_turns[cardinality(v_turns)] END;
+      RETURN QUERY SELECT v_sid, g.t, v_owner, v_anchor, g.f FROM unnest(v_turns, v_seen) AS g(t, f);
+      v_newest := r.sid IS DISTINCT FROM v_sid OR r.owner IS DISTINCT FROM v_owner;
+      v_used := 0;
+      v_turns := '{}'::uuid[];
+      v_seen := '{}'::boolean[];
+    END IF;
+    v_started := true;
+    v_sid := r.sid;
+    v_owner := r.owner;
+    v_used := v_used + r.len;
+    v_turns := v_turns || r.id;
+    v_seen := v_seen || r.was_seen;
+  END LOOP;
+  IF v_started THEN
+    v_anchor := CASE WHEN v_newest AND v_owner IS NOT NULL THEN v_owner ELSE v_turns[cardinality(v_turns)] END;
+    RETURN QUERY SELECT v_sid, g.t, v_owner, v_anchor, g.f FROM unnest(v_turns, v_seen) AS g(t, f);
+  END IF;
+END; $$;
+
 
 --
 -- Name: engram_extraction_pending(text, integer, integer, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
@@ -3975,8 +4127,10 @@ DROP FUNCTION IF EXISTS public.engram_extraction_pending(text, integer, integer,
 -- count n of failures, counted or not: 60 seconds doubled n - 1 times, capped
 -- at 6 hours, the schedule the worker's own backoff uses. Due-ness is decided
 -- here, before the limit, so sessions waiting out a backoff never crowd due
--- ones out. A trailing assistant turn (no MK utterance of its session follows
--- it) is an anchor only while its session may be closed: it ended with no
+-- ones out. The earliest turn of an observation-only group of
+-- engram_extraction_turn_groups is an anchor of kind 'turns': a prompt's
+-- older group at once, a group of the session's flush (the turns no open
+-- prompt follows) only while its session may be closed: it ended with no
 -- later event, or nothing of it was received in the p_idle_seconds before
 -- p_now (received time, so a backlog stored long after its events happened
 -- is not idle), and no event of it waits for engram_capture_materialize.
@@ -4007,11 +4161,7 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  WITH utterance AS (
-    SELECT u.id, u.kind, u.session_id AS sid, u.occurred_at AS t_at
-      FROM public.memory_items u
-     WHERE u.class = 'utterance' AND u.forgotten_at IS NULL AND u.session_id IS NOT NULL
-  ), closable AS (
+  WITH closable AS (
     SELECT s.session_id AS sid
       FROM public.memory_session_state s
      WHERE (s.ended_at >= s.last_event_at
@@ -4019,25 +4169,24 @@ BEGIN
        AND NOT EXISTS (SELECT 1
                          FROM public.memory_capture_events c
                         WHERE c.session_id = s.session_id AND c.processed_at IS NULL AND c.attempts < 3)
+  ), grp AS (
+    SELECT DISTINCT g.session_id AS sid, g.anchor_id, g.owner_id
+      FROM public.engram_extraction_turn_groups(p_version, NULL) g
+     WHERE g.anchor_id IS DISTINCT FROM g.owner_id
   ), anchor AS (
-    SELECT u.id, u.sid, CASE WHEN u.kind = 'assistant_turn' THEN 'trailing' ELSE u.kind END AS kind, u.t_at
-      FROM utterance u
-     WHERE u.kind IN ('user_prompt', 'user_answer')
-        OR (NOT EXISTS (SELECT 1 FROM utterance m
-                         WHERE m.sid = u.sid AND m.kind IN ('user_prompt', 'user_answer') AND m.t_at > u.t_at)
-            AND EXISTS (SELECT 1 FROM closable c WHERE c.sid = u.sid))
+    SELECT u.id, u.session_id AS sid, u.kind, u.occurred_at AS t_at
+      FROM public.memory_items u
+     WHERE u.class = 'utterance' AND u.kind IN ('user_prompt', 'user_answer')
+       AND u.forgotten_at IS NULL AND u.session_id IS NOT NULL
+    UNION ALL
+    SELECT t.id, t.session_id, 'turns', t.occurred_at
+      FROM grp g
+      JOIN public.memory_items t ON t.id = g.anchor_id
+     WHERE g.owner_id IS NOT NULL OR EXISTS (SELECT 1 FROM closable c WHERE c.sid = g.sid)
   ), run AS (
-    SELECT r.anchor_item_id AS aid,
-           bool_or(r.status = 'succeeded') AS succeeded,
-           (count(*) FILTER (WHERE r.status = 'failed'))::integer AS failed,
-           (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "held", "counted": true}'))::integer AS held,
-           (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "transient", "counted": true}'))::integer AS transient,
-           max(coalesce(r.finished_at, r.started_at)) FILTER (WHERE r.status = 'failed') AS last_failed,
-           (array_agg(r.id ORDER BY r.started_at DESC, r.id DESC) FILTER (WHERE r.status = 'running'))[1] AS running_id,
-           max(r.started_at) FILTER (WHERE r.status = 'running') AS running_at
-      FROM public.memory_extraction_runs r
-     WHERE r.extractor_version = p_version AND r.anchor_item_id IS NOT NULL
-     GROUP BY r.anchor_item_id
+    SELECT st.anchor_item_id AS aid, st.failed, st.held, st.transient, st.last_failed, st.finished,
+           st.running_run_id AS running_id, st.running_started_at AS running_at
+      FROM public.engram_extraction_run_state(p_version, NULL) st
   ), pending AS (
     SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.failed, 0) AS failed, coalesce(r.held, 0) AS held,
            coalesce(r.transient, 0) AS transient, r.running_id, r.running_at,
@@ -4045,9 +4194,7 @@ BEGIN
             OR p_now >= r.last_failed + make_interval(secs => least(60 * power(2, r.failed - 1), 21600))) AS due
       FROM anchor a
       LEFT JOIN run r ON r.aid = a.id
-     WHERE NOT coalesce(r.succeeded, false)
-       AND coalesce(r.held, 0) < 3
-       AND coalesce(r.transient, 0) < 6
+     WHERE NOT coalesce(r.finished, false)
   ), queued AS (
     SELECT p.*,
            bool_and(p.due) OVER (PARTITION BY p.sid ORDER BY p.t_at, p.id) AS clear,
@@ -4304,14 +4451,12 @@ DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
 --   content, context, occurred_at and source;
 -- - anchor_event: the payload and plan_dirs of the capture event its
 --   source.event_id names, or null;
--- - turn: for a prompt, the latest assistant turn of its session before it
---   that is not forgotten; null otherwise (a trailing anchor is its own turn,
---   a dialog answer carries its question);
--- - observed: true when a succeeded run at p_version already extracted that
---   turn's observations: the turn was its anchor (a trailing turn flushed
---   before the session went on) or is in its stats.observation_sources. Each
---   turn so yields observations once per version, and a run that never
---   succeeded (an exhausted anchor) leaves its turn to the next window;
+-- - turns: the assistant turns the anchor's window shows, oldest first, each
+--   with the utterance's fields and observed: for a prompt or an assistant
+--   turn, the turns engram_extraction_turn_groups gives that anchor (a
+--   prompt's unobserved turns and its observed context turn; an
+--   observation-only group); [] for a dialog answer, which carries its
+--   question, and for a prompt that is already finished;
 -- - subjects: up to p_subject_limit (1 to 1000) active subjects of the scope,
 --   most recently used first, with last_used_at. A subject is active while a
 --   current item (not forgotten, retired or superseded) is filed under it;
@@ -4327,8 +4472,8 @@ DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
 --   class, kind, subject, project, workspace and the first 1500 characters of
 --   the content. Shown items may lie outside the scope;
 -- - turn_refs: every item, forgotten or not, whose id occurs (in any case) in
---   the text of the window's assistant turn (the prompt's turn or a trailing
---   anchor), at most 200 ids, with its class, kind, subject, project,
+--   the text of the window's assistant turns, at most 200 ids, with its
+--   class, kind, subject, project,
 --   workspace, time and currency, so a retraction naming one can be resolved;
 -- - projects: the id and kind of every registry row.
 -- The scope is the anchor's project, its workspace's own items and global
@@ -4342,12 +4487,10 @@ CREATE OR REPLACE FUNCTION public.engram_extraction_window(p_anchor uuid, p_subj
     AS $$
 DECLARE
   a public.memory_items%ROWTYPE;
-  t public.memory_items%ROWTYPE;
   v_time constant text := 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
   v_event jsonb;
   v_plan text;
-  v_turn jsonb;
-  v_observed boolean := false;
+  v_turns jsonb := '[]'::jsonb;
   v_subjects jsonb;
   v_statements jsonb;
   v_observations jsonb;
@@ -4385,27 +4528,18 @@ BEGIN
     FROM public.memory_capture_events e
    WHERE e.id = CASE WHEN (a.source ->> 'event_id') ~ '^[0-9]{1,18}$' THEN (a.source ->> 'event_id')::bigint END;
 
-  IF a.kind = 'user_prompt' AND a.session_id IS NOT NULL THEN
-    SELECT * INTO t
-      FROM public.memory_items i
-     WHERE i.class = 'utterance' AND i.kind = 'assistant_turn' AND i.forgotten_at IS NULL
-       AND i.session_id = a.session_id AND i.occurred_at < a.occurred_at
-     ORDER BY i.occurred_at DESC, i.id DESC
-     LIMIT 1;
-    IF FOUND THEN
-      v_turn := jsonb_build_object(
-        'id', t.id, 'kind', t.kind, 'session_id', t.session_id, 'project_id', t.project_id,
-        'workspace_id', t.workspace_id, 'content', t.content, 'context', t.context,
-        'occurred_at', to_char(t.occurred_at AT TIME ZONE 'UTC', v_time), 'source', t.source);
-      v_observed := EXISTS (SELECT 1 FROM public.memory_extraction_runs r
-                             WHERE r.extractor_version = p_version AND r.status = 'succeeded'
-                               AND (r.anchor_item_id = t.id
-                                    OR (jsonb_typeof(r.stats -> 'observation_sources') = 'array'
-                                        AND r.stats -> 'observation_sources' ? t.id::text)));
-      v_ref_text := t.content;
-    END IF;
-  ELSIF a.kind = 'assistant_turn' THEN
-    v_ref_text := a.content;
+  IF a.kind IN ('user_prompt', 'assistant_turn') AND a.session_id IS NOT NULL THEN
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+             'id', t.id, 'kind', t.kind, 'session_id', t.session_id, 'project_id', t.project_id,
+             'workspace_id', t.workspace_id, 'content', t.content, 'context', t.context,
+             'occurred_at', to_char(t.occurred_at AT TIME ZONE 'UTC', v_time), 'source', t.source,
+             'observed', g.observed)
+             ORDER BY t.occurred_at, t.id), '[]'::jsonb),
+           string_agg(t.content, E'\n' ORDER BY t.occurred_at, t.id)
+      INTO v_turns, v_ref_text
+      FROM public.engram_extraction_turn_groups(p_version, a.session_id) g
+      JOIN public.memory_items t ON t.id = g.turn_id
+     WHERE g.anchor_id = a.id;
   END IF;
 
   IF a.kind IN ('user_prompt', 'user_answer') AND a.session_id IS NOT NULL THEN
@@ -4513,8 +4647,7 @@ BEGIN
       'workspace_id', a.workspace_id, 'content', a.content, 'context', a.context,
       'occurred_at', to_char(a.occurred_at AT TIME ZONE 'UTC', v_time), 'source', a.source),
     'anchor_event', v_event,
-    'turn', v_turn,
-    'observed', v_observed,
+    'turns', v_turns,
     'subjects', v_subjects,
     'statements', v_statements,
     'observations', v_observations,
@@ -4638,11 +4771,12 @@ END; $$;
 --   extraction_run_id = p_run. An item whose source.event_key is already
 --   stored is not inserted and counts as a duplicate; its entities and links
 --   are not written again, since they were written with it.
--- - retractions: null or {from, targets, rejected}: the assistant utterance
---   whose text retracts earlier items, the ids it retracts and the
---   retractions its validation refused, [{target, reason}]. Each target
---   becomes a retracts link from that utterance, applied and checked as an
---   item's links are; a refused one is recorded under the utterance's id.
+-- - retractions: null or an array of {from, targets, rejected}, one per
+--   assistant turn of the window whose text retracts earlier items: the
+--   turn, the ids it retracts and the retractions its validation refused,
+--   [{target, reason}]. Each target becomes a retracts link from that turn,
+--   applied and checked as an item's links are; a refused one is recorded
+--   under the turn's id.
 -- - stats: counts only, never text; the run's stats are these plus
 --   subjects_created, entities (rows written), duplicates, links_applied,
 --   links_rejected [{item, target, reason}], restatements
@@ -4716,6 +4850,7 @@ DECLARE
   v_plan text;
   v_race jsonb := '[]'::jsonb;
   v_retractions jsonb;
+  v_retraction jsonb;
   v_from uuid;
 BEGIN
   IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
@@ -4743,28 +4878,32 @@ BEGIN
   IF v_problem IS NULL AND jsonb_array_length(v_items) > 500 THEN
     v_problem := format('items holds %s objects, more than 500', jsonb_array_length(v_items));
   END IF;
-  v_retractions := CASE WHEN coalesce(p_payload -> 'retractions', 'null'::jsonb) = 'null'::jsonb THEN NULL ELSE p_payload -> 'retractions' END;
-  IF v_problem IS NULL AND v_retractions IS NOT NULL AND (
-       jsonb_typeof(v_retractions) <> 'object'
-       OR EXISTS (SELECT 1 FROM jsonb_object_keys(v_retractions) AS k(key) WHERE k.key NOT IN ('from', 'targets', 'rejected'))
-       OR jsonb_typeof(v_retractions -> 'from') IS DISTINCT FROM 'string'
-       OR (v_retractions ->> 'from') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
-       OR jsonb_typeof(v_retractions -> 'targets') IS DISTINCT FROM 'array'
-       OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_retractions -> 'targets') = 'array'
-                                                          THEN v_retractions -> 'targets' ELSE '[]'::jsonb END) AS x(v)
-                   WHERE jsonb_typeof(x.v) <> 'string'
-                      OR (x.v #>> '{}') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
-       OR jsonb_typeof(v_retractions -> 'rejected') IS DISTINCT FROM 'array'
-       OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_retractions -> 'rejected') = 'array'
-                                                          THEN v_retractions -> 'rejected' ELSE '[]'::jsonb END) AS r(v)
-                   WHERE CASE WHEN jsonb_typeof(r.v) <> 'object' THEN true
-                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(r.v) AS k(key) WHERE k.key NOT IN ('target', 'reason'))
-                                   OR coalesce(r.v ->> 'reason', '') NOT IN ('not_current', 'class_mismatch', 'subject_mismatch',
-                                                                             'target_newer', 'target_same_time', 'link_conflict',
-                                                                             'not_a_candidate', 'not_in_scope')
-                                   OR jsonb_typeof(r.v -> 'target') IS DISTINCT FROM 'string'
-                                   OR (r.v ->> 'target') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' END)) THEN
-    v_problem := 'retractions must be null or {from, targets, rejected}: a UUID, an array of UUIDs and an array of {target, reason} with a known reason';
+  v_retractions := CASE WHEN coalesce(p_payload -> 'retractions', 'null'::jsonb) = 'null'::jsonb THEN '[]'::jsonb ELSE p_payload -> 'retractions' END;
+  IF v_problem IS NULL AND (
+       jsonb_typeof(v_retractions) <> 'array'
+       OR EXISTS (SELECT 1
+                    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_retractions) = 'array' THEN v_retractions ELSE '[]'::jsonb END) AS e(v)
+                   WHERE jsonb_typeof(e.v) <> 'object'
+                      OR EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(e.v) = 'object' THEN e.v ELSE '{}'::jsonb END) AS k(key)
+                                  WHERE k.key NOT IN ('from', 'targets', 'rejected'))
+                      OR jsonb_typeof(e.v -> 'from') IS DISTINCT FROM 'string'
+                      OR (e.v ->> 'from') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+                      OR jsonb_typeof(e.v -> 'targets') IS DISTINCT FROM 'array'
+                      OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(e.v -> 'targets') = 'array'
+                                                                         THEN e.v -> 'targets' ELSE '[]'::jsonb END) AS x(v)
+                                  WHERE jsonb_typeof(x.v) <> 'string'
+                                     OR (x.v #>> '{}') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+                      OR jsonb_typeof(e.v -> 'rejected') IS DISTINCT FROM 'array'
+                      OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(e.v -> 'rejected') = 'array'
+                                                                         THEN e.v -> 'rejected' ELSE '[]'::jsonb END) AS r(v)
+                                  WHERE CASE WHEN jsonb_typeof(r.v) <> 'object' THEN true
+                                             ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(r.v) AS k(key) WHERE k.key NOT IN ('target', 'reason'))
+                                                  OR coalesce(r.v ->> 'reason', '') NOT IN ('not_current', 'class_mismatch', 'subject_mismatch',
+                                                                                            'target_newer', 'target_same_time', 'link_conflict',
+                                                                                            'not_a_candidate', 'not_in_scope')
+                                                  OR jsonb_typeof(r.v -> 'target') IS DISTINCT FROM 'string'
+                                                  OR (r.v ->> 'target') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' END))) THEN
+    v_problem := 'retractions must be null or an array of {from, targets, rejected}: a UUID, an array of UUIDs and an array of {target, reason} with a known reason';
   END IF;
 
   IF v_problem IS NULL THEN
@@ -5052,15 +5191,17 @@ BEGIN
     v_duplicates := v_count - v_restatements - cardinality(array_positions(v_added, true));
   END IF;
 
-  IF v_retractions IS NOT NULL THEN
+  IF jsonb_array_length(v_retractions) > 0 THEN
     PERFORM pg_advisory_xact_lock(7308892986227385959);
-    v_from := (v_retractions ->> 'from')::uuid;
+  END IF;
+  FOR v_retraction IN SELECT e.v FROM jsonb_array_elements(v_retractions) WITH ORDINALITY AS e(v, k) ORDER BY e.k LOOP
+    v_from := (v_retraction ->> 'from')::uuid;
     PERFORM 1 FROM public.memory_items i WHERE i.id = v_from AND i.class = 'utterance' AND i.kind = 'assistant_turn';
     IF NOT FOUND THEN
       RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
         MESSAGE = 'engram_extraction_commit: retractions.from names no assistant turn';
     END IF;
-    FOR v_link IN SELECT x.v FROM jsonb_array_elements(v_retractions -> 'targets') WITH ORDINALITY AS x(v, k) ORDER BY x.k LOOP
+    FOR v_link IN SELECT x.v FROM jsonb_array_elements(v_retraction -> 'targets') WITH ORDINALITY AS x(v, k) ORDER BY x.k LOOP
       v_target := (v_link #>> '{}')::uuid;
       SELECT i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL INTO v_current
         FROM public.memory_items i WHERE i.id = v_target;
@@ -5082,8 +5223,8 @@ BEGIN
     SELECT v_refused || coalesce(jsonb_agg(jsonb_build_object('item', v_from, 'target', r.v -> 'target', 'reason', r.v -> 'reason')
                                            ORDER BY r.k), '[]'::jsonb)
       INTO v_refused
-      FROM jsonb_array_elements(v_retractions -> 'rejected') WITH ORDINALITY AS r(v, k);
-  END IF;
+      FROM jsonb_array_elements(v_retraction -> 'rejected') WITH ORDINALITY AS r(v, k);
+  END LOOP;
 
   -- A session index lists its session's current statements and observations,
   -- so every session whose list this commit changed (the sessions of the items
@@ -5890,6 +6031,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUB
 REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM PUBLIC;
@@ -5958,6 +6101,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM %I', role_name);
@@ -6015,6 +6160,8 @@ GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO servic
 GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) TO service_role;

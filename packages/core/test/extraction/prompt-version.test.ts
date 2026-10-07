@@ -17,6 +17,7 @@ const PINNED_SHA256: Record<string, string> = {
   'extract-v1': '8b09fe2c023be1a170f3dd237dde123d3d2037ba115165792cb2215f0c44c772',
   'extract-v2': '5f9a4d0d5b6b6a6a2262c23155dc0364a6d93a5f63262bc8cfdd4bc759b1bd77',
   'extract-v3': '69278ae1a395b58a0206af92b7c3e0291557156187f35401318290a96b153f54',
+  'extract-v4': '92ff2429a234c5f69c0bae59e0fcffa34f64cff45c883b1d59060a484e62e611',
 }
 
 function sha256(text: string): string {

@@ -464,7 +464,7 @@ describe('PostgRestCaptureStore extraction', () => {
     const row = {
       anchor_item_id: ANCHOR,
       session_id: 'sess-1',
-      anchor_kind: 'trailing',
+      anchor_kind: 'turns',
       occurred_at: '2026-09-14T09:00:00+00:00',
       failures: 3,
       held_failures: 1,
@@ -484,7 +484,7 @@ describe('PostgRestCaptureStore extraction', () => {
       {
         anchorId: ANCHOR,
         sessionId: 'sess-1',
-        anchorKind: 'trailing',
+        anchorKind: 'turns',
         occurredAt: new Date('2026-09-14T09:00:00.000Z'),
         failures: 3,
         heldFailures: 1,
@@ -527,7 +527,7 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('reads a window from engram_extraction_window, null for a gone anchor, without asking for a malformed id', async () => {
-    const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turn: null, observed: false, subjects: [] }
+    const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turns: [], subjects: [] }
     const { store, calls } = storeWith({ data: window, error: null })
     await expect(store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toEqual(window)
     expect(calls).toEqual([
@@ -538,7 +538,7 @@ describe('PostgRestCaptureStore extraction', () => {
     await expect(store.extractionWindow(ANCHOR, 500, 201, 'tst-extractor')).rejects.toThrow('recentLimit must be an integer from 1 to 200')
     expect(calls).toHaveLength(1)
     await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toBeNull()
-    await expect(storeWith({ data: { turn: null }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).rejects.toThrow(
+    await expect(storeWith({ data: { turns: [] }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).rejects.toThrow(
       'extractionWindow failed: the RPC returned no window',
     )
   })

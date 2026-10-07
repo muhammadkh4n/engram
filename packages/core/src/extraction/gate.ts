@@ -178,17 +178,15 @@ function gateStatement(
 
 /**
  * The exact characters of the question MK answered, or undefined when it is
- * not there: inside the assistant turn for a prompt, inside one dialog
- * question for a dialog answer.
+ * not there: inside one of the window's assistant turns for a prompt, inside
+ * one dialog question for a dialog answer.
  */
 function questionSpan(window: ExtractionWindow, question: string): string | undefined {
   const utterance = window.utterance
   const haystacks =
     utterance?.kind === 'user_answer'
       ? (utterance.dialog?.questions ?? []).map((q) => q.question)
-      : window.turn === null
-        ? []
-        : [window.turn.content]
+      : window.turns.map((t) => t.content)
   const haystack = haystacks.find((text) => quoteOccursIn(question, text))
   return haystack === undefined ? undefined : exactSpan(haystack, question)
 }
@@ -232,8 +230,11 @@ function gateObservation(
 ): Verdict<GatedObservation> {
   if (p.claim.trim() === '') return reject('schema')
   if (p.index >= MAX_ITEMS_PER_SIDE) return reject('over_limit')
-  const turn = window.turn
-  if (turn === null || turn.alreadyObserved || p.assistantUtteranceId !== turn.alias) return reject('unknown_id')
+  // The turn the observation names: one the window shows and no run has
+  // extracted. Its id becomes the observation's lineage, its project and time
+  // the observation's.
+  const turn = window.turns.find((t) => t.alias === p.assistantUtteranceId)
+  if (turn === undefined || turn.alreadyObserved) return reject('unknown_id')
   const supersedes = resolveAll(p.supersedes, [aliases.observations])
   if (!subjectAliasKnown(aliases, p.subject) || !supersedes) return reject('unknown_id')
   if (!subjectLabelValid(p.subject)) return reject('bad_subject')

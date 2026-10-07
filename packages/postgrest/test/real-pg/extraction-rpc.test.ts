@@ -5,11 +5,12 @@
  * - pending: one anchor per session, oldest first; a later anchor waits behind
  *   a pending earlier one, due or not; a held failure backs off and counts, a
  *   transient one does neither; an exhausted anchor no longer blocks;
- * - a trailing assistant turn is pending after session_end or after the idle
- *   time, and not before; a later MK prompt makes it an ordinary turn again;
+ * - assistant turns no MK prompt follows are pending, as a window of turns,
+ *   after session_end or after the idle time, and not before; a later MK
+ *   prompt makes them that prompt's turns;
  * - begin opens one run per anchor and version while one runs or succeeded;
- * - the window: anchor, event, turn and whether an earlier window showed that
- *   turn, and the subjects, statements and observations of the anchor's scope;
+ * - the window: anchor, event, turns and whether an earlier run extracted
+ *   each, and the subjects, statements and observations of the anchor's scope;
  * - commit stores statements, observations, new subjects and entities
  *   together; a quote MK never said raises and writes nothing; a repeated
  *   event key is a duplicate;
@@ -360,14 +361,14 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(await pending(atDate(5))).toEqual([])
     await seed([sessionEnd('sess-e', 2)])
     await received('sess-e', 2)
-    expect((await pending(atDate(5))).map((p) => [p.anchorId, p.anchorKind])).toEqual([[u1, 'trailing']])
+    expect((await pending(atDate(5))).map((p) => [p.anchorId, p.anchorKind])).toEqual([[u1, 'turns']])
 
     // Idleness is judged by received time: sess-t was last received at
     // minute 1, so it is idle once minute 31 has passed.
     expect((await pending(atDate(31))).map((p) => p.anchorId)).toEqual([u1])
     expect((await pending(atDate(31.1))).map((p) => [p.anchorId, p.anchorKind])).toEqual([
-      [u1, 'trailing'],
-      [t1, 'trailing'],
+      [u1, 'turns'],
+      [t1, 'turns'],
     ])
 
     // A backlog whose events are old but were received just now is not idle.
@@ -379,7 +380,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     await received('sess-t', 40)
     expect((await pending(atDate(80))).map((p) => [p.anchorId, p.anchorKind])).toEqual([
       [p2, 'user_prompt'],
-      [u1, 'trailing'],
+      [u1, 'turns'],
     ])
   }, TEST_TIMEOUT_MS)
 
@@ -431,7 +432,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(sqlstateOf(noAnchor)).toBe('22023')
   }, TEST_TIMEOUT_MS)
 
-  it('builds the window: the anchor, its event and turn, and whether an earlier window showed that turn', async () => {
+  it('builds the window: the anchor, its event and turns, and whether an earlier run extracted each turn', async () => {
     const tools = [
       { name: 'Read', ref: 'src/importer.ts' },
       { name: 'Bash', ref: 'npm test' },
@@ -463,8 +464,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
         occurred_at: '2026-09-14T09:02:00.000000Z',
       },
       anchor_event: { plan_dirs: ['Active/tst-plan/'], payload: { text: 'Ship the importer behind a flag for TST-77.' } },
-      turn: { id: t1, kind: 'assistant_turn', content: 'The importer skips rows without an id.', source: { tools } },
-      observed: false,
+      turns: [{ id: t1, kind: 'assistant_turn', content: 'The importer skips rows without an id.', source: { tools }, observed: false }],
       subjects: [],
       statements: [],
       observations: [],
@@ -476,28 +476,28 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     })
     const built = buildWindow(w2!)
     expect(built.planSlug).toBe('tst-plan')
-    expect(built.turn?.tools).toEqual(tools)
+    expect(built.turns.map((t) => t.tools)).toEqual([tools])
     expect(renderUserMessage(built)).toContain('turn-1 (ASSISTANT, 2026-09-14T09:01:00.000Z):\nThe importer skips')
 
-    // p3 follows p2 with no turn between them: the same turn, observed once
-    // p2's run at this version has extracted it, and only at this version.
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turn: { id: t1 }, observed: false })
+    // p3 follows p2 with no turn between them. The turn is p2's to extract,
+    // so p3 shows it only once p2's run at this version has extracted it,
+    // and then as context.
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [] })
     await succeed(p2!, 'sess-w', [t1!], OTHER_VERSION)
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turn: { id: t1 }, observed: false })
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [] })
     await succeed(p2!, 'sess-w', [t1!])
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turn: { id: t1 }, observed: true })
-    expect(await store.extractionWindow(p1!, 500, 40, VERSION)).toMatchObject({ turn: null, observed: false })
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [{ id: t1, observed: true }] })
+    expect(await store.extractionWindow(p1!, 500, 40, VERSION)).toMatchObject({ turns: [] })
     expect(await store.extractionWindow(a1!, 500, 40, VERSION)).toMatchObject({
       anchor: { kind: 'user_answer' },
       anchor_event: { payload: answer },
-      turn: null,
-      observed: false,
+      turns: [],
     })
     expect(await store.extractionWindow(UNKNOWN_ID, 500, 40, VERSION)).toBeNull()
     expect(await store.extractionWindow('not-a-uuid', 500, 40, VERSION)).toBeNull()
 
-    // A turn that already ran as a trailing anchor is observed by the prompt
-    // that later resumed its session.
+    // A turn a flush extracted is context to the prompt that later resumed
+    // its session, and its own window shows nothing more.
     const [x1, t9] = await seed([
       prompt('sess-x', 'Rebuild the index.', 0),
       turn('sess-x', 'The index was rebuilt.', 1),
@@ -505,10 +505,38 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     ])
     await succeed(x1!, 'sess-x')
     expect((await pending(atDate(3))).map((p) => p.anchorId)).toContain(t9)
-    await succeed(t9!, 'sess-x')
+    await succeed(t9!, 'sess-x', [t9!])
     const [p9] = await seed([prompt('sess-x', 'Check it again.', 60)])
-    expect(await store.extractionWindow(p9!, 500, 40, VERSION)).toMatchObject({ turn: { id: t9 }, observed: true })
-    expect(await store.extractionWindow(t9!, 500, 40, VERSION)).toMatchObject({ anchor: { kind: 'assistant_turn' }, turn: null, observed: false })
+    expect(await store.extractionWindow(p9!, 500, 40, VERSION)).toMatchObject({ turns: [{ id: t9, observed: true }] })
+    expect(await store.extractionWindow(t9!, 500, 40, VERSION)).toMatchObject({ anchor: { kind: 'assistant_turn' }, turns: [] })
+  }, TEST_TIMEOUT_MS)
+
+  it('passes the turns of an exhausted prompt to the next prompt, and shows a dialog answer none', async () => {
+    const answer = {
+      questions: [{ question: 'Which flag name?', header: 'Flag', options: [{ label: 'v2', description: 'new' }], multiSelect: false }],
+      answers: { 'Which flag name?': 'v2' },
+      transcript_line: 9,
+    }
+    const [t1, p1, t2, a1, p2] = await seed([
+      turn('sess-g', 'The importer reads rows in batches.', 0),
+      prompt('sess-g', 'Go on.', 1),
+      turn('sess-g', 'The importer skips rows without an id.', 2),
+      event('sess-g', 'user_answer', answer, 3),
+      prompt('sess-g', 'Ship it.', 4),
+    ])
+    const turnsOf = async (anchor: string) =>
+      ((await store.extractionWindow(anchor, 500, 40, VERSION))!.turns ?? []).map((t) => [t.id, t.observed])
+
+    expect(await turnsOf(p1!)).toEqual([[t1, false]])
+    expect(await turnsOf(a1!)).toEqual([])
+    expect(await turnsOf(p2!)).toEqual([[t2, false]])
+
+    for (let i = 0; i < 3; i++) await heldFailure(p1!, 'sess-g')
+    expect(await turnsOf(p2!)).toEqual([
+      [t1, false],
+      [t2, false],
+    ])
+    expect((await pending(atDate(5))).map((p) => p.anchorId)).toEqual([a1, p2])
   }, TEST_TIMEOUT_MS)
 
   it('lists the subjects, statements and observations of the anchor\'s scope only', async () => {

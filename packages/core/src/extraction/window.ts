@@ -1,7 +1,7 @@
 /**
- * The extraction window: one MK utterance (or a trailing assistant turn), the
- * assistant turn it answers, and the subjects and current items in scope, all
- * under short aliases the model must use. `buildWindow` turns the window RPC's
+ * The extraction window: one MK utterance and the assistant turns before it
+ * that no run has extracted (or such turns alone), and the subjects and
+ * current items in scope, all under short aliases the model must use. `buildWindow` turns the window RPC's
  * JSON into this shape; `renderUserMessage` renders it byte-for-byte the same
  * way every time, so a recorded run can be re-run on the same input.
  */
@@ -22,8 +22,12 @@ const MAX_TOKENS_PER_1000_CHARS = 120
 const MAX_TOKENS_CEILING = 6000
 
 export type UtteranceKind = 'user_prompt' | 'user_answer' | 'assistant_turn'
-/** `trailing`: an assistant turn with no later MK utterance in its session. */
-export type AnchorKind = 'user_prompt' | 'user_answer' | 'trailing'
+/**
+ * `turns`: an observation-only window of assistant turns, anchored at its
+ * earliest turn: the turns no MK prompt follows, or a prompt's turns beyond
+ * what its own window holds.
+ */
+export type AnchorKind = 'user_prompt' | 'user_answer' | 'turns'
 
 // --- The window RPC's JSON (snake_case, as the database returns it) --------
 
@@ -42,6 +46,11 @@ export interface RawWindowUtterance {
   context?: string | null
   occurred_at: string
   source?: { event_key?: string; tools?: RawWindowTool[] | null; [key: string]: unknown } | null
+}
+
+/** A turn the window shows; `observed`: an earlier run already extracted it. */
+export interface RawWindowTurn extends RawWindowUtterance {
+  observed?: boolean
 }
 
 /** The anchor's capture event: its payload and the plan folders it ran under. */
@@ -95,10 +104,8 @@ export interface RawWindowProject {
 export interface RawExtractionWindow {
   anchor: RawWindowUtterance
   anchor_event?: RawWindowEvent | null
-  /** The latest assistant turn before a prompt anchor; ignored for other anchors. */
-  turn?: RawWindowUtterance | null
-  /** True when an earlier window already showed this window's assistant turn. */
-  observed?: boolean
+  /** The assistant turns the window shows, oldest first; ignored for a dialog answer. */
+  turns?: RawWindowTurn[]
   subjects?: RawWindowSubject[]
   statements?: RawWindowItem[]
   observations?: RawWindowItem[]
@@ -150,7 +157,8 @@ export interface WindowUtterance {
 }
 
 export interface WindowTurn {
-  alias: 'turn-1'
+  /** `turn-N`, oldest first. */
+  alias: string
   id: string
   sessionId: string | null
   projectId: string | null
@@ -188,7 +196,7 @@ export interface WindowShownItem extends WindowListedItem {
   class: string
 }
 
-/** An item named by id in the window's assistant turn, as the store holds it now. */
+/** An item named by id in one of the window's assistant turns, as the store holds it now. */
 export interface WindowTurnRef {
   id: string
   class: string
@@ -211,7 +219,8 @@ export interface ExtractionWindow {
   /** The slug of the anchor event's first plan folder, or null. */
   planSlug: string | null
   utterance: WindowUtterance | null
-  turn: WindowTurn | null
+  /** Oldest first; a turn marked alreadyObserved is context only. */
+  turns: WindowTurn[]
   subjects: WindowSubject[]
   statements: WindowListedItem[]
   observations: WindowListedItem[]
@@ -227,11 +236,10 @@ export function buildWindow(raw: RawExtractionWindow): ExtractionWindow {
     throw new Error('extraction window: the anchor is missing or malformed')
   }
   const anchorKind = anchorKindOf(anchor.kind)
-  const utterance = anchorKind === 'trailing' ? null : toUtterance(anchor, anchorKind, raw.anchor_event)
-  const turnRow = anchorKind === 'trailing' ? anchor : anchorKind === 'user_prompt' ? raw.turn ?? null : null
-  const turn = turnRow ? toTurn(turnRow, raw.observed === true) : null
+  const utterance = anchorKind === 'turns' ? null : toUtterance(anchor, anchorKind, raw.anchor_event)
+  const turns = anchorKind === 'user_answer' ? [] : (raw.turns ?? []).map(toTurn)
 
-  const windowText = [utterance?.content, utterance?.context, turn?.content].filter(isString).join('\n')
+  const windowText = [utterance?.content, utterance?.context, ...turns.map((t) => t.content)].filter(isString).join('\n')
   const rawSubjects = raw.subjects ?? []
   const labelById = new Map(rawSubjects.map((s) => [s.id, s.label]))
 
@@ -243,12 +251,12 @@ export function buildWindow(raw: RawExtractionWindow): ExtractionWindow {
     workspaceId: anchor.workspace_id ?? null,
     planSlug: planSlugOf(raw.anchor_event?.plan_dirs),
     utterance,
-    turn,
+    turns,
     subjects: listSubjects(rawSubjects, windowText),
     statements: listItems(raw.statements ?? [], 'stmt', labelById),
     observations: listItems(raw.observations ?? [], 'obs', labelById),
     shown: utterance === null ? [] : listShown(raw.shown ?? []),
-    turnRefs: turn === null ? [] : (raw.turn_refs ?? []).map(toTurnRef),
+    turnRefs: turns.length === 0 ? [] : (raw.turn_refs ?? []).map(toTurnRef),
     projects: (raw.projects ?? []).map((p) => ({ id: p.id, kind: p.kind })),
   }
 }
@@ -269,9 +277,8 @@ export function renderUserMessage(window: ExtractionWindow): string {
     section('SUBJECTS:', window.subjects.map((s) => `${s.alias} ${oneLine(s.label)}`)),
     section('CURRENT STATEMENTS:', window.statements.map(listedLine)),
     section('CURRENT OBSERVATIONS:', window.observations.map(listedLine)),
-    ...(window.shown.length > 0 ? [section('SHOWN TO THE ASSISTANT BEFORE turn-1:', window.shown.map(shownLine))] : []),
-    renderTurn(window.turn),
-    section('TOOLS OF turn-1:', (window.turn?.tools ?? []).map(toolLine)),
+    ...(window.shown.length > 0 ? [section('SHOWN TO THE ASSISTANT BEFORE THE TURNS:', window.shown.map(shownLine))] : []),
+    ...renderTurns(window.turns),
     renderUtterance(window.utterance),
   ].join('\n\n')
 }
@@ -289,7 +296,7 @@ export function shownTurnText(text: string): string {
 
 function anchorKindOf(kind: unknown): AnchorKind {
   if (kind === 'user_prompt' || kind === 'user_answer') return kind
-  if (kind === 'assistant_turn') return 'trailing'
+  if (kind === 'assistant_turn') return 'turns'
   throw new Error(`extraction window: an anchor of kind ${String(kind)} is not an utterance`)
 }
 
@@ -313,12 +320,12 @@ function toUtterance(
   }
 }
 
-function toTurn(row: RawWindowUtterance, alreadyObserved: boolean): WindowTurn {
-  if (typeof row.id !== 'string' || typeof row.content !== 'string') {
-    throw new Error('extraction window: the assistant turn is malformed')
+function toTurn(row: RawWindowTurn, index: number): WindowTurn {
+  if (typeof row?.id !== 'string' || typeof row.content !== 'string') {
+    throw new Error('extraction window: an assistant turn is malformed')
   }
   return {
-    alias: 'turn-1',
+    alias: `turn-${index + 1}`,
     id: row.id,
     sessionId: row.session_id ?? null,
     projectId: row.project_id ?? null,
@@ -327,7 +334,7 @@ function toTurn(row: RawWindowUtterance, alreadyObserved: boolean): WindowTurn {
     occurredAt: isoTime(row.occurred_at),
     eventKey: eventKeyOf(row),
     tools: toolsOf(row.source?.tools),
-    alreadyObserved,
+    alreadyObserved: row.observed === true,
   }
 }
 
@@ -466,10 +473,14 @@ function toolLine(tool: WindowTool): string {
   return tool.ref === null ? `- ${oneLine(tool.name)}` : `- ${oneLine(tool.name)}: ${oneLine(tool.ref)}`
 }
 
-function renderTurn(turn: WindowTurn | null): string {
-  if (turn === null) return 'turn-1:\nnone'
-  const header = `turn-1 (ASSISTANT, ${turn.occurredAt}):${turn.alreadyObserved ? ' (already observed)' : ''}`
-  return `${header}\n${shownTurnText(turn.content)}`
+/** Each turn with its tools, oldest first; `TURNS:\nnone` when the window shows none. */
+function renderTurns(turns: readonly WindowTurn[]): string[] {
+  if (turns.length === 0) return ['TURNS:\nnone']
+  return turns.flatMap((turn) => [
+    `${turn.alias} (ASSISTANT, ${turn.occurredAt}):${turn.alreadyObserved ? ' (already observed)' : ''}\n` +
+      shownTurnText(turn.content),
+    section(`TOOLS OF ${turn.alias}:`, turn.tools.map(toolLine)),
+  ])
 }
 
 function renderUtterance(utterance: WindowUtterance | null): string {

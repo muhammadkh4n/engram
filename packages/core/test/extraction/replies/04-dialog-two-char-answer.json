@@ -39,8 +39,7 @@
       },
       "plan_dirs": []
     },
-    "turn": null,
-    "observed": false,
+    "turns": [],
     "subjects": [],
     "statements": [],
     "observations": [],

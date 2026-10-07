@@ -49,8 +49,8 @@ export interface CommitDraft {
   proposals: LinkProposal[]
   /** The window's listed and shown items, current when the window was read. */
   targets: LinkTarget[]
-  /** The assistant turn's retractions by id, already checked by the link rules. */
-  retractions: ExtractionRetractions | null
+  /** The assistant turns' retractions by id, already checked by the link rules. */
+  retractions: ExtractionRetractions[]
   stats: Record<string, unknown>
 }
 
@@ -72,7 +72,7 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
   const items = [...statements, ...observations]
   const gatedItems = [...gated.statements, ...gated.observations]
   const scan = scanRetractions(window)
-  const scanned = window.turn !== null && !window.turn.alreadyObserved
+  const extracted = window.turns.filter((t) => !t.alreadyObserved).map((t) => t.id)
   return {
     subjects: subjects.list(),
     items,
@@ -82,9 +82,11 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
       subjectId: items[index]!.subjectId,
       subjectLabel: g.subject.label,
       occurredAt: g.occurredAt,
+      // Scope is the source utterance's: MK's for a statement (not its
+      // downgraded columns), the named turn's for an observation.
       ...('utteranceId' in g
         ? { projectId: window.utterance?.projectId ?? null, workspaceId: window.utterance?.workspaceId ?? null }
-        : { projectId: window.turn?.projectId ?? null, workspaceId: window.turn?.workspaceId ?? null }),
+        : { projectId: g.projectId, workspaceId: g.workspaceId }),
     })),
     proposals: gatedItems.flatMap((g, index) => [
       ...g.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
@@ -102,8 +104,8 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
       ...gateStats(gated),
       // The turns this run extracts observations from: a later window shows
       // them again only as context, so each turn is extracted once per version.
-      observation_sources: scanned ? [window.turn!.id] : [],
-      ...(scanned ? { retractions_unresolved: scan.unresolved } : {}),
+      observation_sources: extracted,
+      ...(extracted.length > 0 ? { retractions_unresolved: scan.unresolved } : {}),
     },
   }
 }

@@ -49,8 +49,7 @@ const PROMPT: RawExtractionWindow = {
     source: { event_key: 'tst-key-11' },
   },
   anchor_event: { payload: {}, plan_dirs: ['Active/tst-plan'] },
-  turn: TURN,
-  observed: false,
+  turns: [TURN],
   ...LISTINGS,
 }
 
@@ -87,7 +86,12 @@ const DIALOG: RawExtractionWindow = {
   ...LISTINGS,
 }
 
-const TRAILING: RawExtractionWindow = { anchor: TURN, anchor_event: { plan_dirs: ['Active/tst-plan'] }, ...LISTINGS }
+const TRAILING: RawExtractionWindow = {
+  anchor: TURN,
+  anchor_event: { plan_dirs: ['Active/tst-plan'] },
+  turns: [TURN],
+  ...LISTINGS,
+}
 
 const withAnchor = (raw: RawExtractionWindow, anchor: Partial<RawWindowUtterance>): RawExtractionWindow => ({
   ...raw,
@@ -166,8 +170,32 @@ describe('gateWindow: rules', () => {
   })
 
   it('rejects an observation of an already observed turn or a window with no turn', () => {
-    expect(rules(gate({ ...PROMPT, observed: true }, [], [obs()]))).toEqual(['observation:0:unknown_id'])
-    expect(rules(gate({ ...PROMPT, turn: null }, [], [obs()]))).toEqual(['observation:0:unknown_id'])
+    expect(rules(gate({ ...PROMPT, turns: [{ ...TURN, observed: true }] }, [], [obs()]))).toEqual(['observation:0:unknown_id'])
+    expect(rules(gate({ ...PROMPT, turns: [] }, [], [obs()]))).toEqual(['observation:0:unknown_id'])
+  })
+
+  it('takes an observation\'s lineage, project and time from the turn it names, and refuses an alias outside the window', () => {
+    const earlier = {
+      ...TURN,
+      id: uuid(9),
+      project_id: 'tst-other',
+      occurred_at: '2026-10-01T08:58:00Z',
+      source: { event_key: 'tst-key-9', tools: [] },
+    }
+    const raw = { ...PROMPT, turns: [earlier, TURN] }
+    const result = gate(raw, [], [
+      obs({ assistant_utterance_id: 'turn-1' }),
+      obs({ assistant_utterance_id: 'turn-2', claim: 'The capture route caps bodies at 1 MiB.' }),
+      obs({ assistant_utterance_id: 'turn-3', claim: 'The capture route has no SQLite fallback.' }),
+    ])
+    expect(result.observations.map((o) => [o.turnId, o.projectId, o.occurredAt])).toEqual([
+      [uuid(9), 'tst-other', '2026-10-01T08:58:00.000Z'],
+      [uuid(10), 'tst-repo', '2026-10-01T09:00:00.000Z'],
+    ])
+    expect(rules(result)).toEqual(['observation:2:unknown_id'])
+    expect(rules(gate({ ...raw, turns: [{ ...earlier, observed: true }, TURN] }, [], [obs()]))).toEqual([
+      'observation:0:unknown_id',
+    ])
   })
 
   it('rejects any statement in a trailing window, which has no utt-1', () => {
@@ -186,7 +214,7 @@ describe('gateWindow: rules', () => {
     expect(rules(gate(PROMPT, [stmt({ question: 'Should we drop the cache?' })]))).toEqual([
       'statement:0:question_not_found',
     ])
-    expect(rules(gate({ ...PROMPT, turn: null }, [stmt({ question: 'Should the capture route keep Postgres' })]))).toEqual(
+    expect(rules(gate({ ...PROMPT, turns: [] }, [stmt({ question: 'Should the capture route keep Postgres' })]))).toEqual(
       ['statement:0:question_not_found'],
     )
   })

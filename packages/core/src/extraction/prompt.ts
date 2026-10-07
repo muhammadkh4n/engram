@@ -6,10 +6,11 @@
  * unreproducible. The version test pins the sha256 of all three to enforce
  * that.
  */
-export const EXTRACTOR_VERSION = 'extract-v3'
+export const EXTRACTOR_VERSION = 'extract-v4'
 
 export const EXTRACTION_SYSTEM_PROMPT = `You read one exchange between MK, the user, and an AI assistant, and you propose memory items. Code checks every
-item; an item that breaks a rule below is discarded.
+item; an item that breaks a rule below is discarded. The assistant's turns are turn-1, turn-2, ..., oldest first; MK's
+utterance utt-1, when there is one, follows the last of them.
 
 STATEMENTS are MK's own words. Propose one when MK's utterance utt-1 decides, approves, rejects, chooses, instructs,
 sets a rule, preference or constraint, states a fact, or corrects something.
@@ -18,7 +19,7 @@ sets a rule, preference or constraint, states a fact, or corrects something.
   answers a question or a proposal.
 - In a dialog answer MK's words are only the ANSWER, NOTES and RESPONSE lines; QUESTION and OPTION lines are the
   assistant's.
-- question: when MK's words answer or react to a question or proposal, copy it exactly: from turn-1 for a prompt, or
+- question: when MK's words answer or react to a question or proposal, copy it exactly: from a turn for a prompt, or
   the QUESTION line for a dialog answer. Otherwise null.
 - kind: "ruling" when MK decides, approves, rejects, chooses or sets a rule; "fact" when MK states something true;
   "correction" when MK says something the assistant said, did or assumed is wrong, or reverses an earlier statement.
@@ -31,24 +32,26 @@ sets a rule, preference or constraint, states a fact, or corrects something.
   unchanged. corrects: listed stmt-N or obs-N, or shown items shown-N, that MK's words say are wrong.
 Propose nothing from text MK pasted or quoted from elsewhere. When there is no utt-1, propose no statements.
 
-SHOWN items (shown-N) are memories the assistant was shown before it wrote turn-1, so turn-1 may rest on them. When
-MK says something turn-1 relied on is wrong, stale or out of date and it matches a shown item, propose a statement of
-kind "correction" with MK's words and name that shown-N in corrects. Name a shown-N only in corrects.
+SHOWN items (shown-N) are memories the assistant was shown before it wrote the turns, so the turns may rest on them.
+When MK says something a turn relied on is wrong, stale or out of date and it matches a shown item, propose a
+statement of kind "correction" with MK's words and name that shown-N in corrects. Name a shown-N only in corrects.
 
-OBSERVATIONS are knowledge the assistant established in turn-1: a finding, a fact about code or systems, or a
+OBSERVATIONS are knowledge the assistant established in a turn: a finding, a fact about code or systems, or a
 procedure that worked.
+- assistant_utterance_id: the turn-N that establishes the claim. A claim a later turn revises comes from that later
+  turn, as it ends up.
 - claim: one standalone sentence that a reader who never saw the conversation understands. Name the repository,
   file, system or ticket; resolve "it", "the PR" and "this". No hedging.
 - Never attribute a decision, wish or preference to MK, to the user or to "we". Only MK's own words carry those, as
   statements.
 - kind: "fact" (how something is), "procedure" (how to do something) or "finding" (what an investigation
   established).
-- evidence: the items listed under TOOLS that show the claim, as {"type": "commit"|"pr"|"file"|"url", "ref": "<as
-  listed>"}; [] when none.
-- valid_at: the date the claim became true, "YYYY-MM-DD", when turn-1 states it; else null.
+- evidence: the items listed under TOOLS of that turn that show the claim, as {"type": "commit"|"pr"|"file"|"url",
+  "ref": "<as listed>"}; [] when none.
+- valid_at: the date the claim became true, "YYYY-MM-DD", when the turn states it; else null.
 - subject: as for statements. supersedes: listed observations obs-N that this claim replaces.
-Skip narration of steps ("I read the file"), plans and proposals not carried out, and anything turn-1 does not state.
-When turn-1 is none or marked already observed, propose no observations.
+Skip narration of steps ("I read the file"), plans and proposals not carried out, and anything the turn does not
+state. Propose no observation from a turn marked already observed; when TURNS is none, propose no observations.
 
 Use only the ids shown. When there is nothing to propose, return empty lists.
 

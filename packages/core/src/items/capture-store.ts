@@ -298,7 +298,7 @@ export interface ExtractionCandidateRead {
 }
 
 /**
- * The items an assistant turn retracts by id: each target becomes a
+ * The items one assistant turn retracts by id: each target becomes a
  * `retracts` link from the turn, applied with the window's items; `rejected`
  * holds the ones the link rules refused.
  */
@@ -312,7 +312,8 @@ export interface ExtractionRetractions {
 export interface ExtractionCommit {
   subjects: readonly ExtractionNewSubject[]
   items: readonly ExtractionItem[]
-  retractions?: ExtractionRetractions | null
+  /** One entry per turn of the window that retracts something. */
+  retractions?: readonly ExtractionRetractions[]
   stats: Record<string, unknown>
 }
 
