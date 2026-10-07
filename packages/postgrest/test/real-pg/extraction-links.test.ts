@@ -7,6 +7,9 @@
  *   recorded as not_current;
  * - the same words again (whitespace aside) on the same subject store nothing
  *   and add the restatement time once; a restates link does the same;
+ * - the same words count as a repeat only in the new item's scope: a
+ *   session-scoped rule said in another session, or a plan-scoped one under
+ *   another plan, is a statement of its own;
  * - one utterance and quote is one item whatever its subject;
  * - a link the item rules refuse rolls back the window's items and links;
  * - engram_supersede_item refuses an inverted, equal-time, cross-class,
@@ -32,7 +35,12 @@ const SESSION = 'sess-links'
 const REPO = { id: 'tst-repo', workspace: 'tst-ws', repo_root: '/home/tester/tst-repo', branch: 'main', worktree: null }
 
 let eventCounter = 0
-function event(type: string, payload: Record<string, unknown>, occurredAt: string): StoredEvent {
+function event(
+  type: string,
+  payload: Record<string, unknown>,
+  occurredAt: string,
+  over: Partial<StoredEvent> = {},
+): StoredEvent {
   eventCounter += 1
   return {
     sessionId: SESSION,
@@ -46,16 +54,19 @@ function event(type: string, payload: Record<string, unknown>, occurredAt: strin
     payload,
     scrub: { masked: [] },
     hits: [],
+    ...over,
   }
 }
 
-const said = (text: string, occurredAt: string): StoredEvent => event('user_prompt', { text, transcript_line: 1 }, occurredAt)
+const said = (text: string, occurredAt: string, over: Partial<StoredEvent> = {}): StoredEvent =>
+  event('user_prompt', { text, transcript_line: 1 }, occurredAt, over)
 const answered = (text: string, occurredAt: string): StoredEvent =>
   event('assistant_turn', { text, transcript_line: 2, tools: [] }, occurredAt)
 
 interface Utterance {
   id: string
   at: string
+  session: string
 }
 
 interface ItemRow {
@@ -102,6 +113,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction links through Postg
       ingested.map(async (e, i) => ({
         id: await pg.psql(`SELECT id FROM public.memory_items WHERE source ->> 'event_id' = '${e.eventId}';`),
         at: events[i]!.occurredAt,
+        session: events[i]!.sessionId,
       })),
     )
   }
@@ -115,7 +127,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction links through Postg
   /** Opens a run on the anchor under a fresh extractor version. */
   async function begin(anchor: Utterance): Promise<string> {
     versions += 1
-    const run = await store.extractionBegin({ anchorId: anchor.id, sessionId: SESSION, version: `links-${versions}`, model: null })
+    const run = await store.extractionBegin({ anchorId: anchor.id, sessionId: anchor.session, version: `links-${versions}`, model: null })
     expect(run).not.toBeNull()
     return run!
   }
@@ -337,6 +349,101 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction links through Postg
     expect(rerun.result).toMatchObject({ itemIds: [newRule.id], restatements: 1 })
     expect(await row(newRule.id)).toMatchObject({ restated_at: ['2026-10-05T11:30:00Z'] })
   }, TEST_TIMEOUT_MS)
+
+  describe('an exact repeat in scope', () => {
+    const PLANS = '/home/tester/notes/plans'
+
+    /** A statement scoped to its utterance's session, or to the plan named. */
+    function scoped(from: Utterance, content: string, subjectId: string, plan: string | null): ExtractionItem {
+      const item = statement(from, content, subjectId, { sessionId: from.session, planSlug: plan })
+      return { ...item, source: { ...item.source, scope: plan === null ? 'session' : 'plan' } }
+    }
+
+    /** What the candidate read says the item repeats, as pass 2 sees it. */
+    async function repeatOf(anchor: Utterance, item: ExtractionItem): Promise<string | null> {
+      const reads = await store.extractionCandidates(
+        anchor.id,
+        [
+          {
+            subjectId: item.subjectId,
+            subjectLabel: null,
+            class: 'mk_statement',
+            standing: false,
+            occurredAt: item.occurredAt,
+            content: item.content,
+            eventKey: String(item.source.event_key),
+            exclude: [],
+          },
+        ],
+        10,
+      )
+      expect(reads).toHaveLength(1)
+      return reads![0]!.repeatOf
+    }
+
+    it('stores the same session-scoped words from two sessions of one project as two statements', async () => {
+      const review = await subject('review branch')
+      const [first, second] = await seed(
+        said('Keep this branch until the review ends.', '2026-10-04T09:00:00Z', { sessionId: 'sess-links-one' }),
+        said('Keep this branch until the review ends.', '2026-10-05T09:00:00Z', { sessionId: 'sess-links-two' }),
+      )
+      const earlier = scoped(first!, 'Keep this branch until the review ends', review, null)
+      await commit(first!, [earlier])
+
+      const later = scoped(second!, 'Keep this branch until the review ends', review, null)
+      expect(await repeatOf(second!, later)).toBeNull()
+      const { result } = await commit(second!, [later])
+
+      expect(result).toMatchObject({ itemIds: [later.id], restatements: 0, duplicates: 0 })
+      expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe('2')
+      expect(await row(earlier.id)).toMatchObject({ superseded_by: null, restated_at: [] })
+    }, TEST_TIMEOUT_MS)
+
+    it('stores the same plan-scoped words under two plans as two statements', async () => {
+      const cadence = await subject('release cadence')
+      const [first, second] = await seed(
+        said('Ship every Friday.', '2026-10-04T09:00:00Z', { planDirs: [`${PLANS}/harbor-sync`] }),
+        said('Ship every Friday.', '2026-10-05T09:00:00Z', { planDirs: [`${PLANS}/lantern-audit`] }),
+      )
+      const earlier = scoped(first!, 'Ship every Friday', cadence, 'harbor-sync')
+      await commit(first!, [earlier])
+
+      const later = scoped(second!, 'Ship every Friday', cadence, 'lantern-audit')
+      expect(await repeatOf(second!, later)).toBeNull()
+      const { result } = await commit(second!, [later])
+
+      expect(result).toMatchObject({ itemIds: [later.id], restatements: 0 })
+      expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe('2')
+      expect(await row(earlier.id)).toMatchObject({ restated_at: [] })
+    }, TEST_TIMEOUT_MS)
+
+    it('still restates the same words in scope', async () => {
+      const cadence = await subject('release cadence')
+      const [first, again, other] = await seed(
+        said('Ship every Friday.', '2026-10-04T09:00:00Z', { planDirs: [`${PLANS}/harbor-sync`] }),
+        said('Ship every Friday.', '2026-10-05T09:00:00Z', { planDirs: [`${PLANS}/harbor-sync`] }),
+        said('Keep this branch until the review ends.', '2026-10-06T09:00:00Z'),
+      )
+      const planned = scoped(first!, 'Ship every Friday', cadence, 'harbor-sync')
+      await commit(first!, [planned])
+
+      const repeat = scoped(again!, 'Ship every Friday', cadence, 'harbor-sync')
+      expect(await repeatOf(again!, repeat)).toBe(planned.id)
+      const { result } = await commit(again!, [repeat])
+      expect(result).toMatchObject({ itemIds: [planned.id], restatements: 1 })
+      expect(await row(planned.id)).toMatchObject({ restated_at: ['2026-10-05T09:00:00Z'] })
+
+      // A session-scoped rule said again in its own session is a repeat too.
+      const review = await subject('review branch')
+      const [later] = await seed(said('Keep this branch until the review ends.', '2026-10-07T09:00:00Z'))
+      const kept = scoped(other!, 'Keep this branch until the review ends', review, null)
+      await commit(other!, [kept])
+      const again2 = scoped(later!, 'Keep this branch until the review ends', review, null)
+      expect(await repeatOf(later!, again2)).toBe(kept.id)
+      expect((await commit(later!, [again2])).result).toMatchObject({ itemIds: [kept.id], restatements: 1 })
+      expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe('2')
+    }, TEST_TIMEOUT_MS)
+  })
 
   it('treats a restates link as a restatement of its target', async () => {
     const storage = await subject('storage backend')

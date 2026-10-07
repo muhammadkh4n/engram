@@ -283,7 +283,8 @@ export interface ExtractionCandidate {
 /**
  * What one item is weighed against. `stored` names the item that already
  * holds its event key and `repeatOf` a current item of its class and subject
- * holding the same words; either means it needs no decision, and then the
+ * in the anchor's scope holding the same words; either means it needs no
+ * decision, and then the
  * lists are empty. Otherwise `read` lists every current item on its subject
  * in the anchor's scope that occurred no later (minus the excluded ids),
  * `total` counts them and `candidates` holds the newest of them, up to the

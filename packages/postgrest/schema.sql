@@ -4328,8 +4328,11 @@ $$;
 -- Returns one object per item, in input order:
 -- - stored: the id of the item that already holds event_key, or null;
 -- - repeat_of: when nothing holds it, a current item of the same class and
---   subject that occurred no later and holds the same words under the quote
---   rule (the commit stores the item as its restatement), or null;
+--   subject in the anchor's scope (engram_extraction_in_scope) that occurred
+--   no later and holds the same words under the quote rule (the commit
+--   stores the item as its restatement), or null. Out of scope the same
+--   words are a different statement: a session-scoped rule said again in
+--   another session, or a plan-scoped one under another plan, is stored;
 -- - when both are null, total counts the items
 --   engram_extraction_subject_current returns for it in the anchor's scope
 --   minus exclude, read lists all their ids and candidates the first p_limit
@@ -4430,6 +4433,7 @@ BEGIN
        WHERE i.class = v_item ->> 'class' AND i.subject_id = (v_item ->> 'subject_id')::uuid
          AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
          AND i.occurred_at <= v_at
+         AND public.engram_extraction_in_scope(i, a, v_plan)
          AND public.engram_norm_quote(i.content) = public.engram_norm_quote(v_item ->> 'content')
        ORDER BY i.occurred_at DESC, i.id
        LIMIT 1;
@@ -4814,8 +4818,9 @@ END; $$;
 -- became current after the read, so the item was never weighed against it.
 -- Both stay current; nothing is applied to the newcomer.
 -- An item with no supersedes link is a restatement when a restates target is
--- current, or else when a current item of its class and subject holds the
--- same words under the quote rule and occurred no later. A restatement is not
+-- current, or else when a current item of its class and subject in the
+-- anchor's scope (engram_extraction_in_scope) holds the same words under the
+-- quote rule and occurred no later. A restatement is not
 -- stored: its occurred_at joins each target's restated_at (sorted, each time
 -- once), its other links run from its first target, and that target stands
 -- for it in item_ids. Every other item is inserted and its links applied in
@@ -5142,6 +5147,7 @@ BEGIN
          WHERE i.class = v_obj ->> 'class' AND i.subject_id = (v_obj ->> 'subject_id')::uuid
            AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
            AND i.occurred_at <= v_at
+           AND public.engram_extraction_in_scope(i, v_anchor, v_plan)
            AND public.engram_norm_quote(i.content) = public.engram_norm_quote(v_obj ->> 'content')
          ORDER BY i.occurred_at DESC, i.id
          LIMIT 1;
