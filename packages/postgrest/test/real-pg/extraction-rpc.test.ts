@@ -451,7 +451,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       event('sess-w', 'user_answer', answer, 4, plan),
     ])
 
-    const w2 = await store.extractionWindow(p2!, 500, 40, VERSION)
+    const w2 = await store.extractionWindow(p2!, 500, 40, VERSION, 'any_version')
     expect(w2).toMatchObject({
       anchor: {
         id: p2,
@@ -480,21 +480,23 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(renderUserMessage(built)).toContain('turn-1 (ASSISTANT, 2026-09-14T09:01:00.000Z):\nThe importer skips')
 
     // p3 follows p2 with no turn between them. The turn is p2's to extract,
-    // so p3 shows it only once p2's run at this version has extracted it,
-    // and then as context.
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [] })
+    // so p3 shows it only once a run of p2 has extracted it, and then as
+    // context. Under the worker's rule a run at any version counts; a
+    // replace counts only runs at its own version.
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [] })
     await succeed(p2!, 'sess-w', [t1!], OTHER_VERSION)
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [] })
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [{ id: t1, observed: true }] })
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'this_version')).toMatchObject({ turns: [] })
     await succeed(p2!, 'sess-w', [t1!])
-    expect(await store.extractionWindow(p3!, 500, 40, VERSION)).toMatchObject({ turns: [{ id: t1, observed: true }] })
-    expect(await store.extractionWindow(p1!, 500, 40, VERSION)).toMatchObject({ turns: [] })
-    expect(await store.extractionWindow(a1!, 500, 40, VERSION)).toMatchObject({
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'this_version')).toMatchObject({ turns: [{ id: t1, observed: true }] })
+    expect(await store.extractionWindow(p1!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [] })
+    expect(await store.extractionWindow(a1!, 500, 40, VERSION, 'any_version')).toMatchObject({
       anchor: { kind: 'user_answer' },
       anchor_event: { payload: answer },
       turns: [],
     })
-    expect(await store.extractionWindow(UNKNOWN_ID, 500, 40, VERSION)).toBeNull()
-    expect(await store.extractionWindow('not-a-uuid', 500, 40, VERSION)).toBeNull()
+    expect(await store.extractionWindow(UNKNOWN_ID, 500, 40, VERSION, 'any_version')).toBeNull()
+    expect(await store.extractionWindow('not-a-uuid', 500, 40, VERSION, 'any_version')).toBeNull()
 
     // A turn a flush extracted is context to the prompt that later resumed
     // its session, and its own window shows nothing more.
@@ -507,8 +509,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect((await pending(atDate(3))).map((p) => p.anchorId)).toContain(t9)
     await succeed(t9!, 'sess-x', [t9!])
     const [p9] = await seed([prompt('sess-x', 'Check it again.', 60)])
-    expect(await store.extractionWindow(p9!, 500, 40, VERSION)).toMatchObject({ turns: [{ id: t9, observed: true }] })
-    expect(await store.extractionWindow(t9!, 500, 40, VERSION)).toMatchObject({ anchor: { kind: 'assistant_turn' }, turns: [] })
+    expect(await store.extractionWindow(p9!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [{ id: t9, observed: true }] })
+    expect(await store.extractionWindow(t9!, 500, 40, VERSION, 'any_version')).toMatchObject({ anchor: { kind: 'assistant_turn' }, turns: [] })
   }, TEST_TIMEOUT_MS)
 
   it('passes the turns of an exhausted prompt to the next prompt, and shows a dialog answer none', async () => {
@@ -525,7 +527,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       prompt('sess-g', 'Ship it.', 4),
     ])
     const turnsOf = async (anchor: string) =>
-      ((await store.extractionWindow(anchor, 500, 40, VERSION))!.turns ?? []).map((t) => [t.id, t.observed])
+      ((await store.extractionWindow(anchor, 500, 40, VERSION, 'any_version'))!.turns ?? []).map((t) => [t.id, t.observed])
 
     expect(await turnsOf(p1!)).toEqual([[t1, false]])
     expect(await turnsOf(a1!)).toEqual([])
@@ -587,7 +589,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     })
     await pg.psql(`SELECT public.engram_retire_items(ARRAY['${ids[7]}']::uuid[], 'replaced');`)
 
-    const inProject = await store.extractionWindow(p1!, 500, 40, VERSION)
+    const inProject = await store.extractionWindow(p1!, 500, 40, VERSION, 'any_version')
     expect(inProject!.statements!.map((s) => s.content)).toEqual(['foxtrot', 'delta', 'charlie', 'bravo', 'alpha'])
     expect(inProject!.statements![2]).toEqual({
       id: ids[2],
@@ -610,13 +612,13 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       ['importer flags', 'tst-repo', '2026-09-14T09:00:11.000000Z'],
     ])
 
-    const atRoot = await store.extractionWindow(r1!, 500, 40, VERSION)
+    const atRoot = await store.extractionWindow(r1!, 500, 40, VERSION, 'any_version')
     expect(atRoot!.anchor.project_id).toBeNull()
     expect(atRoot!.statements!.map((s) => s.content)).toEqual(['bravo', 'alpha'])
     expect(atRoot!.observations!.map((o) => o.content)).toEqual(['The workspace keeps one importer.'])
     expect(atRoot!.subjects!.map((s) => s.label)).toEqual(['house rules'])
 
-    const cut = await store.extractionWindow(p1!, 1, 2, VERSION)
+    const cut = await store.extractionWindow(p1!, 1, 2, VERSION, 'any_version')
     expect(cut!.statements!.map((s) => s.content)).toEqual(['foxtrot', 'delta'])
     expect(cut!.subjects!.map((s) => s.label)).toEqual(['house rules'])
   }, TEST_TIMEOUT_MS)
@@ -716,7 +718,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
 
     // The committed items and their subject are what the next window lists.
     const [later] = await seed([prompt('sess-c', 'Next step?', 5)])
-    const next = await store.extractionWindow(later!, 500, 40, VERSION)
+    const next = await store.extractionWindow(later!, 500, 40, VERSION, 'any_version')
     expect(next!.subjects!.map((s) => s.label)).toEqual(['Importer flags'])
     expect(next!.statements!.map((s) => s.id)).toEqual(['00000000-0000-4000-8000-000000000201'])
     expect(next!.observations!.map((s) => s.id)).toEqual(['00000000-0000-4000-8000-000000000202'])

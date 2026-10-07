@@ -4007,18 +4007,25 @@ $$;
 
 
 --
--- Name: engram_extraction_turn_groups(text, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_turn_groups(text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
+
+DROP FUNCTION IF EXISTS public.engram_extraction_turn_groups(text, text);
 
 -- The assistant turns the windows of session p_session show at extractor
 -- version p_version (every session when NULL), one row per turn and window,
 -- so the pending read and the window read compute the same windows and a
--- retry rebuilds the same one:
--- - A turn is observed once a succeeded run at p_version lists it in
---   stats.observation_sources: each turn yields observations once per version.
+-- retry rebuilds the same one. p_any_version says which runs count as having
+-- extracted something: with true, a succeeded run at any extractor version
+-- (the worker and engram-extract's gap fill, since a version bump
+-- re-extracts nothing by itself); with false, only one at p_version
+-- (engram-extract --replace, which re-runs what other versions extracted):
+-- - A turn is observed once a succeeded run that counts lists it in
+--   stats.observation_sources: each turn yields observations once.
 -- - An unobserved turn belongs to (owner_id) the first open user prompt of its
---   session after it: one that is neither finished nor forgotten
---   (engram_extraction_run_state). A turn no open prompt follows belongs to
+--   session after it: one that is not forgotten, not exhausted at p_version
+--   (engram_extraction_run_state) and has no succeeded run that counts. A
+--   turn no open prompt follows belongs to
 --   the session's flush (owner_id NULL). A finished prompt so passes the turns
 --   it never extracted to the next one, and a dialog answer shows no turn.
 -- - An open prompt also shows the latest turn before it when that turn is
@@ -4033,7 +4040,7 @@ $$;
 --   group's earliest turn, an observation-only window that the session's
 --   (occurred_at, id) order runs before the prompt.
 -- Read only.
-CREATE OR REPLACE FUNCTION public.engram_extraction_turn_groups(p_version text, p_session text) RETURNS TABLE(session_id text, turn_id uuid, owner_id uuid, anchor_id uuid, observed boolean)
+CREATE OR REPLACE FUNCTION public.engram_extraction_turn_groups(p_version text, p_session text, p_any_version boolean) RETURNS TABLE(session_id text, turn_id uuid, owner_id uuid, anchor_id uuid, observed boolean)
     LANGUAGE plpgsql STABLE
     SET search_path TO 'public'
     AS $$
@@ -4049,6 +4056,10 @@ DECLARE
   v_seen boolean[] := '{}'::boolean[];
   v_anchor uuid;
 BEGIN
+  IF p_any_version IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_extraction_turn_groups: p_any_version is required';
+  END IF;
   FOR r IN
     WITH state AS (
       SELECT st.anchor_item_id AS aid, st.finished
@@ -4058,7 +4069,7 @@ BEGIN
         FROM public.memory_extraction_runs rr
        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(rr.stats -> 'observation_sources') = 'array'
                                                          THEN rr.stats -> 'observation_sources' ELSE '[]'::jsonb END) AS x(v)
-       WHERE rr.extractor_version = p_version AND rr.status = 'succeeded'
+       WHERE (p_any_version OR rr.extractor_version = p_version) AND rr.status = 'succeeded'
          AND (p_session IS NULL OR rr.session_id = p_session)
          AND x.v ~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
     ), open_prompt AS (
@@ -4068,6 +4079,8 @@ BEGIN
        WHERE p.class = 'utterance' AND p.kind = 'user_prompt' AND p.forgotten_at IS NULL
          AND p.session_id IS NOT NULL AND (p_session IS NULL OR p.session_id = p_session)
          AND NOT coalesce(st.finished, false)
+         AND NOT (p_any_version AND EXISTS (SELECT 1 FROM public.memory_extraction_runs x
+                                             WHERE x.anchor_item_id = p.id AND x.status = 'succeeded'))
     ), unseen AS (
       SELECT op.id, op.sid, op.t_at, true AS is_prompt, 0 AS len
         FROM open_prompt op
@@ -4140,8 +4153,12 @@ DROP FUNCTION IF EXISTS public.engram_extraction_pending(text, integer, integer,
 -- Sessions come most recently received first (memory_session_state
 -- .last_received_at), so a live session is never queued behind a backlog;
 -- each session's anchors come in (occurred_at, id) order. An anchor is
--- pending while it has no succeeded run, fewer than 3 counted held failures
--- and fewer than 6 counted transient ones; there is no minimum per session,
+-- pending while no run at any extractor version succeeded on it, and at
+-- p_version it has fewer than 3 counted held failures and fewer than 6
+-- counted transient ones. A version bump so re-extracts nothing by itself:
+-- what an earlier version extracted stays until engram-extract --replace
+-- re-runs it, and a turn observed at any version is observed here too
+-- (engram_extraction_turn_groups with p_any_version). There is no minimum per session,
 -- so a session's one MK utterance is pending as soon as it is stored. A
 -- session's pending anchors are returned from its earliest on, up to the
 -- first one that is not due: a later anchor waits behind a pending earlier
@@ -4196,7 +4213,7 @@ BEGIN
                         WHERE c.session_id = s.session_id AND c.processed_at IS NULL AND c.attempts < 3)
   ), grp AS (
     SELECT DISTINCT g.session_id AS sid, g.anchor_id, g.owner_id
-      FROM public.engram_extraction_turn_groups(p_version, NULL) g
+      FROM public.engram_extraction_turn_groups(p_version, NULL, true) g
      WHERE g.anchor_id IS DISTINCT FROM g.owner_id
   ), anchor AS (
     SELECT u.id, u.session_id AS sid, u.kind, u.occurred_at AS t_at
@@ -4220,6 +4237,8 @@ BEGIN
       FROM anchor a
       LEFT JOIN run r ON r.aid = a.id
      WHERE NOT coalesce(r.finished, false)
+       AND NOT EXISTS (SELECT 1 FROM public.memory_extraction_runs x
+                        WHERE x.anchor_item_id = a.id AND x.status = 'succeeded')
   ), queued AS (
     SELECT p.*,
            bool_and(p.due) OVER (PARTITION BY p.sid ORDER BY p.t_at, p.id) AS clear,
@@ -4469,10 +4488,11 @@ END; $$;
 
 
 --
--- Name: engram_extraction_window(uuid, integer, integer, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_window(uuid, integer, integer, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
 DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
+DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer, text);
 
 -- The window around one anchor as JSON, as extractor version p_version
 -- builds it, or NULL when p_anchor names no utterance or a forgotten one:
@@ -4482,7 +4502,8 @@ DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
 --   source.event_id names, or null;
 -- - turns: the assistant turns the anchor's window shows, oldest first, each
 --   with the utterance's fields and observed: for a prompt or an assistant
---   turn, the turns engram_extraction_turn_groups gives that anchor (a
+--   turn, the turns engram_extraction_turn_groups gives that anchor under
+--   p_any_version, the same rule the caller chose its anchors by (a
 --   prompt's unobserved turns and its observed context turn; an
 --   observation-only group); [] for a dialog answer, which carries its
 --   question, and for a prompt that is already finished;
@@ -4510,7 +4531,7 @@ DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
 -- scoped to a plan is in scope only under that plan, the slug of the anchor
 -- event's first plan folder, and one scoped to a session only in that session.
 -- Times are UTC ISO 8601 with microseconds, whatever the session TimeZone.
-CREATE OR REPLACE FUNCTION public.engram_extraction_window(p_anchor uuid, p_subject_limit integer, p_recent_limit integer, p_version text) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.engram_extraction_window(p_anchor uuid, p_subject_limit integer, p_recent_limit integer, p_version text, p_any_version boolean) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -4541,6 +4562,10 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_window: p_version must be a non-blank text of at most 64 characters';
   END IF;
+  IF p_any_version IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_extraction_window: p_any_version is required';
+  END IF;
 
   SELECT * INTO a
     FROM public.memory_items i
@@ -4566,7 +4591,7 @@ BEGIN
              ORDER BY t.occurred_at, t.id), '[]'::jsonb),
            string_agg(t.content, E'\n' ORDER BY t.occurred_at, t.id)
       INTO v_turns, v_ref_text
-      FROM public.engram_extraction_turn_groups(p_version, a.session_id) g
+      FROM public.engram_extraction_turn_groups(p_version, a.session_id, p_any_version) g
       JOIN public.memory_items t ON t.id = g.turn_id
      WHERE g.anchor_id = a.id;
   END IF;
@@ -4777,9 +4802,10 @@ END; $$;
 
 
 --
--- Name: engram_extraction_commit(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_apply(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- The body of engram_extraction_commit, which calls it with p_reindex empty.
 -- Stores what one run extracted, in one transaction, and closes the run as
 -- succeeded. p_payload is {subjects, items, retractions, stats}, each key
 -- optional:
@@ -4842,7 +4868,13 @@ END; $$;
 -- links_applied}: item_ids
 -- holds one id per item in input order, a duplicate's being the stored
 -- item's and a restatement's its first target's.
-CREATE OR REPLACE FUNCTION public.engram_extraction_commit(p_run uuid, p_payload jsonb) RETURNS jsonb
+-- p_reindex names further sessions whose index the caller's transaction
+-- changed before this call (engram_extraction_replace: the sessions of the
+-- items it retired or handed back). They are made due for a rebuild with the
+-- sessions of this call's own items, all their rows locked in one
+-- session_id order: two separate ordered passes could each hold a row the
+-- other waits for, as could an ingest.
+CREATE OR REPLACE FUNCTION public.engram_extraction_apply(p_run uuid, p_payload jsonb, p_reindex text[]) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -5261,14 +5293,18 @@ BEGIN
 
   -- A session index lists its session's current statements and observations,
   -- so every session whose list this commit changed (the sessions of the items
-  -- it stored or pointed at, and of the items they superseded) gets
-  -- indexed_event_id 0, which makes it due for a rebuild. The rows are locked
-  -- in session_id order first, as engram_capture_ingest locks them: an UPDATE
-  -- alone locks in scan order, and could deadlock with an ingest naming the
-  -- same sessions.
-  v_sessions := ARRAY(SELECT DISTINCT i.session_id
-                        FROM public.memory_items i
-                       WHERE (i.id = ANY (v_ids) OR i.superseded_by = ANY (v_ids)) AND i.session_id IS NOT NULL);
+  -- it stored or pointed at, and of the items they superseded, and the
+  -- caller's p_reindex) gets indexed_event_id 0, which makes it due for a
+  -- rebuild. The rows are locked in session_id order first, as
+  -- engram_capture_ingest locks them: an UPDATE alone locks in scan order,
+  -- and could deadlock with an ingest naming the same sessions.
+  v_sessions := ARRAY(SELECT DISTINCT x.sid
+                        FROM (SELECT i.session_id AS sid
+                                FROM public.memory_items i
+                               WHERE i.id = ANY (v_ids) OR i.superseded_by = ANY (v_ids)
+                              UNION ALL
+                              SELECT u.sid FROM unnest(coalesce(p_reindex, '{}'::text[])) AS u(sid)) AS x
+                       WHERE x.sid IS NOT NULL);
   PERFORM 1 FROM public.memory_session_state st
    WHERE st.session_id = ANY (v_sessions)
    ORDER BY st.session_id
@@ -5298,6 +5334,21 @@ BEGIN
   RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
                             'restatements', v_restatements, 'links_applied', v_applied);
 END; $$;
+
+
+--
+-- Name: engram_extraction_commit(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores what one run extracted and closes it as succeeded:
+-- engram_extraction_apply with no further session to reindex, where the
+-- payload, the link and restatement rules and the result are described.
+CREATE OR REPLACE FUNCTION public.engram_extraction_commit(p_run uuid, p_payload jsonb) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT public.engram_extraction_apply(p_run, p_payload, '{}'::text[])
+$$;
 
 
 --
@@ -5370,18 +5421,23 @@ END; $$;
 
 
 --
--- Name: engram_extraction_session_anchors(text, text); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_session_anchors(text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
+
+DROP FUNCTION IF EXISTS public.engram_extraction_session_anchors(text, text);
 
 -- Every window of session p_session at extractor version p_version, in the
 -- (occurred_at, id) order the worker runs them: its MK utterances that are
 -- not forgotten, and the earliest turn of each observation-only group of
 -- engram_extraction_turn_groups, a flush group included (the caller runs only
--- a session that may be closed). succeeded says a run at p_version
--- succeeded on the anchor; running_run_id and running_started_at name a run
+-- a session that may be closed). The windows and succeeded follow
+-- p_any_version as engram_extraction_turn_groups reads it: with true (gap
+-- fill) succeeded says a run at any version succeeded on the anchor, so only
+-- what no version extracted is left; with false (--replace) it says one at
+-- p_version did, so what other versions extracted is run again. running_run_id and running_started_at name a run
 -- still open on it. Backoff and failure limits are not applied: an operator
 -- re-run decides for itself. Read only.
-CREATE OR REPLACE FUNCTION public.engram_extraction_session_anchors(p_version text, p_session text) RETURNS TABLE(anchor_item_id uuid, anchor_kind text, occurred_at timestamp with time zone, succeeded boolean, running_run_id uuid, running_started_at timestamp with time zone)
+CREATE OR REPLACE FUNCTION public.engram_extraction_session_anchors(p_version text, p_session text, p_any_version boolean) RETURNS TABLE(anchor_item_id uuid, anchor_kind text, occurred_at timestamp with time zone, succeeded boolean, running_run_id uuid, running_started_at timestamp with time zone)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -5394,11 +5450,15 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_session_anchors: p_session must hold 1 to 256 characters';
   END IF;
+  IF p_any_version IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_extraction_session_anchors: p_any_version is required';
+  END IF;
 
   RETURN QUERY
   WITH grp AS (
     SELECT DISTINCT g.anchor_id
-      FROM public.engram_extraction_turn_groups(p_version, p_session) g
+      FROM public.engram_extraction_turn_groups(p_version, p_session, p_any_version) g
      WHERE g.anchor_id IS DISTINCT FROM g.owner_id
   ), anchor AS (
     SELECT u.id, u.kind, u.occurred_at AS t_at
@@ -5410,7 +5470,11 @@ BEGIN
       FROM grp g
       JOIN public.memory_items t ON t.id = g.anchor_id
   )
-  SELECT a.id, a.kind, a.t_at, coalesce(rs.succeeded, false), rs.running_run_id, rs.running_started_at
+  SELECT a.id, a.kind, a.t_at,
+         coalesce(rs.succeeded, false)
+           OR (p_any_version AND EXISTS (SELECT 1 FROM public.memory_extraction_runs x
+                                          WHERE x.anchor_item_id = a.id AND x.status = 'succeeded')),
+         rs.running_run_id, rs.running_started_at
     FROM anchor a
     LEFT JOIN public.engram_extraction_run_state(p_version, p_session) rs ON rs.anchor_item_id = a.id
    ORDER BY a.t_at, a.id;
@@ -5441,6 +5505,8 @@ END; $$;
 -- The old versions' restatement times recorded for these utterances
 -- (stats.restatements of their succeeded runs in this session) are removed
 -- from their targets; the commit adds back the ones the new run reproduces.
+-- The sessions of the retired and handed-back items get indexed_event_id 0,
+-- as the commit does for its own, so their indexes are rebuilt.
 -- Then the payload is committed as engram_extraction_commit commits it, and
 -- the run's stats gain replace {retired [ids], restored [{item, from, to}]
 -- (to NULL: restored, else re-pointed), kept_recorded [ids], unrestated
@@ -5471,6 +5537,7 @@ DECLARE
   v_unrestated jsonb := '[]'::jsonb;
   v_replace jsonb;
   v_result jsonb;
+  v_reindex text[];
 BEGIN
   IF p_run IS NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -5588,7 +5655,15 @@ BEGIN
     END IF;
   END LOOP;
 
-  v_result := public.engram_extraction_commit(p_run, p_payload);
+  -- A session index lists its session's current items, so the sessions of
+  -- the items retired or handed back here go due for a rebuild, with the
+  -- commit's own, in the commit's single ordered pass over their rows.
+  v_reindex := ARRAY(SELECT DISTINCT m.session_id
+                       FROM public.memory_items m
+                      WHERE (m.id = ANY (v_retire)
+                             OR m.id IN (SELECT (e ->> 'item')::uuid FROM jsonb_array_elements(v_restored) e))
+                        AND m.session_id IS NOT NULL);
+  v_result := public.engram_extraction_apply(p_run, p_payload, v_reindex);
 
   v_replace := jsonb_build_object('retired', to_jsonb(v_retire), 'restored', v_restored,
                                   'kept_recorded', to_jsonb(v_recorded), 'unrestated', v_unrestated);
@@ -6374,19 +6449,20 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) 
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM PUBLIC;
@@ -6447,19 +6523,20 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM %I', role_name);
@@ -6509,19 +6586,20 @@ GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) T
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_session_index_source(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) TO service_role;

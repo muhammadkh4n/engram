@@ -3,10 +3,12 @@
  * - engram_extraction_sessions picks sessions by name or by MK utterance
  *   time, oldest first, and says which are live;
  * - engram_extraction_session_anchors lists a session's windows in run order
- *   with their state at one version;
+ *   with their state at one version, or with a run at any version counting
+ *   as extracted (a gap fill);
  * - engram_extraction_replace retires what an older version stored for the
  *   window and the new run does not reproduce, keeps a recorded item, hands
- *   back what the retired items superseded, removes their restatement times
+ *   back what the retired items superseded, removes their restatement times,
+ *   makes the sessions of what it retired or handed back due for a new index
  *   and commits the new run, all in one transaction.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -210,14 +212,20 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction re-run RPCs through
     )
     const run = await begin(p0!, NEW)
     await store.extractionCommit(run, { subjects: [], items: [], stats: {} })
-    const anchors = await store.extractionSessionAnchors(NEW, SESSION)
+    const anchors = await store.extractionSessionAnchors(NEW, SESSION, 'this_version')
     expect(anchors.map((a) => [a.anchorId, a.anchorKind, a.succeeded, a.runningRunId])).toEqual([
       [p0!.id, 'user_prompt', true, null],
       [p1!.id, 'user_prompt', false, null],
     ])
     expect(t0).toBeDefined()
-    const other = await store.extractionSessionAnchors(OLD, SESSION)
+    const other = await store.extractionSessionAnchors(OLD, SESSION, 'this_version')
     expect(other.map((a) => a.succeeded)).toEqual([false, false])
+    // A gap fill at another version leaves what any version extracted.
+    const gaps = await store.extractionSessionAnchors(OLD, SESSION, 'any_version')
+    expect(gaps.map((a) => [a.anchorId, a.succeeded])).toEqual([
+      [p0!.id, true],
+      [p1!.id, false],
+    ])
   }, TEST_TIMEOUT_MS)
 
   it('retires what the new run does not reproduce, keeps a recorded item and hands back supersessions', async () => {
@@ -285,6 +293,37 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction re-run RPCs through
     expect([...stats.replace.retired].sort()).toEqual([...result.retired].sort())
     expect(stats.replace.kept_recorded).toEqual([bId])
     expect(stats.replace.unrestated).toHaveLength(1)
+  }, TEST_TIMEOUT_MS)
+
+  it('makes the sessions of the items it retires or hands back due for a new index', async () => {
+    const [earlier] = await seed(said('we use sqlite for the cache', '2026-03-01T09:00:00Z', OTHER_SESSION))
+    const [p1] = await seed(said('switch the cache to postgres', '2026-03-02T10:05:00Z'))
+    const cache = await subject('cache store')
+    const olderRun = await store.extractionBegin({ anchorId: earlier!.id, sessionId: OTHER_SESSION, version: OLD, model: null })
+    const [rId] = (
+      await store.extractionCommit(olderRun!, {
+        subjects: [],
+        items: [statement(earlier!, 'we use sqlite for the cache', cache, { sessionId: OTHER_SESSION })],
+        stats: {},
+      })
+    ).itemIds
+    const [aId] = await commitOld(p1!, [statement(p1!, 'switch the cache to postgres', cache, { links: [{ rel: 'supersedes', target: rId! }] })])
+    // Both indexes are built and up to date.
+    await pg.psql('UPDATE public.memory_session_state SET indexed_event_id = last_event_id;')
+    const indexed = () =>
+      pg.psql(
+        `SELECT string_agg(session_id || '=' || (indexed_event_id = 0)::text, ',' ORDER BY session_id) FROM public.memory_session_state;`,
+      )
+    expect(await indexed()).toBe(`${SESSION}=false,${OTHER_SESSION}=false`)
+
+    // The new version proposes nothing for the window, so the commit itself
+    // stores and supersedes nothing.
+    const run = await begin(p1!, NEW)
+    const result = await store.extractionReplace(run, { subjects: [], items: [], stats: {} })
+
+    expect(result.retired).toEqual([aId])
+    expect(result.restored).toEqual([{ item: rId, from: aId, to: null }])
+    expect(await indexed()).toBe(`${SESSION}=true,${OTHER_SESSION}=true`)
   }, TEST_TIMEOUT_MS)
 
   it('stores nothing when the commit refuses the new window', async () => {

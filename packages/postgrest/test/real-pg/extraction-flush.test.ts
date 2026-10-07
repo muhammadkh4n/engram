@@ -5,8 +5,9 @@
  * window's character budget get an observation-only window that runs first,
  * the assistant turns after a session's last MK prompt are flushed together
  * once it ends or goes idle, a flushed turn is only context to a later window,
- * and a tick with a smaller budget than the backlog serves the most recently
- * received sessions first.
+ * a tick with a smaller budget than the backlog serves the most recently
+ * received sessions first, and after an extractor version bump a tick takes
+ * only what no version extracted.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import {
@@ -304,6 +305,41 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction of short sessions a
       expect(await sourcesOf(t1!)).toBe(`["${t1}"]`)
       expect(await sourcesOf(p1!)).toBe(`["${t2}"]`)
       expect(await observations()).toBe(2)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'after a version bump, extracts a new window and leaves one an earlier version extracted alone',
+    async () => {
+      const [p1, t1, t2, p2] = await seed([
+        prompt('tst-sess-bump', 'Check the importer.', 0),
+        turn('tst-sess-bump', 'The importer reads rows in batches of 500.', 1),
+        turn('tst-sess-bump', 'The importer skips rows that have no id column.', 2),
+        prompt('tst-sess-bump', 'Now look at the exporter.', 3),
+      ])
+      // An earlier extractor version ran the prompt and observed the first turn.
+      for (const [anchor, sources] of [[p1!, []], [t1!, [t1!]]] as const) {
+        const run = await store.extractionBegin({ anchorId: anchor, sessionId: 'tst-sess-bump', version: 'tst-extractor-old', model: null })
+        expect(run).not.toBeNull()
+        await store.extractionCommit(run!, { subjects: [], items: [], stats: { observation_sources: [...sources] } })
+      }
+      const { tick, requests } = ticker()
+
+      expect(await tick()).toEqual({ windows: 1, succeeded: 1, held: 0, transient: 0, full: false })
+      expect(requests).toHaveLength(1)
+      expect(requests[0]!.user).toContain('Now look at the exporter.')
+      expect(requests[0]!.user).toContain('The importer skips rows')
+      expect(requests[0]!.user).not.toContain('The importer reads rows')
+      expect(await sourcesOf(p2!)).toBe(`["${t2}"]`)
+      expect(
+        await pg.psql(
+          `SELECT string_agg(anchor_item_id::text, ',') FROM public.memory_extraction_runs
+            WHERE status = 'succeeded' AND extractor_version <> 'tst-extractor-old';`,
+        ),
+      ).toBe(p2)
+      expect(await observations()).toBe(1)
+      expect(await tick()).toMatchObject({ windows: 0 })
     },
     TEST_TIMEOUT_MS,
   )

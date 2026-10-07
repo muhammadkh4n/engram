@@ -17,6 +17,7 @@ import type {
   CaptureStore,
   DueSession,
   EmbeddingFailure,
+  ExtractedBy,
   ExtractionBegin,
   ExtractionCandidate,
   ExtractionCandidateQuery,
@@ -66,6 +67,7 @@ const SCAN_PAGE_MAX = 1000
 const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead'] as const
 const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'turns'])
 const FAILURE_CLASSES: ReadonlySet<string> = new Set(['transient', 'held'])
+const EXTRACTED_BY: ReadonlySet<string> = new Set<ExtractedBy>(['any_version', 'this_version'])
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -270,6 +272,7 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     subjectLimit: number,
     recentLimit: number,
     version: string,
+    extractedBy: ExtractedBy,
   ): Promise<RawExtractionWindow | null> {
     if (!Number.isInteger(subjectLimit) || subjectLimit < 1 || subjectLimit > EXTRACTION_WINDOW_SUBJECTS_MAX) {
       throw new Error(`extractionWindow: subjectLimit must be an integer from 1 to ${EXTRACTION_WINDOW_SUBJECTS_MAX}`)
@@ -280,6 +283,7 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     if (typeof version !== 'string' || !/\S/.test(version) || version.length > 64) {
       throw new Error('extractionWindow: version must be a non-blank text of at most 64 characters')
     }
+    if (!EXTRACTED_BY.has(extractedBy)) throw new Error('extractionWindow: extractedBy must be any_version or this_version')
     // A malformed id names no utterance; PostgREST would refuse the whole call.
     if (!isUuid(anchorId)) return null
     const { data, error } = await this.client.rpc('engram_extraction_window', {
@@ -287,6 +291,7 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
       p_subject_limit: subjectLimit,
       p_recent_limit: recentLimit,
       p_version: version,
+      p_any_version: extractedBy === 'any_version',
     })
     if (error) throw toStoreError('extractionWindow', error)
     if (data === null) return null
@@ -408,10 +413,14 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     return toExtractionSessions(data)
   }
 
-  async extractionSessionAnchors(version: string, sessionId: string): Promise<SessionAnchor[]> {
+  async extractionSessionAnchors(version: string, sessionId: string, extractedBy: ExtractedBy): Promise<SessionAnchor[]> {
+    if (!EXTRACTED_BY.has(extractedBy)) {
+      throw new Error('extractionSessionAnchors: extractedBy must be any_version or this_version')
+    }
     const { data, error } = await this.client.rpc('engram_extraction_session_anchors', {
       p_version: version,
       p_session: sessionId,
+      p_any_version: extractedBy === 'any_version',
     })
     if (error) throw toStoreError('extractionSessionAnchors', error)
     return toSessionAnchors(data)

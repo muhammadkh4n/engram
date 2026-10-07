@@ -496,9 +496,11 @@ export interface CaptureStore {
 
   /**
    * Up to `limit` anchors to extract next: sessions most recently received
-   * first, each session's anchors in event order. An anchor is pending at
-   * `version` while it has no succeeded run, fewer than 3 counted held and
-   * fewer than 6 counted transient failures; a session's pending anchors
+   * first, each session's anchors in event order. An anchor is pending while
+   * no run at any extractor version succeeded on it (a version bump
+   * re-extracts nothing by itself) and it has, at `version`, fewer than 3
+   * counted held and fewer than 6 counted transient failures; a turn
+   * observed at any version is observed for it. A session's pending anchors
    * are handed out from its earliest on, up to the first one still in the
    * backoff for all its failures, counted or not. Anchors are MK utterances,
    * however few a session holds, and a trailing assistant turn once its
@@ -511,14 +513,16 @@ export interface CaptureStore {
    * The window around an anchor as the RPC returns it for extractor
    * `version`, or null when the anchor is gone (missing or forgotten). Lists
    * up to `subjectLimit` active subjects of its scope and up to
-   * `recentLimit` current statements and observations. Its assistant turn is
-   * marked observed when a succeeded run at `version` already extracted it.
+   * `recentLimit` current statements and observations. Its turns are those
+   * no succeeded run that `extractedBy` counts has extracted, plus an
+   * observed context turn; pass the rule the anchor was chosen by.
    */
   extractionWindow(
     anchorId: string,
     subjectLimit: number,
     recentLimit: number,
     version: string,
+    extractedBy: ExtractedBy,
   ): Promise<RawExtractionWindow | null>
 
   /**
@@ -587,11 +591,20 @@ export interface ExtractionSession {
 }
 
 /** One window of a session at a version, in the order the worker runs them. */
+/**
+ * Which succeeded runs count as having extracted a window or a turn:
+ * - `any_version`: a run at any extractor version. The worker and a gap fill
+ *   read this way, so a version bump re-extracts nothing by itself.
+ * - `this_version`: only a run at the version asked for. A replace reads
+ *   this way, to re-run what other versions extracted.
+ */
+export type ExtractedBy = 'any_version' | 'this_version'
+
 export interface SessionAnchor {
   anchorId: string
   anchorKind: AnchorKind
   occurredAt: Date
-  /** A run at the version succeeded on it. */
+  /** A run that the read's ExtractedBy counts succeeded on it. */
   succeeded: boolean
   /** A run still open on it, held by another process until it closes. */
   runningRunId: string | null
@@ -621,8 +634,11 @@ export interface ExtractionReplaceResult extends ExtractionCommitResult {
  */
 export interface ExtractionRerunStore {
   extractionSessions(query: ExtractionSessionQuery): Promise<ExtractionSession[]>
-  /** Every window of the session at `version`, in run order, with its run state. */
-  extractionSessionAnchors(version: string, sessionId: string): Promise<SessionAnchor[]>
+  /**
+   * Every window of the session at `version`, in run order, with its run
+   * state; which windows exist and which have succeeded follow `extractedBy`.
+   */
+  extractionSessionAnchors(version: string, sessionId: string, extractedBy: ExtractedBy): Promise<SessionAnchor[]>
   /**
    * Commits the run like extractionCommit after retiring the window's
    * old-version items the commit does not reproduce, handing back what they

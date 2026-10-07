@@ -529,16 +529,16 @@ describe('PostgRestCaptureStore extraction', () => {
   it('reads a window from engram_extraction_window, null for a gone anchor, without asking for a malformed id', async () => {
     const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turns: [], subjects: [] }
     const { store, calls } = storeWith({ data: window, error: null })
-    await expect(store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toEqual(window)
+    await expect(store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).resolves.toEqual(window)
     expect(calls).toEqual([
-      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40, p_version: 'tst-extractor' } },
+      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40, p_version: 'tst-extractor', p_any_version: true } },
     ])
-    await expect(store.extractionWindow('not-a-uuid', 500, 40, 'tst-extractor')).resolves.toBeNull()
-    await expect(store.extractionWindow(ANCHOR, 0, 40, 'tst-extractor')).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
-    await expect(store.extractionWindow(ANCHOR, 500, 201, 'tst-extractor')).rejects.toThrow('recentLimit must be an integer from 1 to 200')
+    await expect(store.extractionWindow('not-a-uuid', 500, 40, 'tst-extractor', 'any_version')).resolves.toBeNull()
+    await expect(store.extractionWindow(ANCHOR, 0, 40, 'tst-extractor', 'any_version')).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
+    await expect(store.extractionWindow(ANCHOR, 500, 201, 'tst-extractor', 'any_version')).rejects.toThrow('recentLimit must be an integer from 1 to 200')
     expect(calls).toHaveLength(1)
-    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toBeNull()
-    await expect(storeWith({ data: { turns: [] }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).rejects.toThrow(
+    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).resolves.toBeNull()
+    await expect(storeWith({ data: { turns: [] }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).rejects.toThrow(
       'extractionWindow failed: the RPC returned no window',
     )
   })

@@ -379,6 +379,7 @@ async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date)
       EXTRACTION_WINDOW_SUBJECTS_MAX,
       RECENT_LISTING_LIMIT,
       EXTRACTOR_VERSION,
+      'any_version',
     )
   } catch (err) {
     return failStore(deps, anchor, runId, err, {}, line)

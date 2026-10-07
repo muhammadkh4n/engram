@@ -7,11 +7,15 @@
  * (anchor_item_id, extractor_version) for running and succeeded runs allows
  * once, so the CLI takes no lock of its own.
  *
- * - Default (gap fill): every window with no succeeded run at this version.
- * - --replace: the same windows, committed through engram_extraction_replace,
- *   which first retires what older versions stored for the window and the new
- *   run does not reproduce (never an item MK recorded in a register), hands
- *   back what those items superseded and removes their restatement times.
+ * - Default (gap fill): the windows the worker would take, those no succeeded
+ *   run at any extractor version extracted. A version bump re-extracts
+ *   nothing by itself.
+ * - --replace: also the windows other versions extracted and this one has
+ *   not, all committed through engram_extraction_replace, which first
+ *   retires what other versions stored for the window and the new run does
+ *   not reproduce (never an item MK recorded in a register), hands back what
+ *   those items superseded, removes their restatement times and makes the
+ *   sessions of what it retired or handed back due for a new index.
  * - --dry-run: calls the model and the gate and writes nothing, run rows
  *   included.
  *
@@ -39,6 +43,7 @@ import {
   planDecisions,
   type CaptureStore,
   type CommitDecisions,
+  type ExtractedBy,
   type ExtractionCommit,
   type ExtractionCommitResult,
   type ExtractionReplaceResult,
@@ -174,6 +179,16 @@ export async function runExtract(opts: ExtractOptions, deps: ExtractDeps): Promi
   return outcome(run, false, run.failed ? EXIT_FAILED : EXIT_OK)
 }
 
+/**
+ * A gap fill takes what no version extracted, as the worker does; a replace
+ * re-runs what only other versions extracted, so it counts this version's
+ * runs alone. The window read follows the same rule as the anchor read, so
+ * both see the same turn groups.
+ */
+function extractedBy(opts: ExtractOptions): ExtractedBy {
+  return opts.replace ? 'this_version' : 'any_version'
+}
+
 function outcome(run: Run, capped: boolean, exitCode: number): ExtractOutcome {
   return { exitCode, windows: run.windows, calls: run.calls, capped }
 }
@@ -182,7 +197,7 @@ function outcome(run: Run, capped: boolean, exitCode: number): ExtractOutcome {
 async function runSession(run: Run, sessionId: string): Promise<'done' | 'capped' | 'aborted'> {
   const seen = new Set<string>()
   for (;;) {
-    const anchors = await run.deps.store.extractionSessionAnchors(EXTRACTOR_VERSION, sessionId)
+    const anchors = await run.deps.store.extractionSessionAnchors(EXTRACTOR_VERSION, sessionId, extractedBy(run.opts))
     const next = anchors.find((a) => !a.succeeded && !seen.has(a.anchorId))
     if (next === undefined) return 'done'
     seen.add(next.anchorId)
@@ -227,7 +242,13 @@ async function runWindow(run: Run, sessionId: string, anchor: SessionAnchor): Pr
   let result: ExtractWindowResult
   let commit: ExtractionCommit
   try {
-    const raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT, EXTRACTOR_VERSION)
+    const raw = await store.extractionWindow(
+      anchor.anchorId,
+      EXTRACTION_WINDOW_SUBJECTS_MAX,
+      RECENT_LISTING_LIMIT,
+      EXTRACTOR_VERSION,
+      extractedBy(run.opts),
+    )
     if (raw === null) {
       if (runId !== null) {
         await store.extractionFail(runId, { error: 'the anchor is gone', failure: 'transient', counted: false, stats: {} })

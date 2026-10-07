@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   EXTRACTOR_VERSION,
   type CompleteJsonRequest,
+  type ExtractedBy,
   type ExtractionCommit,
   type ExtractionCommitResult,
   type ExtractionReplaceResult,
@@ -58,6 +59,8 @@ function rawWindow(id: string): RawExtractionWindow {
 class FakeStore implements ExtractStore {
   readonly writes: string[] = []
   readonly windowsRead: string[] = []
+  /** The ExtractedBy of every anchor and window read, in order. */
+  readonly readsBy: string[] = []
   private runs = 0
 
   constructor(
@@ -69,11 +72,19 @@ class FakeStore implements ExtractStore {
     return this.sessions
   }
 
-  async extractionSessionAnchors(): Promise<SessionAnchor[]> {
+  async extractionSessionAnchors(_version: string, _sessionId: string, extractedBy: ExtractedBy): Promise<SessionAnchor[]> {
+    this.readsBy.push(`anchors ${extractedBy}`)
     return this.anchors.map((a) => ({ ...a }))
   }
 
-  async extractionWindow(anchorId: string): Promise<RawExtractionWindow | null> {
+  async extractionWindow(
+    anchorId: string,
+    _subjectLimit: number,
+    _recentLimit: number,
+    _version: string,
+    extractedBy: ExtractedBy,
+  ): Promise<RawExtractionWindow | null> {
+    this.readsBy.push(`window ${extractedBy}`)
     this.windowsRead.push(anchorId)
     return rawWindow(anchorId)
   }
@@ -222,6 +233,15 @@ describe('engram-extract runs', () => {
     expect(emitted[0]).toMatchObject({ status: 'succeeded', retired: [RETIRED], restored: [{ item: RESTORED, from: RETIRED, to: null }] })
     expect(reported).toHaveLength(1)
     expect(JSON.stringify(emitted)).not.toContain('keep the cache on postgres')
+  })
+
+  it('reads windows as the worker does on a gap fill, and as this version alone on a replace', async () => {
+    const gapFill = new FakeStore([due], [anchor(ANCHOR_A, 0)])
+    await run(gapFill, options())
+    expect(gapFill.readsBy).toEqual(['anchors any_version', 'window any_version', 'anchors any_version'])
+    const replace = new FakeStore([due], [anchor(ANCHOR_A, 0)])
+    await run(replace, options({ replace: true }))
+    expect(replace.readsBy).toEqual(['anchors this_version', 'window this_version', 'anchors this_version'])
   })
 
   it('skips a live session with a line', async () => {

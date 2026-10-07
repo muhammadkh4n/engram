@@ -70,6 +70,7 @@ export type {
   PendingAnchor,
   ReplacedSupersession,
   SessionAnchor,
+  ExtractedBy,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
