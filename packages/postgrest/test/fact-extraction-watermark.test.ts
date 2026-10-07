@@ -56,7 +56,7 @@ function recordingClient(data: unknown) {
 }
 
 describe('PostgRestDigestStorage fact-extraction watermark', () => {
-  it('getPendingFactExtraction asks for unstamped digests below the attempt cap and past their backoff, oldest first, up to the limit', async () => {
+  it('getPendingFactExtraction asks for unstamped live digests below the attempt cap and past their backoff, oldest first, up to the limit', async () => {
     const rows = [digestRow('d-1', '2026-10-01T00:00:00Z', null, 2, 4, '2026-10-03T11:00:00Z')]
     const { client, tables, calls } = recordingClient(rows)
     const now = new Date('2026-10-03T12:00:00.000Z')
@@ -67,6 +67,7 @@ describe('PostgRestDigestStorage fact-extraction watermark', () => {
     expect(calls).toEqual([
       { method: 'select', args: ['*'] },
       { method: 'is', args: ['facts_extracted_at', null] },
+      { method: 'is', args: ['forgotten_at', null] },
       { method: 'lt', args: ['fact_extraction_attempts', 3] },
       { method: 'or', args: ['facts_next_attempt_at.is.null,facts_next_attempt_at.lte.2026-10-03T12:00:00.000Z'] },
       { method: 'order', args: ['created_at', { ascending: true }] },

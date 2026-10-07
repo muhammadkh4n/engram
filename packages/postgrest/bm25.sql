@@ -124,6 +124,12 @@ $$;
 -- is kept, so a second apply rebuilds nothing. engram_bm25_match names the
 -- indexes only as text inside to_bm25query, so no object depends on them;
 -- if one ever does, DROP INDEX fails and the transaction rolls back.
+--
+-- The same block drops an idx_digests_bm25 built without a predicate.
+-- Digests gained a forgotten_at tombstone after that index was first built
+-- over every row; CREATE INDEX IF NOT EXISTS would keep it, and forgotten
+-- digests would go on counting in its term statistics. Dropped once, it is
+-- rebuilt below with the predicate, which a second apply keeps.
 DO $$
 DECLARE
   target text[] := ARRAY['text_config=english', 'k1=1.2', 'b=0.4'];
@@ -133,10 +139,12 @@ BEGIN
     SELECT c.relname
     FROM pg_catalog.pg_class c
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid
     WHERE n.nspname = 'public'
       AND c.relkind = 'i'
       AND c.relname IN ('idx_episodes_bm25', 'idx_digests_bm25', 'idx_semantic_bm25', 'idx_procedural_bm25', 'idx_items_bm25')
-      AND NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)
+      AND (NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)
+           OR (c.relname = 'idx_digests_bm25' AND i.indpred IS NULL))
   LOOP
     EXECUTE format('DROP INDEX public.%I', index_name);
   END LOOP;
@@ -148,7 +156,8 @@ CREATE INDEX IF NOT EXISTS idx_episodes_bm25 ON public.memory_episodes
   WHERE forgotten_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_digests_bm25 ON public.memory_digests
-  USING bm25 (summary) WITH (text_config = 'english', k1 = 1.2, b = 0.4);
+  USING bm25 (summary) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
+  WHERE forgotten_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_semantic_bm25 ON public.memory_semantic
   USING bm25 ((topic || ' ' || content)) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
@@ -293,6 +302,7 @@ CREATE OR REPLACE FUNCTION public.engram_bm25_match(p_terms text[], p_match_coun
             SELECT d.id, row_number() OVER (ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id) AS term_rank
             FROM memory_digests d
             WHERE d.fts @@ mt.q
+              AND d.forgotten_at IS NULL
               AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
               AND (p_exclude_session_id IS NULL OR d.session_id IS DISTINCT FROM p_exclude_session_id)
             ORDER BY ts_rank_cd(d.fts, mt.q, 2) DESC, d.id

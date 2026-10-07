@@ -3,7 +3,7 @@ import type { MemoryType, MemoryKind, TypedMemory, SensorySnapshot, SearchResult
 import type { StorageAdapter, LookupOptions, AccessQuantileTier } from '@engram-mem/core'
 import { assertAccessQuantileArgs } from '@engram-mem/core'
 import { PostgRestEpisodeStorage } from './episodes.js'
-import { PostgRestDigestStorage } from './digests.js'
+import { PostgRestDigestStorage, rowToDigest, type DigestRow } from './digests.js'
 import { PostgRestSemanticStorage } from './semantic.js'
 import { PostgRestProceduralStorage } from './procedural.js'
 import { PostgRestAssociationStorage } from './associations.js'
@@ -180,18 +180,15 @@ export class PostgRestStorageAdapter implements StorageAdapter {
         return { type: 'episode', data: episodes[0] }
       }
       case 'digest': {
-        const { data, error } = await this.client
+        let query = this.client
           .from('memory_digests')
           .select('*')
           .eq('id', id)
-          .maybeSingle()
+        if (activeOnly) query = query.is('forgotten_at', null)
+        const { data, error } = await query.maybeSingle()
         if (error) throw new Error(`getById digest failed: ${error.message}`)
         if (!data) return null
-        const digests = await this._digests!.getBySession(
-          (data as { session_id: string }).session_id
-        )
-        const found = digests.find((d) => d.id === id)
-        return found ? { type: 'digest', data: found } : null
+        return { type: 'digest', data: rowToDigest(data as DigestRow) }
       }
       case 'semantic': {
         let query = this.client
@@ -243,10 +240,12 @@ export class PostgRestStorageAdapter implements StorageAdapter {
     }
 
     for (const batch of idBatches(byType.get('digest'))) {
-      const { data, error } = await this.client
+      let query = this.client
         .from('memory_digests')
         .select('*')
         .in('id', batch)
+      if (activeOnly) query = query.is('forgotten_at', null)
+      const { data, error } = await query
       if (error) throw new Error(`getByIds digest failed: ${error.message}`)
       for (const row of (data ?? []) as DigestRow[]) {
         keep({ type: 'digest', data: rowToDigest(row) })
@@ -489,10 +488,10 @@ export class PostgRestStorageAdapter implements StorageAdapter {
 
     const forgottenTables: Array<[MemoryType, string]> = [
       ['episode', 'memory_episodes'],
+      ['digest', 'memory_digests'],
       ['semantic', 'memory_semantic'],
       ['procedural', 'memory_procedural'],
     ]
-    // memory_digests: no forgotten_at column, never superseded — intentionally omitted.
 
     for (const [type, table] of forgottenTables) {
       collect(await this.pageTombstoneIds(table, type, (q) => q.gte('forgotten_at', sinceIso)), type)
@@ -567,7 +566,7 @@ interface PgScanTierConfig {
 
 const PG_SCAN_TIER_CONFIG: Record<MemoryType, PgScanTierConfig> = {
   episode: { table: 'memory_episodes', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: true },
-  digest: { table: 'memory_digests', hasForgottenAt: false, hasSupersededBy: false, hasSessionId: true },
+  digest: { table: 'memory_digests', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: true },
   semantic: { table: 'memory_semantic', hasForgottenAt: true, hasSupersededBy: true, hasSessionId: false },
   procedural: { table: 'memory_procedural', hasForgottenAt: true, hasSupersededBy: false, hasSessionId: false },
 }
@@ -598,20 +597,6 @@ function idBatches(ids: readonly string[] | undefined): string[][] {
 
 // Inline row mappers for getById/getByIds (avoids cross-importing sub-stores)
 // ---------------------------------------------------------------------------
-
-interface DigestRow {
-  id: string
-  session_id: string
-  summary: string
-  key_topics: string[]
-  source_episode_ids: string[]
-  source_digest_ids: string[]
-  level: number
-  embedding: number[] | string | null
-  metadata: Record<string, unknown>
-  created_at: string
-  project_id?: string | null
-}
 
 interface SemanticRow {
   id: string
@@ -652,26 +637,10 @@ interface ProceduralRow {
   project_id?: string | null
 }
 
-import type { Digest, SemanticMemory, ProceduralMemory } from '@engram-mem/core'
+import type { SemanticMemory, ProceduralMemory } from '@engram-mem/core'
 
 // eslint-disable-next-line no-control-regex
 const C0_CONTROL = /[\u0000-\u001f]/g
-
-function rowToDigest(row: DigestRow): Digest {
-  return {
-    id: row.id,
-    sessionId: row.session_id,
-    summary: row.summary,
-    keyTopics: row.key_topics ?? [],
-    sourceEpisodeIds: row.source_episode_ids ?? [],
-    sourceDigestIds: row.source_digest_ids ?? [],
-    level: row.level,
-    embedding: parseVector(row.embedding),
-    metadata: row.metadata ?? {},
-    createdAt: new Date(row.created_at),
-    projectId: row.project_id ?? null,
-  }
-}
 
 function rowToSemantic(row: SemanticRow): SemanticMemory {
   return {

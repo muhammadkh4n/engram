@@ -85,8 +85,8 @@ describe('TIER_CONFIGS', () => {
     expect(TIER_CONFIGS.procedural).toEqual({ tier: 'procedural', table: 'memory_procedural', hasForgottenAt: true })
   })
 
-  it('maps digests to memory_digests WITHOUT forgotten_at (schema has no such column)', () => {
-    expect(TIER_CONFIGS.digests).toEqual({ tier: 'digests', table: 'memory_digests', hasForgottenAt: false })
+  it('maps digests to memory_digests with forgotten_at', () => {
+    expect(TIER_CONFIGS.digests).toEqual({ tier: 'digests', table: 'memory_digests', hasForgottenAt: true })
   })
 })
 

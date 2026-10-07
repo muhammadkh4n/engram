@@ -181,7 +181,7 @@ Example:
 Agent: "engram_forget({ query: 'legacy API' })"
 Result: { "count": 2, "candidates": [{ "id": "…", "type": "semantic", "content": "…", "relevance": 0.71, ... }] }
 Agent: "engram_forget({ ids: ['…'] })"
-Result: { "forgotten": [{ "id": "…", "type": "semantic" }], "notFound": [], "outOfScope": [], "notForgettable": [] }
+Result: { "forgotten": [{ "id": "…", "type": "semantic" }], "notFound": [], "outOfScope": [] }
 ```
 
 A tombstone hides a memory from every recall path and stays in storage, so it is reversible there.

@@ -110,7 +110,13 @@ const TIERS = {
     expr: 'content',
     predicate: 'forgotten_at IS NULL',
   },
-  digest: { index: 'idx_digests_bm25', table: 'memory_digests', alias: 'md', expr: 'summary', predicate: null },
+  digest: {
+    index: 'idx_digests_bm25',
+    table: 'memory_digests',
+    alias: 'md',
+    expr: 'summary',
+    predicate: 'forgotten_at IS NULL',
+  },
   semantic: {
     index: 'idx_semantic_bm25',
     table: 'memory_semantic',
@@ -213,8 +219,14 @@ describe('bm25.sql converges existing BM25 indexes to the target options', () =>
     const fromCreate = INDEX_OPTIONS.split(',').map((o) => o.replace(/\s+/g, '').replace(/'/g, ''))
     expect(entries).toEqual(fromCreate)
     expect(block).toContain(
-      "AND NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)",
+      "AND (NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)",
     )
+  })
+
+  it('drops an idx_digests_bm25 built without a predicate, so it is rebuilt once with one', () => {
+    const block = convergenceBlock()
+    expect(block).toContain('JOIN pg_catalog.pg_index i ON i.indexrelid = c.oid')
+    expect(block).toContain("OR (c.relname = 'idx_digests_bm25' AND i.indpred IS NULL))")
   })
 
   it('considers exactly the five BM25 indexes in public', () => {
@@ -327,9 +339,9 @@ describe('bm25.sql engram_bm25_match matching', () => {
   })
 
   it('gates tombstoned and superseded rows exactly where recall does', () => {
-    expect(body.match(/forgotten_at IS NULL/g)).toHaveLength(3)
+    expect(body.match(/forgotten_at IS NULL/g)).toHaveLength(4)
     expect(body.match(/superseded_by IS NULL/g)).toHaveLength(1)
-    expect(body).not.toMatch(/\bd\.forgotten_at/)
+    expect(body.match(/\bd\.forgotten_at IS NULL/g)).toHaveLength(1)
     expect(squash(candidateQuery(tierBranches().get('episode')!))).toContain(
       '(p_session_id IS NULL OR e.session_id = p_session_id)',
     )

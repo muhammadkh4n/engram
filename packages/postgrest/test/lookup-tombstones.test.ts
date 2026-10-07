@@ -11,7 +11,7 @@ interface IsCall {
   value: unknown
 }
 
-function fakeClient() {
+function fakeClient(singleRow: unknown = null) {
   const isCalls: IsCall[] = []
   const tables: string[] = []
   const from = vi.fn((table: string) => {
@@ -22,7 +22,7 @@ function fakeClient() {
       isCalls.push({ table, column, value })
       return chain
     })
-    chain['maybeSingle'] = vi.fn(() => Promise.resolve({ data: null, error: null }))
+    chain['maybeSingle'] = vi.fn(() => Promise.resolve({ data: singleRow, error: null }))
     chain['then'] = (resolve: (v: unknown) => void) =>
       Promise.resolve({ data: [], error: null }).then(resolve)
     return chain
@@ -40,23 +40,27 @@ function buildAdapter(client: ReturnType<typeof fakeClient>, legacyMode = false)
   return adapter
 }
 
-const TABLE: Record<Exclude<MemoryType, 'digest'>, string> = {
+const TABLE: Record<MemoryType, string> = {
   episode: 'memory_episodes',
+  digest: 'memory_digests',
   semantic: 'memory_semantic',
   procedural: 'memory_procedural',
 }
 
-const EXPECTED_DEFAULT: Record<Exclude<MemoryType, 'digest'>, string[]> = {
+const EXPECTED_DEFAULT: Record<MemoryType, string[]> = {
   episode: ['forgotten_at'],
+  digest: ['forgotten_at'],
   semantic: ['forgotten_at', 'superseded_by'],
   procedural: ['forgotten_at'],
 }
+
+const ALL_TYPES = ['episode', 'digest', 'semantic', 'procedural'] as const
 
 const columnsOn = (calls: IsCall[], table: string) =>
   calls.filter((c) => c.table === table).map((c) => c.column).sort()
 
 describe('postgrest id lookups filter tombstoned and superseded rows', () => {
-  for (const type of ['episode', 'semantic', 'procedural'] as const) {
+  for (const type of ALL_TYPES) {
     it(`getById(${type}) filters by default`, async () => {
       const client = fakeClient()
       await buildAdapter(client).getById(ID, type)
@@ -79,10 +83,9 @@ describe('postgrest id lookups filter tombstoned and superseded rows', () => {
       { id: ID, type: 'procedural' },
       { id: ID, type: 'digest' },
     ])
-    for (const type of ['episode', 'semantic', 'procedural'] as const) {
+    for (const type of ALL_TYPES) {
       expect(columnsOn(client.isCalls, TABLE[type])).toEqual(EXPECTED_DEFAULT[type])
     }
-    expect(columnsOn(client.isCalls, 'memory_digests')).toEqual([])
     expect(client.isCalls.every((c) => c.value === null)).toBe(true)
   })
 
@@ -103,13 +106,28 @@ describe('postgrest id lookups filter tombstoned and superseded rows', () => {
     )
   })
 
-  it('digest lookups never carry the filters', async () => {
-    const client = fakeClient()
-    const adapter = buildAdapter(client)
-    await adapter.getById(ID, 'digest')
-    await adapter.getByIds([{ id: ID, type: 'digest' }])
-    expect(client.tables.filter((t) => t === 'memory_digests')).toHaveLength(2)
-    expect(client.isCalls).toEqual([])
+  it('getById(digest) maps the one row it reads, without loading its session', async () => {
+    const client = fakeClient({
+      id: ID,
+      session_id: 'sess-digest',
+      summary: 'staging deploy summary',
+      key_topics: ['deploy'],
+      episode_ids: ['0192f3a4-5b6c-7d8e-9f01-000000000001'],
+      source_digest_ids: [],
+      level: 0,
+      embedding: null,
+      metadata: {},
+      created_at: '2026-01-02T03:04:05.000Z',
+      project_id: null,
+    })
+
+    const found = await buildAdapter(client).getById(ID, 'digest')
+
+    expect(client.tables).toEqual(['memory_digests'])
+    expect(found).toMatchObject({
+      type: 'digest',
+      data: { id: ID, sessionId: 'sess-digest', sourceEpisodeIds: ['0192f3a4-5b6c-7d8e-9f01-000000000001'] },
+    })
   })
 
   it('episodes.getByIds filters by default and not with includeInactive', async () => {

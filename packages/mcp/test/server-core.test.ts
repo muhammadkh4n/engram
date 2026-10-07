@@ -602,7 +602,7 @@ describe('runMemoryRecall', () => {
 })
 
 describe('runMemoryForget', () => {
-  const EMPTY_BY_IDS: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [], notForgettable: [] }
+  const EMPTY_BY_IDS: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [] }
 
   function stubMemory(preview: ForgetPreview, byIds: ForgetByIdsResult = EMPTY_BY_IDS) {
     const calls = { forget: [] as unknown[][], forgetByIds: [] as unknown[][] }
@@ -653,10 +653,13 @@ describe('runMemoryForget', () => {
 
   it('forgets exactly the given ids and reports each outcome with its ids', async () => {
     const { mem, calls } = stubMemory(PREVIEW, {
-      forgotten: [{ id: 'ep-1', type: 'episode' }, { id: 'sem-2', type: 'semantic' }],
+      forgotten: [
+        { id: 'ep-1', type: 'episode' },
+        { id: 'sem-2', type: 'semantic' },
+        { id: 'dig-5', type: 'digest' },
+      ],
       notFound: ['gone-3'],
       outOfScope: ['other-4'],
-      notForgettable: ['dig-5'],
     })
     const r = await runMemoryForget(mem, { ids: ['ep-1', 'sem-2', 'gone-3', 'other-4', 'dig-5'] })
     const text = textOf(r)
@@ -664,10 +667,11 @@ describe('runMemoryForget', () => {
     expect(r.isError).toBeUndefined()
     expect(calls.forget).toHaveLength(0)
     expect(calls.forgetByIds).toEqual([[['ep-1', 'sem-2', 'gone-3', 'other-4', 'dig-5']]])
-    expect(text).toContain('Forgotten (2): ep-1 (episode), sem-2 (semantic)')
+    expect(text).toContain('Forgot 3; not found 1; out of scope 1.')
+    expect(text).toContain('Forgotten (3): ep-1 (episode), sem-2 (semantic), dig-5 (digest)')
     expect(text).toContain('Not found (1): gone-3')
     expect(text).toContain('Out of scope (1): other-4')
-    expect(text).toContain('Not forgettable (1): dig-5')
+    expect(text).not.toContain('forgettable')
   })
 
   it('rejects both or neither of query and ids', async () => {

@@ -804,7 +804,7 @@ describe('Memory — forget()', () => {
 
     const result = await memory.forgetByIds([id])
 
-    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [], notForgettable: [] })
+    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [] })
     expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(false)
     expect(await recallHas('when are billing invoices sent?', 'billing invoices')).toBe(true)
   })
@@ -831,7 +831,7 @@ describe('Memory — forget()', () => {
 
     const result = await memory.forgetByIds([id.toUpperCase()])
 
-    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [], notForgettable: [] })
+    expect(result).toEqual({ forgotten: [{ id, type: 'episode' }], notFound: [], outOfScope: [] })
     expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(false)
   })
 
@@ -849,21 +849,51 @@ describe('Memory — forget()', () => {
   it('reports an unknown id as notFound', async () => {
     const result = await memory.forgetByIds(['0190aaaa-0000-7000-8000-000000000000'])
     expect(result).toEqual({
-      forgotten: [], notFound: ['0190aaaa-0000-7000-8000-000000000000'], outOfScope: [], notForgettable: [],
+      forgotten: [], notFound: ['0190aaaa-0000-7000-8000-000000000000'], outOfScope: [],
     })
   })
 
-  it('reports a digest id as notForgettable and leaves it in place', async () => {
+  it('refuses a digest on SQLite before tombstoning anything else in the call', async () => {
+    const episodeId = await deployCandidateId()
     const digest = await storage.digests.insert({
       sessionId: 'forget-digest', summary: 'staging deploy summary', keyTopics: ['deploy'],
       sourceEpisodeIds: [], sourceDigestIds: [], level: 1, embedding: embedText('deploy'), metadata: {}, projectId: null,
     })
 
-    const result = await memory.forgetByIds([digest.id])
+    await expect(memory.forgetByIds([episodeId, digest.id])).rejects.toThrow(
+      'digest forgetting needs the Postgres store',
+    )
 
-    expect(result.notForgettable).toEqual([digest.id])
-    expect(result.forgotten).toEqual([])
     expect(await storage.getByIds([{ id: digest.id, type: 'digest' }])).toHaveLength(1)
+    expect(await recallHas('what is the staging deploy key policy?', 'deploy key')).toBe(true)
+  })
+
+  it('tombstones digests before any other tier', async () => {
+    const episodeId = await deployCandidateId()
+    const digest = await storage.digests.insert({
+      sessionId: 'forget-digest', summary: 'staging deploy summary', keyTopics: ['deploy'],
+      sourceEpisodeIds: [], sourceDigestIds: [], level: 1, embedding: embedText('deploy'), metadata: {}, projectId: null,
+    })
+    const order: string[] = []
+    const digestForget = vi.spyOn(storage.digests, 'markForgotten').mockImplementation(async (ids) => {
+      order.push('digest')
+      return ids.length
+    })
+    const episodeForget = storage.episodes.markForgotten.bind(storage.episodes)
+    vi.spyOn(storage.episodes, 'markForgotten').mockImplementation(async (ids) => {
+      order.push('episode')
+      return episodeForget(ids)
+    })
+
+    const result = await memory.forgetByIds([episodeId, digest.id])
+
+    expect(order).toEqual(['digest', 'episode'])
+    expect(digestForget).toHaveBeenCalledWith([digest.id])
+    expect(result).toEqual({
+      forgotten: [{ id: episodeId, type: 'episode' }, { id: digest.id, type: 'digest' }],
+      notFound: [],
+      outOfScope: [],
+    })
   })
 
   it('tombstones a semantic memory under its own tier', async () => {

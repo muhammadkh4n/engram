@@ -151,6 +151,7 @@ export class FakeStorageAdapter implements StorageAdapter {
               const row = this.insertRow('digest', digest.projectId, digest.sessionId, digest.embedding)
               return this.toTypedMemory(row).data as Digest
             },
+            markForgotten: async (ids: string[]): Promise<number> => this.markForgottenRows('digest', ids),
           }
         : {},
     )

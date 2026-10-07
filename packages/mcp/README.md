@@ -291,7 +291,7 @@ Forget in two steps. Pass exactly one of `query` or `ids`.
    { "ids": ["3f2c…"] }
    ```
 
-   The reply lists the ids per outcome: forgotten, not found, out of scope (tagged with another project), not forgettable (digests).
+   The reply lists the ids per outcome: forgotten, not found, out of scope (tagged with another project). Digests are forgotten like any other tier; the SQLite store cannot tombstone them and refuses the whole call.
 
 A tombstone hides a memory from every recall path. The row stays in storage, so a forget is reversible there. The `confirm` flag no longer exists: a query never deletes.
 

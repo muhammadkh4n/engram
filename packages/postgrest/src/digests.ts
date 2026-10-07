@@ -4,6 +4,7 @@ import { generateId } from '@engram-mem/core'
 import type { DigestStorage, FactExtractionFailure } from '@engram-mem/core'
 import { projectScopeFilter, sanitizeIlike } from './search.js'
 import { parseVector } from './parse-vector.js'
+import { onlyUuids } from './uuid.js'
 
 export class PostgRestDigestStorage implements DigestStorage {
   constructor(private readonly client: PostgrestClient) {}
@@ -88,12 +89,12 @@ export class PostgRestDigestStorage implements DigestStorage {
 
     // Text fallback. It runs whenever the caller has no query vector (an
     // embedder outage, or a caller that passes none) and reads the table
-    // directly, so it applies the project rule itself. Digests carry no
-    // tombstone column.
+    // directly, so it applies the tombstone and project rules itself.
     let queryBuilder = this.client
       .from('memory_digests')
       .select('*')
       .ilike('summary', `%${sanitizeIlike(query)}%`)
+      .is('forgotten_at', null)
       .limit(limit)
     if (opts?.projectId !== undefined) queryBuilder = queryBuilder.or(projectScopeFilter(opts.projectId))
 
@@ -111,6 +112,7 @@ export class PostgRestDigestStorage implements DigestStorage {
       .from('memory_digests')
       .select('*')
       .eq('session_id', sessionId)
+      .is('forgotten_at', null)
       .order('created_at', { ascending: true })
     if (error) throw new Error(`Digest getBySession failed: ${error.message}`)
     return ((data ?? []) as DigestRow[]).map(rowToDigest)
@@ -122,6 +124,7 @@ export class PostgRestDigestStorage implements DigestStorage {
       .from('memory_digests')
       .select('*')
       .gte('created_at', since)
+      .is('forgotten_at', null)
       .order('created_at', { ascending: false })
     if (error) throw new Error(`Digest getRecent failed: ${error.message}`)
     return ((data ?? []) as DigestRow[]).map(rowToDigest)
@@ -145,6 +148,7 @@ export class PostgRestDigestStorage implements DigestStorage {
       .from('memory_digests')
       .select('*')
       .is('facts_extracted_at', null)
+      .is('forgotten_at', null)
       .lt('fact_extraction_attempts', maxAttempts)
       .or(`facts_next_attempt_at.is.null,facts_next_attempt_at.lte.${now.toISOString()}`)
       .order('created_at', { ascending: true })
@@ -172,6 +176,19 @@ export class PostgRestDigestStorage implements DigestStorage {
     return typeof data === 'number' ? data : 0
   }
 
+  async markForgotten(requestedIds: string[]): Promise<number> {
+    const ids = onlyUuids(requestedIds)
+    if (ids.length === 0) return 0
+    const { data, error } = await this.client
+      .from('memory_digests')
+      .update({ forgotten_at: new Date().toISOString() })
+      .in('id', ids)
+      .is('forgotten_at', null)
+      .select('id')
+    if (error) throw new Error(`Digest markForgotten failed: ${error.message}`)
+    return (data ?? []).length
+  }
+
   /**
    * Total digest count, one COUNT(*) query, for stats(). Optional in
    * DigestStorage; without it stats() sums getCountBySession().
@@ -189,7 +206,7 @@ export class PostgRestDigestStorage implements DigestStorage {
 // Row mapping helpers
 // ---------------------------------------------------------------------------
 
-interface DigestRow {
+export interface DigestRow {
   id: string
   session_id: string
   summary: string
@@ -220,7 +237,7 @@ interface RecallRow {
   session_id?: string | null
 }
 
-function rowToDigest(row: DigestRow): Digest {
+export function rowToDigest(row: DigestRow): Digest {
   return {
     id: row.id,
     sessionId: row.session_id,

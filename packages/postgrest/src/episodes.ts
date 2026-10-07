@@ -229,6 +229,8 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
     if (opts?.since) {
       queryBuilder = queryBuilder.gte('created_at', opts.since.toISOString())
     }
+    // The legacy schema predates the forgotten_at column.
+    if (!this.legacyMode) queryBuilder = queryBuilder.is('forgotten_at', null)
 
     const { data, error } = await queryBuilder
     if (error) throw new Error(`Episode getBySession failed: ${error.message}`)
@@ -259,6 +261,7 @@ export class PostgRestEpisodeStorage implements EpisodeStorage {
       .select('*')
       .eq('session_id', sessionId)
       .is('consolidated_at', null)
+      .is('forgotten_at', null)
       .order('salience', { ascending: false })
     if (error) throw new Error(`Episode getUnconsolidated failed: ${error.message}`)
     return ((data ?? []) as EpisodeRow[]).map((r) => rowToEpisode(r, false))

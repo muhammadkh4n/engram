@@ -108,8 +108,11 @@ function wrapDigests(inner: DigestStorage, engine: RecallEngine): DigestStorage 
       engine.noteInsert(row.id, 'digest', row.createdAt.getTime(), row.projectId, row.sessionId, row.embedding)
       return row
     },
-    // DigestStorage has no markForgotten/markSuperseded on the port
-    // (packages/core/src/adapters/storage.ts) — nothing else to wrap.
+    async markForgotten(ids: string[]): Promise<number> {
+      const count = await inner.markForgotten(ids)
+      engine.noteForget(ids)
+      return count
+    },
   })
 }
 

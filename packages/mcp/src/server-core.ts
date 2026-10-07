@@ -562,7 +562,7 @@ const TOOLS = [
       'Forget memories in two steps. Call with query to preview: it lists the matching memories (id, tier, date, relevance, text) and never deletes anything. ' +
       'Then call with ids set to the ones to remove: exactly those memories are tombstoned, nothing else. ' +
       'A tombstoned memory is hidden from every recall path; the row stays in storage, so a forget is reversible there. ' +
-      `Pass exactly one of query or ids (at most ${MAX_FORGET_IDS} ids per call). Digests cannot be forgotten.`,
+      `Pass exactly one of query or ids (at most ${MAX_FORGET_IDS} ids per call).`,
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -858,11 +858,10 @@ export function formatForgetByIds(result: ForgetByIdsResult): string {
     ['Forgotten', result.forgotten.map((f) => `${f.id} (${f.type})`)],
     ['Not found', result.notFound],
     ['Out of scope', result.outOfScope],
-    ['Not forgettable', result.notForgettable],
   ]
   const summary =
     `Forgot ${result.forgotten.length}; not found ${result.notFound.length}; ` +
-    `out of scope ${result.outOfScope.length}; not forgettable ${result.notForgettable.length}.`
+    `out of scope ${result.outOfScope.length}.`
   const detail = sections
     .filter(([, list]) => list.length > 0)
     .map(([label, list]) => `${label} (${list.length}): ${list.join(', ')}`)

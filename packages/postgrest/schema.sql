@@ -73,11 +73,12 @@ $$;
 -- =============================================================================
 -- forget() tombstone — within-file ordering note
 -- -----------------------------------------------------------------------------
--- Phase 1 adds a `forgotten_at timestamptz` tombstone to memory_episodes /
--- memory_semantic / memory_procedural. forget() stamps it; every recall RPC
--- below gates on `forgotten_at IS NULL` (a 1:1 clone of the proven
--- `superseded_by IS NULL` gate). It is intentionally NOT added to
--- memory_digests (consolidation artifacts are not directly forgettable).
+-- memory_episodes, memory_digests, memory_semantic and memory_procedural
+-- each carry a `forgotten_at timestamptz` tombstone. forget() stamps it; every
+-- recall RPC below gates on `forgotten_at IS NULL` (a 1:1 clone of the proven
+-- `superseded_by IS NULL` gate). Digests carry it too, so a forget reaches
+-- what a digest absorbed: a digest's summary cannot be split by episode, so
+-- forgetting any episode it was built from forgets the whole digest.
 --
 -- This file is a pg_dump: functions are emitted ABOVE the tables they read,
 -- which is only valid because `SET check_function_bodies = false` (above)
@@ -325,12 +326,12 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
   SELECT * FROM (
     WITH ft AS (
       SELECT md.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(md.fts, websearch_to_tsquery('english', p_query_text)) DESC) AS rank_ix
-      FROM memory_digests md WHERE p_include_digests AND md.fts @@ websearch_to_tsquery('english', p_query_text)
+      FROM memory_digests md WHERE p_include_digests AND md.fts @@ websearch_to_tsquery('english', p_query_text) AND md.forgotten_at IS NULL
         LIMIT p_match_count * 2
     ),
     vs AS (
       SELECT md.id, ROW_NUMBER() OVER (ORDER BY md.embedding <=> p_query_embedding) AS rank_ix
-      FROM memory_digests md WHERE p_include_digests AND md.embedding IS NOT NULL
+      FROM memory_digests md WHERE p_include_digests AND md.embedding IS NOT NULL AND md.forgotten_at IS NULL
       ORDER BY md.embedding <=> p_query_embedding LIMIT p_match_count * 2
     )
     SELECT md.id, 'digest'::text, md.summary, 0.5::float, 0, md.created_at,
@@ -426,6 +427,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
            (1-(embedding<=>p_query_embedding))::float AS similarity, key_topics, project_id, session_id
     FROM memory_digests
     WHERE p_include_digests AND embedding IS NOT NULL
+      AND forgotten_at IS NULL
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) dg
   WHERE dg.similarity >= p_min_similarity
@@ -542,6 +544,9 @@ DECLARE v_count integer;
 BEGIN
   IF p_memory_type = 'episode' THEN
     UPDATE memory_episodes SET forgotten_at = now()
+      WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
+  ELSIF p_memory_type = 'digest' THEN
+    UPDATE memory_digests SET forgotten_at = now()
       WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
   ELSIF p_memory_type = 'semantic' THEN
     UPDATE memory_semantic SET forgotten_at = now()
@@ -666,6 +671,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
       ts_rank_cd(md.fts, to_tsquery('english', p_query_terms))::float
     FROM memory_digests md
     WHERE md.fts @@ to_tsquery('english', p_query_terms)
+      AND md.forgotten_at IS NULL
 
     UNION ALL
 
@@ -754,6 +760,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
       ts_rank_cd(md.fts, mq.q)::float
     FROM memory_digests md, match_query mq
     WHERE md.fts @@ mq.q
+      AND md.forgotten_at IS NULL
       AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
       AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
 
@@ -821,7 +828,8 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- On the index path only the partial index predicate (`forgotten_at IS NULL`
 -- on episodes, semantic and procedural; none on digests) is part of the
 -- index. Every other condition (`p_session_id`, `p_kinds`,
--- `p_exclude_session_id`, semantic `superseded_by IS NULL`) is a post-filter
+-- `p_exclude_session_id`, semantic `superseded_by IS NULL`, digest
+-- `forgotten_at IS NULL`) is a post-filter
 -- applied to the candidates the scan returns. A
 -- plain HNSW scan returns at most `hnsw.ef_search` candidates (default 40),
 -- so a selective post-filter can leave far fewer rows than the LIMIT asked
@@ -908,6 +916,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         md.key_topics, md.metadata, md.project_id, md.session_id
       FROM memory_digests md
       WHERE md.embedding IS NOT NULL
+        AND md.forgotten_at IS NULL
         AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
         AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
       ORDER BY md.embedding <=> p_query_embedding
@@ -966,7 +975,8 @@ BEGIN
     d.id, d.session_id, d.summary, d.key_topics, d.episode_ids, d.metadata, d.created_at,
     (1 - (d.embedding <=> query_embedding::vector))::FLOAT AS similarity
   FROM memory_digests d
-  WHERE (1 - (d.embedding <=> query_embedding::vector)) >= min_similarity
+  WHERE d.forgotten_at IS NULL
+    AND (1 - (d.embedding <=> query_embedding::vector)) >= min_similarity
   ORDER BY d.embedding <=> query_embedding::vector
   LIMIT match_count;
 END;
@@ -987,7 +997,8 @@ BEGIN
     (1 - (e.embedding <=> query_embedding::vector))::FLOAT AS similarity
   FROM memory_episodes e
   WHERE
-    (filter_session_id IS NULL OR e.session_id = filter_session_id)
+    e.forgotten_at IS NULL
+    AND (filter_session_id IS NULL OR e.session_id = filter_session_id)
     AND (1 - (e.embedding <=> query_embedding::vector)) >= min_similarity
   ORDER BY e.embedding <=> query_embedding::vector
   LIMIT match_count;
@@ -1065,7 +1076,8 @@ CREATE TABLE IF NOT EXISTS public.memory_digests (
     source_digest_ids uuid[] DEFAULT '{}'::uuid[],
     level integer DEFAULT 0,
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, summary)) STORED,
-    project_id text
+    project_id text,
+    forgotten_at timestamp with time zone
 );
 
 
@@ -1588,9 +1600,10 @@ END $$;
 -- DBs (CREATE TABLE IF NOT EXISTS above is a no-op there, so the column in the
 -- table body never lands on an existing DB). Placed after the CREATE TABLEs and
 -- before the partial indexes / post-apply smoke that read it. See the ordering
--- note at the top of this file. NOT added to memory_digests by design.
+-- note at the top of this file.
 --
 ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 
@@ -2053,6 +2066,7 @@ CREATE INDEX IF NOT EXISTS idx_semantic_project ON public.memory_semantic USING 
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON public.memory_episodes USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_digests_forgotten ON public.memory_digests USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_semantic_forgotten ON public.memory_semantic USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 
@@ -6536,6 +6550,7 @@ BEGIN
   PERFORM public.engram_text_match(ARRAY['smoke'], 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
   PERFORM public.engram_vector_search(v_unit, 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
   v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  v_n := public.engram_mark_forgotten('digest', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM * FROM public.engram_invariant_counts();

@@ -131,14 +131,22 @@ describe('postgrestSource.fetchTexts', () => {
     expect(calls[0]!.ops.find(([op]) => op === 'in')![1]).toEqual(['id', [uuid(1), uuid(2)]])
   })
 
-  it("reads a digest's summary; digests are always live", async () => {
-    const { client, calls } = fakeClient({ memory_digests: [{ id: uuid(5), summary: 'Jira triage' }] })
+  it("reads a digest's summary; a forgotten digest is inactive", async () => {
+    const { client, calls } = fakeClient({
+      memory_digests: [
+        { id: uuid(5), summary: 'Jira triage', forgotten_at: null },
+        { id: uuid(6), summary: 'Old triage', forgotten_at: '2026-01-02T00:00:00Z' },
+      ],
+    })
 
-    const rows = await postgrestSource(client).fetchTexts('digest', [uuid(5)])
+    const rows = await postgrestSource(client).fetchTexts('digest', [uuid(5), uuid(6)])
 
-    expect(rows).toEqual([{ id: uuid(5), tier: 'digest', text: 'Jira triage', inactive: false }])
+    expect(rows).toEqual([
+      { id: uuid(5), tier: 'digest', text: 'Jira triage', inactive: false },
+      { id: uuid(6), tier: 'digest', text: 'Old triage', inactive: true },
+    ])
     expect(calls[0]!.table).toBe('memory_digests')
-    expect(calls[0]!.ops[0]![1][0]).toBe('id, summary')
+    expect(calls[0]!.ops[0]![1][0]).toBe('id, summary, forgotten_at')
   })
 
   it(`slices the ids into requests of at most ${ID_LOOKUP_SLICE}`, async () => {
