@@ -376,6 +376,22 @@ describe('drainSpool', () => {
     expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(SECRET)
   })
 
+  it('masks a token after an escaped newline in a parseable line before dead-lettering it', async () => {
+    const token = 'sk-ant-oat01-' + 'Q7xk2Lm9Vp4Rt8Wz'.repeat(4)
+    const [path] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    const malformed = JSON.stringify({ cwd: '/home/tester', text: `run this first\n${token}` })
+    expect(malformed).toContain(`\\n${token}`)
+    writeFileSync(path!, `${malformed}\n${readFileSync(path!, 'utf8')}`)
+
+    const result = await drainSpool({ env })
+
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
+    const [letter] = deadLetters() as unknown as Array<{ reason: string; event: string }>
+    expect(letter!.reason).toBe('unscrubbable_event')
+    expect(JSON.parse(letter!.event)).toEqual({ cwd: '/home/tester', text: 'run this first\n[REDACTED:anthropic-key]' })
+    expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(token)
+  })
+
   it('refreshes its lock before each file, so a drain past the stale age keeps it', async () => {
     await writeSpoolBatch(SESSION, [prompt(1)], { root })
     await writeSpoolBatch(SESSION, [prompt(2)], { root })

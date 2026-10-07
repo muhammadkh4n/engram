@@ -250,11 +250,11 @@ describe('runDocumentsRequest: mapping', () => {
         : { text, redactions: [] }
     const d = deps({ scrub })
     await runDocumentsRequest(d, body(note('Engram/d.md', {
-      frontmatter: { db: { password: 'hunter2' } },
+      frontmatter: { db: { note: 'hunter2' } },
       sections: [{ heading_path: ['Login hunter2'], index: 0, text: 'pw hunter2', kind_hint: 'note' }],
     })))
     const write = sent(d)
-    expect(write.frontmatter).toEqual({ db: { password: '[REDACTED]' } })
+    expect(write.frontmatter).toEqual({ db: { note: '[REDACTED]' } })
     expect(write.sections[0]).toMatchObject({
       headingPath: ['Login [REDACTED]'],
       text: 'pw [REDACTED]',
@@ -337,7 +337,10 @@ const FM_BEARER = 'Bearer Zq7madeupNotReal91xAbc'
 const FM_TOKEN = 'Zq7madeupTokenNotReal91xQw'
 const FM_REGISTERED = 'Kd4madeupRegisteredValue73pX'
 
-describe('runDocumentsRequest: frontmatter is scrubbed as structured data', () => {
+const FM_MIXED = 'Q7xk2Lm9Vp4Rt8Wz'
+const FM_OAUTH = 'sk-ant-oat01-' + FM_MIXED.repeat(4)
+
+describe('runDocumentsRequest: frontmatter is scrubbed member by member', () => {
   let dir = ''
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'engram-documents-registry-'))
@@ -362,20 +365,28 @@ describe('runDocumentsRequest: frontmatter is scrubbed as structured data', () =
       { servers: [{ host: 'db.local', password: '[REDACTED:password]' }] },
     ],
     ['a registered value used as a key', { [FM_REGISTERED]: 'note' }, { '[REDACTED:DEPLOY_SECRET]': 'note' }],
+    ['a number under a credential key', { session: 3 }, { session: '[REDACTED:session]' }],
     ['a plain key and value', { title: 'Release notes', tags: ['plan'] }, { title: 'Release notes', tags: ['plan'] }],
   ])('sends the store %s masked', async (_name, frontmatter, expected) => {
     const d = deps({ scrub: scrubSecrets })
     const out = await runDocumentsRequest(d, body(note('Engram/f.md', { frontmatter })))
     expect(out.status).toBe(200)
+    expect((out.body as DocumentsAccepted).results[0]).toMatchObject({ path: 'Engram/f.md', status: 'applied' })
     expect(sent(d).frontmatter).toEqual(expected)
   })
 
-  it('rejects a note whose frontmatter scrub breaks its shape, stores none of it, and still applies the others', async () => {
-    const scrub = async (text: string): Promise<ScrubResult> =>
-      text.includes('db_password') ? { text: '{"title":"x"}', redactions: [{ kind: 'stub' }] } : { text, redactions: [] }
-    const d = deps({ scrub })
+  it('scrubs each frontmatter string on its own text, so a token at a line start inside a value is masked', async () => {
+    const notes = `deploy steps\n${FM_OAUTH}`
+    const d = deps({ scrub: scrubSecrets })
+    await runDocumentsRequest(d, body(note('Engram/f.md', { frontmatter: { notes } })))
+    expect(sent(d).frontmatter).toEqual({ notes: (await scrubSecrets(notes)).text })
+    expect(JSON.stringify(sent(d))).not.toContain(FM_OAUTH)
+  })
+
+  it('rejects a note whose frontmatter keys mask into one, stores none of it, and still applies the others', async () => {
+    const d = deps({ scrub: scrubSecrets })
     const out = await runDocumentsRequest(d, body(
-      note('Engram/g.md', { frontmatter: { title: 'x', db_password: FM_PASSWORD } }),
+      note('Engram/g.md', { frontmatter: { [FM_REGISTERED]: 'a', '[REDACTED:DEPLOY_SECRET]': 'b', db_password: FM_PASSWORD } }),
       note('Engram/h.md'),
     ))
     expect(out.status).toBe(200)
@@ -384,6 +395,8 @@ describe('runDocumentsRequest: frontmatter is scrubbed as structured data', () =
     expect(accepted.results[1]).toMatchObject({ path: 'Engram/h.md', status: 'applied' })
     expect(d.syncDocumentNote).toHaveBeenCalledTimes(1)
     expect(sent(d).path).toBe('Engram/h.md')
-    expect(JSON.stringify(d.syncDocumentNote.mock.calls)).not.toContain(FM_PASSWORD)
+    const calls = JSON.stringify(d.syncDocumentNote.mock.calls)
+    expect(calls).not.toContain(FM_PASSWORD)
+    expect(calls).not.toContain(FM_REGISTERED)
   })
 })

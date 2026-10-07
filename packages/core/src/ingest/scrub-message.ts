@@ -10,7 +10,7 @@ import type { Message } from '../types.js'
 import { placeholder } from './placeholder.js'
 import { scrubSecrets } from './scrub-secrets.js'
 import type { SecretRedaction } from './scrub-secrets.js'
-import { isSecretUnderKey } from './structured-text.js'
+import { isSecretMember } from './structured-text.js'
 
 export interface ScrubbedMessage {
   message: Message
@@ -42,8 +42,7 @@ async function scrubText(text: string, redactions: SecretRedaction[]): Promise<s
  * holds. Other values are scrubbed as usual.
  */
 async function scrubKeyedValue(key: string, value: unknown, redactions: SecretRedaction[], depth: number): Promise<unknown> {
-  const literal = typeof value === 'number' ? String(value) : value
-  if (typeof literal === 'string' && isSecretUnderKey(key, literal)) {
+  if (isSecretMember(key, value)) {
     redactions.push({ kind: 'named-secret', name: key })
     return placeholder(key)
   }

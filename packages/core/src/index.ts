@@ -171,8 +171,8 @@ export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export { PLACEHOLDER_PREFIX } from './ingest/placeholder.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
-export { scrubJsonValue } from './ingest/scrub-json-value.js'
-export type { ScrubJsonValueResult } from './ingest/scrub-json-value.js'
+export { scrubStructured } from './ingest/scrub-structured.js'
+export type { ScrubStructuredResult, StructuredPath, StructuredRedaction } from './ingest/scrub-structured.js'
 export { findSecretCandidates } from './ingest/secret-candidates.js'
 export {
   createSecretRegistry,

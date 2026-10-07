@@ -23,8 +23,8 @@ import {
   DOCUMENT_SECTION_KINDS,
   DOCUMENT_SECTIONS_MAX,
   PostgresTextKeyCollision,
-  scrubJsonValue,
   scrubSecrets,
+  scrubStructured,
   sqlstateOf,
   toPostgresText,
   type CaptureSecretHit,
@@ -376,15 +376,16 @@ async function mapSections(path: string, sections: readonly CheckedSection[], sc
 }
 
 /**
- * The note's write, or the rule it breaks. Frontmatter is scrubbed as one JSON
- * text so each value is read beside its key; a scrub that cannot give back the
- * same structure rejects the note, since storing the unscrubbed object would
- * keep the secrets and a retry would fail the same way.
+ * The note's write, or the rule it breaks. Frontmatter is scrubbed member by
+ * member: a value under a credential-named key is masked by its key, and every
+ * other string and every key is scrubbed on its own text. A walk that refuses
+ * (two keys masked into one) rejects the note, since storing the unscrubbed
+ * object would keep the secrets and a retry would fail the same way.
  */
 async function mapNote(note: CheckedNote, registry: ProjectRegistry, scrub: Scrub): Promise<DocumentNoteWrite | { reason: string }> {
   let frontmatter: Record<string, unknown> | null = null
   if (note.frontmatter !== null) {
-    const scrubbed = await scrubJsonValue(note.frontmatter, scrub)
+    const scrubbed = await scrubStructured(note.frontmatter, scrub)
     if (!scrubbed.ok) return { reason: 'invalid:frontmatter' }
     frontmatter = scrubbed.value as Record<string, unknown>
   }
