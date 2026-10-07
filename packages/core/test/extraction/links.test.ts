@@ -20,6 +20,8 @@ function source(over: Partial<LinkSource> = {}): LinkSource {
     subjectId: STORAGE,
     subjectLabel: 'storage backend',
     occurredAt: '2026-10-04T09:00:00.000Z',
+    projectId: 'tst-repo',
+    workspaceId: 'tst-ws',
     ...over,
   }
 }
@@ -35,6 +37,9 @@ function target(n: number, over: Partial<LinkTarget> = {}): LinkTarget {
     supersededBy: null,
     retiredAt: null,
     forgottenAt: null,
+    projectId: 'tst-repo',
+    workspaceId: 'tst-ws',
+    shown: false,
     ...over,
   }
 }
@@ -164,5 +169,49 @@ describe('validateLinks', () => {
 
   it('throws on a proposal for an item that is not new', () => {
     expect(() => validateLinks([source()], [link('supersedes', 1, { item: 3 })], [target(1)])).toThrow(/item 3/)
+  })
+})
+
+describe('the scope of corrections and retractions', () => {
+  const observation = { class: 'observation', kind: 'fact' } as const
+
+  it('drops a correction of an item from another project and workspace that was not shown', () => {
+    const result = validateLinks(
+      [source()],
+      [link('corrects', 1)],
+      [target(1, { ...observation, projectId: 'tst-far', workspaceId: 'tst-far-ws' })],
+    )
+    expect(result).toEqual({ accepted: [], rejected: [{ item: 0, rel: 'corrects', target: uuid(1), reason: 'not_in_scope' }] })
+  })
+
+  it('accepts a correction of a shown item wherever it lives', () => {
+    const result = validateLinks(
+      [source()],
+      [link('corrects', 1)],
+      [target(1, { ...observation, projectId: 'tst-far', workspaceId: 'tst-far-ws', shown: true })],
+    )
+    expect(result.accepted).toEqual([{ item: 0, rel: 'corrects', target: uuid(1) }])
+  })
+
+  it('accepts a correction of an item with no project, or of another project in the same workspace', () => {
+    const result = validateLinks(
+      [source()],
+      [link('corrects', 1), link('corrects', 2)],
+      [target(1, { ...observation, projectId: null, workspaceId: null }), target(2, { ...observation, projectId: 'tst-near' })],
+    )
+    expect(result.rejected).toEqual([])
+  })
+
+  it('drops a retraction of an item outside the turn scope', () => {
+    const turn = source({ class: 'utterance', subjectId: null, subjectLabel: null })
+    const result = validateLinks(
+      [turn],
+      [link('retracts', 1), link('retracts', 2)],
+      [target(1, observation), target(2, { ...observation, projectId: 'tst-far', workspaceId: null })],
+    )
+    expect(result).toEqual({
+      accepted: [{ item: 0, rel: 'retracts', target: uuid(1) }],
+      rejected: [{ item: 0, rel: 'retracts', target: uuid(2), reason: 'not_in_scope' }],
+    })
   })
 })

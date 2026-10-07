@@ -23,6 +23,7 @@ import type {
   ExtractionCommitResult,
   ExtractionFailure,
   ExtractionItem,
+  ExtractionRetractions,
   ExtractionPendingQuery,
   IngestedEvent,
   ItemEmbedding,
@@ -295,6 +296,7 @@ export class PostgRestCaptureStore implements CaptureStore {
     const payload = items.map((item, index) => ({
       subject_id: item.subjectId,
       class: item.class,
+      standing: item.standing,
       occurred_at: isoTime(item.occurredAt, index + 1),
       content: item.content,
       event_key: item.eventKey,
@@ -360,6 +362,7 @@ export class PostgRestCaptureStore implements CaptureStore {
     const payload = {
       subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
       items: commit.items.map(toCommitItem),
+      retractions: toCommitRetractions(commit.retractions ?? null),
       stats: commit.stats,
     }
     refuseUnsafeText('extractionCommit', '', payload)
@@ -397,19 +400,46 @@ function toCandidateRead(row: unknown): ExtractionCandidateRead {
 function toCandidate(value: unknown, unexpected: Error): ExtractionCandidate {
   if (!isRecord(value)) throw unexpected
   const { id, class: itemClass, kind, subject_id: subjectId, subject_label: subjectLabel, content } = value
+  const { project_id: projectId, workspace_id: workspaceId } = value
   const occurredAt = parseTime(value.occurred_at)
   if (
     typeof id !== 'string' ||
     typeof itemClass !== 'string' ||
     typeof kind !== 'string' ||
-    !(subjectId === null || typeof subjectId === 'string') ||
-    !(subjectLabel === null || typeof subjectLabel === 'string') ||
+    !isNullableString(subjectId) ||
+    !isNullableString(subjectLabel) ||
+    !isNullableString(projectId) ||
+    !isNullableString(workspaceId) ||
     typeof content !== 'string' ||
     occurredAt === null
   ) {
     throw unexpected
   }
-  return { id, class: itemClass, kind, subjectId, subjectLabel, content, occurredAt: occurredAt.toISOString() }
+  return {
+    id,
+    class: itemClass,
+    kind,
+    subjectId,
+    subjectLabel,
+    projectId,
+    workspaceId,
+    content,
+    occurredAt: occurredAt.toISOString(),
+  }
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+/** The retractions as the commit RPC takes them, or null when the turn retracted nothing. */
+function toCommitRetractions(retractions: ExtractionRetractions | null): Record<string, unknown> | null {
+  if (retractions === null) return null
+  return {
+    from: retractions.from,
+    targets: [...retractions.targets],
+    rejected: retractions.rejected.map((l) => ({ target: l.target, reason: l.reason })),
+  }
 }
 
 function isNullableUuid(value: unknown): value is string | null {

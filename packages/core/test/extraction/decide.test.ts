@@ -137,6 +137,8 @@ function candidate(n: number, at: string): ExtractionCandidate {
     kind: 'ruling',
     subjectId: '00000000-0000-4000-8000-0000000d0010',
     subjectLabel: 'storage backend',
+    projectId: 'tst-repo',
+    workspaceId: 'tst-ws',
     content: `storage rule number ${n}`,
     occurredAt: at,
   }
@@ -315,6 +317,8 @@ describe('the decision pass', () => {
       kind: 'ruling_entry',
       subjectId: null,
       subjectLabel: 'Storage Backend',
+      projectId: null,
+      workspaceId: null,
       content: 'Postgres is the only store.',
       occurredAt: '2026-09-01T10:00:00.000Z',
     }

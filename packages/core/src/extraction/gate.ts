@@ -102,6 +102,7 @@ interface Aliases {
   subjects: ReadonlyMap<string, { id: string; label: string }>
   statements: ReadonlyMap<string, string>
   observations: ReadonlyMap<string, string>
+  shown: ReadonlyMap<string, string>
 }
 
 export function gateWindow(
@@ -147,7 +148,7 @@ function gateStatement(
   if (utterance === null || p.utteranceId !== utterance.alias) return reject('unknown_id')
   const supersedes = resolveAll(p.supersedes, [aliases.statements])
   const restates = resolveAll(p.restates, [aliases.statements])
-  const corrects = resolveAll(p.corrects, [aliases.statements, aliases.observations])
+  const corrects = resolveAll(p.corrects, [aliases.statements, aliases.observations, aliases.shown])
   if (!subjectAliasKnown(aliases, p.subject) || !supersedes || !restates || !corrects) {
     return reject('unknown_id')
   }
@@ -329,6 +330,7 @@ function aliasesOf(window: ExtractionWindow): Aliases {
     subjects: new Map(window.subjects.map((s) => [s.alias, { id: s.id, label: s.label }])),
     statements: new Map(window.statements.map((s) => [s.alias, s.id])),
     observations: new Map(window.observations.map((o) => [o.alias, o.id])),
+    shown: new Map(window.shown.map((s) => [s.alias, s.id])),
   }
 }
 

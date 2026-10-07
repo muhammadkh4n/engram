@@ -4014,21 +4014,39 @@ $$;
 
 
 --
--- Name: engram_extraction_subject_current(public.memory_items, text, uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_subject_current(public.memory_items, text, uuid, text, boolean, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
+
+DROP FUNCTION IF EXISTS public.engram_extraction_subject_current(public.memory_items, text, uuid, text, timestamp with time zone);
 
 -- The current items (not superseded, retired or forgotten) filed under
 -- p_subject in the scope of anchor a under plan p_plan that occurred no later
 -- than p_at: those of p_class, and for an mk_statement also the observations,
--- which a statement may correct. A new item of p_class on p_subject at p_at
--- is weighed against exactly these.
-CREATE OR REPLACE FUNCTION public.engram_extraction_subject_current(a public.memory_items, p_plan text, p_subject uuid, p_class text, p_at timestamp with time zone) RETURNS SETOF public.memory_items
+-- which a statement may correct. A standing statement (p_standing) is also
+-- weighed against the active register entries (artifact/ruling_entry with
+-- source.status 'active') whose source.subject equals the subject's label,
+-- compared case-insensitively with whitespace runs collapsed and trimmed:
+-- register subjects are shared by every project, so they match by label. A
+-- new item of p_class on p_subject at p_at is weighed against exactly these.
+CREATE OR REPLACE FUNCTION public.engram_extraction_subject_current(a public.memory_items, p_plan text, p_subject uuid, p_class text, p_standing boolean, p_at timestamp with time zone) RETURNS SETOF public.memory_items
     LANGUAGE sql STABLE
     AS $$
   SELECT i.*
     FROM public.memory_items i
    WHERE i.subject_id = p_subject
      AND (i.class = p_class OR (p_class = 'mk_statement' AND i.class = 'observation'))
+     AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
+     AND i.occurred_at <= p_at
+     AND public.engram_extraction_in_scope(i, a, p_plan)
+  UNION ALL
+  SELECT i.*
+    FROM public.memory_items i
+    JOIN public.memory_subjects sj ON sj.id = p_subject
+   WHERE p_class = 'mk_statement' AND coalesce(p_standing, false)
+     AND i.class = 'artifact' AND i.kind = 'ruling_entry'
+     AND (i.source ->> 'status') = 'active'
+     AND lower(btrim(regexp_replace(i.source ->> 'subject', '\s+', ' ', 'g')))
+         = lower(btrim(regexp_replace(sj.label, '\s+', ' ', 'g')))
      AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
      AND i.occurred_at <= p_at
      AND public.engram_extraction_in_scope(i, a, p_plan)
@@ -4041,9 +4059,11 @@ $$;
 
 -- What each new item of an extraction window must be weighed against, or
 -- NULL when p_anchor names no utterance or a forgotten one. p_items holds up
--- to 500 objects {subject_id, class, occurred_at, content, event_key,
--- exclude}: a stored subject, mk_statement or observation, the item's time,
--- its words, its source.event_key and the ids its own links already name.
+-- to 500 objects {subject_id, class, standing, occurred_at, content,
+-- event_key, exclude}: a stored subject, mk_statement or observation, whether
+-- a statement is standing (a boolean; false or null for an observation), the
+-- item's time, its words, its source.event_key and the ids its own links
+-- already name.
 -- Returns one object per item, in input order:
 -- - stored: the id of the item that already holds event_key, or null;
 -- - repeat_of: when nothing holds it, a current item of the same class and
@@ -4052,7 +4072,8 @@ $$;
 -- - when both are null, total counts the items
 --   engram_extraction_subject_current returns for it in the anchor's scope
 --   minus exclude, read lists all their ids and candidates the first p_limit
---   (1 to 100), newest first, with their subject label and content.
+--   (1 to 100), newest first, with their subject label (a register entry's
+--   own source.subject), project, workspace and content.
 -- An item that is stored or a repeat gets total 0 and empty lists: it needs
 -- no decision.
 CREATE OR REPLACE FUNCTION public.engram_extraction_candidates(p_anchor uuid, p_items jsonb, p_limit integer) RETURNS jsonb
@@ -4092,12 +4113,14 @@ BEGIN
                  CASE
                    WHEN jsonb_typeof(t.v) <> 'object' THEN format('item %s is not a JSON object', t.n)
                    WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.v) AS k(key)
-                                 WHERE k.key NOT IN ('subject_id', 'class', 'occurred_at', 'content', 'event_key', 'exclude')) THEN
-                     format('item %s has a key other than subject_id, class, occurred_at, content, event_key and exclude', t.n)
+                                 WHERE k.key NOT IN ('subject_id', 'class', 'standing', 'occurred_at', 'content', 'event_key', 'exclude')) THEN
+                     format('item %s has a key other than subject_id, class, standing, occurred_at, content, event_key and exclude', t.n)
                    WHEN jsonb_typeof(t.v -> 'subject_id') IS DISTINCT FROM 'string' OR (t.v ->> 'subject_id') !~* v_uuid THEN
                      format('item %s: subject_id must be a UUID', t.n)
                    WHEN coalesce(t.v ->> 'class', '') NOT IN ('mk_statement', 'observation') THEN
                      format('item %s: class must be mk_statement or observation', t.n)
+                   WHEN coalesce(jsonb_typeof(t.v -> 'standing'), 'null') NOT IN ('boolean', 'null') THEN
+                     format('item %s: standing must be a boolean or null', t.n)
                    WHEN jsonb_typeof(t.v -> 'occurred_at') IS DISTINCT FROM 'string' THEN
                      format('item %s: occurred_at must be a string', t.n)
                    WHEN jsonb_typeof(t.v -> 'content') IS DISTINCT FROM 'string' THEN
@@ -4154,14 +4177,17 @@ BEGIN
              coalesce(jsonb_agg(to_jsonb(r.id) ORDER BY r.rn), '[]'::jsonb),
              coalesce(jsonb_agg(jsonb_build_object(
                         'id', r.id, 'class', r.class, 'kind', r.kind, 'subject_id', r.subject_id,
-                        'subject_label', sj.label, 'content', r.content,
+                        'subject_label', coalesce(sj.label, r.entry_subject), 'project_id', r.project_id,
+                        'workspace_id', r.workspace_id, 'content', r.content,
                         'occurred_at', to_char(r.occurred_at AT TIME ZONE 'UTC', v_time)) ORDER BY r.rn)
                       FILTER (WHERE r.rn <= p_limit), '[]'::jsonb)
         INTO v_total, v_read, v_candidates
-        FROM (SELECT c.id, c.class, c.kind, c.subject_id, c.content, c.occurred_at,
+        FROM (SELECT c.id, c.class, c.kind, c.subject_id, c.content, c.occurred_at, c.project_id, c.workspace_id,
+                     CASE WHEN c.class = 'artifact' THEN c.source ->> 'subject' END AS entry_subject,
                      row_number() OVER (ORDER BY c.occurred_at DESC, c.id DESC) AS rn
                 FROM public.engram_extraction_subject_current(a, v_plan, (v_item ->> 'subject_id')::uuid,
-                                                              v_item ->> 'class', v_at) AS c
+                                                              v_item ->> 'class', (v_item ->> 'standing')::boolean,
+                                                              v_at) AS c
                WHERE c.id <> ALL (v_exclude)) AS r
         LEFT JOIN public.memory_subjects sj ON sj.id = r.subject_id;
     END IF;
@@ -4195,7 +4221,19 @@ END; $$;
 --   current item (not forgotten, retired or superseded) is filed under it;
 --   last_used_at is the latest occurred_at among those items;
 -- - statements and observations: up to p_recent_limit (1 to 200) current
---   items of each class in scope, newest first, with their subject's label;
+--   items of each class in scope, newest first, with their subject's label,
+--   project and workspace;
+-- - shown: for an MK utterance, the current items that briefing_shown events
+--   of its session put in front of the assistant from the previous MK
+--   utterance (inclusive; the session's start when there is none) up to this
+--   one (exclusive): the context of the reply MK reacts to. The latest
+--   briefing first, each in its own order, each item once, at most 24, with
+--   class, kind, subject, project, workspace and the first 1500 characters of
+--   the content. Shown items may lie outside the scope;
+-- - turn_refs: every item, forgotten or not, whose id occurs (in any case) in
+--   the text of the window's assistant turn (the prompt's turn or a trailing
+--   anchor), at most 200 ids, with its class, kind, subject, project,
+--   workspace, time and currency, so a retraction naming one can be resolved;
 -- - projects: the id and kind of every registry row.
 -- The scope is the anchor's project, its workspace's own items and global
 -- ones; at a workspace root (no project) the workspace and global. A statement
@@ -4218,6 +4256,10 @@ DECLARE
   v_statements jsonb;
   v_observations jsonb;
   v_projects jsonb;
+  v_prev timestamptz;
+  v_shown jsonb := '[]'::jsonb;
+  v_ref_text text;
+  v_refs jsonb := '[]'::jsonb;
 BEGIN
   IF p_subject_limit IS NULL OR p_subject_limit NOT BETWEEN 1 AND 1000 THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -4263,7 +4305,59 @@ BEGIN
                                AND (p.occurred_at, p.id) < (a.occurred_at, a.id))
                  OR EXISTS (SELECT 1 FROM public.memory_extraction_runs r
                              WHERE r.anchor_item_id = t.id AND r.status = 'succeeded');
+      v_ref_text := t.content;
     END IF;
+  ELSIF a.kind = 'assistant_turn' THEN
+    v_ref_text := a.content;
+  END IF;
+
+  IF a.kind IN ('user_prompt', 'user_answer') AND a.session_id IS NOT NULL THEN
+    SELECT max(p.occurred_at) INTO v_prev
+      FROM public.memory_items p
+     WHERE p.class = 'utterance' AND p.kind IN ('user_prompt', 'user_answer')
+       AND p.session_id = a.session_id AND (p.occurred_at, p.id) < (a.occurred_at, a.id);
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+             'id', i.id, 'class', i.class, 'kind', i.kind, 'subject_id', i.subject_id, 'subject_label', sj.label,
+             'project_id', i.project_id, 'workspace_id', i.workspace_id, 'content', left(i.content, 1500),
+             'occurred_at', to_char(i.occurred_at AT TIME ZONE 'UTC', v_time))
+             ORDER BY f.rank), '[]'::jsonb)
+      INTO v_shown
+      FROM (SELECT g.id, g.rank
+              FROM (SELECT x.id, min(x.rank) AS rank
+                      FROM (SELECT (s.v #>> '{}')::uuid AS id,
+                                   row_number() OVER (ORDER BY e.occurred_at DESC, e.id DESC, s.n) AS rank
+                              FROM public.memory_capture_events e
+                             CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(e.payload -> 'item_ids') = 'array'
+                                                                          THEN e.payload -> 'item_ids' ELSE '[]'::jsonb END)
+                                        WITH ORDINALITY AS s(v, n)
+                             WHERE e.session_id = a.session_id AND e.type = 'briefing_shown'
+                               AND e.occurred_at >= coalesce(v_prev, '-infinity'::timestamptz)
+                               AND e.occurred_at < a.occurred_at
+                               AND jsonb_typeof(s.v) = 'string'
+                               AND (s.v #>> '{}') ~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$') AS x
+                     GROUP BY x.id) AS g
+              JOIN public.memory_items c ON c.id = g.id
+             WHERE c.superseded_by IS NULL AND c.retired_at IS NULL AND c.forgotten_at IS NULL
+             ORDER BY g.rank
+             LIMIT 24) AS f
+      JOIN public.memory_items i ON i.id = f.id
+      LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id;
+  END IF;
+
+  IF v_ref_text IS NOT NULL THEN
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+             'id', i.id, 'class', i.class, 'kind', i.kind, 'subject_id', i.subject_id,
+             'project_id', i.project_id, 'workspace_id', i.workspace_id,
+             'occurred_at', to_char(i.occurred_at AT TIME ZONE 'UTC', v_time),
+             'superseded_by', i.superseded_by,
+             'retired_at', to_char(i.retired_at AT TIME ZONE 'UTC', v_time),
+             'forgotten_at', to_char(i.forgotten_at AT TIME ZONE 'UTC', v_time))
+             ORDER BY i.id), '[]'::jsonb)
+      INTO v_refs
+      FROM public.memory_items i
+     WHERE i.id IN (SELECT DISTINCT lower(m.found[1])::uuid
+                      FROM regexp_matches(v_ref_text, '([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', 'gi') AS m(found)
+                     LIMIT 200);
   END IF;
 
   SELECT coalesce(jsonb_agg(jsonb_build_object(
@@ -4284,10 +4378,11 @@ BEGIN
 
   SELECT coalesce(jsonb_agg(jsonb_build_object(
            'id', s.id, 'kind', s.kind, 'subject_id', s.subject_id, 'subject_label', s.label,
+           'project_id', s.project_id, 'workspace_id', s.workspace_id,
            'content', s.content, 'occurred_at', to_char(s.occurred_at AT TIME ZONE 'UTC', v_time))
            ORDER BY s.occurred_at DESC, s.id DESC), '[]'::jsonb)
     INTO v_statements
-    FROM (SELECT i.id, i.kind, i.subject_id, sj.label, i.content, i.occurred_at
+    FROM (SELECT i.id, i.kind, i.subject_id, sj.label, i.project_id, i.workspace_id, i.content, i.occurred_at
             FROM public.memory_items i
             LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
            WHERE i.class = 'mk_statement' AND i.forgotten_at IS NULL
@@ -4298,10 +4393,11 @@ BEGIN
 
   SELECT coalesce(jsonb_agg(jsonb_build_object(
            'id', s.id, 'kind', s.kind, 'subject_id', s.subject_id, 'subject_label', s.label,
+           'project_id', s.project_id, 'workspace_id', s.workspace_id,
            'content', s.content, 'occurred_at', to_char(s.occurred_at AT TIME ZONE 'UTC', v_time))
            ORDER BY s.occurred_at DESC, s.id DESC), '[]'::jsonb)
     INTO v_observations
-    FROM (SELECT i.id, i.kind, i.subject_id, sj.label, i.content, i.occurred_at
+    FROM (SELECT i.id, i.kind, i.subject_id, sj.label, i.project_id, i.workspace_id, i.content, i.occurred_at
             FROM public.memory_items i
             LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
            WHERE i.class = 'observation' AND i.forgotten_at IS NULL
@@ -4325,6 +4421,8 @@ BEGIN
     'subjects', v_subjects,
     'statements', v_statements,
     'observations', v_observations,
+    'shown', v_shown,
+    'turn_refs', v_refs,
     'projects', v_projects);
 END; $$;
 
@@ -4424,7 +4522,8 @@ END; $$;
 --
 
 -- Stores what one run extracted, in one transaction, and closes the run as
--- succeeded. p_payload is {subjects, items, stats}, each key optional:
+-- succeeded. p_payload is {subjects, items, retractions, stats}, each key
+-- optional:
 -- - subjects: [{key, label, project_id}], the new subjects the items name by
 --   key. Each is upserted on idx_subjects_project_label, so a label already
 --   stored under that project (in any case) is reused, and its key resolves
@@ -4441,6 +4540,11 @@ END; $$;
 --   extraction_run_id = p_run. An item whose source.event_key is already
 --   stored is not inserted and counts as a duplicate; its entities and links
 --   are not written again, since they were written with it.
+-- - retractions: null or {from, targets, rejected}: the assistant utterance
+--   whose text retracts earlier items, the ids it retracts and the
+--   retractions its validation refused, [{target, reason}]. Each target
+--   becomes a retracts link from that utterance, applied and checked as an
+--   item's links are; a refused one is recorded under the utterance's id.
 -- - stats: counts only, never text; the run's stats are these plus
 --   subjects_created, entities (rows written), duplicates, links_applied,
 --   links_rejected [{item, target, reason}], restatements
@@ -4511,15 +4615,17 @@ DECLARE
   v_anchor public.memory_items%ROWTYPE;
   v_plan text;
   v_race jsonb := '[]'::jsonb;
+  v_retractions jsonb;
+  v_from uuid;
 BEGIN
   IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_commit: p_payload must be a JSON object';
   END IF;
-  SELECT format('p_payload has the key %s, which is not subjects, items or stats', quote_ident(left(k.key, 63)))
+  SELECT format('p_payload has the key %s, which is not subjects, items, retractions or stats', quote_ident(left(k.key, 63)))
     INTO v_problem
     FROM jsonb_object_keys(p_payload) AS k(key)
-   WHERE k.key NOT IN ('subjects', 'items', 'stats')
+   WHERE k.key NOT IN ('subjects', 'items', 'retractions', 'stats')
    ORDER BY k.key
    LIMIT 1;
   v_subjects := CASE WHEN coalesce(p_payload -> 'subjects', 'null'::jsonb) = 'null'::jsonb THEN '[]'::jsonb ELSE p_payload -> 'subjects' END;
@@ -4536,6 +4642,29 @@ BEGIN
   END IF;
   IF v_problem IS NULL AND jsonb_array_length(v_items) > 500 THEN
     v_problem := format('items holds %s objects, more than 500', jsonb_array_length(v_items));
+  END IF;
+  v_retractions := CASE WHEN coalesce(p_payload -> 'retractions', 'null'::jsonb) = 'null'::jsonb THEN NULL ELSE p_payload -> 'retractions' END;
+  IF v_problem IS NULL AND v_retractions IS NOT NULL AND (
+       jsonb_typeof(v_retractions) <> 'object'
+       OR EXISTS (SELECT 1 FROM jsonb_object_keys(v_retractions) AS k(key) WHERE k.key NOT IN ('from', 'targets', 'rejected'))
+       OR jsonb_typeof(v_retractions -> 'from') IS DISTINCT FROM 'string'
+       OR (v_retractions ->> 'from') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+       OR jsonb_typeof(v_retractions -> 'targets') IS DISTINCT FROM 'array'
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_retractions -> 'targets') = 'array'
+                                                          THEN v_retractions -> 'targets' ELSE '[]'::jsonb END) AS x(v)
+                   WHERE jsonb_typeof(x.v) <> 'string'
+                      OR (x.v #>> '{}') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$')
+       OR jsonb_typeof(v_retractions -> 'rejected') IS DISTINCT FROM 'array'
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_retractions -> 'rejected') = 'array'
+                                                          THEN v_retractions -> 'rejected' ELSE '[]'::jsonb END) AS r(v)
+                   WHERE CASE WHEN jsonb_typeof(r.v) <> 'object' THEN true
+                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(r.v) AS k(key) WHERE k.key NOT IN ('target', 'reason'))
+                                   OR coalesce(r.v ->> 'reason', '') NOT IN ('not_current', 'class_mismatch', 'subject_mismatch',
+                                                                             'target_newer', 'target_same_time', 'link_conflict',
+                                                                             'not_a_candidate', 'not_in_scope')
+                                   OR jsonb_typeof(r.v -> 'target') IS DISTINCT FROM 'string'
+                                   OR (r.v ->> 'target') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' END)) THEN
+    v_problem := 'retractions must be null or {from, targets, rejected}: a UUID, an array of UUIDs and an array of {target, reason} with a known reason';
   END IF;
 
   IF v_problem IS NULL THEN
@@ -4694,7 +4823,8 @@ BEGIN
       INTO v_race
       FROM jsonb_array_elements(v_items) WITH ORDINALITY AS t(v, n)
      CROSS JOIN LATERAL public.engram_extraction_subject_current(v_anchor, v_plan, (t.v ->> 'subject_id')::uuid,
-                                                                 t.v ->> 'class', (t.v ->> 'occurred_at')::timestamptz) AS c
+                                                                 t.v ->> 'class', (t.v ->> 'standing')::boolean,
+                                                                 (t.v ->> 'occurred_at')::timestamptz) AS c
      WHERE jsonb_typeof(t.v -> 'candidates_read') = 'array'
        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.v -> 'candidates_read') AS k(x) WHERE k.x::uuid = c.id);
 
@@ -4818,6 +4948,39 @@ BEGIN
     v_duplicates := v_count - v_restatements - cardinality(array_positions(v_added, true));
   END IF;
 
+  IF v_retractions IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(7308892986227385959);
+    v_from := (v_retractions ->> 'from')::uuid;
+    PERFORM 1 FROM public.memory_items i WHERE i.id = v_from AND i.class = 'utterance' AND i.kind = 'assistant_turn';
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_extraction_commit: retractions.from names no assistant turn';
+    END IF;
+    FOR v_link IN SELECT x.v FROM jsonb_array_elements(v_retractions -> 'targets') WITH ORDINALITY AS x(v, k) ORDER BY x.k LOOP
+      v_target := (v_link #>> '{}')::uuid;
+      SELECT i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL INTO v_current
+        FROM public.memory_items i WHERE i.id = v_target;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+          MESSAGE = format('engram_extraction_commit: retraction target %s names no item', v_target);
+      END IF;
+      IF v_target = v_from THEN
+        v_refused := v_refused || jsonb_build_object('item', v_from, 'target', v_target, 'reason', 'link_conflict');
+      ELSIF NOT v_current THEN
+        v_refused := v_refused || jsonb_build_object('item', v_from, 'target', v_target, 'reason', 'not_current');
+      ELSE
+        INSERT INTO public.memory_item_links (from_item, to_item, rel, run_id)
+        VALUES (v_from, v_target, 'retracts', p_run)
+        ON CONFLICT (from_item, to_item, rel) DO NOTHING;
+        v_applied := v_applied + 1;
+      END IF;
+    END LOOP;
+    SELECT v_refused || coalesce(jsonb_agg(jsonb_build_object('item', v_from, 'target', r.v -> 'target', 'reason', r.v -> 'reason')
+                                           ORDER BY r.k), '[]'::jsonb)
+      INTO v_refused
+      FROM jsonb_array_elements(v_retractions -> 'rejected') WITH ORDINALITY AS r(v, k);
+  END IF;
+
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
          finished_at = now(),
@@ -4825,7 +4988,7 @@ BEGIN
          stats = v_stats || jsonb_build_object(
                    'subjects_created', v_created, 'entities', v_entities, 'duplicates', v_duplicates,
                    'links_applied', v_applied,
-                   'links_rejected', (SELECT coalesce(jsonb_agg(jsonb_build_object('item', v_ids[(f.v ->> 'n')::integer],
+                   'links_rejected', (SELECT coalesce(jsonb_agg(jsonb_build_object('item', coalesce(f.v -> 'item', to_jsonb(v_ids[(f.v ->> 'n')::integer])),
                                                                                    'target', f.v -> 'target',
                                                                                    'reason', f.v -> 'reason') ORDER BY f.k), '[]'::jsonb)
                                         FROM jsonb_array_elements(v_refused) WITH ORDINALITY AS f(v, k)),
@@ -5266,7 +5429,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, intege
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
@@ -5329,7 +5492,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
@@ -5382,7 +5545,7 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer
 GRANT EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;

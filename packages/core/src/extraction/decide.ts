@@ -8,8 +8,10 @@
  * After the gate and before the commit, each new item that the commit will
  * store and that names a stored subject gets a candidate read: the current
  * items of its class on its subject in the anchor's scope that occurred no
- * later than it (a backfilled old session never sees its future), and for a
- * statement also the observations on that subject, which it may correct.
+ * later than it (a backfilled old session never sees its future), for a
+ * statement also the observations on that subject, which it may correct, and
+ * for a standing statement the active register entries on its subject's
+ * label, which it may restate or change.
  * Items its own links already name are left out, as is an item whose words
  * are stored already. One model call then covers every item that has
  * candidates, newest DECISION_CANDIDATES_MAX each. Its decisions become link
@@ -97,6 +99,7 @@ export function candidateQueries(draft: CommitDraft): CandidateQueries {
     queries.push({
       subjectId: item.subjectId,
       class: item.class,
+      standing: item.class === 'mk_statement' && item.standing === true,
       occurredAt: item.occurredAt,
       content: item.content,
       eventKey: String(item.source.event_key),
@@ -260,6 +263,9 @@ function candidateTarget(c: ExtractionCandidate): LinkTarget {
     supersededBy: null,
     retiredAt: null,
     forgottenAt: null,
+    projectId: c.projectId,
+    workspaceId: c.workspaceId,
+    shown: false,
   }
 }
 

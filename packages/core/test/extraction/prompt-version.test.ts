@@ -16,6 +16,7 @@ import {
 const PINNED_SHA256: Record<string, string> = {
   'extract-v1': '8b09fe2c023be1a170f3dd237dde123d3d2037ba115165792cb2215f0c44c772',
   'extract-v2': '5f9a4d0d5b6b6a6a2262c23155dc0364a6d93a5f63262bc8cfdd4bc759b1bd77',
+  'extract-v3': '69278ae1a395b58a0206af92b7c3e0291557156187f35401318290a96b153f54',
 }
 
 function sha256(text: string): string {
@@ -28,10 +29,6 @@ describe('extraction prompt version', () => {
 
     expect(PINNED_SHA256[EXTRACTOR_VERSION]).toBeDefined()
     expect(digest).toBe(PINNED_SHA256[EXTRACTOR_VERSION])
-  })
-
-  it('keeps the window prompt the earlier version pinned, so only the decision pass is new', () => {
-    expect(sha256(EXTRACTION_SYSTEM_PROMPT)).toBe(PINNED_SHA256['extract-v1'])
   })
 
   it('asks for the exact reply shapes the parsers enforce', () => {

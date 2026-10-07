@@ -15,6 +15,7 @@ import type {
   ExtractionEntity,
   ExtractionItem,
   ExtractionNewSubject,
+  ExtractionRetractions,
 } from '../items/capture-store.js'
 import { toPostgresText } from '../text/postgres-text.js'
 import { generateId } from '../utils/id.js'
@@ -28,8 +29,9 @@ import {
   type LinkTarget,
   type LinkValidation,
 } from './links.js'
+import { scanRetractions } from './retractions.js'
 import { labelKey } from './subjects.js'
-import type { ExtractionWindow, WindowListedItem } from './window.js'
+import type { ExtractionWindow, WindowListedItem, WindowShownItem } from './window.js'
 
 export type ExtractionItemClass = 'mk_statement' | 'observation'
 
@@ -45,8 +47,10 @@ export interface CommitDraft {
   sources: LinkSource[]
   /** The links the window's reply proposed, by item index. */
   proposals: LinkProposal[]
-  /** The window's listed items, current when the window was read. */
+  /** The window's listed and shown items, current when the window was read. */
   targets: LinkTarget[]
+  /** The assistant turn's retractions by id, already checked by the link rules. */
+  retractions: ExtractionRetractions | null
   stats: Record<string, unknown>
 }
 
@@ -67,6 +71,8 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
   const observations = gated.observations.map((o) => observationItem(window, safeObservation(o), runId, subjects))
   const items = [...statements, ...observations]
   const gatedItems = [...gated.statements, ...gated.observations]
+  const scan = scanRetractions(window)
+  const scanned = window.turn !== null && !window.turn.alreadyObserved
   return {
     subjects: subjects.list(),
     items,
@@ -76,6 +82,9 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
       subjectId: items[index]!.subjectId,
       subjectLabel: g.subject.label,
       occurredAt: g.occurredAt,
+      ...('utteranceId' in g
+        ? { projectId: window.utterance?.projectId ?? null, workspaceId: window.utterance?.workspaceId ?? null }
+        : { projectId: window.turn?.projectId ?? null, workspaceId: window.turn?.workspaceId ?? null }),
     })),
     proposals: gatedItems.flatMap((g, index) => [
       ...g.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
@@ -85,8 +94,11 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
     targets: [
       ...window.statements.map((t) => listedTarget(t, 'mk_statement')),
       ...window.observations.map((t) => listedTarget(t, 'observation')),
+      // After the listings, so an item both listed and shown counts as shown.
+      ...window.shown.map(shownTarget),
     ],
-    stats: gateStats(gated),
+    retractions: scan.retractions,
+    stats: { ...gateStats(gated), ...(scanned ? { retractions_unresolved: scan.unresolved } : {}) },
   }
 }
 
@@ -115,7 +127,12 @@ export function finishCommit(draft: CommitDraft, decisions?: CommitDecisions): E
       ...(read === undefined ? {} : { candidatesRead: [...read] }),
     }
   })
-  return { subjects: draft.subjects, items, stats: { ...draft.stats, ...(decisions?.stats ?? {}) } }
+  return {
+    subjects: draft.subjects,
+    items,
+    retractions: draft.retractions,
+    stats: { ...draft.stats, ...(decisions?.stats ?? {}) },
+  }
 }
 
 export function buildCommitPayload(
@@ -139,7 +156,15 @@ function listedTarget(item: WindowListedItem, itemClass: ExtractionItemClass): L
     supersededBy: null,
     retiredAt: null,
     forgottenAt: null,
+    projectId: item.projectId,
+    workspaceId: item.workspaceId,
+    shown: false,
   }
+}
+
+/** The window shows only current items. */
+function shownTarget(item: WindowShownItem): LinkTarget {
+  return { ...listedTarget(item, 'mk_statement'), class: item.class, shown: true }
 }
 
 /** Counts only, never text. Proposed = accepted + rejected, per side. */

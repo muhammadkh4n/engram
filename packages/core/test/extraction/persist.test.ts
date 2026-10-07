@@ -251,6 +251,7 @@ describe('buildCommitPayload', () => {
         { item: 'observation', index: 1, rule: 'attributed_to_user' },
         { item: 'observation', index: 2, rule: 'schema' },
       ],
+      retractions_unresolved: 0,
       scope_downgraded: 0,
       valid_at_clamped: 0,
     })

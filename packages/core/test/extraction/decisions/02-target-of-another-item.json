@@ -68,6 +68,8 @@
           "kind": "ruling",
           "subjectId": "00000000-0000-4000-8000-0000000d0020",
           "subjectLabel": "deploys",
+          "projectId": "tst-repo",
+          "workspaceId": "tst-ws",
           "content": "deploys go straight to production",
           "occurredAt": "2026-09-25T08:00:00Z"
         }
@@ -87,6 +89,8 @@
           "kind": "ruling",
           "subjectId": "00000000-0000-4000-8000-0000000d0030",
           "subjectLabel": "cache ttl",
+          "projectId": "tst-repo",
+          "workspaceId": "tst-ws",
           "content": "the cache TTL is five minutes",
           "occurredAt": "2026-09-26T08:00:00Z"
         }

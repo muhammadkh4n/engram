@@ -62,6 +62,8 @@
           "kind": "fact",
           "subjectId": "00000000-0000-4000-8000-0000000d0040",
           "subjectLabel": "server port",
+          "projectId": "tst-repo",
+          "workspaceId": "tst-ws",
           "content": "The engram MCP server listens on port 3850.",
           "occurredAt": "2026-10-01T12:00:00Z"
         }

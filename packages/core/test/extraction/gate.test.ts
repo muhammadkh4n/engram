@@ -439,3 +439,30 @@ describe('gateWindow: resolved references', () => {
     })
   })
 })
+
+describe('gateWindow: shown items', () => {
+  const SHOWN: RawExtractionWindow = {
+    ...PROMPT,
+    shown: [
+      {
+        id: uuid(51),
+        class: 'observation',
+        kind: 'fact',
+        subject_id: uuid(22),
+        project_id: 'tst-far',
+        workspace_id: null,
+        content: 'The importer runs nightly.',
+        occurred_at: '2026-09-25T10:00:00Z',
+      },
+    ],
+  }
+
+  it('resolves a shown alias in corrects', () => {
+    const result = gate(SHOWN, [stmt({ kind: 'correction', corrects: ['shown-1'] })])
+    expect(result.statements[0]!.corrects).toEqual([uuid(51)])
+  })
+
+  it('refuses a shown alias in supersedes as an unknown id', () => {
+    expect(rules(gate(SHOWN, [stmt({ supersedes: ['shown-1'] })]))).toEqual(['statement:0:unknown_id'])
+  })
+})

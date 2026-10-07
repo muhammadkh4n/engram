@@ -527,6 +527,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       kind: 'ruling',
       subject_id: expect.any(String),
       subject_label: 'importer flags',
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
       content: 'charlie',
       occurred_at: '2026-09-14T09:00:03.000000Z',
     })

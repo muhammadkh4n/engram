@@ -204,6 +204,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the decision pass through Post
     return {
       subjectId: item.subjectId!,
       class: item.class,
+      standing: item.standing === true,
       occurredAt: item.occurredAt,
       content: item.content,
       eventKey: String(item.source.event_key),

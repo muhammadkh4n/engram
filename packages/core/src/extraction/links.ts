@@ -11,6 +11,11 @@
  * Validation is pure: `validateLinks` decides from the new items and what is
  * known about each target, before the transaction that stores them. A
  * rejected link never blocks its item; it is reported with its reason.
+ *
+ * Scope: a correction or a retraction may contest an item the assistant was
+ * shown, wherever it lives, because the reply under dispute was built on it.
+ * Any other target must be in the source's scope: no project, the source's
+ * project, or the source's workspace.
  */
 import { createHash } from 'node:crypto'
 
@@ -58,6 +63,9 @@ export interface LinkSource {
   /** The subject's label, which is what a register entry matches on. */
   subjectLabel: string | null
   occurredAt: string
+  /** The project and workspace of the utterance the item came from. */
+  projectId: string | null
+  workspaceId: string | null
 }
 
 /** An existing item a link may point at, as last read. */
@@ -71,6 +79,10 @@ export interface LinkTarget {
   supersededBy: string | null
   retiredAt: string | null
   forgottenAt: string | null
+  projectId: string | null
+  workspaceId: string | null
+  /** A briefing put it in front of the assistant before the reply the source reacts to. */
+  shown: boolean
 }
 
 export interface LinkProposal {
@@ -144,7 +156,19 @@ function rejectionOf(
   const target = known.get(proposal.target)
   if (target === undefined) return 'not_in_scope'
   if (!isCurrent(target)) return 'not_current'
+  if (CONTESTING_RELS.has(proposal.rel) && !target.shown && !inScope(source, target)) return 'not_in_scope'
   return shapeRejection(source, proposal.rel, target) ?? timeRejection(source, proposal.rel, target)
+}
+
+const CONTESTING_RELS: ReadonlySet<LinkRel> = new Set(['corrects', 'retracts'])
+
+/** No project, the source's project, or (both having one) the source's workspace. */
+export function inScope(
+  source: Pick<LinkSource, 'projectId' | 'workspaceId'>,
+  target: Pick<LinkTarget, 'projectId' | 'workspaceId'>,
+): boolean {
+  if (target.projectId === null || target.projectId === source.projectId) return true
+  return target.workspaceId !== null && target.workspaceId === source.workspaceId
 }
 
 export function isCurrent(target: LinkTarget): boolean {

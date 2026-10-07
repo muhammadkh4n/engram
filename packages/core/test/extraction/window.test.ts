@@ -449,3 +449,40 @@ describe('extractionMaxTokens', () => {
     expect(extractionMaxTokens('a'.repeat(chars))).toBe(expected)
   })
 })
+
+describe('shown items', () => {
+  const shownItem = (n: number, content = `shown memory ${n}`) => ({
+    id: uuid(3000 + n),
+    class: 'observation',
+    kind: 'fact',
+    subject_id: null,
+    project_id: 'tst-far',
+    workspace_id: null,
+    content,
+    occurred_at: '2026-09-25T10:00:00Z',
+  })
+
+  it('lists each shown item once, in the store order, at most 24, each cut at 1500 characters', () => {
+    const items = [shownItem(0, 'y'.repeat(1600)), shownItem(1), shownItem(0), ...Array.from({ length: 30 }, (_, i) => shownItem(10 + i))]
+    const w = buildWindow({ ...PROMPT_WINDOW, shown: items })
+
+    expect(w.shown).toHaveLength(24)
+    expect(w.shown.slice(0, 3).map((item) => [item.alias, item.id])).toEqual([
+      ['shown-1', uuid(3000)],
+      ['shown-2', uuid(3001)],
+      ['shown-3', uuid(3010)],
+    ])
+    expect(w.shown[0]!.content).toBe('y'.repeat(1500))
+    expect(w.shown[0]).toMatchObject({ class: 'observation', projectId: 'tst-far', workspaceId: null })
+  })
+
+  it('renders the shown items before the turn, one line each', () => {
+    const message = renderUserMessage(buildWindow({ ...PROMPT_WINDOW, shown: [shownItem(1, 'The port\nis 3850.')] }))
+    expect(message).toContain('SHOWN TO THE ASSISTANT BEFORE turn-1:\nshown-1 [observation/fact, 2026-09-25] The port is 3850.\n\nturn-1')
+  })
+
+  it('omits the section when nothing was shown, and lists nothing shown for a trailing turn', () => {
+    expect(renderUserMessage(buildWindow(PROMPT_WINDOW))).not.toContain('SHOWN')
+    expect(buildWindow({ ...TRAILING_WINDOW, shown: [shownItem(1)] }).shown).toEqual([])
+  })
+})

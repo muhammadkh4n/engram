@@ -59,6 +59,7 @@ export type {
   ExtractionItem,
   ExtractionLink,
   ExtractionRejectedLink,
+  ExtractionRetractions,
   ExtractionNewSubject,
   ExtractionPendingQuery,
   PendingAnchor,
@@ -289,6 +290,8 @@ export {
   SUBJECT_LISTING_LIMIT,
   RECENT_LISTING_LIMIT,
   LISTED_CONTENT_MAX_CHARS,
+  SHOWN_LISTING_LIMIT,
+  SHOWN_CONTENT_MAX_CHARS,
   TURN_MAX_CHARS,
   EARLIER_TEXT_MARKER,
 } from './extraction/window.js'
@@ -300,6 +303,8 @@ export type {
   RawWindowEvent,
   RawWindowSubject,
   RawWindowItem,
+  RawWindowShownItem,
+  RawWindowTurnRef,
   RawWindowProject,
   RawWindowTool,
   ExtractionWindow,
@@ -311,6 +316,8 @@ export type {
   WindowDialogOption,
   WindowSubject,
   WindowListedItem,
+  WindowShownItem,
+  WindowTurnRef,
 } from './extraction/window.js'
 export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
@@ -343,8 +350,18 @@ export {
   validateLinks,
   isCurrent,
   isRegisterEntry,
+  inScope,
   LINK_REJECT_REASONS,
 } from './extraction/links.js'
+export {
+  scanRetractions,
+  splitSentences,
+  isRetraction,
+  idsIn,
+  RETRACTION_GAP_MAX_CHARS,
+  NEGATION_LOOKBACK_WORDS,
+} from './extraction/retractions.js'
+export type { RetractionScan } from './extraction/retractions.js'
 export type {
   IdentityClass,
   LinkRel,

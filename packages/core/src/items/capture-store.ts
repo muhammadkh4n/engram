@@ -253,19 +253,26 @@ export interface ExtractionItem {
 export interface ExtractionCandidateQuery {
   subjectId: string
   class: 'mk_statement' | 'observation'
+  /** A standing statement is also weighed against the active register entries on its subject's label. */
+  standing: boolean
   occurredAt: Date
   content: string
   eventKey: string
   exclude: readonly string[]
 }
 
-/** A current item a new one is weighed against. Times are UTC ISO 8601. */
+/**
+ * A current item a new one is weighed against. Times are UTC ISO 8601. A
+ * register entry has no subject id; its label is the entry's own subject.
+ */
 export interface ExtractionCandidate {
   id: string
   class: string
   kind: string
   subjectId: string | null
   subjectLabel: string | null
+  projectId: string | null
+  workspaceId: string | null
   content: string
   occurredAt: string
 }
@@ -287,10 +294,22 @@ export interface ExtractionCandidateRead {
   candidates: ExtractionCandidate[]
 }
 
+/**
+ * The items an assistant turn retracts by id: each target becomes a
+ * `retracts` link from the turn, applied with the window's items; `rejected`
+ * holds the ones the link rules refused.
+ */
+export interface ExtractionRetractions {
+  from: string
+  targets: readonly string[]
+  rejected: readonly ExtractionRejectedLink[]
+}
+
 /** Everything one run stores, in one transaction. `stats` holds counts only, never text. */
 export interface ExtractionCommit {
   subjects: readonly ExtractionNewSubject[]
   items: readonly ExtractionItem[]
+  retractions?: ExtractionRetractions | null
   stats: Record<string, unknown>
 }
 

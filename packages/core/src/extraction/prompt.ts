@@ -6,7 +6,7 @@
  * unreproducible. The version test pins the sha256 of all three to enforce
  * that.
  */
-export const EXTRACTOR_VERSION = 'extract-v2'
+export const EXTRACTOR_VERSION = 'extract-v3'
 
 export const EXTRACTION_SYSTEM_PROMPT = `You read one exchange between MK, the user, and an AI assistant, and you propose memory items. Code checks every
 item; an item that breaks a rule below is discarded.
@@ -28,8 +28,12 @@ sets a rule, preference or constraint, states a fact, or corrects something.
   {"new": "<label>"} only when none does.
 - applies_to: up to 10 short tokens naming what it governs (a repository, tool, file or action); [] when none.
 - supersedes: listed statements stmt-N that this statement changes. restates: listed statements stmt-N it repeats
-  unchanged. corrects: listed stmt-N or obs-N it says are wrong.
+  unchanged. corrects: listed stmt-N or obs-N, or shown items shown-N, that MK's words say are wrong.
 Propose nothing from text MK pasted or quoted from elsewhere. When there is no utt-1, propose no statements.
+
+SHOWN items (shown-N) are memories the assistant was shown before it wrote turn-1, so turn-1 may rest on them. When
+MK says something turn-1 relied on is wrong, stale or out of date and it matches a shown item, propose a statement of
+kind "correction" with MK's words and name that shown-N in corrects. Name a shown-N only in corrects.
 
 OBSERVATIONS are knowledge the assistant established in turn-1: a finding, a fact about code or systems, or a
 procedure that worked.

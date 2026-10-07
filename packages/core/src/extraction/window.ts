@@ -11,6 +11,9 @@ import { orderSubjects } from './subjects.js'
 export const SUBJECT_LISTING_LIMIT = 150
 export const RECENT_LISTING_LIMIT = 40
 export const LISTED_CONTENT_MAX_CHARS = 500
+/** The most shown items a window lists, and how much of each it shows. */
+export const SHOWN_LISTING_LIMIT = 24
+export const SHOWN_CONTENT_MAX_CHARS = 1500
 export const TURN_MAX_CHARS = 24_000
 export const EARLIER_TEXT_MARKER = '[earlier text not shown]'
 
@@ -59,8 +62,29 @@ export interface RawWindowItem {
   kind: string
   subject_id: string | null
   subject_label?: string | null
+  project_id?: string | null
+  workspace_id?: string | null
   content: string
   occurred_at: string
+}
+
+/** An item a briefing showed the assistant before the reply MK reacts to. */
+export interface RawWindowShownItem extends RawWindowItem {
+  class: string
+}
+
+/** An item whose id occurs in the window's assistant turn. */
+export interface RawWindowTurnRef {
+  id: string
+  class: string
+  kind: string
+  subject_id?: string | null
+  project_id?: string | null
+  workspace_id?: string | null
+  occurred_at: string
+  superseded_by?: string | null
+  retired_at?: string | null
+  forgotten_at?: string | null
 }
 
 export interface RawWindowProject {
@@ -78,6 +102,8 @@ export interface RawExtractionWindow {
   subjects?: RawWindowSubject[]
   statements?: RawWindowItem[]
   observations?: RawWindowItem[]
+  shown?: RawWindowShownItem[]
+  turn_refs?: RawWindowTurnRef[]
   projects?: RawWindowProject[]
 }
 
@@ -150,9 +176,30 @@ export interface WindowListedItem {
   kind: string
   subjectId: string | null
   subjectLabel: string | null
+  projectId: string | null
+  workspaceId: string | null
   /** Cut at LISTED_CONTENT_MAX_CHARS. */
   content: string
   occurredAt: string
+}
+
+/** A shown item, aliased `shown-N`; its content is cut at SHOWN_CONTENT_MAX_CHARS. */
+export interface WindowShownItem extends WindowListedItem {
+  class: string
+}
+
+/** An item named by id in the window's assistant turn, as the store holds it now. */
+export interface WindowTurnRef {
+  id: string
+  class: string
+  kind: string
+  subjectId: string | null
+  projectId: string | null
+  workspaceId: string | null
+  occurredAt: string
+  supersededBy: string | null
+  retiredAt: string | null
+  forgottenAt: string | null
 }
 
 export interface ExtractionWindow {
@@ -168,6 +215,9 @@ export interface ExtractionWindow {
   subjects: WindowSubject[]
   statements: WindowListedItem[]
   observations: WindowListedItem[]
+  /** What briefings showed the assistant since MK's previous utterance; MK may correct it. */
+  shown: WindowShownItem[]
+  turnRefs: WindowTurnRef[]
   projects: RawWindowProject[]
 }
 
@@ -197,6 +247,8 @@ export function buildWindow(raw: RawExtractionWindow): ExtractionWindow {
     subjects: listSubjects(rawSubjects, windowText),
     statements: listItems(raw.statements ?? [], 'stmt', labelById),
     observations: listItems(raw.observations ?? [], 'obs', labelById),
+    shown: utterance === null ? [] : listShown(raw.shown ?? []),
+    turnRefs: turn === null ? [] : (raw.turn_refs ?? []).map(toTurnRef),
     projects: (raw.projects ?? []).map((p) => ({ id: p.id, kind: p.kind })),
   }
 }
@@ -217,6 +269,7 @@ export function renderUserMessage(window: ExtractionWindow): string {
     section('SUBJECTS:', window.subjects.map((s) => `${s.alias} ${oneLine(s.label)}`)),
     section('CURRENT STATEMENTS:', window.statements.map(listedLine)),
     section('CURRENT OBSERVATIONS:', window.observations.map(listedLine)),
+    ...(window.shown.length > 0 ? [section('SHOWN TO THE ASSISTANT BEFORE turn-1:', window.shown.map(shownLine))] : []),
     renderTurn(window.turn),
     section('TOOLS OF turn-1:', (window.turn?.tools ?? []).map(toolLine)),
     renderUtterance(window.utterance),
@@ -354,9 +407,44 @@ function listItems(
     kind: item.kind,
     subjectId: item.subject_id ?? null,
     subjectLabel: item.subject_label ?? (item.subject_id ? labelById.get(item.subject_id) ?? null : null),
+    projectId: item.project_id ?? null,
+    workspaceId: item.workspace_id ?? null,
     content: cutCodePoints(item.content, LISTED_CONTENT_MAX_CHARS),
     occurredAt: isoTime(item.occurred_at),
   }))
+}
+
+/** Shown items in the store's order (latest briefing first), each once, at most SHOWN_LISTING_LIMIT. */
+function listShown(items: RawWindowShownItem[]): WindowShownItem[] {
+  const firsts = new Map<string, RawWindowShownItem>()
+  for (const item of items) if (!firsts.has(item.id)) firsts.set(item.id, item)
+  return [...firsts.values()].slice(0, SHOWN_LISTING_LIMIT).map((item, i) => ({
+    alias: `shown-${i + 1}`,
+    id: item.id,
+    class: item.class,
+    kind: item.kind,
+    subjectId: item.subject_id ?? null,
+    subjectLabel: item.subject_label ?? null,
+    projectId: item.project_id ?? null,
+    workspaceId: item.workspace_id ?? null,
+    content: cutCodePoints(item.content, SHOWN_CONTENT_MAX_CHARS),
+    occurredAt: isoTime(item.occurred_at),
+  }))
+}
+
+function toTurnRef(ref: RawWindowTurnRef): WindowTurnRef {
+  return {
+    id: ref.id.toLowerCase(),
+    class: ref.class,
+    kind: ref.kind,
+    subjectId: ref.subject_id ?? null,
+    projectId: ref.project_id ?? null,
+    workspaceId: ref.workspace_id ?? null,
+    occurredAt: isoTime(ref.occurred_at),
+    supersededBy: ref.superseded_by ?? null,
+    retiredAt: ref.retired_at ?? null,
+    forgottenAt: ref.forgotten_at ?? null,
+  }
 }
 
 // --- Rendering ---------------------------------------------------------------
@@ -368,6 +456,10 @@ function section(header: string, lines: string[]): string {
 function listedLine(item: WindowListedItem): string {
   const subject = item.subjectLabel === null ? 'none' : oneLine(item.subjectLabel)
   return `${item.alias} [${item.kind}, ${subject}, ${item.occurredAt.slice(0, 10)}] ${oneLine(item.content)}`
+}
+
+function shownLine(item: WindowShownItem): string {
+  return `${item.alias} [${item.class}/${item.kind}, ${item.occurredAt.slice(0, 10)}] ${oneLine(item.content)}`
 }
 
 function toolLine(tool: WindowTool): string {
