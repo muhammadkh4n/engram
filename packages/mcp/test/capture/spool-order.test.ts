@@ -117,13 +117,21 @@ async function elapse(ms: number): Promise<void> {
 
 /**
  * Two files a proxy refuses, then a good file the route accepts, listed
- * in that order. Each has a backoff entry that ended a moment ago, written
- * without `alone` as a state file from before that field existed.
+ * in that order. Each has a backoff entry that ended a moment ago. Without
+ * `alone`, the entries are written as a state file from before that field
+ * existed.
  */
-async function refusedRefusedGood(attempts: readonly [number, number, number]): Promise<{ p1: string; g: string }> {
+async function refusedRefusedGood(
+  attempts: readonly [number, number, number],
+  alone?: readonly [boolean, boolean, boolean],
+): Promise<{ p1: string; g: string }> {
   const paths = await writeOneEventFiles([1, 2, 3])
   const expired = new Date(Date.now() - 1).toISOString()
-  const files = Object.fromEntries(paths.map((p, i) => [fileKey(p), { attempts: attempts[i], next_attempt_at: expired }]))
+  const entry = (i: number) =>
+    alone === undefined
+      ? { attempts: attempts[i], next_attempt_at: expired }
+      : { attempts: attempts[i], next_attempt_at: expired, alone: alone[i] }
+  const files = Object.fromEntries(paths.map((p, i) => [fileKey(p), entry(i)]))
   const state = {
     v: 1,
     last_ack_at: null,
@@ -171,6 +179,24 @@ describe('drainSpool send order', () => {
     expect(deadLetterCount()).toBe(0)
   })
 
+  it('acks a good file known to fail alone behind two refused files never marked so, then stops raising the server\'s backoff', async () => {
+    const { g } = await refusedRefusedGood([2, 2, 1], [false, false, true])
+
+    for (let drain = 0; drain < 2 && existsSync(g); drain++) {
+      await elapse(PAST_EVERY_WINDOW_MS)
+      await drainSpool({ env })
+    }
+
+    expect(existsSync(g)).toBe(false)
+    expect(deadLetterCount()).toBe(0)
+    const failuresAtAck = (await loadSpoolState(root)).failures
+    for (let drain = 0; drain < 3; drain++) {
+      await elapse(PAST_EVERY_WINDOW_MS)
+      await drainSpool({ env })
+      expect((await loadSpoolState(root)).failures).toBeLessThanOrEqual(failuresAtAck)
+    }
+  })
+
   it('never raises the server\'s backoff over two refused files known to fail alone', async () => {
     await refusedRefusedGood([2, 2, 1])
     await drainSpool({ env })
@@ -201,10 +227,47 @@ function seededRandom(seed: number): () => number {
   }
 }
 
+type FileKind = 'good' | 'refused' | 'flaky'
+
 /**
- * Two to seven one-event files, some refused by a proxy, at least one good;
- * zero to four drains during an outage answered 502, at random gaps; then
- * drains spaced past every window until each good file must have been acked.
+ * The route accepts good files and a proxy refuses refused ones with an
+ * HTML 403. A flaky file is refused once, on its first send that follows
+ * another file's ack in the same drain, so that failure makes it known to
+ * fail alone; every other send of it is accepted. `drainStarts` resets the
+ * per-drain ack.
+ */
+function scenarioResponder(kinds: ReadonlyMap<string, FileKind>): { reply: CaptureStubResponder; drainStarts: () => void } {
+  const flakyFailed = new Set<string>()
+  let ackedThisDrain = false
+  const reply: CaptureStubResponder = (request) => {
+    const uuids = sentUuids(request) as string[]
+    if (uuids.some((u) => kinds.get(u) === 'refused')) return PROXY_403
+    const flaky = uuids.find((u) => kinds.get(u) === 'flaky' && !flakyFailed.has(u))
+    if (flaky !== undefined && ackedThisDrain) {
+      flakyFailed.add(flaky)
+      return PROXY_403
+    }
+    ackedThisDrain = true
+    return acceptAll(request)
+  }
+  return { reply, drainStarts: () => (ackedThisDrain = false) }
+}
+
+/**
+ * Two to seven one-event files, each good, refused by a proxy or flaky, at
+ * least one good; zero to four drains during an outage answered 502, at
+ * random gaps; then drains spaced past every window until each good and
+ * flaky file must have been acked.
+ *
+ * The bound on spaced drains, with R refused files, F flaky files and O
+ * outage drains: an outage drain sends at most two requests, so a file has
+ * at most O attempts when the outage ends, and a flaky file at most O + 1
+ * after its one failure. Files go out by attempts, so a refused file stays
+ * ahead of a pending file only while its attempts do not exceed that file's,
+ * which is at most O + 2 failures. A drain that ends before reaching the
+ * pending file ends on two failures of files ahead of it, and a flaky file
+ * fails at most once, so at most (R × (O + 2) + F) / 2 drains end before it,
+ * one more is a flaky file's own failure, and the next reaches and acks it.
  */
 async function runScenario(seed: number): Promise<void> {
   const random = seededRandom(seed)
@@ -212,17 +275,25 @@ async function runScenario(seed: number): Promise<void> {
   const label = `seed ${seed}`
 
   const count = int(2, 7)
-  const isRefused = Array.from({ length: count }, () => random() < 0.5)
-  if (isRefused.every(Boolean)) isRefused[int(0, count - 1)] = false
+  const pick = (): FileKind => {
+    const r = random()
+    return r < 0.4 ? 'refused' : r < 0.65 ? 'flaky' : 'good'
+  }
+  const fileKinds = Array.from({ length: count }, pick)
+  if (!fileKinds.includes('good')) fileKinds[int(0, count - 1)] = 'good'
   const numbers = Array.from({ length: count }, (_, i) => i + 1)
   const paths = await writeOneEventFiles(numbers)
-  const refused = new Set(numbers.filter((_, i) => isRefused[i]).map(uuid))
-  const good = paths.filter((_, i) => !isRefused[i])
+  const kinds = new Map(numbers.map((n, i) => [uuid(n), fileKinds[i]!]))
+  const toAck = paths.filter((_, i) => fileKinds[i] !== 'refused')
+  const refusedCount = fileKinds.filter((k) => k === 'refused').length
+  const flakyCount = fileKinds.filter((k) => k === 'flaky').length
   const outageDrains = int(0, 4)
+  const responder = scenarioResponder(kinds)
 
   let before: SpoolState = await loadSpoolState(root)
   const checkedDrain = async (duringOutage: boolean, step: string): Promise<void> => {
     const sentBefore = stub.received.length
+    responder.drainStarts()
     const result = await drainSpool({ env })
     const after = await loadSpoolState(root)
     const where = `${label}, ${step}`
@@ -243,19 +314,19 @@ async function runScenario(seed: number): Promise<void> {
     await checkedDrain(true, `outage drain ${drain + 1} after ${gap} ms`)
   }
 
-  stub.reply = refusing(refused)
-  const spacedDrains = refused.size * (outageDrains + 2) + 1
+  stub.reply = responder.reply
+  const spacedDrains = Math.floor((refusedCount * (outageDrains + 2) + flakyCount) / 2) + 2
   for (let drain = 0; drain < spacedDrains; drain++) {
     await elapse(PAST_EVERY_WINDOW_MS)
     await checkedDrain(false, `spaced drain ${drain + 1} of ${spacedDrains}`)
   }
 
-  const scenario = `${label}: ${count} files, refused ${JSON.stringify(isRefused)}, ${outageDrains} outage drain(s)`
-  expect(good.filter((p) => existsSync(p)), `${scenario}: good files still spooled`).toEqual([])
+  const scenario = `${label}: ${count} files ${JSON.stringify(fileKinds)}, ${outageDrains} outage drain(s)`
+  expect(toAck.filter((p) => existsSync(p)), `${scenario}: good and flaky files still spooled`).toEqual([])
   expect(deadLetterCount(), `${scenario}: dead letters`).toBe(0)
 }
 
-describe('drainSpool over generated outages and refused files', () => {
+describe('drainSpool over generated outages, refused and flaky files', () => {
   it.each(Array.from({ length: 50 }, (_, i) => i + 1))('keeps every rule for seed %i', async (seed) => {
     await runScenario(seed)
   })

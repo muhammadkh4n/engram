@@ -319,29 +319,26 @@ class Drain {
   }
 
   /**
-   * Each file by its own record: files that never failed, then files whose
-   * backoff is over and that are not known to fail alone, then files known to
-   * fail alone; within a group the fewest attempts first and the oldest file
-   * on a tie. Files inside their own backoff are skipped. A file goes back
-   * behind the files that failed less often each time it fails, so a run of
-   * failing files cannot keep a good file behind them from being sent, and
-   * files known to fail alone go last, where they cannot end a drain before
-   * the files that can show whether the server is back.
+   * Files that never failed first, then the fewest attempts, the oldest file
+   * on a tie; files inside their own backoff are skipped. Each failure puts a
+   * file behind the files that failed less often, so a run of failing files
+   * cannot keep a good file behind them from being sent. Being known to fail
+   * alone never moves a file: that mark never clears, so ordering by it would
+   * hold a file that failed alone once behind files that keep failing.
    */
   private sendOrder(batches: readonly Batch[]): Batch[] {
     const now = Date.now()
-    const ranked: Array<{ batch: Batch; group: number; attempts: number; name: string }> = []
+    const ranked: Array<{ batch: Batch; failed: number; attempts: number; name: string }> = []
     for (const batch of batches) {
       const entry = this.state.files[batchKey(batch)]
       if (entry !== undefined && Date.parse(entry.next_attempt_at) > now) {
         this.skipped++
         continue
       }
-      const group = entry === undefined ? 0 : entry.alone ? 2 : 1
-      ranked.push({ batch, group, attempts: entry?.attempts ?? 0, name: basename(batch.path) })
+      ranked.push({ batch, failed: entry === undefined ? 0 : 1, attempts: entry?.attempts ?? 0, name: basename(batch.path) })
     }
     // Batch file names start with their 13-digit write time, so name order is age order.
-    ranked.sort((a, b) => a.group - b.group || a.attempts - b.attempts || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    ranked.sort((a, b) => a.failed - b.failed || a.attempts - b.attempts || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     return ranked.map((r) => r.batch)
   }
 
@@ -460,11 +457,11 @@ class Drain {
  * neither file is known to fail alone, so a drain that settles any send
  * never raises it.
  *
- * Files go out by their own record: files that never failed, then files
- * whose backoff is over and that are not known to fail alone, then files
- * known to fail alone; the fewest attempts first within each, the oldest
- * file on a tie. A file inside its own backoff is skipped. `retry_later`
- * means some file was kept for a later retry.
+ * Files go out by attempts alone: files that never failed, then the fewest
+ * attempts, the oldest file on a tie. A file inside its own backoff is
+ * skipped. Being known to fail alone decides only whether two failures in a
+ * row blame the server, never the order. `retry_later` means some file was
+ * kept for a later retry.
  */
 export async function drainSpool(opts: DrainOptions): Promise<DrainResult> {
   const root = opts.root ?? spoolRoot(opts.env)
