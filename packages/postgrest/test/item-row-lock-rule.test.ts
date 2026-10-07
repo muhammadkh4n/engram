@@ -25,6 +25,7 @@ import { readFileSync } from 'node:fs'
 const KEY = '7308892986227385959'
 const EXCLUSIVE = `pg_advisory_xact_lock(${KEY})`
 const SHARED = `pg_advisory_xact_lock_shared(${KEY})`
+const CALLS_LOCKER = /public\.engram_(?:supersede_item|retire_items|unretire_items|forget_items)\(/
 
 interface SqlFunction {
   name: string
@@ -173,7 +174,10 @@ describe('the forget advisory key orders every row lock on memory_items', () => 
     const inserters = all.filter((f) => INSERT.test(f.body))
     expect(inserters.map((f) => f.name)).toContain('engram_insert_items')
     for (const f of inserters) {
-      const key = lockers.includes(f) ? EXCLUSIVE : SHARED
+      // A function that calls a row-locking RPC holds the key exclusively from
+      // the start: taking it shared first, two such calls would each wait
+      // for the other's shared hold when the RPC asks for it exclusively.
+      const key = lockers.includes(f) || CALLS_LOCKER.test(f.body) ? EXCLUSIVE : SHARED
       const keyAt = f.body.indexOf(key)
       expect(keyAt, `${f.name} never takes ${key}`).toBeGreaterThanOrEqual(0)
       expect(keyAt, `${f.name} inserts before taking ${key}`).toBeLessThan(f.body.search(INSERT))

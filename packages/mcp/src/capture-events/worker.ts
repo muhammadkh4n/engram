@@ -33,6 +33,11 @@
  * table, and a tick that used its whole window budget schedules the next one
  * at once.
  *
+ * Last, the tick builds the index of every session that is due
+ * (runSessionIndexTick): after extraction, so an index built in the tick
+ * that stored a session's statements lists them. A session's failure leaves
+ * it due for the next tick.
+ *
  * The loop is a self-scheduling timeout, so ticks never overlap, and all of
  * its state lives in the returned handle. Log lines carry counts, error codes
  * and messages only, never stored text.
@@ -42,6 +47,7 @@ import {
   EMBEDDING_ERROR_MAX_CHARS,
   isEmbeddingInputError,
   runExtractionTick,
+  runSessionIndexTick,
   scrubSecrets,
   type CaptureStore,
   type EmbeddingFailure,
@@ -50,6 +56,7 @@ import {
   type IntelligenceAdapter,
   type MaterializeResult,
   type PendingEmbedding,
+  type SessionIndexStore,
 } from '@engram-mem/core'
 
 /** Events one materialize call takes. */
@@ -77,6 +84,8 @@ export interface CaptureWorkerOptions {
   embeddingModel: string
   /** Extraction runs only when given. */
   extraction?: CaptureWorkerExtraction
+  /** Session indexes are built only when given. */
+  sessionIndex?: { store: SessionIndexStore; now?: () => Date }
   intervalMs?: number
   log: (line: string) => void
 }
@@ -245,6 +254,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     }
     await refreshEmbedFailed(embedded.recorded)
     const extracted = await extract()
+    const indexed = await indexSessions()
 
     const happened = result.processed + result.failed + result.skipped + embedded.written + embedded.recorded > 0
     if (happened || result.dead !== lastDead || embedFailed !== lastEmbedFailed) {
@@ -257,7 +267,24 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
     lastDead = result.dead
     lastEmbedFailed = embedFailed
     const embeddedFull = embedded.read >= WORKER_EMBED_BATCH && embedded.error === null && embedded.refusedAll === null
-    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull || extracted.full }
+    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull || extracted.full || indexed.full }
+  }
+
+  const indexSessions = async (): Promise<{ full: boolean }> => {
+    if (opts.sessionIndex === undefined) return { full: false }
+    try {
+      const indexed = await runSessionIndexTick({ ...opts.sessionIndex, log })
+      if (indexed.written + indexed.stale + indexed.failed > 0) {
+        log(
+          `capture worker: session indexes written=${indexed.written} unchanged=${indexed.unchanged} ` +
+            `stale=${indexed.stale} failed=${indexed.failed}`,
+        )
+      }
+      return { full: indexed.full }
+    } catch (err) {
+      log(`capture worker: session index failed: ${describeError(err)}`)
+      return { full: false }
+    }
   }
 
   const extract = async (): Promise<Pick<ExtractionTickResult, 'full'>> => {

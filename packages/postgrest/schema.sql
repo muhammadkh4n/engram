@@ -1446,6 +1446,31 @@ CREATE TABLE IF NOT EXISTS public.memory_capture_events (
 
 
 --
+-- Name: memory_session_state; Type: TABLE; Schema: public; Owner: -
+--
+-- One row per capture session, kept by engram_track_session_activity on
+-- every event insert: the first and last event times, the last event id, the
+-- last time an event of the session was received, and the latest session_end
+-- time. The session index builder records what its index covers:
+-- index_item_id is the index it last wrote or confirmed, indexed_event_id
+-- the last event id that index reflects. 0 means no index reflects the
+-- session as it stands: none was built yet, or an extraction commit changed
+-- the statements or observations the index lists.
+CREATE TABLE IF NOT EXISTS public.memory_session_state (
+    session_id text PRIMARY KEY,
+    first_event_at timestamp with time zone NOT NULL,
+    last_event_at timestamp with time zone NOT NULL,
+    last_event_id bigint NOT NULL,
+    last_received_at timestamp with time zone NOT NULL,
+    ended_at timestamp with time zone,
+    index_item_id uuid REFERENCES public.memory_items(id),
+    indexed_event_id bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT memory_session_state_session_id_check CHECK (char_length(session_id) BETWEEN 1 AND 256),
+    CONSTRAINT memory_session_state_indexed_event_id_check CHECK (indexed_event_id >= 0)
+);
+
+
+--
 -- Name: memory_secret_hits; Type: TABLE; Schema: public; Owner: -
 --
 -- One row per value masked before storage: where it was and which detector
@@ -2048,23 +2073,25 @@ CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btr
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
 -- first read of items still waiting for a vector. Its predicate is that
 -- function's WHERE, word for word, so it holds only the backlog embedding
--- drains: assistant utterances, session indexes and legacy rows are never
--- embedded by the worker, and an index that held them would be walked whole
--- on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
--- whatever its predicate, so an index built before the embedding_attempts
--- clause is dropped first and rebuilt with it; otherwise the planner could no
--- longer match it to the function and every call would scan the table.
+-- drains: assistant utterances and legacy rows are never embedded by the
+-- worker, and an index that held them would be walked whole on every idle
+-- call. CREATE INDEX IF NOT EXISTS keeps an existing index whatever its
+-- predicate, so an index built before the embedding_attempts clause, or one
+-- that still left session indexes out, is dropped first and rebuilt;
+-- otherwise the planner could no longer match it to the function and every
+-- call would scan the table.
 DO $$ BEGIN
   IF EXISTS (SELECT 1
                FROM pg_catalog.pg_index x
                JOIN pg_catalog.pg_class c ON c.oid = x.indexrelid
               WHERE c.relname = 'idx_items_pending_embedding'
                 AND c.relnamespace = 'public'::regnamespace
-                AND pg_catalog.pg_get_expr(x.indpred, x.indrelid) NOT LIKE '%(embedding_attempts < 5)%') THEN
+                AND (pg_catalog.pg_get_expr(x.indpred, x.indrelid) NOT LIKE '%(embedding_attempts < 5)%'
+                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%session_index%')) THEN
     DROP INDEX public.idx_items_pending_embedding;
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class NOT IN ('session_index', 'legacy'));
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class <> 'legacy');
 
 
 --
@@ -2467,6 +2494,48 @@ CREATE CONSTRAINT TRIGGER memory_items_supersession AFTER UPDATE OF superseded_b
 
 DROP TRIGGER IF EXISTS memory_items_forget_cascade ON public.memory_items;
 CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON public.memory_items FOR EACH ROW WHEN (OLD.forgotten_at IS NULL AND NEW.forgotten_at IS NOT NULL) EXECUTE FUNCTION public.memory_items_forget_cascade();
+
+-- engram_track_session_activity keeps memory_session_state for each inserted
+-- capture event: least() of the first event time, greatest() of the last
+-- event time, the last event id and the last received time, and the latest
+-- session_end time (greatest() ignores NULLs, so any other event leaves it
+-- as it is). It fires per row, so the events of one session inserted in one
+-- statement fold into a single row one after another.
+CREATE OR REPLACE FUNCTION public.engram_track_session_activity() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  INSERT INTO public.memory_session_state AS s
+         (session_id, first_event_at, last_event_at, last_event_id, last_received_at, ended_at)
+  VALUES (NEW.session_id, NEW.occurred_at, NEW.occurred_at, NEW.id, NEW.received_at,
+          CASE WHEN NEW.type = 'session_end' THEN NEW.occurred_at END)
+  ON CONFLICT (session_id) DO UPDATE
+     SET first_event_at = least(s.first_event_at, EXCLUDED.first_event_at),
+         last_event_at = greatest(s.last_event_at, EXCLUDED.last_event_at),
+         last_event_id = greatest(s.last_event_id, EXCLUDED.last_event_id),
+         last_received_at = greatest(s.last_received_at, EXCLUDED.last_received_at),
+         ended_at = greatest(s.ended_at, EXCLUDED.ended_at);
+  RETURN NULL;
+END; $$;
+
+DROP TRIGGER IF EXISTS memory_capture_events_session_activity ON public.memory_capture_events;
+CREATE TRIGGER memory_capture_events_session_activity AFTER INSERT ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.engram_track_session_activity();
+
+-- Events stored before the trigger existed fold into their sessions' rows
+-- here. The fold is idempotent, so re-applying the file changes nothing.
+INSERT INTO public.memory_session_state AS s
+       (session_id, first_event_at, last_event_at, last_event_id, last_received_at, ended_at)
+SELECT c.session_id, min(c.occurred_at), max(c.occurred_at), max(c.id), max(c.received_at),
+       max(c.occurred_at) FILTER (WHERE c.type = 'session_end')
+  FROM public.memory_capture_events c
+ GROUP BY c.session_id
+ON CONFLICT (session_id) DO UPDATE
+   SET first_event_at = least(s.first_event_at, EXCLUDED.first_event_at),
+       last_event_at = greatest(s.last_event_at, EXCLUDED.last_event_at),
+       last_event_id = greatest(s.last_event_id, EXCLUDED.last_event_id),
+       last_received_at = greatest(s.last_received_at, EXCLUDED.last_received_at),
+       ended_at = greatest(s.ended_at, EXCLUDED.ended_at);
 
 
 --
@@ -3579,10 +3648,10 @@ END; $$;
 
 -- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
 -- no embedding, not forgotten, fewer than 5 refused embedding attempts, not
--- an assistant utterance, and not a session_index or legacy item. Assistant
--- turns are trust 3 and never ranked
--- by vector; session indexes and legacy rows are embedded by their own
--- writers or not at all. Read only; idx_items_pending_embedding serves the
+-- an assistant utterance, and not a legacy item. Assistant turns are trust 3
+-- and never ranked by vector; legacy rows are embedded by their own writer or
+-- not at all. A session index is written without a vector and waits here
+-- like any other item. Read only; idx_items_pending_embedding serves the
 -- order, and its predicate repeats this WHERE word for word so the planner
 -- proves the match and the index holds no row this function skips. The WHERE
 -- columns are unqualified to keep that text identical; none of them is an
@@ -3603,7 +3672,7 @@ BEGIN
      AND forgotten_at IS NULL
      AND embedding_attempts < 5
      AND NOT (class = 'utterance' AND speaker = 'assistant')
-     AND class NOT IN ('session_index', 'legacy')
+     AND class <> 'legacy'
    ORDER BY i.created_at, i.id
    LIMIT p_limit;
 END; $$;
@@ -4996,6 +5065,17 @@ BEGIN
       FROM jsonb_array_elements(v_retractions -> 'rejected') WITH ORDINALITY AS r(v, k);
   END IF;
 
+  -- A session index lists its session's current statements and observations,
+  -- so every session whose list this commit changed (the sessions of the items
+  -- it stored or pointed at, and of the items they superseded) gets
+  -- indexed_event_id 0, which makes it due for a rebuild.
+  UPDATE public.memory_session_state st
+     SET indexed_event_id = 0
+   WHERE st.indexed_event_id <> 0
+     AND st.session_id IN (SELECT i.session_id
+                             FROM public.memory_items i
+                            WHERE i.id = ANY (v_ids) OR i.superseded_by = ANY (v_ids));
+
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
          finished_at = now(),
@@ -5015,6 +5095,341 @@ BEGIN
 
   RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
                             'restatements', v_restatements);
+END; $$;
+
+
+--
+-- Name: engram_due_sessions(integer, integer, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Up to p_limit (1 to 1000) sessions whose index is out of date and may be
+-- built now, the longest idle first. Out of date: an event was stored after
+-- the last one the index reflects, or the index was forgotten. May be built:
+-- the session ended with no later event, or nothing of it was received in
+-- the p_idle_seconds before p_now; received time, not event time, so a
+-- backlog stored long after its events happened does not count as idle. And
+-- no event of the session waits for engram_capture_materialize, judged as
+-- that function picks its candidates (unprocessed, fewer than 3 attempts),
+-- so an event it gave up on never holds the index back. Each row carries the
+-- session's last event id, which the builder hands back to
+-- engram_session_index_commit. Read only.
+CREATE OR REPLACE FUNCTION public.engram_due_sessions(p_idle_seconds integer, p_limit integer, p_now timestamp with time zone) RETURNS TABLE(session_id text, last_event_id bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_idle_seconds IS NULL OR p_idle_seconds < 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_due_sessions: p_idle_seconds must be 0 or more';
+  END IF;
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_due_sessions: p_limit must be from 1 to 1000';
+  END IF;
+  IF p_now IS NULL OR NOT public.engram_time_in_range(p_now) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_due_sessions: p_now must be a finite time';
+  END IF;
+  RETURN QUERY
+  SELECT s.session_id, s.last_event_id
+    FROM public.memory_session_state s
+    LEFT JOIN public.memory_items i ON i.id = s.index_item_id
+   WHERE (s.last_event_id > s.indexed_event_id OR i.forgotten_at IS NOT NULL)
+     AND (s.ended_at >= s.last_event_at
+          OR s.last_received_at < p_now - make_interval(secs => p_idle_seconds))
+     AND NOT EXISTS (SELECT 1
+                       FROM public.memory_capture_events c
+                      WHERE c.session_id = s.session_id AND c.processed_at IS NULL AND c.attempts < 3)
+   ORDER BY s.last_received_at, s.session_id
+   LIMIT p_limit;
+END; $$;
+
+
+--
+-- Name: engram_session_index_source(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Everything the index of session p_session is rendered from, read in one
+-- snapshot, as one JSON object:
+-- - first_event_id, last_event_id: over its events; first_at, last_at: over
+--   its events but briefing_shown, which records what memory showed the
+--   session rather than anything the session did, so a resume that only
+--   shows a briefing leaves the text as it was;
+-- - history: a user_prompt event of it carries payload.origin;
+-- - projects, workspaces: its events' project ids and workspaces, and plans:
+--   the basenames of its events' plan_dirs and the plan of its ledger events;
+--   each distinct, in the order first seen;
+-- - utterances: its current user_prompt and user_answer utterances in event
+--   order, each {id, kind, occurred_at, text}; text is a prompt's content
+--   and an answer's search text, which pairs each question with MK's answer;
+-- - has_utterance: it holds an utterance that is not forgotten;
+-- - statements, observations: the ids of its current items of each class;
+-- - commits: {repo, sha, occurred_at} of its git_commit events whose commit item is
+--   stored and not forgotten (a commit captured by two sessions is one item,
+--   so the event, not the item's session, ties the commit to the session);
+-- - tool_refs: {repo, ref, occurred_at} of the refs its current assistant turns carry that
+--   look like a commit sha or a GitHub pull request URL, repo being the
+--   turn's project;
+-- - ledger: {plan, id} of its ledger events whose item is stored and not
+--   forgotten; a ruling has no id of its own and reads <phase>/<task>;
+-- - current_index: {id, content, occurred_at} of its current index, or null.
+-- Read only.
+CREATE OR REPLACE FUNCTION public.engram_session_index_source(p_session text) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_result jsonb;
+BEGIN
+  IF p_session IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_index_source: p_session is required';
+  END IF;
+
+  WITH ev AS (
+    SELECT c.id, c.type, c.occurred_at, c.project, c.plan_dirs, c.payload,
+           row_number() OVER (ORDER BY c.occurred_at, c.id) AS r
+      FROM public.memory_capture_events c
+     WHERE c.session_id = p_session
+  ), it AS (
+    SELECT i.id, i.class, i.kind, i.content, i.search_text, i.occurred_at, i.created_at, i.project_id, i.source,
+           (i.superseded_by IS NULL AND i.retired_at IS NULL) AS is_current
+      FROM public.memory_items i
+     WHERE i.session_id = p_session AND i.forgotten_at IS NULL
+  ), keyed AS (
+    SELECT ev.id, ev.type, ev.occurred_at, ev.payload,
+           CASE ev.type
+             WHEN 'git_commit' THEN format('git:%s:%s', ev.payload ->> 'repo', ev.payload ->> 'sha')
+             WHEN 'ledger_decision' THEN format('ledger-decision:%s:%s', ev.payload ->> 'plan', ev.payload ->> 'id')
+                                         || ':' || encode(sha256(convert_to(ev.payload::text, 'UTF8')), 'hex')
+             ELSE 'capture:' || ev.id
+           END AS event_key
+      FROM ev
+     WHERE ev.type IN ('git_commit', 'ledger_decision', 'ledger_ruling')
+  ), stored AS (
+    SELECT k.*
+      FROM keyed k
+     WHERE EXISTS (SELECT 1 FROM public.memory_items i
+                    WHERE (i.source ? 'event_key') AND (i.source ->> 'event_key') = k.event_key
+                      AND i.forgotten_at IS NULL)
+  ), plans AS (
+    SELECT regexp_replace(rtrim(d.v, '/'), '^.*/', '') AS v, ev.r, d.n
+      FROM ev
+     CROSS JOIN LATERAL (SELECT x.v, x.n FROM unnest(ev.plan_dirs) WITH ORDINALITY AS x(v, n)
+                         UNION ALL
+                         SELECT ev.payload ->> 'plan', 2147483647
+                          WHERE ev.type IN ('ledger_decision', 'ledger_ruling')) AS d(v, n)
+  )
+  SELECT jsonb_build_object(
+           'session_id', p_session,
+           'first_event_id', (SELECT min(ev.id) FROM ev),
+           'last_event_id', (SELECT max(ev.id) FROM ev),
+           'first_at', (SELECT min(ev.occurred_at) FROM ev WHERE ev.type <> 'briefing_shown'),
+           'last_at', (SELECT max(ev.occurred_at) FROM ev WHERE ev.type <> 'briefing_shown'),
+           'history', EXISTS (SELECT 1 FROM ev WHERE ev.type = 'user_prompt' AND ev.payload ? 'origin'),
+           'projects', (SELECT coalesce(jsonb_agg(f.v ORDER BY f.r), '[]'::jsonb)
+                          FROM (SELECT ev.project ->> 'id' AS v, min(ev.r) AS r FROM ev
+                                 WHERE (ev.project ->> 'id') ~ '\S' GROUP BY 1) AS f),
+           'workspaces', (SELECT coalesce(jsonb_agg(f.v ORDER BY f.r), '[]'::jsonb)
+                            FROM (SELECT ev.project ->> 'workspace' AS v, min(ev.r) AS r FROM ev
+                                   WHERE (ev.project ->> 'workspace') ~ '\S' GROUP BY 1) AS f),
+           'plans', (SELECT coalesce(jsonb_agg(f.v ORDER BY f.r, f.n), '[]'::jsonb)
+                       FROM (SELECT DISTINCT ON (p.v) p.v, p.r, p.n FROM plans p
+                              WHERE p.v ~ '\S' ORDER BY p.v, p.r, p.n) AS f),
+           'utterances', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                                    'id', u.id, 'kind', u.kind, 'occurred_at', u.occurred_at,
+                                    'text', CASE u.kind WHEN 'user_answer' THEN u.search_text ELSE u.content END)
+                                  ORDER BY u.occurred_at, (u.source ->> 'event_id')::bigint, u.id), '[]'::jsonb)
+                            FROM it u
+                           WHERE u.class = 'utterance' AND u.kind IN ('user_prompt', 'user_answer') AND u.is_current),
+           'has_utterance', EXISTS (SELECT 1 FROM it u WHERE u.class = 'utterance'),
+           'statements', (SELECT coalesce(jsonb_agg(s.id ORDER BY s.occurred_at, s.created_at, s.id), '[]'::jsonb)
+                            FROM it s WHERE s.class = 'mk_statement' AND s.is_current),
+           'observations', (SELECT coalesce(jsonb_agg(o.id ORDER BY o.occurred_at, o.created_at, o.id), '[]'::jsonb)
+                              FROM it o WHERE o.class = 'observation' AND o.is_current),
+           'commits', (SELECT coalesce(jsonb_agg(jsonb_build_object('repo', k.payload ->> 'repo', 'sha', k.payload ->> 'sha',
+                                                                   'occurred_at', k.occurred_at)
+                                                 ORDER BY k.occurred_at, k.id), '[]'::jsonb)
+                         FROM stored k WHERE k.type = 'git_commit'),
+           'tool_refs', (SELECT coalesce(jsonb_agg(jsonb_build_object('repo', t.project_id, 'ref', x.v ->> 'ref',
+                                                                     'occurred_at', t.occurred_at)
+                                                   ORDER BY t.occurred_at, (t.source ->> 'event_id')::bigint, t.id, x.n), '[]'::jsonb)
+                           FROM it t
+                          CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.source -> 'tools') = 'array'
+                                                                       THEN t.source -> 'tools' ELSE '[]'::jsonb END)
+                                     WITH ORDINALITY AS x(v, n)
+                          WHERE t.class = 'utterance' AND t.kind = 'assistant_turn' AND t.is_current
+                            AND jsonb_typeof(x.v) = 'object'
+                            AND ((x.v ->> 'ref') ~ '^[a-f0-9]{7,40}$'
+                                 OR (x.v ->> 'ref') ~ '^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$')),
+           'ledger', (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                                'plan', k.payload ->> 'plan',
+                                'id', CASE k.type WHEN 'ledger_decision' THEN k.payload ->> 'id'
+                                                  ELSE concat_ws('/', k.payload ->> 'phase', k.payload ->> 'task') END)
+                              ORDER BY k.occurred_at, k.id), '[]'::jsonb)
+                        FROM stored k WHERE k.type IN ('ledger_decision', 'ledger_ruling')),
+           'current_index', (SELECT jsonb_build_object('id', x.id, 'content', x.content, 'occurred_at', x.occurred_at)
+                               FROM it x
+                              WHERE x.class = 'session_index' AND x.is_current
+                              ORDER BY x.occurred_at DESC, x.created_at DESC, x.id DESC
+                              LIMIT 1))
+    INTO v_result;
+  RETURN v_result;
+END; $$;
+
+
+--
+-- Name: engram_session_index_commit(text, jsonb, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores the index the builder rendered for session p_session from the
+-- events up to p_event_id, in one transaction. p_item is null for a session
+-- with no utterance, which gets no index; otherwise an object with exactly
+-- content, occurred_at, project_id, workspace_id, lineage (the quoted MK
+-- utterances), source ({type transcript or history, session_id, event_key
+-- 'session_index:<session>:…', first_event_id, last_event_id}), listed (the
+-- statement and observation ids the text names) and replaces (the current
+-- index the text was rendered against, or null).
+-- It takes the forget advisory key (7308892986227385959) exclusively, as
+-- every function that locks item rows does, and then the session's row. The
+-- rendered text is stale, and nothing is written, when the session's current
+-- index is no longer replaces, or its current statements and observations
+-- are no longer listed: the session stays due and the next build reads them
+-- again. An unchanged text writes no item. A changed text is inserted as a
+-- session_index item (speaker system, trust 1, search text = content) with a
+-- NULL embedding, and supersedes the current index through
+-- engram_supersede_item. That rule wants the successor strictly later, so a
+-- rebuild whose last event is no later than the current index's (a late
+-- delivery, a commit that changed only the listed items) takes the current
+-- index's time plus one microsecond. A key already stored on another item
+-- raises. Then index_item_id is set and indexed_event_id raised to
+-- p_event_id; it never moves back, so a slower build never undoes a newer
+-- one. Returns {written, stale, item_id}.
+CREATE OR REPLACE FUNCTION public.engram_session_index_commit(p_session text, p_item jsonb, p_event_id bigint) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_last bigint;
+  v_current record;
+  v_item jsonb := CASE WHEN p_item = 'null'::jsonb THEN NULL ELSE p_item END;
+  v_problem text;
+  v_listed uuid[];
+  v_actual uuid[];
+  v_at timestamptz;
+  v_new uuid;
+  v_key_prefix text;
+BEGIN
+  IF p_session IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_index_commit: p_session is required';
+  END IF;
+  IF p_event_id IS NULL OR p_event_id < 1 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_index_commit: p_event_id must be an event id';
+  END IF;
+  v_key_prefix := 'session_index:' || p_session || ':';
+  IF v_item IS NOT NULL THEN
+    IF jsonb_typeof(v_item) <> 'object' THEN
+      v_problem := 'p_item must be a JSON object or null';
+    ELSIF EXISTS (SELECT 1 FROM jsonb_object_keys(v_item) AS k(key)
+                   WHERE k.key NOT IN ('content', 'occurred_at', 'project_id', 'workspace_id', 'lineage', 'source',
+                                       'listed', 'replaces'))
+          OR (SELECT count(*) FROM jsonb_object_keys(v_item)) <> 8 THEN
+      v_problem := 'p_item must have exactly the keys content, occurred_at, project_id, workspace_id, lineage, source, listed and replaces';
+    ELSIF jsonb_typeof(v_item -> 'content') <> 'string' OR jsonb_typeof(v_item -> 'occurred_at') <> 'string'
+          OR jsonb_typeof(v_item -> 'lineage') <> 'array' OR jsonb_typeof(v_item -> 'listed') <> 'array'
+          OR jsonb_typeof(v_item -> 'source') <> 'object'
+          OR jsonb_typeof(v_item -> 'project_id') NOT IN ('string', 'null')
+          OR jsonb_typeof(v_item -> 'workspace_id') NOT IN ('string', 'null')
+          OR jsonb_typeof(v_item -> 'replaces') NOT IN ('string', 'null') THEN
+      v_problem := 'p_item has a value of the wrong type';
+    ELSIF (v_item -> 'source' ->> 'session_id') IS DISTINCT FROM p_session
+          OR (v_item -> 'source' ->> 'type') NOT IN ('transcript', 'history')
+          OR left(coalesce(v_item -> 'source' ->> 'event_key', ''), char_length(v_key_prefix)) <> v_key_prefix THEN
+      v_problem := 'p_item.source must name the session, its type and a session_index event key';
+    END IF;
+    IF v_problem IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_session_index_commit: ' || v_problem;
+    END IF;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  SELECT s.last_event_id INTO v_last
+    FROM public.memory_session_state s
+   WHERE s.session_id = p_session
+     FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_index_commit: p_session names no captured session';
+  END IF;
+  IF p_event_id > v_last THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_index_commit: p_event_id is later than the session''s last event';
+  END IF;
+
+  SELECT i.id, i.content, i.occurred_at INTO v_current
+    FROM public.memory_items i
+   WHERE i.session_id = p_session AND i.class = 'session_index'
+     AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
+   ORDER BY i.occurred_at DESC, i.created_at DESC, i.id DESC
+   LIMIT 1;
+
+  IF v_item IS NULL THEN
+    UPDATE public.memory_session_state s
+       SET index_item_id = v_current.id,
+           indexed_event_id = greatest(s.indexed_event_id, p_event_id)
+     WHERE s.session_id = p_session;
+    RETURN jsonb_build_object('written', false, 'stale', false, 'item_id', v_current.id);
+  END IF;
+
+  v_listed := ARRAY(SELECT DISTINCT (x.v #>> '{}')::uuid FROM jsonb_array_elements(v_item -> 'listed') AS x(v) ORDER BY 1);
+  v_actual := ARRAY(SELECT i.id
+                      FROM public.memory_items i
+                     WHERE i.session_id = p_session AND i.class IN ('mk_statement', 'observation')
+                       AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
+                     ORDER BY 1);
+  IF (v_item ->> 'replaces')::uuid IS DISTINCT FROM v_current.id OR v_listed <> v_actual THEN
+    RETURN jsonb_build_object('written', false, 'stale', true, 'item_id', v_current.id);
+  END IF;
+
+  IF v_current.id IS NOT NULL AND v_current.content = (v_item ->> 'content') THEN
+    UPDATE public.memory_session_state s
+       SET index_item_id = v_current.id,
+           indexed_event_id = greatest(s.indexed_event_id, p_event_id)
+     WHERE s.session_id = p_session;
+    RETURN jsonb_build_object('written', false, 'stale', false, 'item_id', v_current.id);
+  END IF;
+
+  v_at := (v_item ->> 'occurred_at')::timestamptz;
+  IF v_current.id IS NOT NULL AND v_at <= v_current.occurred_at THEN
+    v_at := v_current.occurred_at + interval '1 microsecond';
+  END IF;
+  INSERT INTO public.memory_items AS m (
+    class, kind, speaker, trust, project_id, workspace_id, session_id,
+    content, search_text, occurred_at, source, lineage)
+  VALUES ('session_index', 'session', 'system', 1, v_item ->> 'project_id', v_item ->> 'workspace_id', p_session,
+          v_item ->> 'content', v_item ->> 'content', v_at, v_item -> 'source',
+          ARRAY(SELECT (x.v #>> '{}')::uuid FROM jsonb_array_elements(v_item -> 'lineage') WITH ORDINALITY AS x(v, n) ORDER BY x.n))
+  ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING
+  RETURNING m.id INTO v_new;
+  IF v_new IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_session_index_commit: the index key is already stored on another item';
+  END IF;
+  IF v_current.id IS NOT NULL THEN
+    PERFORM public.engram_supersede_item(v_current.id, v_new);
+  END IF;
+  -- The lineage check is deferred to commit; forcing it here fails this call
+  -- with its own message instead of at the end of the transaction.
+  SET CONSTRAINTS ALL IMMEDIATE;
+
+  UPDATE public.memory_session_state s
+     SET index_item_id = v_new,
+         indexed_event_id = greatest(s.indexed_event_id, p_event_id)
+   WHERE s.session_id = p_session;
+  RETURN jsonb_build_object('written', true, 'stale', false, 'item_id', v_new);
 END; $$;
 
 
@@ -5178,6 +5593,12 @@ ALTER TABLE public.memory_item_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_item_links ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_session_state; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_session_state ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memory_capture_events; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5293,6 +5714,14 @@ CREATE POLICY service_role_all ON public.memory_item_links TO service_role USING
 
 
 --
+-- Name: memory_session_state service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_session_state;
+CREATE POLICY service_role_all ON public.memory_session_state TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: memory_capture_events service_role_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -5326,7 +5755,7 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
 REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
@@ -5338,7 +5767,7 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
       EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
@@ -5353,6 +5782,7 @@ GRANT SELECT ON TABLE public.memory_item_entities TO service_role;
 GRANT SELECT ON TABLE public.memory_item_links TO service_role;
 GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
+GRANT SELECT ON TABLE public.memory_session_state TO service_role;
 
 
 --
@@ -5406,7 +5836,8 @@ $smoke$;
 -- re-created above lose their grants on every apply, so this section runs
 -- after the last function definition and re-applying the file restores it.
 --
--- Every function below except the memory_items_* trigger functions is an RPC
+-- Every function below except the trigger functions (memory_items_* and
+-- engram_track_session_activity) is an RPC
 -- endpoint and gets the service_role grant. The trigger functions are revoked
 -- from service_role as well and granted to no role, so a database whose
 -- default privileges give service_role EXECUTE on new functions ends with the
@@ -5448,6 +5879,9 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memor
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -5468,11 +5902,13 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -5511,6 +5947,9 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -5531,6 +5970,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -5564,6 +6004,9 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_session_index_source(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;

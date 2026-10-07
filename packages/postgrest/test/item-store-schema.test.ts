@@ -238,8 +238,8 @@ describe('memory_items triggers', () => {
     expect(squash(schema)).toContain(`DROP TRIGGER IF EXISTS ${name} ON public.memory_items; ${create}`)
   })
 
-  it('creates exactly these triggers, each once', () => {
-    const created = [...schema.matchAll(/^CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
+  it('creates exactly these triggers on memory_items, each once', () => {
+    const created = [...schema.matchAll(/^CREATE (?:CONSTRAINT )?TRIGGER (\w+) .*? ON public\.memory_items /gm)].map((m) => m[1])
     expect(created).toEqual(TRIGGER_NAMES)
   })
 
@@ -475,7 +475,7 @@ describe('the pending-embedding index', () => {
       'forgotten_at IS NULL',
       'embedding_attempts < 5',
       "NOT (class = 'utterance' AND speaker = 'assistant')",
-      "class NOT IN ('session_index', 'legacy')",
+      "class <> 'legacy'",
     ]) {
       expect(predicate).toContain(clause)
     }

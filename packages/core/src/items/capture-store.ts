@@ -336,6 +336,91 @@ export interface ExtractionCommitResult {
  * The database applies the table rules, so an implementation forwards writes
  * and reports a refused rule as `ItemConstraintError`.
  */
+/** engram_due_sessions returns at most this many sessions per call. */
+export const DUE_SESSIONS_LIMIT_MAX = 1000
+
+/** A session whose index is out of date and may be built now. */
+export interface DueSession {
+  sessionId: string
+  /** The last event stored for the session when it was found due; the index built now reflects it. */
+  lastEventId: number
+}
+
+/** An MK utterance as the session index lists it. */
+export interface SessionIndexUtterance {
+  id: string
+  kind: 'user_prompt' | 'user_answer'
+  occurredAt: Date
+  /** A prompt's content; an answer's search text, which pairs each question with MK's answer. */
+  text: string
+}
+
+/** A commit sha, from a commit item or from an assistant turn's tool ref. */
+export interface SessionIndexCommitRef {
+  /** The commit's repo; a tool ref's turn project, null when the turn had none. */
+  repo: string | null
+  sha: string
+  occurredAt: Date
+}
+
+/**
+ * Everything one session's index is rendered from, read in one snapshot
+ * (see engram_session_index_source). Lists are in the order first seen.
+ */
+export interface SessionIndexSource {
+  sessionId: string
+  firstEventId: number | null
+  lastEventId: number | null
+  firstAt: Date | null
+  lastAt: Date | null
+  /** A prompt of the session was recovered from shell history rather than a transcript. */
+  history: boolean
+  projects: string[]
+  workspaces: string[]
+  plans: string[]
+  utterances: SessionIndexUtterance[]
+  /** The session holds an utterance that is not forgotten, MK's or the assistant's. */
+  hasUtterance: boolean
+  statements: string[]
+  observations: string[]
+  commits: SessionIndexCommitRef[]
+  /** Tool refs of the current assistant turns that look like a commit sha or a pull request URL. */
+  toolRefs: Array<{ repo: string | null; ref: string; occurredAt: Date }>
+  /** `<phase>/<task>` for a ruling, the decision id for a decision. */
+  ledger: Array<{ plan: string; id: string }>
+  currentIndex: { id: string; content: string; occurredAt: Date } | null
+}
+
+/** A rendered session index, as engram_session_index_commit takes it. */
+export interface SessionIndexItem {
+  content: string
+  occurredAt: Date
+  projectId: string | null
+  workspaceId: string | null
+  /** The MK utterances the index quotes. */
+  lineage: string[]
+  source: {
+    type: 'transcript' | 'history'
+    session_id: string
+    event_key: string
+    first_event_id: string
+    last_event_id: string
+  }
+  /** The statement and observation ids the text names. */
+  listed: string[]
+  /** The current index the text was rendered against. */
+  replaces: string | null
+}
+
+export interface SessionIndexCommitResult {
+  /** A new index item was stored. */
+  written: boolean
+  /** The session changed after the read; nothing was stored and it stays due. */
+  stale: boolean
+  /** The session's current index after the call. */
+  itemId: string | null
+}
+
 export interface CaptureStore {
   /**
    * Upserts every row, workspaces before projects, and never deletes one: a
@@ -365,7 +450,7 @@ export interface CaptureStore {
    * Up to `limit` (1 to EMBEDDING_BATCH_MAX) items that still need an
    * embedding, oldest first: no embedding, not forgotten, fewer than
    * EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant utterance, and
-   * not a session_index or legacy item.
+   * not a legacy item.
    */
   pendingEmbeddings(limit: number): Promise<PendingEmbedding[]>
 
@@ -450,6 +535,23 @@ export interface CaptureStore {
    * the run running for the caller to fail.
    */
   extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult>
+
+  /**
+   * Up to `limit` (1 to DUE_SESSIONS_LIMIT_MAX) sessions whose index is out
+   * of date and that ended, or received nothing for `idleSeconds` before
+   * `now`, with no event waiting to be materialized; longest idle first.
+   */
+  dueSessions(idleSeconds: number, limit: number, now: Date): Promise<DueSession[]>
+
+  /** What the session's index is rendered from, read in one snapshot. */
+  sessionIndexSource(sessionId: string): Promise<SessionIndexSource>
+
+  /**
+   * Stores the session's rendered index (null: the session has no utterance)
+   * as of event `eventId`: nothing when unchanged or stale, else a new item
+   * superseding the current index, in one transaction.
+   */
+  sessionIndexCommit(sessionId: string, item: SessionIndexItem | null, eventId: number): Promise<SessionIndexCommitResult>
 }
 
 const SQLSTATE = /^[0-9A-Z]{5}$/

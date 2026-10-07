@@ -1,5 +1,6 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import {
+  DUE_SESSIONS_LIMIT_MAX,
   EMBEDDING_BATCH_MAX,
   EXTRACTION_CANDIDATES_LIMIT_MAX,
   EXTRACTION_COMMIT_ITEMS_MAX,
@@ -14,6 +15,7 @@ import {
 import type {
   AnchorKind,
   CaptureStore,
+  DueSession,
   EmbeddingFailure,
   ExtractionBegin,
   ExtractionCandidate,
@@ -34,8 +36,12 @@ import type {
   RawExtractionWindow,
   ScanRow,
   ScanTarget,
+  SessionIndexCommitResult,
+  SessionIndexItem,
+  SessionIndexSource,
   StoredEvent,
 } from '@engram-mem/core'
+import { toCommitIndexItem, toDueSessions, toSessionIndexCommitResult, toSessionIndexSource } from './session-index.js'
 import { isUuid } from './uuid.js'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
@@ -370,6 +376,45 @@ export class PostgRestCaptureStore implements CaptureStore {
     const { data, error } = await this.client.rpc('engram_extraction_commit', { p_run: runId, p_payload: payload })
     if (error) throw toStoreError('extractionCommit', error)
     return toCommitResult(data, commit.items.length)
+  }
+
+  async dueSessions(idleSeconds: number, limit: number, now: Date): Promise<DueSession[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > DUE_SESSIONS_LIMIT_MAX) {
+      throw new Error(`dueSessions: limit must be an integer from 1 to ${DUE_SESSIONS_LIMIT_MAX}`)
+    }
+    if (!Number.isInteger(idleSeconds) || idleSeconds < 0) {
+      throw new Error('dueSessions: idleSeconds must be a whole number of seconds, 0 or more')
+    }
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new Error('dueSessions: now is not a valid date')
+    const { data, error } = await this.client.rpc('engram_due_sessions', {
+      p_idle_seconds: idleSeconds,
+      p_limit: limit,
+      p_now: now.toISOString(),
+    })
+    if (error) throw toStoreError('dueSessions', error)
+    return toDueSessions(data)
+  }
+
+  async sessionIndexSource(sessionId: string): Promise<SessionIndexSource> {
+    const { data, error } = await this.client.rpc('engram_session_index_source', { p_session: sessionId })
+    if (error) throw toStoreError('sessionIndexSource', error)
+    return toSessionIndexSource(data, sessionId)
+  }
+
+  async sessionIndexCommit(
+    sessionId: string,
+    item: SessionIndexItem | null,
+    eventId: number,
+  ): Promise<SessionIndexCommitResult> {
+    const pItem = item === null ? null : toCommitIndexItem(item)
+    if (pItem !== null) refuseUnsafeText('sessionIndexCommit', 'item.', pItem)
+    const { data, error } = await this.client.rpc('engram_session_index_commit', {
+      p_session: sessionId,
+      p_item: pItem,
+      p_event_id: eventId,
+    })
+    if (error) throw toStoreError('sessionIndexCommit', error)
+    return toSessionIndexCommitResult(data)
   }
 }
 

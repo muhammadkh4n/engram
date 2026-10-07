@@ -89,6 +89,7 @@ describe.skipIf(!realPgImage)('re-applying schema.sql over an earlier memory_ite
         'constraint memory_items_version_of_check',
       ])
       expect(once).toMatch(/^index .*\(embedding_attempts < 5\)/m)
+      expect(once).not.toContain('session_index')
       const dumpOnce = await pg.dumpSchema()
 
       await pg.applySchema()
@@ -108,6 +109,23 @@ describe.skipIf(!realPgImage)('re-applying schema.sql over an earlier memory_ite
             WHERE i.source ->> 'event_key' = '${ITEM_KEY}';`,
         ),
       ).toBe('1')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'rebuilds an index that has the attempts clause but still leaves session indexes out',
+    async () => {
+      await pg.psql(`
+        DROP INDEX public.idx_items_pending_embedding;
+        CREATE INDEX idx_items_pending_embedding ON public.memory_items USING btree (created_at, id)
+          WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5
+                 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class NOT IN ('session_index', 'legacy'));`)
+      expect(await shape()).toContain('session_index')
+      await pg.applySchema()
+      const index = (await shape()).split('\n').find((l) => l.startsWith('index '))
+      expect(index).toMatch(/\(embedding_attempts < 5\)/)
+      expect(index).not.toContain('session_index')
     },
     TEST_TIMEOUT_MS,
   )

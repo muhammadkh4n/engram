@@ -39,6 +39,7 @@ export {
   EXTRACTION_WINDOW_RECENT_MAX,
   EXTRACTION_WINDOW_SUBJECTS_MAX,
   EXTRACTION_CANDIDATES_LIMIT_MAX,
+  DUE_SESSIONS_LIMIT_MAX,
   MATERIALIZE_LIMIT_MAX,
   SCAN_TARGETS,
   sqlstateOf,
@@ -71,6 +72,12 @@ export type {
   ScanRow,
   ScanTarget,
   StoredEvent,
+  DueSession,
+  SessionIndexCommitRef,
+  SessionIndexCommitResult,
+  SessionIndexItem,
+  SessionIndexSource,
+  SessionIndexUtterance,
 } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
@@ -344,6 +351,17 @@ export type {
   ParsedDecisions,
   DecisionRelation,
 } from './extraction/decide.js'
+export {
+  buildSessionIndexItem,
+  clipLine,
+  indexTime,
+  renderSessionIndex,
+  runSessionIndexTick,
+  SESSION_INDEX_IDLE_MS,
+  SESSION_INDEX_LINE_MAX_CODE_POINTS,
+  SESSION_INDEX_SESSIONS_PER_TICK,
+} from './extraction/session-index.js'
+export type { SessionIndexStore, SessionIndexTickDeps, SessionIndexTickResult } from './extraction/session-index.js'
 export {
   itemEventKey,
   sessionIndexEventKey,

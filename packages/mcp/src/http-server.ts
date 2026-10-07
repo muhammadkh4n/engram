@@ -181,6 +181,7 @@ export async function main(): Promise<void> {
         }),
         model: captureModel,
       },
+      sessionIndex: { store },
       log,
     })
   }
