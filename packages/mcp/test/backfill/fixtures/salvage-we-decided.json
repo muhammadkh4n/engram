@@ -1,0 +1,33 @@
+{
+  "rows": [
+    {
+      "id": "00000000-0000-4000-8000-000000000c01",
+      "kind": "legacy_episode",
+      "session_id": "tst-salvage-open",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "Asked whether the SQLite adapter should stay in tst-app.",
+      "occurred_at": "2026-03-02T09:00:00Z",
+      "forgotten_at": null,
+      "retired_at": null,
+      "role": "user",
+      "producer": "claude-code-hook",
+      "legacy_superseded_by": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000c02",
+      "kind": "legacy_episode",
+      "session_id": "tst-salvage-open",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "Done. We decided to drop SQLite: the store runs on Postgres only, and the SQLite adapter is gone from tst-app/src/store.ts.",
+      "occurred_at": "2026-03-02T09:01:30Z",
+      "forgotten_at": null,
+      "retired_at": null,
+      "role": "assistant",
+      "producer": "claude-code-hook-stop",
+      "legacy_superseded_by": null
+    }
+  ],
+  "reply": "{\"observations\":[{\"claim\":\"We decided to drop SQLite\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]},{\"claim\":\"The store runs on Postgres only\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]}]}"
+}
