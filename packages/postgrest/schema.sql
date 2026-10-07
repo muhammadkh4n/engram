@@ -2523,13 +2523,17 @@ DROP TRIGGER IF EXISTS memory_capture_events_session_activity ON public.memory_c
 CREATE TRIGGER memory_capture_events_session_activity AFTER INSERT ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.engram_track_session_activity();
 
 -- Events stored before the trigger existed fold into their sessions' rows
--- here. The fold is idempotent, so re-applying the file changes nothing.
+-- here. The fold is idempotent, so re-applying the file changes nothing. It
+-- writes the rows in session_id order, the order every multi-row writer of
+-- memory_session_state locks them in, so an apply during live capture cannot
+-- deadlock with an ingest.
 INSERT INTO public.memory_session_state AS s
        (session_id, first_event_at, last_event_at, last_event_id, last_received_at, ended_at)
 SELECT c.session_id, min(c.occurred_at), max(c.occurred_at), max(c.id), max(c.received_at),
        max(c.occurred_at) FILTER (WHERE c.type = 'session_end')
   FROM public.memory_capture_events c
  GROUP BY c.session_id
+ ORDER BY c.session_id
 ON CONFLICT (session_id) DO UPDATE
    SET first_event_at = least(s.first_event_at, EXCLUDED.first_event_at),
        last_event_at = greatest(s.last_event_at, EXCLUDED.last_event_at),
@@ -3234,6 +3238,27 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_capture_ingest: every event must be an object with exactly session_id, event_uuid, type, occurred_at, cwd, project, plan_dirs, client, payload, scrub and hits, of their types';
   END IF;
+
+  -- Every event's AFTER INSERT trigger upserts its session's state row, and
+  -- that row lock is held to the end of the call. Taken in event order, two
+  -- batches naming sessions A and B in opposite orders, or a batch and an
+  -- extraction commit resetting both rows, would each hold one row and wait
+  -- for the other: a deadlock (40P01). So the batch's session rows are locked
+  -- first, in session_id order, the order every multi-row writer of
+  -- memory_session_state uses. A session with no row yet gets one here; ON
+  -- CONFLICT DO UPDATE locks a row another call created, and waits for it if
+  -- that call has not committed. The new row starts at values every fold
+  -- below replaces: least() and greatest() take the first stored event's
+  -- times and id. The session has no stored event (an event always comes
+  -- with its row), so the batch's first event of it is stored and folded.
+  -- Locking a session before any of its events is inserted also keeps two
+  -- calls from blocking each other on an event key of one session.
+  INSERT INTO public.memory_session_state AS s
+         (session_id, first_event_at, last_event_at, last_event_id, last_received_at)
+  SELECT DISTINCT e.r ->> 'session_id', 'infinity'::timestamptz, '-infinity'::timestamptz, 0, '-infinity'::timestamptz
+    FROM jsonb_array_elements(p_events) AS e(r)
+   ORDER BY 1
+  ON CONFLICT (session_id) DO UPDATE SET last_event_id = s.last_event_id;
 
   FOR v_event, v_ord IN SELECT e.r, e.n FROM jsonb_array_elements(p_events) WITH ORDINALITY AS e(r, n) ORDER BY e.n
   LOOP
@@ -4826,6 +4851,7 @@ DECLARE
   v_insert jsonb;
   v_count integer;
   v_ids uuid[] := '{}'::uuid[];
+  v_sessions text[];
   v_added boolean[] := '{}'::boolean[];
   v_restating boolean[] := '{}'::boolean[];
   v_to_insert jsonb;
@@ -5230,13 +5256,21 @@ BEGIN
   -- A session index lists its session's current statements and observations,
   -- so every session whose list this commit changed (the sessions of the items
   -- it stored or pointed at, and of the items they superseded) gets
-  -- indexed_event_id 0, which makes it due for a rebuild.
+  -- indexed_event_id 0, which makes it due for a rebuild. The rows are locked
+  -- in session_id order first, as engram_capture_ingest locks them: an UPDATE
+  -- alone locks in scan order, and could deadlock with an ingest naming the
+  -- same sessions.
+  v_sessions := ARRAY(SELECT DISTINCT i.session_id
+                        FROM public.memory_items i
+                       WHERE (i.id = ANY (v_ids) OR i.superseded_by = ANY (v_ids)) AND i.session_id IS NOT NULL);
+  PERFORM 1 FROM public.memory_session_state st
+   WHERE st.session_id = ANY (v_sessions)
+   ORDER BY st.session_id
+     FOR UPDATE;
   UPDATE public.memory_session_state st
      SET indexed_event_id = 0
    WHERE st.indexed_event_id <> 0
-     AND st.session_id IN (SELECT i.session_id
-                             FROM public.memory_items i
-                            WHERE i.id = ANY (v_ids) OR i.superseded_by = ANY (v_ids));
+     AND st.session_id = ANY (v_sessions);
 
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
