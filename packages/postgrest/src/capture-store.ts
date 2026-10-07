@@ -23,6 +23,11 @@ import type {
   ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
+  ExtractionReplaceResult,
+  ExtractionRerunStore,
+  ExtractionSession,
+  ExtractionSessionQuery,
+  SessionAnchor,
   ExtractionFailure,
   ExtractionItem,
   ExtractionRetractions,
@@ -42,6 +47,7 @@ import type {
   StoredEvent,
 } from '@engram-mem/core'
 import { toCommitIndexItem, toDueSessions, toSessionIndexCommitResult, toSessionIndexSource } from './session-index.js'
+import { toExtractionSessions, toReplaceExtras, toSessionAnchors } from './extraction-rerun.js'
 import { isUuid } from './uuid.js'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
@@ -78,7 +84,7 @@ interface PgError {
  * Errors carry the code and message only, never PostgREST's `details`, which
  * can hold the failing row.
  */
-export class PostgRestCaptureStore implements CaptureStore {
+export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore {
   private readonly client: PostgrestClient
 
   constructor(opts: PostgRestCaptureStoreOptions) {
@@ -369,22 +375,46 @@ export class PostgRestCaptureStore implements CaptureStore {
   }
 
   async extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
-    if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
-      throw refusedData(
-        `extractionCommit: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
-        INVALID_PARAMETER_VALUE,
-      )
-    }
-    const payload = {
-      subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
-      items: commit.items.map(toCommitItem),
-      retractions: toCommitRetractions(commit.retractions ?? []),
-      stats: commit.stats,
-    }
-    refuseUnsafeText('extractionCommit', '', payload)
+    const payload = commitPayload('extractionCommit', commit)
     const { data, error } = await this.client.rpc('engram_extraction_commit', { p_run: runId, p_payload: payload })
     if (error) throw toStoreError('extractionCommit', error)
     return toCommitResult(data, commit.items.length)
+  }
+
+  async extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult> {
+    const payload = commitPayload('extractionReplace', commit)
+    const { data, error } = await this.client.rpc('engram_extraction_replace', { p_run: runId, p_payload: payload })
+    if (error) throw toStoreError('extractionReplace', error)
+    return { ...toCommitResult(data, commit.items.length), ...toReplaceExtras(data) }
+  }
+
+  async extractionSessions(query: ExtractionSessionQuery): Promise<ExtractionSession[]> {
+    const { sessionId, since, idleMs, now } = query
+    if ((sessionId === null) === (since === null)) {
+      throw new Error('extractionSessions: give exactly one of sessionId and since')
+    }
+    if (since !== null && Number.isNaN(since.getTime())) throw new Error('extractionSessions: since is not a valid date')
+    if (!Number.isSafeInteger(idleMs) || idleMs < 1000 || idleMs % 1000 !== 0) {
+      throw new Error('extractionSessions: idleMs must be a whole number of seconds, at least 1000')
+    }
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new Error('extractionSessions: now is not a valid date')
+    const { data, error } = await this.client.rpc('engram_extraction_sessions', {
+      p_session: sessionId,
+      p_since: since === null ? null : since.toISOString(),
+      p_idle_seconds: idleMs / 1000,
+      p_now: now.toISOString(),
+    })
+    if (error) throw toStoreError('extractionSessions', error)
+    return toExtractionSessions(data)
+  }
+
+  async extractionSessionAnchors(version: string, sessionId: string): Promise<SessionAnchor[]> {
+    const { data, error } = await this.client.rpc('engram_extraction_session_anchors', {
+      p_version: version,
+      p_session: sessionId,
+    })
+    if (error) throw toStoreError('extractionSessionAnchors', error)
+    return toSessionAnchors(data)
   }
 
   async dueSessions(idleSeconds: number, limit: number, now: Date): Promise<DueSession[]> {
@@ -603,6 +633,7 @@ function toCommitResult(data: unknown, itemCount: number): ExtractionCommitResul
   const unexpected = new Error('extractionCommit failed: the RPC returned an unexpected result')
   if (!isRecord(data)) throw unexpected
   const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates, restatements } = data
+  const linksApplied = data.links_applied
   if (
     !Array.isArray(itemIds) ||
     itemIds.length !== itemCount ||
@@ -610,11 +641,36 @@ function toCommitResult(data: unknown, itemCount: number): ExtractionCommitResul
     !isCount(subjectsCreated) ||
     !isCount(duplicates) ||
     !isCount(restatements) ||
-    duplicates + restatements > itemCount
+    duplicates + restatements > itemCount ||
+    (linksApplied !== undefined && !isCount(linksApplied))
   ) {
     throw unexpected
   }
-  return { itemIds: itemIds as string[], subjectsCreated, duplicates, restatements }
+  return {
+    itemIds: itemIds as string[],
+    subjectsCreated,
+    duplicates,
+    restatements,
+    ...(linksApplied === undefined ? {} : { linksApplied }),
+  }
+}
+
+/** The commit payload engram_extraction_commit and engram_extraction_replace take, checked before it is sent. */
+function commitPayload(operation: string, commit: ExtractionCommit): Record<string, unknown> {
+  if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
+    throw refusedData(
+      `${operation}: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
+      INVALID_PARAMETER_VALUE,
+    )
+  }
+  const payload = {
+    subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
+    items: commit.items.map(toCommitItem),
+    retractions: toCommitRetractions(commit.retractions ?? []),
+    stats: commit.stats,
+  }
+  refuseUnsafeText(operation, '', payload)
+  return payload
 }
 
 function isCount(value: unknown): value is number {

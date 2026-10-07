@@ -328,6 +328,8 @@ export interface ExtractionCommitResult {
   subjectsCreated: number
   duplicates: number
   restatements: number
+  /** Links the commit applied: supersessions and link rows; absent from a store that does not report it. */
+  linksApplied?: number
 }
 
 /**
@@ -562,6 +564,70 @@ export interface CaptureStore {
    * superseding the current index, in one transaction.
    */
   sessionIndexCommit(sessionId: string, item: SessionIndexItem | null, eventId: number): Promise<SessionIndexCommitResult>
+}
+
+/** Which sessions an operator re-run of extraction covers: exactly one of `sessionId` and `since`. */
+export interface ExtractionSessionQuery {
+  sessionId: string | null
+  /** Every session with an MK utterance at or after this time. */
+  since: Date | null
+  /** A session with no capture event received for this long may be closed (a whole number of seconds, at least one). */
+  idleMs: number
+  now: Date
+}
+
+/** A session a re-run covers, oldest first. */
+export interface ExtractionSession {
+  sessionId: string
+  /** Its earliest MK utterance in the range, or null when it holds none. */
+  firstAt: Date | null
+  /** False while the session is live: its windows belong to the worker. */
+  due: boolean
+}
+
+/** One window of a session at a version, in the order the worker runs them. */
+export interface SessionAnchor {
+  anchorId: string
+  anchorKind: AnchorKind
+  occurredAt: Date
+  /** A run at the version succeeded on it. */
+  succeeded: boolean
+  /** A run still open on it, held by another process until it closes. */
+  runningRunId: string | null
+}
+
+/** A live item a replace re-pointed (`to` set) or restored (`to` null) after retiring its successor `from`. */
+export interface ReplacedSupersession {
+  item: string
+  from: string
+  to: string | null
+}
+
+/** What a replace did on top of the commit's own result. */
+export interface ExtractionReplaceResult extends ExtractionCommitResult {
+  /** Old-version items of the window the new run did not reproduce, now retired. */
+  retired: string[]
+  restored: ReplacedSupersession[]
+  /** Unreproduced old-version items MK recorded in a register: never retired. */
+  keptRecorded: string[]
+  /** Old-version restatement times removed from their targets. */
+  unrestated: number
+}
+
+/**
+ * The reads and the replace an operator re-run of extraction needs on top of
+ * the worker's extraction calls.
+ */
+export interface ExtractionRerunStore {
+  extractionSessions(query: ExtractionSessionQuery): Promise<ExtractionSession[]>
+  /** Every window of the session at `version`, in run order, with its run state. */
+  extractionSessionAnchors(version: string, sessionId: string): Promise<SessionAnchor[]>
+  /**
+   * Commits the run like extractionCommit after retiring the window's
+   * old-version items the commit does not reproduce, handing back what they
+   * superseded and removing their restatement times, in one transaction.
+   */
+  extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult>
 }
 
 const SQLSTATE = /^[0-9A-Z]{5}$/

@@ -325,7 +325,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction links through Postg
 
     const repeat = statement(again!, 'Postgres  only', storage)
     const { run, result } = await commit(again!, [repeat])
-    expect(result).toEqual({ itemIds: [newRule.id], subjectsCreated: 0, duplicates: 0, restatements: 1 })
+    expect(result).toEqual({ itemIds: [newRule.id], subjectsCreated: 0, duplicates: 0, restatements: 1, linksApplied: 0 })
     expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe('1')
     expect(await row(newRule.id)).toMatchObject({ superseded_by: null, restated_at: ['2026-10-05T11:30:00Z'] })
     expect((await runStats(run))['restatements']).toEqual([
