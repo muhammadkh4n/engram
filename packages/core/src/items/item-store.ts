@@ -1,4 +1,12 @@
-import type { ForgetEffect, InsertedItem, InvariantCounts, MemoryItem, NewItem } from './types.js'
+import type {
+  ForgetEffect,
+  ForgottenMemory,
+  InsertedItem,
+  InvariantCounts,
+  ItemActionResult,
+  MemoryItem,
+  NewItem,
+} from './types.js'
 
 /**
  * Storage for typed memory items. The database enforces the item invariants
@@ -19,10 +27,22 @@ export interface ItemStore {
    * only. At most 50 ids per call; more are refused before any write.
    */
   forgetItems(ids: readonly string[], reason: string): Promise<ForgetEffect[]>
-  /** Returns the ids it retired. At most 50 ids per call; more are refused before any write. */
-  retireItems(ids: readonly string[], reason: string): Promise<string[]>
-  /** Returns the ids it unretired. At most 50 ids per call; more are refused before any write. */
-  unretireItems(ids: readonly string[]): Promise<string[]>
+  /**
+   * Forgets items and old-table rows by id, with everything derived from
+   * them through item lineage, the old tables' source ids and the legacy
+   * copies between the two, in one transaction that also writes the audit
+   * row naming `channel`. At most 50 distinct ids; more are refused before
+   * any write.
+   */
+  forgetMemories(ids: readonly string[], reason: string, channel: string): Promise<ForgottenMemory[]>
+  /**
+   * Retires items and writes the audit row in one transaction. One result
+   * per distinct id, in the order given; a malformed id is `not_found`. At
+   * most 50 distinct ids; more are refused before any write.
+   */
+  retireItems(ids: readonly string[], reason: string, channel: string): Promise<ItemActionResult[]>
+  /** Unretires items, clearing the reason, and writes the audit row with `reason`; results as retireItems. */
+  unretireItems(ids: readonly string[], reason: string, channel: string): Promise<ItemActionResult[]>
   /** False when `oldId` is already superseded by `newId`. One pair per call. */
   supersedeItem(oldId: string, newId: string): Promise<boolean>
   invariantCounts(): Promise<InvariantCounts>

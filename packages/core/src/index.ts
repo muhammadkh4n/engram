@@ -10,6 +10,8 @@ export {
   ENTITY_TYPES,
   CAPTURE_EVENT_TYPES,
   ITEM_INVARIANTS,
+  FORGET_STORES,
+  ITEM_ACTION_OUTCOMES,
 } from './items/types.js'
 export type {
   ItemClass,
@@ -26,6 +28,10 @@ export type {
   NewItem,
   InsertedItem,
   ForgetEffect,
+  ForgetStore,
+  ForgottenMemory,
+  ItemActionOutcome,
+  ItemActionResult,
   InvariantCounts,
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'

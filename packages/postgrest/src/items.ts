@@ -2,7 +2,11 @@ import { PostgrestClient } from '@supabase/postgrest-js'
 import { ITEM_INVARIANTS, ItemConstraintError, findPostgresUnsafeText, generateId } from '@engram-mem/core'
 import type {
   ForgetEffect,
+  ForgetStore,
+  ForgottenMemory,
   InsertedItem,
+  ItemActionOutcome,
+  ItemActionResult,
   InvariantCounts,
   ItemClass,
   ItemInvariant,
@@ -19,7 +23,10 @@ import { isUuid, onlyUuids } from './uuid.js'
 
 /** engram_insert_items refuses more objects than this in one call. */
 const MAX_INSERT_ITEMS = 500
-/** engram_forget_items, engram_retire_items and engram_unretire_items refuse more ids than this. */
+/**
+ * engram_forget_items refuses more ids than this; engram_forget_memories,
+ * engram_retire_memories and engram_unretire_memories more distinct ids.
+ */
 const MAX_IDS_PER_CALL = 50
 /** Ids per `in.(…)` filter, which travels in the request URL. */
 const GET_CHUNK_SIZE = 100
@@ -61,6 +68,21 @@ interface ForgetRow {
   item_id: string
   effect: ForgetEffect['effect']
   via: string | null
+}
+
+interface ForgottenRow {
+  id: string
+  store: ForgetStore
+  kind: string
+  requested: boolean
+  via: string | null
+  effect: ForgetEffect['effect']
+}
+
+interface OutcomeRow {
+  id: string
+  outcome: ItemActionOutcome
+  register_ref: string | null
 }
 
 interface CountRow {
@@ -155,21 +177,57 @@ export class PostgRestItemStore implements ItemStore {
     return ((data ?? []) as ForgetRow[]).map((row) => ({ itemId: row.item_id, effect: row.effect, via: row.via }))
   }
 
-  async retireItems(ids: readonly string[], reason: string): Promise<string[]> {
-    const pIds = idsForCall('retireItems', ids)
+  async forgetMemories(ids: readonly string[], reason: string, channel: string): Promise<ForgottenMemory[]> {
+    const pIds = distinctIdsForCall('forgetMemories', ids)
     if (pIds.length === 0) return []
-    refuseUnsafeText('retireItems', '', { reason })
-    const { data, error } = await this.rpcRetryingRollbacks('engram_retire_items', { p_ids: pIds, p_reason: reason })
-    if (error) throw toStoreError('retireItems', error)
-    return (data ?? []) as string[]
+    refuseUnsafeText('forgetMemories', '', { reason, channel })
+    const { data, error } = await this.rpcRetryingRollbacks('engram_forget_memories', {
+      p_ids: pIds,
+      p_reason: reason,
+      p_channel: channel,
+    })
+    if (error) throw toStoreError('forgetMemories', error)
+    return ((data ?? []) as ForgottenRow[]).map((row) => ({
+      id: row.id,
+      store: row.store,
+      kind: row.kind,
+      requested: row.requested,
+      via: row.via,
+      effect: row.effect,
+    }))
   }
 
-  async unretireItems(ids: readonly string[]): Promise<string[]> {
-    const pIds = idsForCall('unretireItems', ids)
-    if (pIds.length === 0) return []
-    const { data, error } = await this.rpcRetryingRollbacks('engram_unretire_items', { p_ids: pIds })
-    if (error) throw toStoreError('unretireItems', error)
-    return (data ?? []) as string[]
+  async retireItems(ids: readonly string[], reason: string, channel: string): Promise<ItemActionResult[]> {
+    return this.itemAction('retireItems', 'engram_retire_memories', ids, reason, channel)
+  }
+
+  async unretireItems(ids: readonly string[], reason: string, channel: string): Promise<ItemActionResult[]> {
+    return this.itemAction('unretireItems', 'engram_unretire_memories', ids, reason, channel)
+  }
+
+  /**
+   * One result per distinct id, in the order given. A malformed id cannot
+   * name a row, so it is reported not_found without being sent.
+   */
+  private async itemAction(
+    operation: string,
+    fn: string,
+    ids: readonly string[],
+    reason: string,
+    channel: string,
+  ): Promise<ItemActionResult[]> {
+    const distinct = [...new Set(ids.map((id) => (isUuid(id) ? id.toLowerCase() : id)))]
+    const pIds = distinctIdsForCall(operation, distinct)
+    refuseUnsafeText(operation, '', { reason, channel })
+    const byId = new Map<string, ItemActionResult>()
+    if (pIds.length > 0) {
+      const { data, error } = await this.rpcRetryingRollbacks(fn, { p_ids: pIds, p_reason: reason, p_channel: channel })
+      if (error) throw toStoreError(operation, error)
+      for (const row of (data ?? []) as OutcomeRow[]) {
+        byId.set(row.id, { id: row.id, outcome: row.outcome, registerRef: row.register_ref })
+      }
+    }
+    return distinct.map((id) => byId.get(id) ?? { id, outcome: 'not_found', registerRef: null })
   }
 
   async supersedeItem(oldId: string, newId: string): Promise<boolean> {
@@ -229,6 +287,18 @@ function refuseUnsafeText(operation: string, prefix: string, value: Record<strin
  */
 function idsForCall(operation: string, ids: readonly string[]): string[] {
   const pIds = onlyUuids(ids)
+  if (pIds.length > MAX_IDS_PER_CALL) {
+    throw new Error(`${operation} failed: ${pIds.length} ids, at most ${MAX_IDS_PER_CALL} per call`)
+  }
+  return pIds
+}
+
+/**
+ * The distinct uuids of `ids`, lowercased as PostgreSQL returns them, refused
+ * before any request when there are more than one call takes.
+ */
+function distinctIdsForCall(operation: string, ids: readonly string[]): string[] {
+  const pIds = [...new Set(onlyUuids(ids).map((id) => id.toLowerCase()))]
   if (pIds.length > MAX_IDS_PER_CALL) {
     throw new Error(`${operation} failed: ${pIds.length} ids, at most ${MAX_IDS_PER_CALL} per call`)
   }

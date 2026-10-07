@@ -190,5 +190,46 @@ export interface ForgetEffect {
   via: string | null
 }
 
+/** The tables a forget by id reaches: the item store and, until the cutover, the old tiers. */
+export const FORGET_STORES = [
+  'memory_items',
+  'memory_episodes',
+  'memory_digests',
+  'memory_semantic',
+  'memory_procedural',
+] as const
+export type ForgetStore = (typeof FORGET_STORES)[number]
+
+/**
+ * One id a forget by id reached. `kind` is `class/kind` for an item and the
+ * old tier (episode, digest, semantic, procedural) for an old row. `via` is
+ * null for a requested id, else the id that pulled this one in; for a
+ * repointed or restored item it is the forgotten successor. A requested id
+ * that was already forgotten is reported again; one found nowhere is absent.
+ */
+export interface ForgottenMemory {
+  id: string
+  store: ForgetStore
+  kind: string
+  requested: boolean
+  via: string | null
+  effect: ForgetEffect['effect']
+}
+
+/**
+ * What a retire or unretire did to one id: `retired` or `unretired`;
+ * `unchanged` when the item was already in that state; `forgotten`;
+ * `old_row` for an id of the old tables, which have no retire; `not_found`.
+ */
+export const ITEM_ACTION_OUTCOMES = ['retired', 'unretired', 'unchanged', 'forgotten', 'old_row', 'not_found'] as const
+export type ItemActionOutcome = (typeof ITEM_ACTION_OUTCOMES)[number]
+
+/** One id of a retire or unretire. `registerRef` names where a retired statement is recorded, else null. */
+export interface ItemActionResult {
+  id: string
+  outcome: ItemActionOutcome
+  registerRef: string | null
+}
+
 /** Violations per invariant; every invariant holds when all are zero. */
 export type InvariantCounts = Readonly<Record<ItemInvariant, number>>

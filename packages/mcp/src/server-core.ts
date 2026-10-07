@@ -19,7 +19,6 @@ import {
 import {
   createMemory,
   startConsolidationWorker,
-  MAX_FORGET_IDS,
   recallOutputPolicyFromEnv,
   DEFAULT_RELATED_SHARE,
   degradedRecallNotice,
@@ -32,17 +31,22 @@ import type {
   StorageAdapter,
   IntelligenceAdapter,
   GraphPort,
-  ForgetPreview,
-  ForgetByIdsResult,
   RecallOutputPolicy,
   SupersessionSettings,
 } from '@engram-mem/core'
-import { PostgRestCaptureStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
+import { PostgRestCaptureStore, PostgRestItemStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, assertTimeZone, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
 import { defaultSecretRegistry } from '@engram-mem/core'
-import type { ItemIngestStore, Memory } from '@engram-mem/core'
+import type { ItemIngestStore, ItemStore, Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
+import {
+  MEMORY_FORGET_TOOL,
+  MEMORY_RETIRE_TOOL,
+  MEMORY_UNRETIRE_TOOL,
+  runMemoryForget,
+  runMemoryRetire,
+} from './item-action-tools.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
 import { recallLogFromEnv } from './recall-log.js'
@@ -364,6 +368,10 @@ interface MemoryStack {
   recallLog: RecallLog | null
   /** The typed item store memory_ingest reads from and writes to. */
   items: ItemIngestStore
+  /** The item store memory_forget, memory_retire and memory_unretire write through. */
+  itemStore: ItemStore
+  /** Neo4j, when configured and reachable at startup; a forget stamps its old-table ids there. */
+  graph: GraphPort | null
 }
 
 const getMemoryStack = sharedInit(buildMemoryStack)
@@ -492,7 +500,8 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // Same PostgREST endpoint and key as the memory's storage: typed items live
   // in the same database.
   const items = new PostgRestCaptureStore({ url: supabaseUrl, key: supabaseKey })
-  return { memory, storage, intelligence, recallLog, items }
+  const itemStore = new PostgRestItemStore({ url: supabaseUrl, key: supabaseKey })
+  return { memory, storage, intelligence, recallLog, items, itemStore, graph }
 }
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
@@ -556,30 +565,9 @@ const TOOLS = [
     },
   },
   MEMORY_INGEST_TOOL,
-  {
-    name: 'memory_forget',
-    description:
-      'Forget memories in two steps. Call with query to preview: it lists the matching memories (id, tier, date, relevance, text) and never deletes anything. ' +
-      'Then call with ids set to the ones to remove: exactly those memories are tombstoned, nothing else. ' +
-      'A tombstoned memory is hidden from every recall path; the row stays in storage, so a forget is reversible there. ' +
-      `Pass exactly one of query or ids (at most ${MAX_FORGET_IDS} ids per call).`,
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Describes what to forget. Previews candidates only; nothing is deleted.',
-        },
-        ids: {
-          type: 'array',
-          items: { type: 'string' },
-          minItems: 1,
-          maxItems: MAX_FORGET_IDS,
-          description: 'Memory ids to tombstone, taken from a preview. Only these ids are forgotten.',
-        },
-      },
-    },
-  },
+  MEMORY_FORGET_TOOL,
+  MEMORY_RETIRE_TOOL,
+  MEMORY_UNRETIRE_TOOL,
   {
     name: 'memory_timeline',
     description:
@@ -747,10 +735,6 @@ export function formatRecallTimingLine(
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
 
-type ForgetRequest = { query: string } | { ids: string[] } | { error: string }
-
-const FORGET_PREVIEW_TEXT_CHARS = 160
-
 function toolText(text: string): ToolTextResult {
   return { content: [{ type: 'text' as const, text }] }
 }
@@ -813,73 +797,6 @@ export async function runMemoryRecall(
   return toolText(result.formatted)
 }
 
-/** memory_forget takes a query (preview) or ids (tombstone), never both, so a
- *  single call can never search and delete at once. */
-function parseForgetArgs(args: Record<string, unknown>): ForgetRequest {
-  const query = args['query']
-  const ids = args['ids']
-  const hasQuery = query !== undefined && query !== null
-  const hasIds = ids !== undefined && ids !== null
-  if (hasQuery === hasIds) {
-    return { error: 'pass exactly one of query or ids (query previews, ids forget)' }
-  }
-  if (hasQuery) {
-    if (typeof query !== 'string' || query.trim().length === 0) {
-      return { error: 'query must be a non-empty string' }
-    }
-    return { query: query.trim() }
-  }
-  if (!Array.isArray(ids) || ids.length === 0) {
-    return { error: 'ids must be a non-empty array of memory ids' }
-  }
-  if (!ids.every((id): id is string => typeof id === 'string' && id.trim().length > 0)) {
-    return { error: 'every id must be a non-empty string' }
-  }
-  return { ids }
-}
-
-export function formatForgetPreview(preview: ForgetPreview): string {
-  if (preview.candidates.length === 0) return 'No matching memories found.'
-  const lines = preview.candidates.map((c) => {
-    const tag = c.date ? `${c.type} · ${c.date}` : c.type
-    const text = c.content.replace(/\s+/g, ' ').trim().slice(0, FORGET_PREVIEW_TEXT_CHARS)
-    return `- [${tag}] ${c.id} · relevance ${c.relevance.toFixed(2)} · ${text}`
-  })
-  const n = preview.candidates.length
-  return [
-    `Preview: ${n} matching memor${n === 1 ? 'y' : 'ies'}. Nothing was forgotten.`,
-    ...lines,
-    'To forget, call memory_forget again with ids set to the ones to remove.',
-  ].join('\n')
-}
-
-export function formatForgetByIds(result: ForgetByIdsResult): string {
-  const sections: Array<[string, string[]]> = [
-    ['Forgotten', result.forgotten.map((f) => `${f.id} (${f.type})`)],
-    ['Not found', result.notFound],
-    ['Out of scope', result.outOfScope],
-  ]
-  const summary =
-    `Forgot ${result.forgotten.length}; not found ${result.notFound.length}; ` +
-    `out of scope ${result.outOfScope.length}.`
-  const detail = sections
-    .filter(([, list]) => list.length > 0)
-    .map(([label, list]) => `${label} (${list.length}): ${list.join(', ')}`)
-  return [summary, ...detail].join('\n')
-}
-
-/** The memory_forget tool body, separated from the server so it can run
- *  against any object with the two forget entry points. */
-export async function runMemoryForget(
-  mem: Pick<Memory, 'forget' | 'forgetByIds'>,
-  args: Record<string, unknown>,
-): Promise<ToolTextResult> {
-  const request = parseForgetArgs(args)
-  if ('error' in request) return toolError(request.error)
-  if ('query' in request) return toolText(formatForgetPreview(await mem.forget(request.query)))
-  return toolText(formatForgetByIds(await mem.forgetByIds(request.ids)))
-}
-
 export function createEngramServer(): Server {
   const server = new Server(
     { name: 'engram-memory', version: PACKAGE_VERSION },
@@ -915,7 +832,13 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_forget') {
-        return await runMemoryForget(mem, args)
+        const { itemStore, graph } = await getMemoryStack()
+        return await runMemoryForget({ preview: (query) => mem.forget(query), store: itemStore, graph }, args)
+      }
+
+      if (name === 'memory_retire' || name === 'memory_unretire') {
+        const { itemStore } = await getMemoryStack()
+        return await runMemoryRetire({ store: itemStore }, name === 'memory_retire' ? 'retire' : 'unretire', args)
       }
 
       if (name === 'memory_timeline') {

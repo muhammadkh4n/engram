@@ -221,14 +221,31 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     const item = commit('docs: describe the release steps', 0)
     await store.insertItems([item])
 
-    expect(await store.retireItems([item.id!], 'steps changed')).toEqual([item.id])
-    expect(await store.retireItems([item.id!], 'steps changed')).toEqual([])
+    expect(await store.retireItems([item.id!], 'steps changed', 'mcp')).toEqual([
+      { id: item.id, outcome: 'retired', registerRef: null },
+    ])
+    expect(await store.retireItems([item.id!], 'steps changed', 'mcp')).toEqual([
+      { id: item.id, outcome: 'unchanged', registerRef: null },
+    ])
     const [retired] = await store.getItems([item.id!])
     expect(retired).toMatchObject({ retiredReason: 'steps changed', retiredAt: expect.any(Date) })
 
-    expect(await store.unretireItems([item.id!])).toEqual([item.id])
+    expect(await store.unretireItems([item.id!], 'steps restored', 'mcp')).toEqual([
+      { id: item.id, outcome: 'unretired', registerRef: null },
+    ])
     const [back] = await store.getItems([item.id!])
     expect(back).toMatchObject({ retiredAt: null, retiredReason: null })
+  }, TEST_TIMEOUT_MS)
+
+  it('forgets an item by id with its lineage through forgetMemories', async () => {
+    const said = utterance('Tag every release from main.', { id: newId() })
+    const ruled = statement('Tag every release from main.', [said.id!], { id: newId() })
+    await store.insertItems([said, ruled])
+
+    expect(await store.forgetMemories([said.id!, 'not-a-uuid'], 'tagged in the wrong repo', 'mcp')).toEqual([
+      { id: said.id, store: 'memory_items', kind: 'utterance/user_prompt', requested: true, via: null, effect: 'forgotten' },
+      { id: ruled.id, store: 'memory_items', kind: 'mk_statement/ruling', requested: false, via: said.id, effect: 'forgotten' },
+    ])
   }, TEST_TIMEOUT_MS)
 
   it('supersedes an item, restores it when the successor is forgotten, and refuses an earlier successor', async () => {
@@ -347,7 +364,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore on a server
       occurredAt: new Date('1800-01-01T12:00:00Z'),
     })
     await store.insertItems([item])
-    await store.retireItems([item.id!], 'tst: retired to read a second time back')
+    await store.retireItems([item.id!], 'tst: retired to read a second time back', 'mcp')
 
     const [stored] = await store.getItems([item.id!])
 
