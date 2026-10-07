@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,6 +22,7 @@ const TOKEN = 'test-capture-token'
 const SECRET = 'zr4-dead-letter-secret-8812'
 // A quote, a backslash and a tab: inside a JSON line the value appears only in its escaped spelling.
 const ESCAPED_SECRET = 'qk7"dead\\letter\tvalue-3390'
+const UNREGISTERED_TOKEN = 'Zq7madeupNotReal91xAbc'
 
 // The secret registry is built once per process from process.env, on the
 // first scrub, so its source must be in place before any test runs.
@@ -390,6 +392,35 @@ describe('drainSpool', () => {
     expect(letter!.reason).toBe('unscrubbable_event')
     expect(JSON.parse(letter!.event)).toEqual({ cwd: '/home/tester', text: 'run this first\n[REDACTED:anthropic-key]' })
     expect(readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')).not.toContain(token)
+  })
+
+  it.each([
+    ['too-deep', (): unknown => {
+      let deep: unknown = `leaf ${SECRET}`
+      for (let i = 0; i < 200; i++) deep = [deep]
+      return { cwd: '/home/tester', deep }
+    }],
+    ['key-collision', (): unknown => ({ cwd: '/home/tester', [SECRET]: 'a', '[REDACTED:FIXTURE_SECRET]': 'b' })],
+    // A made-up bearer token that is not registered: only the whole-text pass reads it beside its header name.
+    ['missed-by-walk', (): unknown => ({ cwd: '/home/tester', headers: [['Authorization', `Bearer ${UNREGISTERED_TOKEN}`]], note: SECRET })],
+  ])('keeps only the length and sha256 of a parseable line the walk refuses (%s)', async (_reason, build) => {
+    const [path] = await writeSpoolBatch(SESSION, [prompt(2)], { root })
+    const malformed = JSON.stringify(build())
+    writeFileSync(path!, `${malformed}\n${readFileSync(path!, 'utf8')}`)
+
+    const result = await drainSpool({ env })
+
+    expect(result).toMatchObject({ files_sent: 1, accepted: 1, dead: 1, remaining: 0 })
+    const [letter] = deadLetters() as unknown as Array<Record<string, unknown>>
+    expect(letter).toEqual({
+      at: expect.any(String),
+      reason: 'unscrubbable_event',
+      length: malformed.length,
+      sha256: createHash('sha256').update(malformed, 'utf8').digest('hex'),
+    })
+    const written = readFileSync(join(root, '.dead', `${SESSION}.jsonl`), 'utf8')
+    expect(written).not.toContain(SECRET)
+    expect(written).not.toContain(UNREGISTERED_TOKEN)
   })
 
   it('refreshes its lock before each file, so a drain past the stale age keeps it', async () => {

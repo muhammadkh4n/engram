@@ -299,11 +299,12 @@ interface Prepared {
 }
 
 /**
- * The line with its secrets masked. A line that parses is walked member by
- * member and serialized again: scrubbing the serialized text would read each
- * string escaped (a newline as `\n`, hiding a token at a line start) and miss
- * an env or JSON block held inside a value. Only an unparsable line is
- * scrubbed as text. A walk that refuses throws, like a scrub that fails.
+ * The line with its secrets masked. A line that parses passes every scrub view
+ * (scrubStructured) and is serialized again: scrubbing only the serialized
+ * text would read each string escaped (a newline as `\n`, hiding a token at a
+ * line start) and miss an env or JSON block held inside a value. Only an
+ * unparsable line is scrubbed as text. A refusal throws, like a scrub that
+ * fails, so the dead letter keeps the line's length and sha256 alone.
  */
 async function maskedLine(line: string): Promise<string> {
   let parsed: unknown

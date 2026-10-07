@@ -376,11 +376,12 @@ async function mapSections(path: string, sections: readonly CheckedSection[], sc
 }
 
 /**
- * The note's write, or the rule it breaks. Frontmatter is scrubbed member by
- * member: a value under a credential-named key is masked by its key, and every
- * other string and every key is scrubbed on its own text. A walk that refuses
- * (two keys masked into one) rejects the note, since storing the unscrubbed
- * object would keep the secrets and a retry would fail the same way.
+ * The note's write, or the rule it breaks. Frontmatter passes every scrub
+ * view: a value under a credential-named key is masked by its key, every other
+ * string, number and key is scrubbed on its own text, and the result is
+ * scrubbed once more as one JSON text. A refusal (two keys masked into one, or
+ * a secret only the whole-text pass found) rejects the note, since storing the
+ * unscrubbed object would keep the secrets and a retry would fail the same way.
  */
 async function mapNote(note: CheckedNote, registry: ProjectRegistry, scrub: Scrub): Promise<DocumentNoteWrite | { reason: string }> {
   let frontmatter: Record<string, unknown> | null = null

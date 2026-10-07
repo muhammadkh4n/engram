@@ -65,14 +65,19 @@ describe('scrubStructured — each string is scrubbed on its own text', () => {
     expect(result.ok && result.redactions[0]?.path).toEqual(['lines', 1])
   })
 
-  it('hands the scrubber each key and each string alone, never a serialized document', async () => {
+  it('hands the scrubber each key, string, number and boolean alone, then the walked document once', async () => {
     const seen: string[] = []
     const record = async (text: string): Promise<ScrubResult> => {
       seen.push(text)
       return { text, redactions: [] }
     }
-    await scrubStructured({ title: 'Release', meta: { owner: 'ops', tags: ['a', 'b'] }, count: 2 }, record)
-    expect(seen.sort()).toEqual(['Release', 'a', 'b', 'count', 'meta', 'ops', 'owner', 'tags', 'title'].sort())
+    const input = { title: 'Release', meta: { owner: 'ops', tags: ['a', 'b'] }, count: 2, draft: true, owner: null }
+    await scrubStructured(input, record)
+    const whole = seen.pop()
+    expect(whole).toBe(JSON.stringify(input))
+    expect(seen.sort()).toEqual(
+      ['Release', 'a', 'b', 'count', 'meta', 'ops', 'owner', 'owner', 'tags', 'title', '2', 'draft', 'true'].sort(),
+    )
   })
 })
 
@@ -165,12 +170,95 @@ describe('scrubStructured — keys', () => {
     expect(result).toEqual({ ok: false, reason: 'key-collision' })
   })
 
-  it('names a key-rule placeholder by the scrubbed key, so a masked key never returns in its label', async () => {
+  it('names a key-rule placeholder by the scrubbed key, so a masked key never returns in its label and the label ends no placeholder early', async () => {
     const result = await scrubStructured({ [`${REGISTERED}_password`]: PASSWORD })
     expect(result.ok && result.value).toEqual({
-      '[REDACTED:DEPLOY_SECRET]_password': '[REDACTED:[REDACTED:DEPLOY_SECRET]_password]',
+      '[REDACTED:DEPLOY_SECRET]_password': '[REDACTED:DEPLOY_SECRET_password]',
     })
     expect(JSON.stringify(result)).not.toContain(REGISTERED)
     expect(JSON.stringify(result)).not.toContain(PASSWORD)
+  })
+})
+
+// A made-up registered secret written as a bare number in YAML or JSON.
+const REGISTERED_NUMBER = 7304918265
+const BEARER_TOKEN = BEARER.slice('Bearer '.length)
+
+// Every input with the secret values it holds. Each case is either refused or
+// comes back holding none of them; plain frontmatter is never refused.
+const UNION_CORPUS: Array<[string, unknown, string[]]> = [
+  ['an OAuth token after a newline', { notes: OWN_TEXT_CASES[0]![1] }, [ANTHROPIC_OAUTH]],
+  ['a JWT after a tab', { notes: OWN_TEXT_CASES[1]![1] }, [JWT]],
+  ['a GitHub token after a newline', { notes: OWN_TEXT_CASES[2]![1] }, [GITHUB_PAT]],
+  ['an OpenRouter key after a newline', { notes: OWN_TEXT_CASES[3]![1] }, [OPENROUTER_KEY]],
+  ['an env block', { notes: OWN_TEXT_CASES[4]![1] }, [API_KEY_VALUE, PASSWORD]],
+  ['a JSON document', { notes: OWN_TEXT_CASES[5]![1] }, [TOKEN]],
+  ['a PEM block', { notes: MORE_PARITY_CASES[0]![1] }, PEM_BODY],
+  ['a URL userinfo password', { notes: MORE_PARITY_CASES[1]![1] }, [PASSWORD]],
+  ['a credential-named key', { db_password: PASSWORD }, [PASSWORD]],
+  ['an Authorization header', { Authorization: BEARER }, [BEARER_TOKEN]],
+  ['a nested credential key', { deploy: { api_token: TOKEN } }, [TOKEN]],
+  ['a credential key in an array of objects', { servers: [{ host: 'db.local', password: PASSWORD }] }, [PASSWORD]],
+  ['a registered value used as a key', { [REGISTERED]: 'note' }, [REGISTERED]],
+  ['a registered value inside a key', { [`${REGISTERED}_password`]: PASSWORD }, [REGISTERED, PASSWORD]],
+  ['an Authorization header as a tuple', { headers: [['Authorization', BEARER]] }, [BEARER_TOKEN]],
+  ['a registered number as a member', { backup: REGISTERED_NUMBER }, [String(REGISTERED_NUMBER)]],
+  ['a registered number as an array element', { pins: [1, REGISTERED_NUMBER] }, [String(REGISTERED_NUMBER)]],
+]
+
+const PLAIN_FRONTMATTER: Array<[string, Record<string, unknown>]> = [
+  ['title and tags', { title: 'Release notes', tags: ['plan', 'docs'] }],
+  ['aliases', { aliases: ['Release', 'Ship notes'], cssclasses: ['wide'] }],
+  ['dates', { created: '2026-09-30', updated: '2026-10-01T09:30:00.000Z', due: '2026-11-01' }],
+  ['mixed scalars', { type: 'phase', order: 3, draft: false, owner: null, weight: 0.5, rating: -2 }],
+  ['nested plain data', { links: [{ title: 'Spec', url: 'https://example.com/spec' }], status: { state: 'active' } }],
+]
+
+describe('scrubStructured — every scrub view', () => {
+  let restore: () => void = () => {}
+  beforeAll(() => {
+    restore = useTempRegistry({ DEPLOY_SECRET: REGISTERED, BACKUP_PASSWORD: String(REGISTERED_NUMBER) })
+  })
+  afterAll(() => restore())
+
+  it.each(UNION_CORPUS)('refuses %s or returns none of its secret values', async (_name, input, secrets) => {
+    const result = await scrubStructured(input)
+    if (!result.ok) return
+    const stored = JSON.stringify(result.value)
+    for (const secret of secrets) expect(stored).not.toContain(secret)
+  })
+
+  it('masks every corpus case but the Authorization tuple, which only the whole-text pass reads', async () => {
+    const refused: string[] = []
+    for (const [name, input] of UNION_CORPUS) if (!(await scrubStructured(input)).ok) refused.push(name)
+    expect(refused).toEqual(['an Authorization header as a tuple'])
+  })
+
+  it.each(PLAIN_FRONTMATTER)('never refuses plain frontmatter: %s', async (_name, input) => {
+    expect(await scrubStructured(input)).toEqual({ ok: true, value: input, redactions: [] })
+  })
+
+  it('refuses an Authorization tuple the walk cannot read across values', async () => {
+    expect(await scrubStructured({ headers: [['Authorization', BEARER]] })).toEqual({ ok: false, reason: 'missed-by-walk' })
+  })
+
+  it('masks a registered secret written as a bare number, as a member and as an array element', async () => {
+    expect(await scrubStructured({ backup: REGISTERED_NUMBER })).toEqual({
+      ok: true,
+      value: { backup: '[REDACTED:BACKUP_PASSWORD]' },
+      redactions: [{ kind: 'known', name: 'BACKUP_PASSWORD', path: ['backup'], part: 'value' }],
+    })
+    expect(await scrubStructured([REGISTERED_NUMBER])).toEqual({
+      ok: true,
+      value: ['[REDACTED:BACKUP_PASSWORD]'],
+      redactions: [{ kind: 'known', name: 'BACKUP_PASSWORD', path: [0], part: 'value' }],
+    })
+  })
+
+  it('refuses when the whole-text pass reports a secret, and never returns that pass\'s text', async () => {
+    const wholeText = (text: string): boolean => text.startsWith('{')
+    const scrub = async (text: string): Promise<ScrubResult> =>
+      wholeText(text) ? { text: '{"title":"[REDACTED:x]"}', redactions: [{ kind: 'known', name: 'x' }] } : { text, redactions: [] }
+    expect(await scrubStructured({ title: 'Release' }, scrub)).toEqual({ ok: false, reason: 'missed-by-walk' })
   })
 })

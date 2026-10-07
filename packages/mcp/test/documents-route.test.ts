@@ -340,7 +340,7 @@ const FM_REGISTERED = 'Kd4madeupRegisteredValue73pX'
 const FM_MIXED = 'Q7xk2Lm9Vp4Rt8Wz'
 const FM_OAUTH = 'sk-ant-oat01-' + FM_MIXED.repeat(4)
 
-describe('runDocumentsRequest: frontmatter is scrubbed member by member', () => {
+describe('runDocumentsRequest: frontmatter passes every scrub view', () => {
   let dir = ''
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), 'engram-documents-registry-'))
@@ -381,6 +381,21 @@ describe('runDocumentsRequest: frontmatter is scrubbed member by member', () => 
     await runDocumentsRequest(d, body(note('Engram/f.md', { frontmatter: { notes } })))
     expect(sent(d).frontmatter).toEqual({ notes: (await scrubSecrets(notes)).text })
     expect(JSON.stringify(sent(d))).not.toContain(FM_OAUTH)
+  })
+
+  it('rejects a note whose frontmatter holds a secret only the whole-text pass finds, and still applies the others', async () => {
+    const d = deps({ scrub: scrubSecrets })
+    const out = await runDocumentsRequest(d, body(
+      note('Engram/t.md', { frontmatter: { headers: [['Authorization', FM_BEARER]] } }),
+      note('Engram/u.md', { frontmatter: { title: 'Release notes' } }),
+    ))
+    expect(out.status).toBe(200)
+    const accepted = out.body as DocumentsAccepted
+    expect(accepted.results[0]).toEqual({ path: 'Engram/t.md', status: 'rejected', reason: 'invalid:frontmatter' })
+    expect(accepted.results[1]).toMatchObject({ path: 'Engram/u.md', status: 'applied' })
+    expect(d.syncDocumentNote).toHaveBeenCalledTimes(1)
+    expect(sent(d)).toMatchObject({ path: 'Engram/u.md', frontmatter: { title: 'Release notes' } })
+    expect(JSON.stringify(d.syncDocumentNote.mock.calls)).not.toContain(FM_BEARER.slice('Bearer '.length))
   })
 
   it('rejects a note whose frontmatter keys mask into one, stores none of it, and still applies the others', async () => {
