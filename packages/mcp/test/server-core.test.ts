@@ -26,9 +26,7 @@ import {
   chatIntelligenceOptionsFromEnv,
   supersessionSettingsAtStartup,
   runMemoryForget,
-  runMemoryIngest,
   runMemoryRecall,
-  MEMORY_INGEST_SOURCE,
   RECALL_BUDGET_TOO_SMALL,
   parseSalienceThresholdEnv,
   parseExtractWindowsPerTickEnv,
@@ -206,7 +204,7 @@ describe('recallOptionsFromArgs', () => {
     },
   )
 
-  it('trims the project id the way memory_ingest does', () => {
+  it('trims the project id the way stored project tags were written', () => {
     expect(recallOptionsFromArgs({ query: 'q', project_id: '  engram  ' })).toEqual({ projectId: 'engram' })
   })
 
@@ -600,51 +598,6 @@ describe('runMemoryRecall', () => {
     expect(res.isError).toBe(true)
     expect(res.content[0]?.text).toMatch(/^Error: conversation_id must be a non-blank string/)
     expect(calls).toHaveLength(0)
-  })
-})
-
-describe('runMemoryIngest', () => {
-  function stubMemory() {
-    return { ingest: vi.fn().mockResolvedValue(undefined) }
-  }
-
-  it("stores the row with source 'memory-ingest', the trimmed content, session and project", async () => {
-    const mem = stubMemory()
-
-    const result = await runMemoryIngest(mem, {
-      content: '  Prefer squash merges  ',
-      role: 'user',
-      session_id: 'sess-k7q',
-      project_id: ' demo-repo-k7q ',
-    })
-
-    expect(result).toEqual({ content: [{ type: 'text', text: 'Memory stored.' }] })
-    expect(MEMORY_INGEST_SOURCE).toBe('memory-ingest')
-    expect(mem.ingest).toHaveBeenCalledWith(
-      { content: 'Prefer squash merges', role: 'user', sessionId: 'sess-k7q', metadata: { source: 'memory-ingest' } },
-      { projectId: 'demo-repo-k7q' },
-    )
-  })
-
-  it('names the source when the caller passes no session or project', async () => {
-    const mem = stubMemory()
-
-    await runMemoryIngest(mem, { content: 'A note', role: 'assistant' })
-
-    expect(mem.ingest).toHaveBeenCalledWith(
-      { content: 'A note', role: 'assistant', sessionId: undefined, metadata: { source: 'memory-ingest' } },
-      undefined,
-    )
-  })
-
-  it('rejects empty content and an unknown role without storing', async () => {
-    const mem = stubMemory()
-
-    expect((await runMemoryIngest(mem, { content: '  ', role: 'user' })).isError).toBe(true)
-    expect((await runMemoryIngest(mem, { content: 'x', role: 'robot' })).content[0]?.text).toBe(
-      'Error: role must be one of "user", "assistant", or "system"',
-    )
-    expect(mem.ingest).not.toHaveBeenCalled()
   })
 })
 

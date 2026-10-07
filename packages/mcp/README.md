@@ -98,7 +98,7 @@ Claude Code now has access to Engram's memory tools. The server auto-includes in
 
 A project tag **ranks** memories; it never hides one. Tags come from the working directory at write time, so a memory written from a worktree, a sibling repo of the same product, or outside any repo would otherwise vanish exactly where it is needed. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
 
-- `memory_recall` and `memory_ingest` accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
+- `memory_recall` and a `memory_ingest` observation accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
 - A recall for project X returns every matching memory. X's memories get `+ENGRAM_PROJECT_BOOST` (default `0.10`), memories of another project in X's product group get `+ENGRAM_PROJECT_GROUP_BOOST` (default `0.05`), shared and unrelated memories get nothing. The boost is applied before the candidate cut the reranker sees and again after reranking.
 - Product groups come from the JSON file named by `ENGRAM_PROJECT_GROUPS_FILE`: `{ "groups": { "aithentic": ["aithentic-*", "*-mfe"], "engram": ["engram*"] } }`. Patterns are project names or `*`/`?` globs, matched case-insensitively against the whole name; a project belongs to the first group that matches. Unset, missing or malformed means no groups; each distinct failure is reported once on stderr. The file is re-checked at most every 60 s and re-read when its modification time or existence changes, so an edit takes effect without a restart.
 - Ingest with `project_id` tags the stored memory; without it the memory is shared.
@@ -149,22 +149,41 @@ With `ENGRAM_RECALL_LOG=<file path>` (unset = off) the server also appends one J
 
 ### memory_ingest
 
-Store a message into memory.
+Store one typed item and get its id. The answer is JSON: `{"id": "<uuid>", "outcome": "stored" | "restated" | "duplicate"}`.
 
-**Input:**
+**An observation** is the agent's own claim with evidence:
 ```json
 {
-  "content": "User prefers TypeScript with strict mode enabled",
-  "role": "user",
+  "class": "observation",
+  "kind": "finding",
+  "subject": "storage engine",
+  "content": "The item store runs on Postgres 17.",
+  "evidence": [{ "type": "file", "ref": "packages/postgrest/schema.sql" }],
+  "project_id": "my-repo",
   "session_id": "optional-session-id"
 }
 ```
+`kind` is `fact`, `procedure` or `finding`; evidence `type` is `item`, `commit`, `pr`, `file` or `url`. The claim is
+trust 2 when every `item` ref names a stored item and every `commit` ref prefixes a captured commit's SHA, else trust 3.
+A claim that puts a decision or wish in MK's or the user's mouth ("we decided", "MK wants") is refused.
 
-**Role must be:** `"user"`, `"assistant"`, or `"system"`
+**MK's words** are an exact quote of what MK wrote in an earlier turn of the session, as capture stored it:
+```json
+{
+  "class": "mk_statement",
+  "kind": "ruling",
+  "subject": "storage engine",
+  "quote": "Postgres only",
+  "question": "keep SQLite as a fallback?",
+  "standing": false,
+  "session_id": "the-session-id"
+}
+```
+`kind` is `ruling`, `fact` or `correction`. The quote is matched ignoring whitespace runs and curly quotes; `question`
+must come from the assistant turn just before MK's words or from the dialog he answered. Both forms take `supersedes`
+(item ids); a correction takes `corrects`. A `content` + `role` call is refused with a message naming these forms.
 
-**When Claude uses it:** After important user statements, decisions, preferences, or assistant responses worth remembering.
-
-Agents call `memory_ingest` as shown; its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
+Its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
 
 ## Capture route (HTTP server)
 

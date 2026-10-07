@@ -7,7 +7,11 @@ import {
   EXTRACTION_PENDING_LIMIT_MAX,
   EXTRACTION_WINDOW_RECENT_MAX,
   EXTRACTION_WINDOW_SUBJECTS_MAX,
+  INGEST_COMMIT_MATCHES_MAX,
+  INGEST_TARGETS_MAX,
   ItemConstraintError,
+  labelKey,
+  normalizeLabel,
   MATERIALIZE_LIMIT_MAX,
   findPostgresUnsafeText,
   toPostgresText,
@@ -35,13 +39,16 @@ import type {
   ExtractionPendingQuery,
   IngestedEvent,
   IngestItemWrite,
+  IngestProject,
   ItemEmbedding,
   ItemIngestStore,
+  LinkTarget,
   MaterializeResult,
   PendingAnchor,
   PendingEmbedding,
   ProjectRow,
   RawExtractionWindow,
+  RawWindowUtterance,
   ScanRow,
   ScanTarget,
   SessionIndexCommitResult,
@@ -70,6 +77,16 @@ const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead']
 const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'turns'])
 const FAILURE_CLASSES: ReadonlySet<string> = new Set(['transient', 'held'])
 const EXTRACTED_BY: ReadonlySet<string> = new Set<ExtractedBy>(['any_version', 'this_version'])
+/** The utterance columns the extraction window gives an anchor or a turn. */
+const UTTERANCE_COLUMNS = 'id,kind,session_id,project_id,workspace_id,content,context,occurred_at,source'
+const LINK_TARGET_COLUMNS =
+  'id,class,kind,subject_id,occurred_at,superseded_by,retired_at,forgotten_at,project_id,workspace_id'
+/** Rows per page of a session's MK utterances; Supabase's default max-rows is 1000. */
+const UTTERANCE_PAGE = 1000
+/** Subjects one label pattern may match before the exact label comparison. */
+const SUBJECT_LABEL_MATCHES_MAX = 50
+const SHA_PREFIX = /^[0-9a-f]{7,40}$/i
+const EVENT_ID = /^[0-9]{1,18}$/
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -399,6 +416,115 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     return toCommitResult(data, 1)
   }
 
+  async sessionMkUtterances(sessionId: string): Promise<RawWindowUtterance[]> {
+    const rows: RawWindowUtterance[] = []
+    for (let from = 0; ; from += UTTERANCE_PAGE) {
+      const { data, error } = await this.client
+        .from('memory_items')
+        .select(UTTERANCE_COLUMNS)
+        .eq('session_id', sessionId)
+        .eq('class', 'utterance')
+        .eq('speaker', 'mk')
+        .in('kind', ['user_prompt', 'user_answer'])
+        .is('superseded_by', null)
+        .is('retired_at', null)
+        .is('forgotten_at', null)
+        .order('occurred_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, from + UTTERANCE_PAGE - 1)
+      const page = rowsOf('sessionMkUtterances', data, error)
+      rows.push(...page.map(toUtteranceRow))
+      if (page.length < UTTERANCE_PAGE) return rows
+    }
+  }
+
+  async assistantTurnBefore(
+    utterance: Pick<RawWindowUtterance, 'id' | 'session_id' | 'occurred_at'>,
+  ): Promise<RawWindowUtterance | null> {
+    if (utterance.session_id === null || !isUuid(utterance.id)) return null
+    // The stored time string keeps its microseconds; quoting it keeps its
+    // colons and offset out of the filter grammar.
+    const at = `"${utterance.occurred_at.replace(/"/g, '')}"`
+    const { data, error } = await this.client
+      .from('memory_items')
+      .select(UTTERANCE_COLUMNS)
+      .eq('session_id', utterance.session_id)
+      .eq('class', 'utterance')
+      .eq('kind', 'assistant_turn')
+      .is('forgotten_at', null)
+      .or(`occurred_at.lt.${at},and(occurred_at.eq.${at},id.lt.${utterance.id})`)
+      .order('occurred_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(1)
+    const rows = rowsOf('assistantTurnBefore', data, error)
+    return rows.length === 0 ? null : toUtteranceRow(rows[0]!)
+  }
+
+  async captureEventPayload(eventId: string): Promise<unknown> {
+    if (!EVENT_ID.test(eventId)) return null
+    const { data, error } = await this.client.from('memory_capture_events').select('payload').eq('id', eventId).limit(1)
+    const rows = rowsOf('captureEventPayload', data, error)
+    return rows.length === 0 ? null : (rows[0]!.payload ?? null)
+  }
+
+  async projectRows(): Promise<IngestProject[]> {
+    const { data, error } = await this.client.from('memory_projects').select('id,kind,workspace_id').order('id')
+    return rowsOf('projectRows', data, error).map((row) => ({
+      id: String(row.id),
+      kind: String(row.kind),
+      workspaceId: typeof row.workspace_id === 'string' ? row.workspace_id : null,
+    }))
+  }
+
+  async subjectIdByLabel(projectId: string | null, label: string): Promise<string | null> {
+    const key = labelKey(label)
+    if (key === '') return null
+    // Every LIKE metacharacter (PostgREST also reads `*` as `%`) becomes the
+    // one-character wildcard, so the pattern matches a superset that the
+    // exact comparison below narrows.
+    const pattern = normalizeLabel(label).replace(/[%_*\\]/g, '_')
+    let query = this.client.from('memory_subjects').select('id,label').ilike('label', pattern)
+    query = projectId === null ? query.is('project_id', null) : query.eq('project_id', projectId)
+    const { data, error } = await query.order('id').limit(SUBJECT_LABEL_MATCHES_MAX)
+    const match = rowsOf('subjectIdByLabel', data, error).find(
+      (row) => typeof row.label === 'string' && labelKey(row.label) === key,
+    )
+    return match === undefined ? null : String(match.id)
+  }
+
+  async linkTargets(ids: readonly string[]): Promise<LinkTarget[]> {
+    const wanted = [...new Set(ids.filter(isUuid).map((id) => id.toLowerCase()))]
+    if (wanted.length > INGEST_TARGETS_MAX) {
+      throw refusedData(`linkTargets: ${wanted.length} ids, at most ${INGEST_TARGETS_MAX}`, INVALID_PARAMETER_VALUE)
+    }
+    if (wanted.length === 0) return []
+    const { data, error } = await this.client.from('memory_items').select(LINK_TARGET_COLUMNS).in('id', wanted)
+    const items = rowsOf('linkTargets', data, error)
+    const subjectIds = [...new Set(items.map((row) => row.subject_id).filter((id): id is string => typeof id === 'string'))]
+    const labels = new Map<string, string>()
+    if (subjectIds.length > 0) {
+      const read = await this.client.from('memory_subjects').select('id,label').in('id', subjectIds)
+      for (const row of rowsOf('linkTargets', read.data, read.error)) labels.set(String(row.id), String(row.label))
+    }
+    return items.map((row) => toLinkTarget(row, labels))
+  }
+
+  async commitArtifactIds(shaPrefix: string): Promise<string[]> {
+    if (!SHA_PREFIX.test(shaPrefix)) {
+      throw refusedData('commitArtifactIds: the prefix must be 7 to 40 hex characters', INVALID_PARAMETER_VALUE)
+    }
+    const { data, error } = await this.client
+      .from('memory_items')
+      .select('id')
+      .eq('class', 'artifact')
+      .eq('kind', 'commit')
+      .is('forgotten_at', null)
+      .ilike('source->>sha', `${shaPrefix.toLowerCase()}*`)
+      .order('id')
+      .limit(INGEST_COMMIT_MATCHES_MAX)
+    return rowsOf('commitArtifactIds', data, error).map((row) => String(row.id))
+  }
+
   async extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult> {
     const payload = commitPayload('extractionReplace', commit)
     const { data, error } = await this.client.rpc('engram_extraction_replace', { p_run: runId, p_payload: payload })
@@ -693,6 +819,48 @@ function commitPayload(operation: string, commit: ExtractionCommit): Record<stri
   }
   refuseUnsafeText(operation, '', payload)
   return payload
+}
+
+function rowsOf(operation: string, data: unknown, error: PgError | null): Array<Record<string, unknown>> {
+  if (error) throw toStoreError(operation, error)
+  if (!Array.isArray(data)) throw new Error(`${operation} failed: PostgREST returned no rows array`)
+  return data as Array<Record<string, unknown>>
+}
+
+function nullableText(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function toUtteranceRow(row: Record<string, unknown>): RawWindowUtterance {
+  return {
+    id: String(row.id),
+    kind: row.kind as RawWindowUtterance['kind'],
+    session_id: nullableText(row.session_id),
+    project_id: nullableText(row.project_id),
+    workspace_id: nullableText(row.workspace_id),
+    content: String(row.content ?? ''),
+    context: nullableText(row.context),
+    occurred_at: String(row.occurred_at),
+    source: isRecord(row.source) ? (row.source as RawWindowUtterance['source']) : null,
+  }
+}
+
+function toLinkTarget(row: Record<string, unknown>, labels: ReadonlyMap<string, string>): LinkTarget {
+  const subjectId = nullableText(row.subject_id)
+  return {
+    id: String(row.id),
+    class: String(row.class),
+    kind: String(row.kind),
+    subjectId,
+    subjectLabel: subjectId === null ? null : (labels.get(subjectId) ?? null),
+    occurredAt: String(row.occurred_at),
+    supersededBy: nullableText(row.superseded_by),
+    retiredAt: nullableText(row.retired_at),
+    forgottenAt: nullableText(row.forgotten_at),
+    projectId: nullableText(row.project_id),
+    workspaceId: nullableText(row.workspace_id),
+    shown: false,
+  }
 }
 
 function isCount(value: unknown): value is number {

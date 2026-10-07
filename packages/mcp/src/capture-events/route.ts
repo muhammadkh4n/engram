@@ -78,7 +78,7 @@ export function unavailableCaptureEventsResponse(message = CAPTURE_EVENTS_NOT_RE
 const lastDegradedLine = new WeakMap<CaptureEventsRouteDeps, string>()
 
 /** Why the secret registry cannot be trusted to scrub, or null when it can. Paths only, never a value. */
-function degradedReason(status: SecretRegistryStatus): string | null {
+export function degradedReason(status: SecretRegistryStatus): string | null {
   if (status.unreadable.length > 0) return `the secret registry could not read: ${status.unreadable.join(', ')}`
   if (!status.configured) return 'the secret registry read no sources configuration'
   return null

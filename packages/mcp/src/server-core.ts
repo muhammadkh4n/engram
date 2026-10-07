@@ -37,10 +37,12 @@ import type {
   RecallOutputPolicy,
   SupersessionSettings,
 } from '@engram-mem/core'
-import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
+import { PostgRestCaptureStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
 import { openaiIntelligence, assertTimeZone, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
-import type { Memory } from '@engram-mem/core'
+import { defaultSecretRegistry } from '@engram-mem/core'
+import type { ItemIngestStore, Memory } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
+import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
 import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
 import { recallLogFromEnv } from './recall-log.js'
@@ -296,10 +298,6 @@ export function chatIntelligenceOptionsFromEnv(
 
 const DEFAULT_SALIENCE_THRESHOLD = 0.7
 
-/** `metadata.source` of rows the memory_ingest tool writes; core's memory
- *  kind rules read this value as a note. */
-export const MEMORY_INGEST_SOURCE = 'memory-ingest'
-
 /**
  * ENGRAM_SALIENCE_THRESHOLD: the classifier confidence a capture needs to be
  * stored, a number in 0..1 (default 0.7). Anything else fails startup: a
@@ -364,6 +362,8 @@ interface MemoryStack {
   intelligence: IntelligenceAdapter
   /** Set when ENGRAM_RECALL_LOG names a file. */
   recallLog: RecallLog | null
+  /** The typed item store memory_ingest reads from and writes to. */
+  items: ItemIngestStore
 }
 
 const getMemoryStack = sharedInit(buildMemoryStack)
@@ -371,7 +371,7 @@ const getMemoryStack = sharedInit(buildMemoryStack)
 /**
  * Capture pipeline deps on the server's own stores and chat model. Builds the
  * memory stack on first use; the pipeline gets getMemory itself, so it is the
- * same instance agents' memory_ingest writes through.
+ * same instance the recall and forget tools use.
  */
 export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
   const stack = await getMemoryStack()
@@ -457,8 +457,8 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // Wave 5: the server is intentionally UNSCOPED. A single server (especially
   // the shared HTTP transport) has no project context of its own, so it must
   // not guess one from its cwd. Project scope is supplied per call by the
-  // agent via the declarative `project_id` param on memory_recall /
-  // memory_ingest. On recall it ranks that project's memories higher and
+  // agent via the declarative `project_id` param on memory_recall, where it
+  // ranks that project's memories higher and
   // hides none; omitting it means no project preference.
   const memory = createMemory({
     storage,
@@ -489,7 +489,10 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   process.once('SIGTERM', () => worker.stop())
   process.once('SIGINT', () => worker.stop())
 
-  return { memory, storage, intelligence, recallLog }
+  // Same PostgREST endpoint and key as the memory's storage: typed items live
+  // in the same database.
+  const items = new PostgRestCaptureStore({ url: supabaseUrl, key: supabaseKey })
+  return { memory, storage, intelligence, recallLog, items }
 }
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
@@ -552,35 +555,7 @@ const TOOLS = [
       required: ['query'],
     },
   },
-  {
-    name: 'memory_ingest',
-    description:
-      'Store a message into Engram memory. Call this for important user statements, decisions, preferences, or assistant responses worth remembering.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        content: {
-          type: 'string',
-          description: 'The text content to store.',
-        },
-        role: {
-          type: 'string',
-          enum: ['user', 'assistant', 'system'],
-          description: 'The role of the message author.',
-        },
-        session_id: {
-          type: 'string',
-          description: 'Optional session ID to associate this message with.',
-        },
-        project_id: {
-          type: 'string',
-          description:
-            'Optional project tag (typically the git repository name, e.g. "engram"). A tagged memory ranks higher in recalls for that project and its product group and stays recallable from every project. Omit to store as shared.',
-        },
-      },
-      required: ['content', 'role'],
-    },
-  },
+  MEMORY_INGEST_TOOL,
   {
     name: 'memory_forget',
     description:
@@ -695,8 +670,9 @@ export interface RecallArgOptions {
 
 /**
  * Recall options from memory_recall arguments. The project id is normalised
- * exactly as memory_ingest normalises it, so a padded id or a shared alias
- * (blank/global/none/shared) ranks against the same tag ingest wrote. An
+ * with normalizeProjectId, the rule the stored project tags were written
+ * under, so a padded id or a shared alias (blank/global/none/shared) ranks
+ * against the same tag. An
  * out-of-range or non-integer token_budget is an error, not ignored, so a
  * caller never silently gets an unbounded payload. conversation_id becomes the
  * priming key; session_id is not, because it filters the search to one
@@ -893,37 +869,6 @@ export function formatForgetByIds(result: ForgetByIdsResult): string {
   return [summary, ...detail].join('\n')
 }
 
-/** The memory_ingest tool body: validates the arguments and stores one memory tagged as a deliberate note. */
-export async function runMemoryIngest(
-  mem: Pick<Memory, 'ingest'>,
-  args: Record<string, unknown>,
-): Promise<ToolTextResult> {
-  const content = args['content']
-  const role = args['role']
-  const sessionId = args['session_id']
-  const projectId = normalizeProjectId(args['project_id'])
-
-  if (typeof content !== 'string' || content.trim().length === 0) {
-    return toolError('content must be a non-empty string')
-  }
-  if (role !== 'user' && role !== 'assistant' && role !== 'system') {
-    return toolError('role must be one of "user", "assistant", or "system"')
-  }
-
-  // The tool takes no source argument, so every row it writes is named as a
-  // deliberate note; capture routes write their own source.
-  await mem.ingest(
-    {
-      content: content.trim(),
-      role,
-      sessionId: typeof sessionId === 'string' ? sessionId : undefined,
-      metadata: { source: MEMORY_INGEST_SOURCE },
-    },
-    projectId ? { projectId } : undefined,
-  )
-  return toolText('Memory stored.')
-}
-
 /** The memory_forget tool body, separated from the server so it can run
  *  against any object with the two forget entry points. */
 export async function runMemoryForget(
@@ -966,7 +911,8 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_ingest') {
-        return await runMemoryIngest(mem, args)
+        const { items } = await getMemoryStack()
+        return await runMemoryIngestTyped({ store: items, status: () => defaultSecretRegistry().status() }, args)
       }
 
       if (name === 'memory_forget') {

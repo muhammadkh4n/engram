@@ -86,7 +86,8 @@ export type {
   SessionIndexSource,
   SessionIndexUtterance,
 } from './items/capture-store.js'
-export type { IngestItemWrite, ItemIngestStore } from './items/ingest-store.js'
+export { INGEST_TARGETS_MAX, INGEST_COMMIT_MATCHES_MAX } from './items/ingest-store.js'
+export type { IngestItemWrite, IngestProject, ItemIngestStore } from './items/ingest-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'
@@ -334,7 +335,17 @@ export type {
   WindowShownItem,
   WindowTurnRef,
 } from './extraction/window.js'
-export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
+export {
+  gateWindow,
+  MAX_ITEMS_PER_SIDE,
+  ATTRIBUTION_PATTERNS,
+  SUBJECT_LABEL_MIN_CHARS,
+  SUBJECT_LABEL_MAX_CHARS,
+  MIN_SHARED_SHA_CHARS,
+} from './extraction/gate.js'
+// The root already exports the older ingestion extractEntities; these two
+// names are free, and typed writes extract entities the way extraction does.
+export { statementEntities, observationEntities } from './extraction/entities.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
 export { buildCommitPayload, draftCommit, draftLinks, finishCommit } from './extraction/persist.js'
 export type { ExtractionItemClass, CommitDraft, CommitDecisions } from './extraction/persist.js'
