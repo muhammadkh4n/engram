@@ -14,6 +14,12 @@
  *     transcript left, pastes put back; a bang command is not a prompt.
  *   - git: the user's non-merge commits on each registered repository's
  *     default branch, each built as the post-commit hook builds it.
+ *   - legacy-copy (on the server, SUPABASE_URL and SUPABASE_KEY): `--plan`
+ *     lists every raw project value of the old memory tables with what the
+ *     resolver makes of it and writes the project map; `--map` copies every
+ *     old row into the item store as a legacy item, scrubbed before insert.
+ *   - legacy-utterances (on the server): MK's own words in old prompt-capture
+ *     rows, sent as prompts to the capture route of `--target`.
  *
  * Dry run by default: prints what would be sent, sends nothing and writes no
  * state. `--apply` spools to the backfill's own state directory and drains it
@@ -25,6 +31,9 @@
  *   engram-backfill transcripts [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
  *   engram-backfill history [--history-file FILE] [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
  *   engram-backfill git (--repo DIR | --repos-under DIR)... [--author-email EMAIL]... [--since ISO] [sending flags] [--apply] [--json]
+ *   engram-backfill legacy-copy --plan --map-out FILE [--registry FILE] [--overrides FILE] [--json]
+ *   engram-backfill legacy-copy --map FILE [--registry FILE] [--apply] [--json]
+ *   engram-backfill legacy-utterances [--target URL] [--token-file FILE] [--state-dir DIR] [--apply] [--json]
  *
  * Sending flags:
  *   --target URL        the server (default ENGRAM_SERVER_URL); events go to its /capture/events
@@ -35,9 +44,10 @@
  * Exit codes: 0 done, 1 stopped or failed, 2 usage.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { PostgrestClient } from '@supabase/postgrest-js'
 import type { ProjectRegistry } from '../capture-events/project-registry.js'
 import { captureEventsEndpoint } from '../capture/endpoint.js'
 import { captureClientInfo } from '../capture/events.js'
@@ -45,6 +55,22 @@ import { isEntryPoint } from '../ingest/entry-point.js'
 import { openPrivateHandle } from '../ingest/private-files.js'
 import { type GitSummary, runGit } from './git.js'
 import { type HistorySummary, runHistory } from './history.js'
+import {
+  type LegacyCopySummary,
+  type LegacyPlan,
+  parseProjectMap,
+  planLegacyProjects,
+  postgrestLegacyCopyStore,
+  runLegacyCopy,
+} from './legacy-copy.js'
+import {
+  LEGACY_UTTERANCES_DEFAULT_TARGET,
+  LegacyUtterancesRefused,
+  type LegacyUtterancesSummary,
+  postgrestLegacyUtteranceStore,
+  runLegacyUtterances,
+} from './legacy-utterances.js'
+import { registryRows } from '../capture-events/project-registry.js'
 import { createProjectResolver, loadOverrides, loadResolverRegistry, type ProjectResolver } from './project-resolver.js'
 import { BACKFILL_CLIENT_NAME, type SendTarget } from './send.js'
 import {
@@ -60,13 +86,16 @@ import { runTranscripts, type TranscriptsSummary } from './transcripts.js'
 
 type Env = Record<string, string | undefined>
 
-export const COMMANDS = ['transcripts', 'history', 'git'] as const
+export const COMMANDS = ['transcripts', 'history', 'git', 'legacy-copy', 'legacy-utterances'] as const
 export type BackfillCommand = (typeof COMMANDS)[number]
 
 export interface BackfillCliArgs {
   command: BackfillCommand
   apply: boolean
   json: boolean
+  plan: boolean
+  map: string | null
+  mapOut: string | null
   target: string | null
   tokenFile: string | null
   registry: string | null
@@ -100,6 +129,10 @@ const USAGE =
   '                       the last hour are left to live capture\n' +
   '  history              prompts from the history file of sessions with no transcript left\n' +
   '  git                  your non-merge commits on each registered repository\'s default branch\n' +
+  '  legacy-copy          the old memory tables into the item store as legacy items (server; SUPABASE_URL,\n' +
+  '                       SUPABASE_KEY)\n' +
+  '  legacy-utterances    MK\'s own words in old prompt-capture rows, as prompts (server; SUPABASE_URL,\n' +
+  '                       SUPABASE_KEY)\n' +
   '  Sending flags:\n' +
   '  --target URL         the server (default ENGRAM_SERVER_URL)\n' +
   '  --token-file FILE    the capture token (default ENGRAM_CAPTURE_TOKEN_FILE, else ENGRAM_CAPTURE_TOKEN)\n' +
@@ -117,6 +150,15 @@ const USAGE =
   '  --repos-under DIR    read every main clone directly under DIR (repeatable)\n' +
   '  --author-email EMAIL whose commits to send (repeatable; default each repository\'s user.email)\n' +
   '  --since ISO          only commits after this time\n' +
+  '  legacy-copy:\n' +
+  '  --plan               list every raw project value with its row counts and the resolver\'s rule\n' +
+  '  --map-out FILE       with --plan: where to write the project map (raw value -> project, workspace)\n' +
+  '  --map FILE           copy every old row with this map; a dry run lists each step\'s pending work\n' +
+  '  --registry FILE      the project registry (default ENGRAM_PROJECT_REGISTRY_FILE)\n' +
+  '  --overrides FILE     with --plan: JSON object, raw project value -> project name or null\n' +
+  '  legacy-utterances:\n' +
+  `  --target URL         the server (default ${LEGACY_UTTERANCES_DEFAULT_TARGET})\n` +
+  '  --token-file FILE    as for the sending commands; --state-dir as well\n' +
   '  Common:\n' +
   '  --apply              send, and move cursors once the server acknowledged\n' +
   '  --json               print the summary as JSON\n'
@@ -130,6 +172,8 @@ const VALUE_FLAGS = {
   '--projects-dir': 'projectsDir',
   '--history-file': 'historyFile',
   '--since': 'since',
+  '--map': 'map',
+  '--map-out': 'mapOut',
 } as const satisfies Record<string, keyof BackfillCliArgs>
 
 const REPEATED_FLAGS = {
@@ -139,12 +183,15 @@ const REPEATED_FLAGS = {
 } as const satisfies Record<string, keyof BackfillCliArgs>
 
 const SENDING_FLAGS = ['--target', '--token-file', '--registry', '--state-dir', '--apply', '--json']
+const SWITCH_FLAGS = ['--apply', '--json', '--plan']
 
 /** The flags each command takes; another command's flag is a usage error, not silently ignored. */
 const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
   transcripts: new Set([...SENDING_FLAGS, '--projects-dir', '--overrides']),
   history: new Set([...SENDING_FLAGS, '--history-file', '--projects-dir', '--overrides']),
   git: new Set([...SENDING_FLAGS, '--repo', '--repos-under', '--author-email', '--since']),
+  'legacy-copy': new Set(['--plan', '--map-out', '--map', '--registry', '--overrides', '--apply', '--json']),
+  'legacy-utterances': new Set(['--target', '--token-file', '--state-dir', '--apply', '--json']),
 }
 
 function isCommand(value: string): value is BackfillCommand {
@@ -161,6 +208,9 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     command,
     apply: false,
     json: false,
+    plan: false,
+    map: null,
+    mapOut: null,
     target: null,
     tokenFile: null,
     registry: null,
@@ -176,11 +226,12 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i]!
     if (!COMMAND_FLAGS[command].has(flag)) {
-      const known = flag in VALUE_FLAGS || flag in REPEATED_FLAGS || SENDING_FLAGS.includes(flag)
+      const known = flag in VALUE_FLAGS || flag in REPEATED_FLAGS || SWITCH_FLAGS.includes(flag)
       throw new UsageError(known ? `${command} does not take ${flag}` : `unknown flag "${flag}"`)
     }
     if (flag === '--apply') args.apply = true
     else if (flag === '--json') args.json = true
+    else if (flag === '--plan') args.plan = true
     else {
       const value = rest[++i]?.trim()
       if (!value || value.startsWith('--')) throw new UsageError(`${flag} requires a value`)
@@ -192,7 +243,16 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     throw new UsageError('git needs --repo or --repos-under')
   }
   if (args.since !== null && Number.isNaN(Date.parse(args.since))) throw new UsageError('--since must be an ISO date')
+  if (command === 'legacy-copy') checkLegacyCopyArgs(args)
   return args
+}
+
+function checkLegacyCopyArgs(args: BackfillCliArgs): void {
+  if (args.plan === (args.map !== null)) throw new UsageError('legacy-copy needs exactly one of --plan and --map')
+  if (args.plan && args.mapOut === null) throw new UsageError('--plan needs --map-out')
+  if (args.plan && args.apply) throw new UsageError('--plan writes only the map file and takes no --apply')
+  if (!args.plan && args.mapOut !== null) throw new UsageError('--map-out goes with --plan')
+  if (!args.plan && args.overrides !== null) throw new UsageError('--overrides goes with --plan; edit the map instead')
 }
 
 function expandHome(path: string, env: Env): string {
@@ -335,6 +395,122 @@ async function runCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<B
   })
 }
 
+// ── Legacy commands (server side) ───────────────────────────────────────
+
+interface LegacyOutcome {
+  summary: LegacyPlan | LegacyCopySummary | LegacyUtterancesSummary
+  text: string
+  ok: boolean
+}
+
+function storeClient(env: Env): PostgrestClient {
+  const url = env.SUPABASE_URL?.trim()
+  const key = env.SUPABASE_KEY?.trim()
+  if (!url || !key) throw new UsageError('SUPABASE_URL and SUPABASE_KEY are required')
+  return new PostgrestClient(url, { headers: { Authorization: `Bearer ${key}`, apikey: key } })
+}
+
+function readJsonFile(path: string, what: string): unknown {
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch (err) {
+    throw new Error(`${what} ${path} cannot be read (${(err as NodeJS.ErrnoException).code ?? 'error'})`)
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`${what} ${path} is not valid JSON`)
+  }
+}
+
+export function formatLegacyPlan(plan: LegacyPlan, mapFile: string): string {
+  const lines = plan.entries.map(
+    (e) =>
+      `    ${e.raw === null ? '(null)' : JSON.stringify(e.raw)} episodes=${e.rows.memory_episodes} ` +
+      `digests=${e.rows.memory_digests} facts=${e.rows.memory_semantic} -> ` +
+      `project=${e.project_id ?? '-'} workspace=${e.workspace_id ?? '-'} rule=${e.rule}\n`,
+  )
+  return `plan: legacy-copy\n  raw project values:\n${lines.join('') || '    none\n'}  map written to ${mapFile}\n`
+}
+
+export function formatLegacyCopy(s: LegacyCopySummary): string {
+  const steps = s.steps.map((r) => {
+    const extra = r.not_later === undefined ? '' : ` not_later=${r.not_later} skipped=${r.skipped ?? 0}`
+    return `    ${r.step}: copied=${r.copied} remaining=${r.remaining} sent=${r.sent} masked=${r.masked} entities=${r.entities}${extra}\n`
+  })
+  return (
+    `${s.apply ? 'apply' : 'dry run'}: legacy-copy\n` +
+    `  unmapped: ${s.unmapped.length === 0 ? 'none' : s.unmapped.join(', ')}\n` +
+    `  steps:\n${steps.join('')}`
+  )
+}
+
+export function formatLegacyUtterances(s: LegacyUtterancesSummary): string {
+  return (
+    `${s.apply ? 'apply' : 'dry run'}: legacy-utterances\n` +
+    `  candidates=${s.candidates} covered=${s.covered} sent=${s.sent}\n` +
+    `  excluded: ${pairs(s.excluded)}\n` +
+    `  accepted=${s.accepted} duplicates=${s.duplicates}\n` +
+    `  rejected: ${pairs(s.rejected)}\n` +
+    `  stopped: ${s.stopped ?? 'none'}\n`
+  )
+}
+
+async function runLegacyCopyCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<LegacyOutcome> {
+  const registryArg = required(args.registry ?? env.ENGRAM_PROJECT_REGISTRY_FILE, '--registry or ENGRAM_PROJECT_REGISTRY_FILE')
+  const registry = loadResolverRegistry(expandHome(registryArg, env), env)
+  const store = postgrestLegacyCopyStore(storeClient(env))
+  if (args.plan) {
+    const overrides = args.overrides ? loadOverrides(args.overrides, env) : new Map<string, string | null>()
+    const plan = await planLegacyProjects(store, createProjectResolver({ registry, overrides }, env))
+    const mapFile = expandHome(args.mapOut!, env)
+    await fs.writeFile(mapFile, `${JSON.stringify(plan.map, null, 2)}\n`)
+    return { summary: plan, text: formatLegacyPlan(plan, mapFile), ok: true }
+  }
+  const map = parseProjectMap(readJsonFile(expandHome(args.map!, env), 'map file'))
+  const summary = await runLegacyCopy({
+    store,
+    map,
+    projects: registryRows(registry).map((r) => ({ id: r.id, kind: r.kind })),
+    apply: args.apply,
+    log: (line) => io.err(`[engram-backfill] ${line}\n`),
+  })
+  return { summary, text: formatLegacyCopy(summary), ok: true }
+}
+
+async function runLegacyUtterancesCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<LegacyOutcome> {
+  const store = postgrestLegacyUtteranceStore(storeClient(env))
+  const endpoint = endpointOf(args.target ?? LEGACY_UTTERANCES_DEFAULT_TARGET)
+  const log = (line: string): void => io.err(`[engram-backfill] ${line}\n`)
+  const done = (summary: LegacyUtterancesSummary): LegacyOutcome => ({
+    summary,
+    text: formatLegacyUtterances(summary),
+    ok: summary.stopped === null,
+  })
+  if (!args.apply) return done(await runLegacyUtterances({ store, log }))
+
+  const paths = backfillPaths(args.stateDir ? expandHome(args.stateDir, env) : defaultStateDir(endpoint, env))
+  const state = await openStateDir(paths, endpoint)
+  return withRunLock(paths, async () => {
+    const token = await tokenFileFor(args, env, paths)
+    try {
+      const send: SendTarget = {
+        env,
+        spool: paths.spool,
+        endpoint,
+        tokenFile: token.file,
+        client: { name: BACKFILL_CLIENT_NAME, version: captureClientInfo().version },
+      }
+      const summary = await runLegacyUtterances({ store, send, log })
+      await saveBackfillState(paths, withRun(state, args.command, summary, new Date()))
+      return done(summary)
+    } finally {
+      await token.cleanup()
+    }
+  })
+}
+
 /** Runs one command and returns the exit code. */
 export async function runBackfillCli(argv: readonly string[], env: Env, io: CliIo): Promise<number> {
   let args: BackfillCliArgs | 'help'
@@ -349,6 +525,12 @@ export async function runBackfillCli(argv: readonly string[], env: Env, io: CliI
     return 0
   }
   try {
+    if (args.command === 'legacy-copy' || args.command === 'legacy-utterances') {
+      const run = args.command === 'legacy-copy' ? runLegacyCopyCommand : runLegacyUtterancesCommand
+      const outcome = await run(args, env, io)
+      io.out(args.json ? `${JSON.stringify(outcome.summary)}\n` : outcome.text)
+      return outcome.ok ? 0 : 1
+    }
     const summary = await runCommand(args, env, io)
     io.out(args.json ? `${JSON.stringify(summary)}\n` : formatSummary(summary))
     return summary.stopped === null ? 0 : 1
@@ -356,6 +538,10 @@ export async function runBackfillCli(argv: readonly string[], env: Env, io: CliI
     if (err instanceof UsageError) {
       io.err(`${err.message}\n${USAGE}`)
       return 2
+    }
+    if (err instanceof LegacyUtterancesRefused) {
+      io.err(`[engram-backfill] refused: ${err.message}\n`)
+      return 1
     }
     io.err(`[engram-backfill] failed: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

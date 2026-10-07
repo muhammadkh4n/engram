@@ -7156,10 +7156,14 @@ END; $$;
 -- Runs one step of the legacy copy and returns {step, copied, remaining}:
 -- what this call did, and the step's pending work after it.
 -- episodes, digests and facts take p_rows, 0 to 1000 objects {id, content,
--- masks: [{detector, secret_name}]}, each naming a row of the step's old
--- table: content is that row's text after the caller's scrub, and masks
--- lists what the scrub replaced. A row that already has an item is skipped,
--- so a repeated batch copies nothing. Each other row becomes one live item of
+-- masks: [{detector, secret_name}], entities?: [{entity, entity_type}]},
+-- each naming a row of the step's old table: content is that row's text
+-- after the caller's scrub, masks lists what the scrub replaced, and
+-- entities lists what the deterministic entity extractor found in content.
+-- Entities are checked as engram_items_apply checks them and written in this
+-- call for the rows it inserts, so no legacy item exists without them. A row
+-- that already has an item is skipped, with its entities, so a repeated
+-- batch copies nothing. Each other row becomes one live item of
 -- class legacy, trust 3, under the old row's id, with content and
 -- search_text the given text. The old embedding is copied, as model
 -- text-embedding-3-small, only when that text is the old row's exactly: a
@@ -7317,8 +7321,8 @@ BEGIN
       FROM (SELECT t.n,
                    CASE
                      WHEN jsonb_typeof(t.e) <> 'object' THEN 'is not a JSON object'
-                     WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.e) AS k(key) WHERE k.key NOT IN ('id', 'content', 'masks'))
-                       THEN 'has a key other than id, content and masks'
+                     WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.e) AS k(key) WHERE k.key NOT IN ('id', 'content', 'masks', 'entities'))
+                       THEN 'has a key other than id, content, masks and entities'
                      WHEN jsonb_typeof(t.e -> 'id') IS DISTINCT FROM 'string' OR NOT pg_input_is_valid(t.e ->> 'id', 'uuid')
                        THEN 'needs id, a uuid string'
                      WHEN jsonb_typeof(t.e -> 'content') IS DISTINCT FROM 'string' OR (t.e ->> 'content') !~ '\S'
@@ -7336,6 +7340,16 @@ BEGIN
                                            ELSE jsonb_typeof(x.m -> 'secret_name') <> 'string' OR (x.m ->> 'secret_name') !~ '\S'
                                          END)
                        THEN 'has a mask other than {detector, secret_name}: a non-blank detector, a non-blank or null secret_name'
+                     WHEN coalesce(jsonb_typeof(t.e -> 'entities'), 'null') NOT IN ('array', 'null')
+                       THEN 'needs entities, an array, when it gives them'
+                     WHEN EXISTS (SELECT 1
+                                    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.e -> 'entities') = 'array'
+                                                                   THEN t.e -> 'entities' ELSE '[]'::jsonb END) AS x(v)
+                                   WHERE CASE WHEN jsonb_typeof(x.v) <> 'object' THEN true
+                                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(x.v) AS k(key) WHERE k.key NOT IN ('entity', 'entity_type'))
+                                                   OR jsonb_typeof(x.v -> 'entity') IS DISTINCT FROM 'string'
+                                                   OR jsonb_typeof(x.v -> 'entity_type') IS DISTINCT FROM 'string' END)
+                       THEN 'has an entity other than {entity, entity_type} with string values'
                    END AS reason
               FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)) r
      WHERE r.reason IS NOT NULL
@@ -7511,6 +7525,15 @@ BEGIN
    CROSS JOIN LATERAL jsonb_array_elements(g.masks) WITH ORDINALITY AS x(m, k)
    WHERE g.id = ANY (v_inserted)
    ORDER BY g.n, x.k;
+
+  INSERT INTO public.memory_item_entities (item_id, entity, entity_type)
+  SELECT g.id, x.v ->> 'entity', x.v ->> 'entity_type'
+    FROM (SELECT (t.e ->> 'id')::uuid AS id, t.e -> 'entities' AS entities
+            FROM jsonb_array_elements(p_rows) AS t(e)) g
+   CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(g.entities) = 'array'
+                                                THEN g.entities ELSE '[]'::jsonb END) AS x(v)
+   WHERE g.id = ANY (v_inserted)
+  ON CONFLICT (item_id, entity) DO NOTHING;
 
   RETURN jsonb_build_object('step', p_step, 'copied', cardinality(v_inserted),
                             'remaining', (SELECT count(*) FROM public.engram_legacy_work(p_step) w WHERE w.state = 'pending'));

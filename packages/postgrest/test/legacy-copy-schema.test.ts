@@ -7,7 +7,8 @@
  * - SECURITY DEFINER with a fixed search_path, EXECUTE revoked from PUBLIC,
  *   anon and authenticated and granted to service_role, after the definition;
  * - the five steps in their fixed order;
- * - no write to an old table, and no read of memory_procedural.
+ * - no write to an old table, and no read of memory_procedural;
+ * - entities written only for the rows the copy call inserted.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -86,6 +87,15 @@ describe('schema.sql legacy copy functions', () => {
         "ARRAY['episodes', 'digests', 'facts', 'fact_supersession', 'forgets']",
       )
     }
+  })
+
+  it('writes the batch rows\' entities only for the items the call inserted, idempotently', () => {
+    const { body } = definition('engram_legacy_copy')
+    const insert = body.match(/INSERT INTO public\.memory_item_entities \(item_id, entity, entity_type\)[\s\S]*?;/)
+    expect(insert).not.toBeNull()
+    expect(insert![0]).toContain('= ANY (v_inserted)')
+    expect(insert![0]).toMatch(/ON CONFLICT \(item_id, entity\) DO NOTHING;$/)
+    expect(body).toContain("k.key NOT IN ('entity', 'entity_type')")
   })
 
   it.each(FUNCTIONS)('never writes an old table and never reads memory_procedural in $name', ({ name }) => {

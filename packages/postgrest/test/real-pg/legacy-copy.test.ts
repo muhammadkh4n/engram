@@ -3,6 +3,7 @@
  * service_role the way the backfill CLI calls them through PostgREST:
  * - old episodes, digests and facts become legacy items under their old ids,
  *   dated by their own time, their latest input episode or their digest;
+ * - each copied item gets the entities its batch row lists, in the same call;
  * - a supersession is linked only to a strictly later fact;
  * - what the old tables had forgotten is forgotten last, with everything
  *   built on it;
@@ -31,6 +32,10 @@ const OLD_SESSION = 'tst-old-session'
 const MASKED_OLD_TEXT = 'deploy with the token tst-not-a-real-token'
 const MASKED_TEXT = 'deploy with the token [masked]'
 const MASK = { detector: 'tst-known-value', secret_name: 'TST_DEPLOY_TOKEN' }
+const ASSISTANT_ENTITIES = [
+  { entity: 'tst-release-repo', entity_type: 'repo' },
+  { entity: 'docs/tst-release.md', entity_type: 'path' },
+]
 
 const PROJECT_MAP = {
   'tst-app-raw': { project_id: 'tst-app', workspace_id: 'tst-ws' },
@@ -49,6 +54,7 @@ interface CopyRow {
   id: string
   content: string
   masks: Array<{ detector: string; secret_name: string | null }>
+  entities?: Array<{ entity: string; entity_type: string }>
 }
 
 interface CopyResult {
@@ -89,9 +95,11 @@ function jsonb(value: unknown): string {
 const VECTOR = `('[0.5' || repeat(',0', 1535) || ']')::public.vector`
 
 function toCopyRows(rows: readonly PendingRow[]): CopyRow[] {
-  return rows.map((r) =>
-    r.id === EP_MASKED ? { id: r.id, content: MASKED_TEXT, masks: [MASK] } : { id: r.id, content: r.text!, masks: [] },
-  )
+  return rows.map((r) => {
+    if (r.id === EP_MASKED) return { id: r.id, content: MASKED_TEXT, masks: [MASK] }
+    if (r.id === EP_ASSISTANT) return { id: r.id, content: r.text!, masks: [], entities: ASSISTANT_ENTITIES }
+    return { id: r.id, content: r.text!, masks: [] }
+  })
 }
 
 describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
@@ -167,6 +175,11 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
     ) as ItemRow
   }
 
+  async function entities(id: string): Promise<string> {
+    return pg.psql(`SELECT coalesce(string_agg(entity_type || ':' || entity, ',' ORDER BY entity), '')
+                      FROM public.memory_item_entities WHERE item_id = '${id}'`)
+  }
+
   async function count(sql: string): Promise<number> {
     return Number(await pg.psql(sql))
   }
@@ -211,7 +224,15 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
     expect(await refusal(copySql('episodes', [{ id: EP_MASKED, content: MASKED_TEXT, masks: [] }]))).toMatch(
       /engram_legacy_copy: row 1: content differs from the old text but lists no mask/,
     )
+    const assistantRow = rows.find((r) => r.id === EP_ASSISTANT)!
+    expect(
+      await refusal(copySql('episodes', [{ ...assistantRow, entities: [{ entity: 'tst-release-repo' }] as never }])),
+    ).toMatch(/engram_legacy_copy: row 1 has an entity other than \{entity, entity_type\} with string values/)
+    expect(
+      await refusal(copySql('episodes', [{ ...assistantRow, entities: [{ entity: 'tst-release-repo', entity_type: 'person' }] }])),
+    ).toMatch(/memory_item_entities_entity_type_check/)
     expect(await count('SELECT count(*) FROM public.memory_items')).toBe(0)
+    expect(await count('SELECT count(*) FROM public.memory_item_entities')).toBe(0)
     expect(await count('SELECT count(*) FROM public.memory_secret_hits')).toBe(0)
   }, TEST_TIMEOUT_MS)
 
@@ -229,6 +250,8 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
 
     const assistant = await item(EP_ASSISTANT)
     expect(assistant).toMatchObject({ speaker: 'assistant', project_id: null, workspace_id: 'tst-ws' })
+    expect(await entities(EP_ASSISTANT)).toBe('path:docs/tst-release.md,repo:tst-release-repo')
+    expect(await entities(EP_FORGOTTEN)).toBe('')
     expect(assistant.source).toEqual({
       type: 'legacy', table: 'memory_episodes', id: EP_ASSISTANT, role: 'assistant', producer: 'hook-stop',
       legacy_type: 'turn', legacy_project: 'tst-ws-raw', legacy_session_id: OLD_SESSION, embed_text_version: 2,
@@ -317,6 +340,13 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
     expect(await copy('episodes', [{ id: EP_MASKED, content: MASKED_TEXT, masks: [MASK] }])).toEqual({
       step: 'episodes', copied: 0, remaining: 0,
     })
+    expect(
+      await copy('episodes', [{
+        id: EP_ASSISTANT, content: 'the release moved to thursdays', masks: [],
+        entities: [...ASSISTANT_ENTITIES, { entity: 'tst-other-repo', entity_type: 'repo' }],
+      }]),
+    ).toEqual({ step: 'episodes', copied: 0, remaining: 0 })
+    expect(await count('SELECT count(*) FROM public.memory_item_entities')).toBe(2)
     expect(await copy('fact_supersession', null)).toEqual({
       step: 'fact_supersession', copied: 0, remaining: 0, not_later: 1, skipped: 0,
     })
