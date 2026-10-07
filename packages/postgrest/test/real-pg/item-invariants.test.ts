@@ -339,6 +339,15 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       expect(await rowCount(o.id)).toBe(0)
     }, TEST_TIMEOUT_MS)
 
+    it.each([0, 1])('an observation with trust %i and evidence', async (trust) => {
+      const o = observation('The build caches node_modules.', [], {
+        trust,
+        source: { type: 'extraction', evidence: [{ type: 'file', ref: 'tst/build.sh' }] },
+      })
+      await expectCheckViolation(insert(o), /violates check constraint "memory_items_trust_check"/)
+      expect(await rowCount(o.id)).toBe(0)
+    }, TEST_TIMEOUT_MS)
+
     it.each(['infinity', '-infinity'])('a direct insert of a non-finite occurred_at violates the finite check (%s)', async (when) => {
       const u = mkUtterance('An utterance with no real time.', { occurredAt: when })
       await expectCheckViolation(insert(u), /violates check constraint "memory_items_finite_check"/)
@@ -605,6 +614,15 @@ describe.skipIf(!realPgImage)('memory_items invariants on real Postgres', () => 
       const s = statement('don\u2019t ship until the \u201cbeta\u201d build\nis\u00a0green', [u.id])
       await commit(u, s)
       expect(await rowCount(s.id)).toBe(1)
+    }, TEST_TIMEOUT_MS)
+
+    it('an observation with evidence at trust 2 when it is verified and at trust 3 when it is not', async () => {
+      const evidence = [{ type: 'commit', ref: 'c0ffee5d1e9a' }]
+      const verified = observation('The worker parks a failing event.', [], { trust: 2, source: { type: 'extraction', evidence } })
+      const unverified = observation('The worker retries a failing event.', [], { trust: 3, source: { type: 'extraction', evidence } })
+      await commit(verified, unverified)
+      expect(await column(verified.id, 'trust')).toBe('2')
+      expect(await column(unverified.id, `trust || '|' || (source -> 'evidence')::text`)).toBe('3|[{"ref": "c0ffee5d1e9a", "type": "commit"}]')
     }, TEST_TIMEOUT_MS)
 
     it('a statement inserted before its utterance in one transaction', async () => {

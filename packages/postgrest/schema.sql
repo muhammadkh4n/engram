@@ -1268,8 +1268,11 @@ CREATE TABLE IF NOT EXISTS public.memory_projects (
 --   trust 0; assistant turns are trust 3.
 -- - mk_statement: an exact quote of MK, trust 0. It needs a subject and a
 --   non-empty lineage (the utterances it was quoted from).
--- - observation: written by the assistant; trust 2 when source.evidence is a
---   non-empty array of pointers, else 3. It needs a subject.
+-- - observation: written by the assistant; trust 2 when the writer verified
+--   every pointer in source.evidence, else 3. Trust 2 needs a non-empty
+--   source.evidence array; trust 3 keeps whatever evidence was cited, since a
+--   pointer the writer could not check is still the claim's provenance. It
+--   needs a subject.
 -- - artifact, document_section, session_index: produced by tools, trust 1.
 -- - legacy: rows copied from the memory_* tiers, trust 3 whoever spoke.
 -- Only utterances, observations and legacy rows may have the assistant as
@@ -1333,7 +1336,7 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
         WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
         WHEN 'mk_statement' THEN 0
-        WHEN 'observation' THEN (CASE WHEN jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+        WHEN 'observation' THEN (CASE WHEN trust = 2 AND jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
         WHEN 'artifact' THEN 1
         WHEN 'document_section' THEN 1
         WHEN 'session_index' THEN 1
@@ -1551,6 +1554,31 @@ DO $$ BEGIN
     ALTER TABLE ONLY public.memory_items
       ADD CONSTRAINT memory_items_embedding_attempts_check CHECK (embedding_attempts BETWEEN 0 AND 5
         AND (embedding_error IS NULL OR (embedding_error ~ '\S' AND char_length(embedding_error) <= 500)));
+  END IF;
+END $$;
+
+--
+-- memory_items_trust_check once gave trust 2 to every observation with
+-- evidence, so an observation citing a pointer its writer could not verify
+-- was refused at trust 3. A database created under that rule gets the
+-- current one here; the same expression is in CREATE TABLE above. The new
+-- rule accepts every row the old one did, and the swap is one ALTER TABLE.
+--
+
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_trust_check' AND conrelid = 'public.memory_items'::regclass
+             AND position('WHEN ((trust = 2) AND' IN pg_get_constraintdef(oid)) = 0) THEN
+    ALTER TABLE ONLY public.memory_items
+      DROP CONSTRAINT memory_items_trust_check,
+      ADD CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
+        WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
+        WHEN 'mk_statement' THEN 0
+        WHEN 'observation' THEN (CASE WHEN trust = 2 AND jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+        WHEN 'artifact' THEN 1
+        WHEN 'document_section' THEN 1
+        WHEN 'session_index' THEN 1
+        WHEN 'legacy' THEN 3
+        ELSE -1 END);
   END IF;
 END $$;
 
