@@ -582,7 +582,7 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('sends a commit to engram_extraction_commit as snake_case and maps the result', async () => {
-    const result = { item_ids: ['00000000-0000-4000-8000-00000000e004', '00000000-0000-4000-8000-00000000e005'], subjects_created: 1, duplicates: 0 }
+    const result = { item_ids: ['00000000-0000-4000-8000-00000000e004', '00000000-0000-4000-8000-00000000e005'], subjects_created: 1, duplicates: 0, restatements: 0 }
     const { store, calls } = storeWith({ data: result, error: null })
     const listed = item({
       id: '00000000-0000-4000-8000-00000000e005',
@@ -602,7 +602,7 @@ describe('PostgRestCaptureStore extraction', () => {
         items: [item(), listed],
         stats: { statements: { proposed: 1 } },
       }),
-    ).resolves.toEqual({ itemIds: result.item_ids, subjectsCreated: 1, duplicates: 0 })
+    ).resolves.toEqual({ itemIds: result.item_ids, subjectsCreated: 1, duplicates: 0, restatements: 0 })
     const args = calls[0]!.args as { p_run: string; p_payload: { subjects: unknown; items: Array<Record<string, unknown>>; stats: unknown } }
     expect(calls[0]!.fn).toBe('engram_extraction_commit')
     expect(args.p_run).toBe(RUN)
@@ -634,7 +634,7 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('refuses a commit it cannot send, and a result that does not match the items', async () => {
-    const { store, calls } = storeWith({ data: { item_ids: [], subjects_created: 0, duplicates: 0 }, error: null })
+    const { store, calls } = storeWith({ data: { item_ids: [], subjects_created: 0, duplicates: 0, restatements: 0 }, error: null })
     await expect(store.extractionCommit(RUN, { subjects: [], items: [item({ content: 'a\u0000b' })], stats: {} })).rejects.toThrow(
       'extractionCommit failed: items[0].content holds U+0000 or an unpaired surrogate',
     )

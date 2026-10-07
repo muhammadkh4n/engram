@@ -18,7 +18,8 @@ import type {
   ExtractionFailure,
   PendingAnchor,
 } from '../../src/items/capture-store.js'
-import { buildCommitPayload, extractionEventKey } from '../../src/extraction/persist.js'
+import { itemEventKey } from '../../src/extraction/links.js'
+import { buildCommitPayload } from '../../src/extraction/persist.js'
 import { extractWindow, runExtractionTick, type ExtractionStore } from '../../src/extraction/run.js'
 import { buildWindow, renderUserMessage, type RawExtractionWindow } from '../../src/extraction/window.js'
 
@@ -108,7 +109,7 @@ class OneWindowStore implements ExtractionStore {
   async extractionCommit(_runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
     this.closed = true
     this.commits.push(commit)
-    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0 }
+    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0, restatements: 0 }
   }
 }
 
@@ -187,12 +188,14 @@ describe('recorded extraction replies', () => {
           type: 'extraction',
           utterance_id: utteranceId,
           run_id: RUN_ID,
-          event_key: extractionEventKey(window.anchorId, 'mk_statement', 'ok'),
+          event_key: itemEventKey('mk_statement', utteranceId, 'ok'),
           scope: 'project',
           applies_to: [],
         },
         lineage: [utteranceId],
         entities: [],
+        links: [],
+        linksRejected: [],
       },
     ])
   })

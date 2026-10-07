@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
 
 import { gateWindow, type GateResult } from '../../src/extraction/gate.js'
-import { buildCommitPayload, extractionEventKey } from '../../src/extraction/persist.js'
-import { EXTRACTOR_VERSION } from '../../src/extraction/prompt.js'
+import { itemEventKey } from '../../src/extraction/links.js'
+import { buildCommitPayload } from '../../src/extraction/persist.js'
 import { parseReply } from '../../src/extraction/reply.js'
 import { buildWindow, type ExtractionWindow, type RawExtractionWindow } from '../../src/extraction/window.js'
 
@@ -115,7 +115,7 @@ describe('buildCommitPayload', () => {
       type: 'extraction',
       utterance_id: uuid(11),
       run_id: RUN,
-      event_key: extractionEventKey(uuid(11), 'mk_statement', 'keep Postgres'),
+      event_key: itemEventKey('mk_statement', uuid(11), 'keep Postgres'),
       scope: 'project',
       applies_to: ['postgres'],
     })
@@ -160,18 +160,43 @@ describe('buildCommitPayload', () => {
       type: 'extraction',
       utterance_id: uuid(10),
       run_id: RUN,
-      event_key: extractionEventKey(uuid(11), 'observation', 'The engram capture route writes to Postgres.'),
+      event_key: itemEventKey('observation', uuid(10), 'The engram capture route writes to Postgres.'),
       evidence: [{ type: 'commit', ref: 'abc1234' }],
     })
     expect(items[0]!.entities).toContainEqual({ entity: 'abc1234', entityType: 'sha' })
   })
 
-  it('keys the event on version, anchor, class and the normalized content', () => {
-    const expected = createHash('sha256')
-      .update(JSON.stringify([EXTRACTOR_VERSION, uuid(11), 'mk_statement', 'keep Postgres']))
-      .digest('hex')
-    expect(extractionEventKey(uuid(11), 'mk_statement', '  keep  Postgres ')).toBe(`x:${expected}`)
-    expect(extractionEventKey(uuid(11), 'observation', 'keep Postgres')).not.toBe(`x:${expected}`)
+  it('keys a statement on its utterance and normalized quote, and an observation on its turn and claim', () => {
+    const digest = createHash('sha256').update('keep Postgres', 'utf8').digest('hex')
+    expect(itemEventKey('mk_statement', uuid(11), '  keep  Postgres ')).toBe(`mk_statement:${uuid(11)}:${digest}`)
+    expect(itemEventKey('observation', uuid(10), 'keep\u00a0Postgres')).toBe(`observation:${uuid(10)}:${digest}`)
+  })
+
+  it('attaches each link the listed items allow and records the rest with their reasons', () => {
+    const listed = buildWindow({
+      ...RAW,
+      statements: [
+        { id: uuid(31), kind: 'ruling', subject_id: uuid(21), content: 'keep SQLite too', occurred_at: '2026-09-20T09:00:00Z' },
+        { id: uuid(32), kind: 'ruling', subject_id: uuid(21), content: 'keep Postgres', occurred_at: '2026-10-01T09:00:05Z' },
+      ],
+      observations: [
+        { id: uuid(41), kind: 'fact', subject_id: uuid(21), content: 'The route writes twice.', occurred_at: '2026-10-02T00:00:00Z' },
+      ],
+    })
+    const reply = {
+      statements: [
+        statement({ quote: 'keep Postgres for the capture route', supersedes: ['stmt-1', 'stmt-2'] }),
+        statement({ quote: 'Track it in TST-77.', corrects: ['obs-1'] }),
+      ],
+      observations: [observation({ supersedes: ['obs-1'] })],
+    }
+    const { items } = buildCommitPayload(listed, gated(listed, reply), RUN)
+
+    expect(items.map((i) => [i.links, i.linksRejected])).toEqual([
+      [[{ rel: 'supersedes', target: uuid(31) }], [{ target: uuid(32), reason: 'target_same_time' }]],
+      [[], [{ target: uuid(41), reason: 'target_newer' }]],
+      [[], [{ target: uuid(41), reason: 'target_newer' }]],
+    ])
   })
 
   it('gives a re-run of the same reply the same event keys and fresh row ids', () => {

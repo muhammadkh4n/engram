@@ -31,6 +31,7 @@ const ITEM_TABLES = [
   'memory_projects',
   'memory_items',
   'memory_item_entities',
+  'memory_item_links',
   'memory_capture_events',
   'memory_secret_hits',
 ] as const
@@ -190,12 +191,12 @@ describe('item store tables are reachable only through their own grants', () => 
     for (const stmt of grants) expect(stmt).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALL)\b/)
   })
 
-  it('revokes all on the two id sequences and grants nothing back', () => {
+  it('revokes all on the three id sequences and grants nothing back', () => {
     const section = privilegeSection()
     expect(section).toContain(
-      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;',
+      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;',
     )
-    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|secret_hits)_id_seq/)
+    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|secret_hits|item_links)_id_seq/)
   })
 })
 

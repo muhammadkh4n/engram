@@ -1,4 +1,5 @@
 import type { ExtractionErrorClass } from '../adapters/intelligence.js'
+import type { LinkRejectReason, LinkRel } from '../extraction/links.js'
 import type { AnchorKind, RawExtractionWindow } from '../extraction/window.js'
 import type { EntityType, ItemKind, ItemSource, RegisterStatus, Speaker } from './types.js'
 
@@ -190,6 +191,18 @@ export interface ExtractionEntity {
   entityType: EntityType
 }
 
+/** A link from an item of the commit to an existing item, already validated. */
+export interface ExtractionLink {
+  rel: LinkRel
+  target: string
+}
+
+/** A proposed link validation refused; the commit records it in the run's stats. */
+export interface ExtractionRejectedLink {
+  target: string
+  reason: LinkRejectReason
+}
+
 /**
  * One item an extraction commit stores. Its subject is either a listed one
  * (`subjectId`) or a new one of the same payload (`subjectKey`), never both.
@@ -216,6 +229,12 @@ export interface ExtractionItem {
   source: ItemSource
   lineage: readonly string[]
   entities: readonly ExtractionEntity[]
+  /**
+   * Applied in the commit's transaction. An item whose links restate (and
+   * none supersede) is not stored: each restated target gains its time.
+   */
+  links?: readonly ExtractionLink[]
+  linksRejected?: readonly ExtractionRejectedLink[]
 }
 
 /** Everything one run stores, in one transaction. `stats` holds counts only, never text. */
@@ -228,12 +247,14 @@ export interface ExtractionCommit {
 /**
  * What a commit stored. `itemIds` holds one id per item in input order; an
  * item whose event key was already stored counts in `duplicates` and its id
- * is the stored item's.
+ * is the stored item's; an item stored as a restatement counts in
+ * `restatements` and its id is its first restated target's.
  */
 export interface ExtractionCommitResult {
   itemIds: string[]
   subjectsCreated: number
   duplicates: number
+  restatements: number
 }
 
 /**

@@ -718,6 +718,25 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
   )
 
   it(
+    'stores the next version of a retired entry as current and leaves the retired version unsuperseded',
+    async () => {
+      const [active, retired, again] = (await ingest([
+        registerEntry('R-TST-1', 'active', 1),
+        registerEntry('R-TST-1', 'retired', 2),
+        registerEntry('R-TST-1', 'active', 3),
+      ])) as [string, string, string]
+      await expect(store.materialize(200)).resolves.toEqual(counts(3, 0, 0, 0, 0))
+      const [first, second, third] = [await itemOf(active), await itemOf(retired), await itemOf(again)]
+      expect(first.superseded_by).toBe(second.id)
+      expect(second.superseded_by).toBeNull()
+      expect(second.retired_reason).toBe('register status: retired')
+      expect(third.superseded_by).toBeNull()
+      expect(third.retired_reason).toBeNull()
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
     'retires the current version of each entry a register entry supersedes',
     async () => {
       const [old, replacement] = (await ingest([

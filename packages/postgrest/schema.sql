@@ -1387,6 +1387,30 @@ CREATE TABLE IF NOT EXISTS public.memory_item_entities (
 
 
 --
+-- Name: memory_item_links; Type: TABLE; Schema: public; Owner: -
+--
+-- Relations between items that neither supersede nor restate: an MK
+-- statement that corrects an item, an assistant turn that retracts one, a
+-- statement that changes a register entry. A link counts only while
+-- from_item is neither retired nor forgotten; readers apply that, so retiring
+-- or forgetting the source withdraws the link without deleting it. run_id is
+-- the extraction run that wrote the link, NULL for one written outside
+-- extraction.
+CREATE TABLE IF NOT EXISTS public.memory_item_links (
+    id bigserial PRIMARY KEY,
+    from_item uuid NOT NULL REFERENCES public.memory_items(id),
+    to_item uuid NOT NULL REFERENCES public.memory_items(id),
+    rel text NOT NULL,
+    run_id uuid REFERENCES public.memory_extraction_runs(id),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_item_links_rel_check CHECK (rel IN ('corrects', 'retracts', 'changes')),
+    CONSTRAINT memory_item_links_distinct_check CHECK (from_item <> to_item),
+    CONSTRAINT memory_item_links_finite_check CHECK (public.engram_time_in_range(created_at)),
+    CONSTRAINT memory_item_links_from_to_rel_key UNIQUE (from_item, to_item, rel)
+);
+
+
+--
 -- Name: memory_capture_events; Type: TABLE; Schema: public; Owner: -
 --
 -- Raw capture events, one row per (session_id, event_uuid): a replayed
@@ -2002,6 +2026,8 @@ CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (l
 CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
 CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
+CREATE INDEX IF NOT EXISTS idx_item_links_to_item ON public.memory_item_links USING btree (to_item);
+CREATE INDEX IF NOT EXISTS idx_item_links_run ON public.memory_item_links USING btree (run_id);
 CREATE INDEX IF NOT EXISTS idx_capture_events_pending ON public.memory_capture_events USING btree (occurred_at, id) WHERE (processed_at IS NULL);
 CREATE INDEX IF NOT EXISTS idx_capture_events_session ON public.memory_capture_events USING btree (session_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extraction_runs USING btree (session_id, started_at);
@@ -2905,8 +2931,11 @@ END; $$;
 -- Marks p_old as superseded by p_new. Both rows are locked FOR UPDATE in id
 -- order, so two calls on the same pair cannot deadlock, and every rule is
 -- checked on the locked rows: both exist and are live, they differ, share a
--- class, p_new occurred strictly later, and p_old is not superseded by a third
--- item (replacing a successor is forgetting it). A missing or equal id is an
+-- class, p_new occurred strictly later, p_old is not retired (a retired item
+-- is no longer current, so nothing replaces it), and p_old is not superseded
+-- by a third item (replacing a successor is forgetting it). valid_to is never
+-- set here: memory_items_before_update derives it from superseded_by as the
+-- successor's occurred_at, so a backfilled pair keeps its event times. A missing or equal id is an
 -- invalid argument (22023); a broken rule is refused (23514). Returns false
 -- when p_old is already superseded by p_new; otherwise sets superseded_by, and
 -- memory_items_before_update ends p_old's validity at p_new's event time.
@@ -2938,7 +2967,7 @@ BEGIN
   PERFORM pg_advisory_xact_lock(7308892986227385959);
   PERFORM 1 FROM public.memory_items i WHERE i.id IN (p_old, p_new) ORDER BY i.id FOR UPDATE;
 
-  SELECT i.class, i.occurred_at, i.superseded_by, i.forgotten_at INTO v_old
+  SELECT i.class, i.occurred_at, i.superseded_by, i.retired_at, i.forgotten_at INTO v_old
     FROM public.memory_items i WHERE i.id = p_old;
   IF NOT FOUND THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -2965,6 +2994,10 @@ BEGIN
   IF v_old.superseded_by IS NOT NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
       MESSAGE = 'engram_supersede_item: p_old is already superseded by another item';
+  END IF;
+  IF v_old.retired_at IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = 'engram_supersede_item: p_old is retired';
   END IF;
   IF v_new.occurred_at <= v_old.occurred_at THEN
     RAISE EXCEPTION USING ERRCODE = 'check_violation',
@@ -3213,8 +3246,10 @@ END; $$;
 -- A ledger decision or register entry is a new version of the item chain
 -- named by source.version_of. The newest live head of that chain (retired
 -- included) is superseded by the new version when the new one occurred
--- later, and supersedes it when it occurred earlier (a late delivery); equal
--- times fail the event. The new version takes the head's restated_at
+-- later, unless that head is retired: a retired item is no longer current,
+-- engram_supersede_item refuses to replace it, and it keeps its retirement as
+-- its end. The new version supersedes the head when it occurred earlier (a
+-- late delivery); equal times fail the event. The new version takes the head's restated_at
 -- (copied after the insert: a new item carries no restatement). A register
 -- entry whose status is not 'active' is retired, and each entry it lists in
 -- supersedes has its head retired unless already retired.
@@ -3460,7 +3495,7 @@ BEGIN
       END IF;
 
       IF v_new IS NOT NULL AND v_version_of IS NOT NULL THEN
-        SELECT i.id, i.occurred_at, i.restated_at INTO v_head
+        SELECT i.id, i.occurred_at, i.restated_at, i.retired_at INTO v_head
           FROM public.memory_items i
          WHERE (i.source ? 'version_of') AND (i.source ->> 'version_of') = v_version_of
            AND i.class = v_class AND i.kind = v_kind
@@ -3472,7 +3507,11 @@ BEGIN
             UPDATE public.memory_items m SET restated_at = v_head.restated_at WHERE m.id = v_new;
           END IF;
           IF e.occurred_at > v_head.occurred_at THEN
-            PERFORM public.engram_supersede_item(v_head.id, v_new);
+            -- A retired version is no longer current and keeps its end as
+            -- retired; only a current one is superseded by its successor.
+            IF v_head.retired_at IS NULL THEN
+              PERFORM public.engram_supersede_item(v_head.id, v_new);
+            END IF;
           ELSIF e.occurred_at < v_head.occurred_at THEN
             PERFORM public.engram_supersede_item(v_new, v_head.id);
           ELSE
@@ -4203,18 +4242,41 @@ END; $$;
 --   to the stored or created id. subjects_created counts the rows created.
 -- - items: up to 500 mk_statement or observation objects in
 --   engram_insert_items' form, except that a subject is given either as
---   subject_id or as subject_key, and entities lists the item's
---   {entity, entity_type} rows. Every item gets extraction_run_id = p_run.
---   An item whose source.event_key is already stored is not inserted and
---   counts as a duplicate; its entities are not written again.
+--   subject_id or as subject_key, entities lists the item's
+--   {entity, entity_type} rows, links lists its validated links
+--   {rel, target} (rel supersedes, restates, corrects, retracts or changes;
+--   never both supersedes and restates) and links_rejected the links its
+--   validation refused, {target, reason}. Every item gets
+--   extraction_run_id = p_run. An item whose source.event_key is already
+--   stored is not inserted and counts as a duplicate; its entities and links
+--   are not written again, since they were written with it.
 -- - stats: counts only, never text; the run's stats are these plus
---   subjects_created, entities (rows written) and duplicates.
+--   subjects_created, entities (rows written), duplicates, links_applied,
+--   links_rejected [{item, target, reason}] and restatements
+--   [{target, at, utterance}].
+-- An item with no supersedes link is a restatement when a restates target is
+-- current, or else when a current item of its class and subject holds the
+-- same words under the quote rule and occurred no later. A restatement is not
+-- stored: its occurred_at joins each target's restated_at (sorted, each time
+-- once), its other links run from its first target, and that target stands
+-- for it in item_ids. Every other item is inserted and its links applied in
+-- input order: supersedes through engram_supersede_item, corrects, retracts
+-- and changes as memory_item_links rows (a repeated row is skipped). A link
+-- whose target is no longer current (superseded, retired or forgotten) is not
+-- applied and is recorded as not_current; a target that names no item, a
+-- restatement time earlier than its target, or a supersession the item rules
+-- refuse raises, so the window's items and links are stored together or not
+-- at all.
 -- The run row is locked first and must be running. The deferred item checks
 -- (an mk_statement's quote must occur in an MK utterance of its lineage) are
 -- forced right after the insert, so a refused item raises from this call,
 -- nothing is written and the run stays running for the caller to fail.
--- Returns {item_ids, subjects_created, duplicates}: item_ids holds one id
--- per item in input order, a duplicate's being the stored item's.
+-- Restatement times and supersessions lock existing item rows, so the call
+-- takes the forget advisory key (7308892986227385959) exclusively before it
+-- reads or writes any item, as every function that locks item rows does.
+-- Returns {item_ids, subjects_created, duplicates, restatements}: item_ids
+-- holds one id per item in input order, a duplicate's being the stored
+-- item's and a restatement's its first target's.
 CREATE OR REPLACE FUNCTION public.engram_extraction_commit(p_run uuid, p_payload jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
@@ -4227,8 +4289,26 @@ DECLARE
   v_stats jsonb;
   v_keys jsonb := '{}'::jsonb;
   v_insert jsonb;
+  v_count integer;
   v_ids uuid[] := '{}'::uuid[];
   v_added boolean[] := '{}'::boolean[];
+  v_restating boolean[] := '{}'::boolean[];
+  v_to_insert jsonb;
+  v_positions integer[];
+  v_row record;
+  v_n integer;
+  v_obj jsonb;
+  v_links jsonb;
+  v_link jsonb;
+  v_target uuid;
+  v_targets uuid[];
+  v_at timestamptz;
+  v_target_at timestamptz;
+  v_current boolean;
+  v_refused jsonb := '[]'::jsonb;
+  v_restated jsonb := '[]'::jsonb;
+  v_applied integer := 0;
+  v_restatements integer := 0;
   v_created integer := 0;
   v_entities integer := 0;
   v_duplicates integer := 0;
@@ -4311,6 +4391,30 @@ BEGIN
                                                    OR jsonb_typeof(e.v -> 'entity') IS DISTINCT FROM 'string'
                                                    OR jsonb_typeof(e.v -> 'entity_type') IS DISTINCT FROM 'string' END) THEN
                        format('item %s: each entity must be {entity, entity_type} with string values', t.n)
+                     WHEN coalesce(jsonb_typeof(t.v -> 'links'), 'null') NOT IN ('array', 'null') THEN
+                       format('item %s: links must be a JSON array', t.n)
+                     WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.v -> 'links') = 'array'
+                                                                          THEN t.v -> 'links' ELSE '[]'::jsonb END) AS l(v)
+                                   WHERE CASE WHEN jsonb_typeof(l.v) <> 'object' THEN true
+                                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(l.v) AS k(key) WHERE k.key NOT IN ('rel', 'target'))
+                                                   OR coalesce(l.v ->> 'rel', '') NOT IN ('supersedes', 'restates', 'corrects', 'retracts', 'changes')
+                                                   OR jsonb_typeof(l.v -> 'target') IS DISTINCT FROM 'string'
+                                                   OR (l.v ->> 'target') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' END) THEN
+                       format('item %s: each link must be {rel, target} with a known rel and a UUID target', t.n)
+                     WHEN (t.v -> 'links') @> '[{"rel": "supersedes"}]' AND (t.v -> 'links') @> '[{"rel": "restates"}]' THEN
+                       format('item %s both supersedes and restates', t.n)
+                     WHEN coalesce(jsonb_typeof(t.v -> 'links_rejected'), 'null') NOT IN ('array', 'null') THEN
+                       format('item %s: links_rejected must be a JSON array', t.n)
+                     WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.v -> 'links_rejected') = 'array'
+                                                                          THEN t.v -> 'links_rejected' ELSE '[]'::jsonb END) AS r(v)
+                                   WHERE CASE WHEN jsonb_typeof(r.v) <> 'object' THEN true
+                                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(r.v) AS k(key) WHERE k.key NOT IN ('target', 'reason'))
+                                                   OR coalesce(r.v ->> 'reason', '') NOT IN ('not_current', 'class_mismatch', 'subject_mismatch',
+                                                                                             'target_newer', 'target_same_time', 'link_conflict',
+                                                                                             'not_a_candidate', 'not_in_scope')
+                                                   OR jsonb_typeof(r.v -> 'target') IS DISTINCT FROM 'string'
+                                                   OR (r.v ->> 'target') !~* '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$' END) THEN
+                       format('item %s: each rejected link must be {target, reason} with a known reason and a UUID target', t.n)
                    END AS reason
               FROM jsonb_array_elements(v_items) WITH ORDINALITY AS t(v, n)) AS x
      WHERE x.reason IS NOT NULL
@@ -4356,7 +4460,21 @@ BEGIN
   END IF;
 
   IF jsonb_array_length(v_items) > 0 THEN
-    SELECT jsonb_agg((t.v - 'subject_key' - 'entities')
+    PERFORM pg_advisory_xact_lock(7308892986227385959);
+
+    SELECT format('item %s: link target %s names no item', t.n, l.v ->> 'target') INTO v_problem
+      FROM jsonb_array_elements(v_items) WITH ORDINALITY AS t(v, n)
+     CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(t.v -> 'links') = 'array'
+                                                  THEN t.v -> 'links' ELSE '[]'::jsonb END) WITH ORDINALITY AS l(v, k)
+     WHERE NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = (l.v ->> 'target')::uuid)
+     ORDER BY t.n, l.k
+     LIMIT 1;
+    IF v_problem IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_extraction_commit: ' || v_problem;
+    END IF;
+
+    SELECT jsonb_agg((t.v - 'subject_key' - 'entities' - 'links' - 'links_rejected')
                      || jsonb_build_object('extraction_run_id', p_run)
                      || CASE WHEN coalesce(t.v -> 'subject_key', 'null'::jsonb) <> 'null'::jsonb
                              THEN jsonb_build_object('subject_id', v_keys -> (t.v ->> 'subject_key'))
@@ -4365,11 +4483,104 @@ BEGIN
       INTO v_insert
       FROM jsonb_array_elements(v_items) WITH ORDINALITY AS t(v, n);
 
-    SELECT array_agg(r.id ORDER BY r.ord), array_agg(r.inserted ORDER BY r.ord)
-      INTO v_ids, v_added
-      FROM public.engram_insert_items(v_insert) AS r;
+    v_count := jsonb_array_length(v_items);
+    v_ids := array_fill(NULL::uuid, ARRAY[v_count]);
+    v_added := array_fill(false, ARRAY[v_count]);
+    v_restating := array_fill(false, ARRAY[v_count]);
+
+    -- Restatements first: an item whose event key is stored is left to the
+    -- insert, which reports it as a duplicate.
+    FOR v_n IN 1 .. v_count LOOP
+      v_obj := v_insert -> (v_n - 1);
+      v_links := CASE WHEN jsonb_typeof(v_items -> (v_n - 1) -> 'links') = 'array' THEN v_items -> (v_n - 1) -> 'links' ELSE '[]'::jsonb END;
+      CONTINUE WHEN EXISTS (SELECT 1 FROM public.memory_items x
+                             WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = (v_obj -> 'source' ->> 'event_key'));
+      CONTINUE WHEN v_links @> '[{"rel": "supersedes"}]';
+      v_at := (v_obj ->> 'occurred_at')::timestamptz;
+      v_targets := '{}'::uuid[];
+      FOR v_link IN SELECT l.v FROM jsonb_array_elements(v_links) WITH ORDINALITY AS l(v, k) WHERE l.v ->> 'rel' = 'restates' ORDER BY l.k LOOP
+        v_target := (v_link ->> 'target')::uuid;
+        SELECT i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL, i.occurred_at
+          INTO v_current, v_target_at
+          FROM public.memory_items i WHERE i.id = v_target;
+        IF NOT v_current THEN
+          v_refused := v_refused || jsonb_build_object('n', v_n, 'target', v_target, 'reason', 'not_current');
+        ELSIF v_target_at > v_at THEN
+          RAISE EXCEPTION USING ERRCODE = 'check_violation',
+            MESSAGE = format('engram_extraction_commit: item %s restates an item that occurred later', v_n);
+        ELSIF NOT v_target = ANY (v_targets) THEN
+          v_targets := v_targets || v_target;
+        END IF;
+      END LOOP;
+      IF cardinality(v_targets) = 0 THEN
+        SELECT ARRAY[i.id] INTO v_targets
+          FROM public.memory_items i
+         WHERE i.class = v_obj ->> 'class' AND i.subject_id = (v_obj ->> 'subject_id')::uuid
+           AND i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL
+           AND i.occurred_at <= v_at
+           AND public.engram_norm_quote(i.content) = public.engram_norm_quote(v_obj ->> 'content')
+         ORDER BY i.occurred_at DESC, i.id
+         LIMIT 1;
+      END IF;
+      CONTINUE WHEN coalesce(cardinality(v_targets), 0) = 0;
+
+      v_restating[v_n] := true;
+      v_ids[v_n] := v_targets[1];
+      v_restatements := v_restatements + 1;
+      UPDATE public.memory_items m
+         SET restated_at = ARRAY(SELECT DISTINCT u.x FROM unnest(m.restated_at || v_at) AS u(x) ORDER BY u.x)
+       WHERE m.id = ANY (v_targets);
+      SELECT v_restated || jsonb_agg(jsonb_build_object('target', g.id, 'at', v_obj -> 'occurred_at',
+                                                        'utterance', v_obj -> 'lineage' -> 0) ORDER BY g.k)
+        INTO v_restated
+        FROM unnest(v_targets) WITH ORDINALITY AS g(id, k);
+    END LOOP;
+
+    SELECT coalesce(jsonb_agg(e.v ORDER BY e.n), '[]'::jsonb), coalesce(array_agg(e.n::integer ORDER BY e.n), '{}'::integer[])
+      INTO v_to_insert, v_positions
+      FROM jsonb_array_elements(v_insert) WITH ORDINALITY AS e(v, n)
+     WHERE NOT v_restating[e.n::integer];
+    IF cardinality(v_positions) > 0 THEN
+      FOR v_row IN SELECT r.ord, r.id, r.inserted FROM public.engram_insert_items(v_to_insert) AS r LOOP
+        v_ids[v_positions[v_row.ord]] := v_row.id;
+        v_added[v_positions[v_row.ord]] := v_row.inserted;
+      END LOOP;
+    END IF;
 
     SET CONSTRAINTS ALL IMMEDIATE;
+
+    -- Links, in input order, from each stored item or a restatement's first
+    -- target; a duplicate's were written with it.
+    FOR v_n IN 1 .. v_count LOOP
+      CONTINUE WHEN NOT (v_added[v_n] OR v_restating[v_n]);
+      v_links := CASE WHEN jsonb_typeof(v_items -> (v_n - 1) -> 'links') = 'array' THEN v_items -> (v_n - 1) -> 'links' ELSE '[]'::jsonb END;
+      FOR v_link IN SELECT l.v FROM jsonb_array_elements(v_links) WITH ORDINALITY AS l(v, k) WHERE l.v ->> 'rel' <> 'restates' ORDER BY l.k LOOP
+        v_target := (v_link ->> 'target')::uuid;
+        IF v_target = v_ids[v_n] THEN
+          v_refused := v_refused || jsonb_build_object('n', v_n, 'target', v_target, 'reason', 'link_conflict');
+          CONTINUE;
+        END IF;
+        SELECT i.superseded_by IS NULL AND i.retired_at IS NULL AND i.forgotten_at IS NULL INTO v_current
+          FROM public.memory_items i WHERE i.id = v_target;
+        IF NOT v_current THEN
+          v_refused := v_refused || jsonb_build_object('n', v_n, 'target', v_target, 'reason', 'not_current');
+          CONTINUE;
+        END IF;
+        IF v_link ->> 'rel' = 'supersedes' THEN
+          PERFORM public.engram_supersede_item(v_target, v_ids[v_n]);
+        ELSE
+          INSERT INTO public.memory_item_links (from_item, to_item, rel, run_id)
+          VALUES (v_ids[v_n], v_target, v_link ->> 'rel', p_run)
+          ON CONFLICT (from_item, to_item, rel) DO NOTHING;
+        END IF;
+        v_applied := v_applied + 1;
+      END LOOP;
+      SELECT v_refused || coalesce(jsonb_agg(jsonb_build_object('n', v_n, 'target', r.v -> 'target', 'reason', r.v -> 'reason')
+                                             ORDER BY r.k), '[]'::jsonb)
+        INTO v_refused
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(v_items -> (v_n - 1) -> 'links_rejected') = 'array'
+                                       THEN v_items -> (v_n - 1) -> 'links_rejected' ELSE '[]'::jsonb END) WITH ORDINALITY AS r(v, k);
+    END LOOP;
 
     INSERT INTO public.memory_item_entities (item_id, entity, entity_type)
     SELECT v_ids[t.n::integer], e.v ->> 'entity', e.v ->> 'entity_type'
@@ -4380,18 +4591,25 @@ BEGIN
     ON CONFLICT (item_id, entity) DO NOTHING;
     GET DIAGNOSTICS v_entities = ROW_COUNT;
 
-    v_duplicates := cardinality(array_positions(v_added, false));
+    v_duplicates := v_count - v_restatements - cardinality(array_positions(v_added, true));
   END IF;
 
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
          finished_at = now(),
          error = NULL,
-         stats = v_stats || jsonb_build_object('subjects_created', v_created, 'entities', v_entities,
-                                               'duplicates', v_duplicates)
+         stats = v_stats || jsonb_build_object(
+                   'subjects_created', v_created, 'entities', v_entities, 'duplicates', v_duplicates,
+                   'links_applied', v_applied,
+                   'links_rejected', (SELECT coalesce(jsonb_agg(jsonb_build_object('item', v_ids[(f.v ->> 'n')::integer],
+                                                                                   'target', f.v -> 'target',
+                                                                                   'reason', f.v -> 'reason') ORDER BY f.k), '[]'::jsonb)
+                                        FROM jsonb_array_elements(v_refused) WITH ORDINALITY AS f(v, k)),
+                   'restatements', v_restated)
    WHERE r.id = p_run;
 
-  RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates);
+  RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
+                            'restatements', v_restatements);
 END; $$;
 
 
@@ -4549,6 +4767,12 @@ ALTER TABLE public.memory_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_item_entities ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_item_links; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_item_links ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memory_capture_events; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4655,6 +4879,13 @@ CREATE POLICY service_role_all ON public.memory_items TO service_role USING (tru
 DROP POLICY IF EXISTS service_role_all ON public.memory_item_entities;
 CREATE POLICY service_role_all ON public.memory_item_entities TO service_role USING (true) WITH CHECK (true);
 
+--
+-- Name: memory_item_links service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_item_links;
+CREATE POLICY service_role_all ON public.memory_item_links TO service_role USING (true) WITH CHECK (true);
+
 
 --
 -- Name: memory_capture_events service_role_all; Type: POLICY; Schema: public; Owner: -
@@ -4680,7 +4911,7 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- privilege, DELETE and TRUNCATE included, and UPDATE on sequences. So all
 -- privileges are revoked from PUBLIC, service_role, anon and authenticated
 -- first, then service_role gets back SELECT and nothing else: no INSERT,
--- UPDATE, DELETE or TRUNCATE on the tables and nothing on the two id
+-- UPDATE, DELETE or TRUNCATE on the tables and nothing on the three id
 -- sequences. Every write goes through the engram_* RPCs, which run as the
 -- owner, so the rules each RPC applies (idempotent inserts, forgets that
 -- cascade under one lock order, supersession only to a later live item) hold
@@ -4690,8 +4921,8 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
-REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
+REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -4702,8 +4933,8 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
-      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -4714,6 +4945,7 @@ GRANT SELECT ON TABLE public.memory_extraction_runs TO service_role;
 GRANT SELECT ON TABLE public.memory_projects TO service_role;
 GRANT SELECT ON TABLE public.memory_items TO service_role;
 GRANT SELECT ON TABLE public.memory_item_entities TO service_role;
+GRANT SELECT ON TABLE public.memory_item_links TO service_role;
 GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 

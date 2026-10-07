@@ -373,8 +373,8 @@ function parseTime(value: unknown): Date | null {
 
 /**
  * The item as the commit RPC takes it: engram_insert_items' columns plus
- * subject_key and entities. Only the set one of subject_id and subject_key is
- * sent.
+ * subject_key, entities, links and links_rejected. Only the set one of
+ * subject_id and subject_key is sent, and the link lists only when non-empty.
  */
 function toCommitItem(item: ExtractionItem, index: number): Record<string, unknown> {
   const object: Record<string, unknown> = {
@@ -399,6 +399,10 @@ function toCommitItem(item: ExtractionItem, index: number): Record<string, unkno
   }
   if (item.subjectId !== null) object.subject_id = item.subjectId
   if (item.subjectKey !== null) object.subject_key = item.subjectKey
+  if (item.links && item.links.length > 0) object.links = item.links.map((l) => ({ rel: l.rel, target: l.target }))
+  if (item.linksRejected && item.linksRejected.length > 0) {
+    object.links_rejected = item.linksRejected.map((l) => ({ target: l.target, reason: l.reason }))
+  }
   return object
 }
 
@@ -423,18 +427,19 @@ function isoTime(value: Date, position: number): string {
 function toCommitResult(data: unknown, itemCount: number): ExtractionCommitResult {
   const unexpected = new Error('extractionCommit failed: the RPC returned an unexpected result')
   if (!isRecord(data)) throw unexpected
-  const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates } = data
+  const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates, restatements } = data
   if (
     !Array.isArray(itemIds) ||
     itemIds.length !== itemCount ||
     !itemIds.every((id) => typeof id === 'string') ||
     !isCount(subjectsCreated) ||
     !isCount(duplicates) ||
-    duplicates > itemCount
+    !isCount(restatements) ||
+    duplicates + restatements > itemCount
   ) {
     throw unexpected
   }
-  return { itemIds: itemIds as string[], subjectsCreated, duplicates }
+  return { itemIds: itemIds as string[], subjectsCreated, duplicates, restatements }
 }
 
 function isCount(value: unknown): value is number {

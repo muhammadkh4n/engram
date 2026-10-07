@@ -213,7 +213,7 @@ class FakeStore implements ExtractionStore {
     expect(run.status).toBe('running')
     Object.assign(run, { status: 'succeeded', finishedAt: new Date(this.clock.now), stats: commit.stats })
     this.commits.push({ anchorId: run.anchorId, commit })
-    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0 }
+    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0, restatements: 0 }
   }
 }
 

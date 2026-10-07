@@ -53,6 +53,8 @@ export type {
   ExtractionEntity,
   ExtractionFailure,
   ExtractionItem,
+  ExtractionLink,
+  ExtractionRejectedLink,
   ExtractionNewSubject,
   ExtractionPendingQuery,
   PendingAnchor,
@@ -303,8 +305,27 @@ export type {
 } from './extraction/window.js'
 export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
-export { buildCommitPayload, extractionEventKey } from './extraction/persist.js'
+export { buildCommitPayload } from './extraction/persist.js'
 export type { ExtractionItemClass } from './extraction/persist.js'
+export {
+  itemEventKey,
+  sessionIndexEventKey,
+  validateLinks,
+  isCurrent,
+  isRegisterEntry,
+  LINK_REJECT_REASONS,
+} from './extraction/links.js'
+export type {
+  IdentityClass,
+  LinkRel,
+  LinkRejectReason,
+  LinkSource,
+  LinkTarget,
+  LinkProposal,
+  AcceptedLink,
+  RejectedLink,
+  LinkValidation,
+} from './extraction/links.js'
 export {
   extractWindow,
   runExtractionTick,

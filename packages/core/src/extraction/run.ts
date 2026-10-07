@@ -463,7 +463,8 @@ async function commitWindow(
   line(
     'succeeded',
     ` statements=${result.statements.length} observations=${result.observations.length}` +
-      ` rejected=${result.rejected.length} duplicates=${stored.duplicates} subjects_created=${stored.subjectsCreated}`,
+      ` rejected=${result.rejected.length} duplicates=${stored.duplicates} restatements=${stored.restatements}` +
+      ` subjects_created=${stored.subjectsCreated}`,
   )
   return 'succeeded'
 }

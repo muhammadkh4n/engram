@@ -374,7 +374,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       status: 'succeeded',
       finished: true,
       error: null,
-      stats: { statements: { proposed: 0 }, subjects_created: 0, entities: 0, duplicates: 0 },
+      stats: { statements: { proposed: 0 }, subjects_created: 0, entities: 0, duplicates: 0, links_applied: 0, links_rejected: [], restatements: [] },
     })
     expect(await store.extractionBegin({ anchorId: p1!, sessionId: 'sess-r', version: VERSION, model: null })).toBeNull()
 
@@ -600,6 +600,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       itemIds: ['00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000202'],
       subjectsCreated: 1,
       duplicates: 0,
+      restatements: 0,
     })
 
     const rows = JSON.parse(
@@ -627,6 +628,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
         subjects_created: 1,
         entities: 3,
         duplicates: 0,
+        links_applied: 0,
+        links_rejected: [],
+        restatements: [],
       },
     })
 
@@ -679,7 +683,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       items: [{ ...repeat.items[0]!, id: '00000000-0000-4000-8000-000000000204' }],
       stats: {},
     })
-    expect(result).toEqual({ itemIds: ['00000000-0000-4000-8000-000000000201'], subjectsCreated: 0, duplicates: 1 })
+    expect(result).toEqual({ itemIds: ['00000000-0000-4000-8000-000000000201'], subjectsCreated: 0, duplicates: 1, restatements: 0 })
     expect(await count(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe(1)
     expect(await count('SELECT count(*) FROM public.memory_subjects;')).toBe(1)
     expect(await count('SELECT count(*) FROM public.memory_item_entities;')).toBe(3)
