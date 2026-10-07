@@ -232,7 +232,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the decision pass through Post
 
   it('reads the newest 20 of 25 current statements with the total, all ids, and nothing later or excluded', async () => {
     const storage = await subject('storage backend')
-    const days = Array.from({ length: 27 }, (_, n) => `2026-09-${String(n + 1).padStart(2, '0')}T10:00:00Z`)
+    const days = Array.from({ length: 27 }, (_, n) => new Date(Date.UTC(2026, 8, n + 1, 10)).toISOString())
     const utterances = await seed(...days.map((at, n) => said(`Storage rule number ${n}.`, at)))
     const stored = utterances.map((u, n) => statement(u, `Storage rule number ${n}`, storage))
     for (const [n, item] of stored.entries()) await storeItems(utterances[n]!, [item])

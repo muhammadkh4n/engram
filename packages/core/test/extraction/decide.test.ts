@@ -220,7 +220,7 @@ describe('the decision pass', () => {
     const gated = await extractWindow(window, replying(fixture.reply))
     const draft = draftCommit(window, gated, RUN_ID)
     const queries = candidateQueries(draft)
-    const all = Array.from({ length: 25 }, (_, n) => candidate(n, `2026-09-${String(25 - n).padStart(2, '0')}T10:00:00.000Z`))
+    const all = Array.from({ length: 25 }, (_, n) => candidate(n, new Date(Date.UTC(2026, 8, 25 - n, 10)).toISOString()))
     const read: ExtractionCandidateRead = {
       stored: null,
       repeatOf: null,
