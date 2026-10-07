@@ -86,6 +86,7 @@ export type {
   SessionIndexSource,
   SessionIndexUtterance,
 } from './items/capture-store.js'
+export type { IngestItemWrite, ItemIngestStore } from './items/ingest-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'

@@ -4802,13 +4802,22 @@ END; $$;
 
 
 --
--- Name: engram_extraction_apply(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_apply(uuid, public.memory_items, text, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- The body of engram_extraction_commit, which calls it with p_reindex empty.
--- Stores what one run extracted, in one transaction, and closes the run as
--- succeeded. p_payload is {subjects, items, retractions, stats}, each key
--- optional:
+-- The shared write of engram_extraction_apply and engram_ingest_item.
+-- Stores mk_statement and observation items with their subjects, entities and
+-- links in one transaction. With a run (p_run), as engram_extraction_apply
+-- calls it, it stores what that run extracted and closes the run as
+-- succeeded; the run's anchor utterance is the scope repeats and races are
+-- judged from, and p_scope is ignored. With no run, as engram_ingest_item
+-- calls it, p_scope is that scope (a row of memory_items' shape whose id,
+-- project, workspace, session and source the scope rules read), no run row is
+-- read or touched, extraction_run_id and link run_id stay NULL, and a link
+-- the call cannot apply raises instead of being recorded, since there is no
+-- run whose stats could record it. p_caller names the public function in
+-- every error message. p_payload is {subjects, items, retractions, stats},
+-- each key optional:
 -- - subjects: [{key, label, project_id}], the new subjects the items name by
 --   key. Each is upserted on idx_subjects_project_label, so a label already
 --   stored under that project (in any case) is reused, and its key resolves
@@ -4823,7 +4832,7 @@ END; $$;
 --   the current items on its subject it was weighed against (with those its
 --   links name), as engram_extraction_candidates read them; on a new subject
 --   (subject_key) only a standing statement has them, read by the label. Every item gets
---   extraction_run_id = p_run. An item whose source.event_key is already
+--   extraction_run_id = p_run (NULL with no run). An item whose source.event_key is already
 --   stored is not inserted and counts as a duplicate; its entities and links
 --   are not written again, since they were written with it.
 -- - retractions: null or an array of {from, targets, rejected}, one per
@@ -4857,7 +4866,7 @@ END; $$;
 -- restatement time earlier than its target, or a supersession the item rules
 -- refuse raises, so the window's items and links are stored together or not
 -- at all.
--- The run row is locked first and must be running. The deferred item checks
+-- With a run, the run row is locked first and must be running. The deferred item checks
 -- (an mk_statement's quote must occur in an MK utterance of its lineage) are
 -- forced right after the insert, so a refused item raises from this call,
 -- nothing is written and the run stays running for the caller to fail.
@@ -4874,7 +4883,7 @@ END; $$;
 -- sessions of this call's own items, all their rows locked in one
 -- session_id order: two separate ordered passes could each hold a row the
 -- other waits for, as could an ingest.
-CREATE OR REPLACE FUNCTION public.engram_extraction_apply(p_run uuid, p_payload jsonb, p_reindex text[]) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.engram_items_apply(p_run uuid, p_scope public.memory_items, p_caller text, p_payload jsonb, p_reindex text[]) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -4919,7 +4928,7 @@ DECLARE
 BEGIN
   IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: p_payload must be a JSON object';
+      MESSAGE = p_caller || ': p_payload must be a JSON object';
   END IF;
   SELECT format('p_payload has the key %s, which is not subjects, items, retractions or stats', quote_ident(left(k.key, 63)))
     INTO v_problem
@@ -5064,20 +5073,25 @@ BEGIN
 
   IF v_problem IS NOT NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: ' || v_problem;
+      MESSAGE = p_caller || ': ' || v_problem;
   END IF;
 
-  SELECT r.status INTO v_status
-    FROM public.memory_extraction_runs r
-   WHERE r.id = p_run
-     FOR UPDATE;
-  IF NOT FOUND THEN
+  IF p_run IS NOT NULL THEN
+    SELECT r.status INTO v_status
+      FROM public.memory_extraction_runs r
+     WHERE r.id = p_run
+       FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = p_caller || ': p_run names no run';
+    END IF;
+    IF v_status <> 'running' THEN
+      RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
+        MESSAGE = format('%s: the run is %s, not running', p_caller, v_status);
+    END IF;
+  ELSIF (p_scope).id IS NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: p_run names no run';
-  END IF;
-  IF v_status <> 'running' THEN
-    RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
-      MESSAGE = format('engram_extraction_commit: the run is %s, not running', v_status);
+      MESSAGE = p_caller || ': a write with no run needs a scope';
   END IF;
 
   IF jsonb_array_length(v_subjects) > 0 THEN
@@ -5111,15 +5125,19 @@ BEGIN
      LIMIT 1;
     IF v_problem IS NOT NULL THEN
       RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-        MESSAGE = 'engram_extraction_commit: ' || v_problem;
+        MESSAGE = p_caller || ': ' || v_problem;
     END IF;
 
     -- Before any item of this call is written, so only items another writer
     -- made current since the read can appear here.
-    SELECT r.* INTO v_anchor
-      FROM public.memory_extraction_runs x
-      JOIN public.memory_items r ON r.id = x.anchor_item_id
-     WHERE x.id = p_run;
+    IF p_run IS NOT NULL THEN
+      SELECT r.* INTO v_anchor
+        FROM public.memory_extraction_runs x
+        JOIN public.memory_items r ON r.id = x.anchor_item_id
+       WHERE x.id = p_run;
+    ELSE
+      v_anchor := p_scope;
+    END IF;
     SELECT public.engram_extraction_plan_slug(e.plan_dirs) INTO v_plan
       FROM public.memory_capture_events e
      WHERE e.id = CASE WHEN (v_anchor.source ->> 'event_id') ~ '^[0-9]{1,18}$' THEN (v_anchor.source ->> 'event_id')::bigint END;
@@ -5168,7 +5186,7 @@ BEGIN
           v_refused := v_refused || jsonb_build_object('n', v_n, 'target', v_target, 'reason', 'not_current');
         ELSIF v_target_at > v_at THEN
           RAISE EXCEPTION USING ERRCODE = 'check_violation',
-            MESSAGE = format('engram_extraction_commit: item %s restates an item that occurred later', v_n);
+            MESSAGE = format('%s: item %s restates an item that occurred later', p_caller, v_n);
         ELSIF NOT v_target = ANY (v_targets) THEN
           v_targets := v_targets || v_target;
         END IF;
@@ -5264,7 +5282,7 @@ BEGIN
     PERFORM 1 FROM public.memory_items i WHERE i.id = v_from AND i.class = 'utterance' AND i.kind = 'assistant_turn';
     IF NOT FOUND THEN
       RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-        MESSAGE = 'engram_extraction_commit: retractions.from names no assistant turn';
+        MESSAGE = p_caller || ': retractions.from names no assistant turn';
     END IF;
     FOR v_link IN SELECT x.v FROM jsonb_array_elements(v_retraction -> 'targets') WITH ORDINALITY AS x(v, k) ORDER BY x.k LOOP
       v_target := (v_link #>> '{}')::uuid;
@@ -5272,7 +5290,7 @@ BEGIN
         FROM public.memory_items i WHERE i.id = v_target;
       IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-          MESSAGE = format('engram_extraction_commit: retraction target %s names no item', v_target);
+          MESSAGE = format('%s: retraction target %s names no item', p_caller, v_target);
       END IF;
       IF v_target = v_from THEN
         v_refused := v_refused || jsonb_build_object('item', v_from, 'target', v_target, 'reason', 'link_conflict');
@@ -5314,6 +5332,19 @@ BEGIN
    WHERE st.indexed_event_id <> 0
      AND st.session_id = ANY (v_sessions);
 
+  IF p_run IS NULL THEN
+    SELECT format('%s: item %s: the link to %s was refused: %s', p_caller, f.v ->> 'n', f.v ->> 'target', f.v ->> 'reason')
+      INTO v_problem
+      FROM jsonb_array_elements(v_refused) WITH ORDINALITY AS f(v, k)
+     ORDER BY f.k
+     LIMIT 1;
+    IF v_problem IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = v_problem;
+    END IF;
+    RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
+                              'restatements', v_restatements, 'links_applied', v_applied);
+  END IF;
+
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
          finished_at = now(),
@@ -5333,6 +5364,96 @@ BEGIN
 
   RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
                             'restatements', v_restatements, 'links_applied', v_applied);
+END; $$;
+
+
+--
+-- Name: engram_extraction_apply(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The body of engram_extraction_commit, which calls it with p_reindex empty:
+-- engram_items_apply with the run, where the payload, the link and
+-- restatement rules, p_reindex and the result are described. It stores what
+-- one run extracted, in one transaction, and closes the run as succeeded.
+CREATE OR REPLACE FUNCTION public.engram_extraction_apply(p_run uuid, p_payload jsonb, p_reindex text[]) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT public.engram_items_apply(p_run, NULL::public.memory_items, 'engram_extraction_commit', p_payload, p_reindex)
+$$;
+
+
+--
+-- Name: engram_ingest_item(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores one item a caller wrote outside extraction (the memory_ingest tool),
+-- through engram_items_apply with no run. p_payload is {subjects, items}:
+-- subjects as engram_items_apply takes them, and items exactly one
+-- mk_statement or observation in its form, whose source.type is ingest_tool
+-- and which names no extraction run. The scope its repeats are judged from is
+-- its own: an mk_statement's is the utterance its lineage starts with, which
+-- must be a stored utterance; an observation's is the item itself (its id,
+-- project, workspace, session and plan). Returns engram_items_apply's result.
+CREATE OR REPLACE FUNCTION public.engram_ingest_item(p_payload jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_item jsonb;
+  v_scope public.memory_items%ROWTYPE;
+  v_problem text;
+  c_uuid CONSTANT text := '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$';
+BEGIN
+  IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_ingest_item: p_payload must be a JSON object';
+  END IF;
+  SELECT format('p_payload has the key %s, which is not subjects or items', quote_ident(left(k.key, 63)))
+    INTO v_problem
+    FROM jsonb_object_keys(p_payload) AS k(key)
+   WHERE k.key NOT IN ('subjects', 'items')
+   ORDER BY k.key
+   LIMIT 1;
+  IF v_problem IS NULL AND (jsonb_typeof(p_payload -> 'items') IS DISTINCT FROM 'array'
+                            OR jsonb_array_length(p_payload -> 'items') <> 1) THEN
+    v_problem := 'items must be an array of exactly one item';
+  END IF;
+  v_item := CASE WHEN v_problem IS NULL THEN p_payload -> 'items' -> 0 END;
+  IF v_problem IS NULL AND jsonb_typeof(v_item) <> 'object' THEN
+    v_problem := 'item 1 is not a JSON object';
+  END IF;
+  IF v_problem IS NULL AND (v_item -> 'source' ->> 'type') IS DISTINCT FROM 'ingest_tool' THEN
+    v_problem := 'item 1: source.type must be ingest_tool';
+  END IF;
+  IF v_problem IS NULL AND coalesce(v_item -> 'extraction_run_id', 'null'::jsonb) <> 'null'::jsonb THEN
+    v_problem := 'item 1 names an extraction run';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(v_item -> 'id') IS DISTINCT FROM 'string' OR (v_item ->> 'id') !~* c_uuid) THEN
+    v_problem := 'item 1: id must be a UUID';
+  END IF;
+  IF v_problem IS NULL AND (v_item ->> 'class') = 'mk_statement' THEN
+    SELECT i.* INTO v_scope
+      FROM public.memory_items i
+     WHERE i.id = CASE WHEN (v_item -> 'lineage' ->> 0) ~* c_uuid THEN (v_item -> 'lineage' ->> 0)::uuid END
+       AND i.class = 'utterance';
+    IF NOT FOUND THEN
+      v_problem := 'item 1: an mk_statement''s lineage must start with a stored utterance';
+    END IF;
+  ELSIF v_problem IS NULL THEN
+    v_scope.id := (v_item ->> 'id')::uuid;
+    v_scope.class := v_item ->> 'class';
+    v_scope.project_id := v_item ->> 'project_id';
+    v_scope.workspace_id := v_item ->> 'workspace_id';
+    v_scope.plan_slug := v_item ->> 'plan_slug';
+    v_scope.session_id := v_item ->> 'session_id';
+    v_scope.source := v_item -> 'source';
+  END IF;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_ingest_item: ' || v_problem;
+  END IF;
+  RETURN public.engram_items_apply(NULL, v_scope, 'engram_ingest_item', p_payload, '{}'::text[]);
 END; $$;
 
 
@@ -6459,6 +6580,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memor
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM PUBLIC;
@@ -6533,6 +6656,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM %I', role_name);
@@ -6596,6 +6721,8 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) TO service_role;

@@ -34,7 +34,9 @@ import type {
   ExtractionRetractions,
   ExtractionPendingQuery,
   IngestedEvent,
+  IngestItemWrite,
   ItemEmbedding,
+  ItemIngestStore,
   MaterializeResult,
   PendingAnchor,
   PendingEmbedding,
@@ -86,7 +88,7 @@ interface PgError {
  * Errors carry the code and message only, never PostgREST's `details`, which
  * can hold the failing row.
  */
-export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore {
+export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore, ItemIngestStore {
   private readonly client: PostgrestClient
 
   constructor(opts: PostgRestCaptureStoreOptions) {
@@ -384,6 +386,17 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     const { data, error } = await this.client.rpc('engram_extraction_commit', { p_run: runId, p_payload: payload })
     if (error) throw toStoreError('extractionCommit', error)
     return toCommitResult(data, commit.items.length)
+  }
+
+  async ingestItem(write: IngestItemWrite): Promise<ExtractionCommitResult> {
+    const payload = {
+      subjects: write.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
+      items: [toCommitItem(write.item, 0)],
+    }
+    refuseUnsafeText('ingestItem', '', payload)
+    const { data, error } = await this.client.rpc('engram_ingest_item', { p_payload: payload })
+    if (error) throw toStoreError('ingestItem', error)
+    return toCommitResult(data, 1)
   }
 
   async extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult> {
