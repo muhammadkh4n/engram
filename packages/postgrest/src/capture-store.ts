@@ -311,6 +311,9 @@ export class PostgRestCaptureStore implements CaptureStore {
     if (!FAILURE_CLASSES.has(failure.failure)) {
       throw new Error('extractionFail: failure must be transient or held')
     }
+    if (typeof failure.counted !== 'boolean') {
+      throw new Error('extractionFail: counted must be a boolean')
+    }
     refuseUnsafeText('extractionFail', 'stats.', failure.stats)
     const { data, error } = await this.client.rpc('engram_extraction_fail', {
       p_run: runId,
@@ -319,6 +322,7 @@ export class PostgRestCaptureStore implements CaptureStore {
       // run open until it goes stale.
       p_error: toPostgresText(failure.error),
       p_failure: failure.failure,
+      p_counted: failure.counted,
       p_stats: failure.stats,
     })
     if (error) throw toStoreError('extractionFail', error)
@@ -346,6 +350,7 @@ function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
   const unexpected = new Error('extractionPending failed: the RPC returned an unexpected row')
   const { anchor_item_id: anchorId, session_id: sessionId, anchor_kind: anchorKind, failures } = row
   const heldFailures = row.held_failures
+  const transientFailures = row.transient_failures
   const runningRunId = row.running_run_id
   const occurredAt = parseTime(row.occurred_at)
   const isOpen = runningRunId !== null
@@ -358,7 +363,8 @@ function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
     occurredAt === null ||
     !isCount(failures) ||
     !isCount(heldFailures) ||
-    heldFailures > failures ||
+    !isCount(transientFailures) ||
+    heldFailures + transientFailures > failures ||
     (isOpen && (typeof runningRunId !== 'string' || runningStartedAt === null)) ||
     (!isOpen && row.running_started_at !== null)
   ) {
@@ -371,6 +377,7 @@ function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
     occurredAt,
     failures,
     heldFailures,
+    transientFailures,
     runningRunId: isOpen ? (runningRunId as string) : null,
     runningStartedAt,
   }

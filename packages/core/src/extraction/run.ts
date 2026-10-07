@@ -10,20 +10,28 @@
  * - `transient` (an empty or moderated reply, a provider or network fault);
  * - `held` (a reply cut off at its cap, an unreadable reply, a refused
  *   commit).
- * Every failure backs its anchor off (60 s doubled per earlier failure of
- * either class, capped at 6 h), so a window that keeps failing never stays at
- * the head of the oldest-first queue. An anchor is left after
- * EXTRACTION_HELD_FAILURES_MAX held or EXTRACTION_TRANSIENT_FAILURES_MAX
- * transient failures, and its session's later anchors run.
+ * Every failure backs its anchor off (60 s doubled per earlier failure,
+ * counted or not, capped at 6 h), so a window that keeps failing never stays
+ * at the head of the oldest-first queue.
  *
- * One failing window never ends a tick: a single transient failure goes on to
- * the next anchor. Two transient failures in a row end it, since the provider
- * itself is then most likely down and every further call would fail too.
+ * A failure counts toward the anchor's limit (EXTRACTION_HELD_FAILURES_MAX
+ * held, EXTRACTION_TRANSIENT_FAILURES_MAX transient) only on direct proof that
+ * the provider is up, never by what other windows did:
+ * - the call was answered (an empty, moderated, cut-off or unreadable reply,
+ *   or a rejected request), so the failure is the window's own;
+ * - the call went unanswered (5xx, 408, 429, 404, 409, 401-403, a network
+ *   fault, an open circuit), and one minimal probe sent at once to the same
+ *   adapter and model was answered.
+ * When the probe goes unanswered too, the provider is down: the failure backs
+ * the anchor off uncounted and the tick ends, so an outage tick makes two
+ * calls and an outage of any length exhausts no anchor. An exhausted anchor no
+ * longer holds its session's later anchors back.
  *
  * Log lines carry id prefixes, statuses, counts and durations, never text.
  */
 import {
   classifyExtractionError,
+  type CompleteJsonRequest,
   type CompleteJsonResult,
   type ExtractionErrorClass,
   type IntelligenceAdapter,
@@ -56,8 +64,18 @@ export const EXTRACTION_STALE_RUN_MS = 10 * 60_000
 export const EXTRACTION_HELD_FAILURES_MAX = 3
 /** Transient failures after which an anchor is no longer pending (the pending RPC holds the same number). */
 export const EXTRACTION_TRANSIENT_FAILURES_MAX = 6
-/** Transient failures in a row that end a tick. */
-const TRANSIENT_FAILURES_IN_A_ROW_MAX = 2
+/** Names the probe call in logs; a probe never carries window text. */
+export const EXTRACTION_PROBE_LABEL = 'extraction-probe'
+/**
+ * The smallest JSON-mode call: any reply, whatever its content or finish
+ * reason, shows the provider answers.
+ */
+const PROBE_REQUEST: CompleteJsonRequest = {
+  label: EXTRACTION_PROBE_LABEL,
+  system: 'Reply with the JSON object {"ok":true}.',
+  user: 'ping',
+  maxTokens: 16,
+}
 /** Longest error message a run row or a log line keeps. */
 const ERROR_MESSAGE_MAX_CHARS = 500
 const ID_PREFIX_CHARS = 8
@@ -172,7 +190,14 @@ export interface ExtractionTickResult {
   full: boolean
 }
 
-type WindowStatus = 'succeeded' | 'held' | 'transient' | 'gone' | 'skipped'
+/**
+ * `outage`: the provider (an unanswered call and probe) or the store (an
+ * unreadable window) is down; the failure is not counted and the tick ends.
+ */
+type WindowStatus = 'succeeded' | 'held' | 'transient' | 'outage' | 'gone' | 'skipped'
+
+type TickDeps = ExtractionTickDeps & { intelligence: IntelligenceAdapter }
+type WindowLine = (status: string, detail: string) => void
 
 const EMPTY_TICK: ExtractionTickResult = { windows: 0, succeeded: 0, held: 0, transient: 0, full: false }
 
@@ -200,15 +225,11 @@ export async function runExtractionTick(deps: ExtractionTickDeps): Promise<Extra
   return { ...counts, full: counts.windows >= EXTRACTION_WINDOWS_PER_TICK }
 }
 
-async function runWindows(
-  deps: ExtractionTickDeps & { intelligence: IntelligenceAdapter },
-  counts: ExtractionTickResult,
-): Promise<void> {
+async function runWindows(deps: TickDeps, counts: ExtractionTickResult): Promise<void> {
   const now = deps.now ?? (() => new Date())
   // An anchor handed out twice in one tick (held by another process, gone)
   // is not retried here; a fetch that brings nothing new ends the tick.
   const seen = new Set<string>()
-  let transientInARow = 0
   while (counts.windows < EXTRACTION_WINDOWS_PER_TICK) {
     const pending = await deps.store.extractionPending({
       version: EXTRACTOR_VERSION,
@@ -225,43 +246,24 @@ async function runWindows(
       counts.windows += 1
       if (status === 'succeeded') counts.succeeded += 1
       else if (status === 'held') counts.held += 1
-      else if (status === 'transient') counts.transient += 1
-      if (status === 'transient') transientInARow += 1
-      else if (status !== 'gone') transientInARow = 0
-      if (transientInARow >= TRANSIENT_FAILURES_IN_A_ROW_MAX) {
-        deps.log('extraction: two transient failures in a row, so the tick ends; the provider may be down')
-        return
-      }
+      else if (status === 'transient' || status === 'outage') counts.transient += 1
+      if (status === 'outage') return
       if (counts.windows >= EXTRACTION_WINDOWS_PER_TICK) return
     }
   }
 }
 
-async function runWindow(
-  deps: ExtractionTickDeps & { intelligence: IntelligenceAdapter },
-  anchor: PendingAnchor,
-  now: () => Date,
-): Promise<WindowStatus> {
+async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date): Promise<WindowStatus> {
   const { store, log } = deps
   const started = Date.now()
-  const line = (status: string, detail: string): void =>
+  const line: WindowLine = (status, detail) =>
     log(
       `extraction: session=${prefix(anchor.sessionId)} anchor=${prefix(anchor.anchorId)} status=${status}` +
         `${detail} ms=${Date.now() - started}`,
     )
 
   if (anchor.runningRunId !== null) {
-    if (!isStale(anchor, now())) return 'skipped'
-    // The closed run is a transient failure like any other, so the anchor now
-    // waits out the backoff it sets; a window that kills its worker every
-    // time is left after EXTRACTION_TRANSIENT_FAILURES_MAX tries.
-    const closed = await store.extractionFail(anchor.runningRunId, {
-      error: `the run was still running after ${EXTRACTION_STALE_RUN_MS} ms`,
-      failure: 'transient',
-      stats: { anchor_kind: anchor.anchorKind },
-    })
-    line('stale_closed', '')
-    if (closed) logIfExhausted(log, anchor, 'transient')
+    if (isStale(anchor, now())) await closeStale(deps, anchor, anchor.runningRunId, line)
     return 'skipped'
   }
 
@@ -274,7 +276,6 @@ async function runWindow(
   if (runId === null) return 'skipped'
 
   let window: ExtractionWindow
-  let result: ExtractWindowResult
   try {
     const raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT)
     if (raw === null) {
@@ -283,26 +284,126 @@ async function runWindow(
       await store.extractionFail(runId, {
         error: 'the anchor is gone',
         failure: 'transient',
+        counted: false,
         stats: { anchor_kind: anchor.anchorKind },
       })
       line('gone', '')
       return 'gone'
     }
     window = buildWindow(raw)
-    result = await extractWindow(window, { intelligence: deps.intelligence })
   } catch (err) {
-    const failure = extractionFailureClass(err)
-    const call = isExtractionReplyError(err) ? err.call : null
-    await store.extractionFail(runId, {
-      error: describeError(err),
-      failure,
-      stats: { anchor_kind: anchor.anchorKind, ...callStats(call) },
-    })
-    line(failure, ` error=${errorLabel(err)}`)
-    logIfExhausted(log, anchor, failure)
-    return failure
+    return failRead(deps, anchor, runId, err, line)
   }
 
+  let result: ExtractWindowResult
+  try {
+    result = await extractWindow(window, { intelligence: deps.intelligence })
+  } catch (err) {
+    return failCall(deps, anchor, runId, err, line)
+  }
+  return commitWindow(deps, anchor, runId, window, result, line)
+}
+
+/**
+ * A run still open after EXTRACTION_STALE_RUN_MS lost its worker mid-run. It
+ * is closed as a counted transient failure, so the anchor waits out the
+ * backoff it sets, and a window that kills its worker every time is left
+ * after EXTRACTION_TRANSIENT_FAILURES_MAX tries instead of blocking its
+ * session for ever.
+ */
+async function closeStale(deps: TickDeps, anchor: PendingAnchor, runId: string, line: WindowLine): Promise<void> {
+  const closed = await deps.store.extractionFail(runId, {
+    error: `the run was still running after ${EXTRACTION_STALE_RUN_MS} ms`,
+    failure: 'transient',
+    counted: true,
+    stats: { anchor_kind: anchor.anchorKind },
+  })
+  line('stale_closed', '')
+  if (closed) logIfExhausted(deps.log, anchor, 'transient')
+}
+
+/**
+ * The store could not read or the window could not be built; no model call
+ * was made. An unreachable store says nothing about the window, so the
+ * failure is not counted and the tick ends; anything else (a window that
+ * cannot be built) is the window's own and is held.
+ */
+async function failRead(
+  deps: TickDeps,
+  anchor: PendingAnchor,
+  runId: string,
+  err: unknown,
+  line: WindowLine,
+): Promise<WindowStatus> {
+  const failure = classifyExtractionError(err)
+  const counted = failure === 'held'
+  await deps.store.extractionFail(runId, {
+    error: describeError(err),
+    failure,
+    counted,
+    stats: { anchor_kind: anchor.anchorKind },
+  })
+  line(failure, ` error=${errorLabel(err)} counted=${counted}`)
+  if (!counted) {
+    deps.log('extraction: the store could not read a window, so the tick ends')
+    return 'outage'
+  }
+  logIfExhausted(deps.log, anchor, failure)
+  return failure
+}
+
+/**
+ * The model call failed. A failure the provider answered (a reply that cannot
+ * be used, a rejected request) counts. An unanswered one counts only when a
+ * probe sent at once is answered; otherwise the provider is down, nothing is
+ * counted and the tick ends.
+ */
+async function failCall(
+  deps: TickDeps,
+  anchor: PendingAnchor,
+  runId: string,
+  err: unknown,
+  line: WindowLine,
+): Promise<WindowStatus> {
+  const failure = extractionFailureClass(err)
+  const answered = isExtractionReplyError(err) || failure === 'held'
+  const counted = answered || (await providerAnswers(deps.intelligence))
+  const call = isExtractionReplyError(err) ? err.call : null
+  await deps.store.extractionFail(runId, {
+    error: describeError(err),
+    failure,
+    counted,
+    stats: { anchor_kind: anchor.anchorKind, ...callStats(call) },
+  })
+  line(failure, ` error=${errorLabel(err)} counted=${counted}`)
+  if (!counted) {
+    deps.log('extraction: a window call and the probe after it went unanswered, so the tick ends; the provider is down')
+    return 'outage'
+  }
+  logIfExhausted(deps.log, anchor, failure)
+  return failure
+}
+
+/** Sends the probe; true when the provider answered it in any way. */
+async function providerAnswers(intelligence: IntelligenceAdapter): Promise<boolean> {
+  const completeJson = intelligence.completeJson
+  if (!completeJson) return false
+  try {
+    await completeJson.call(intelligence, PROBE_REQUEST)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function commitWindow(
+  deps: TickDeps,
+  anchor: PendingAnchor,
+  runId: string,
+  window: ExtractionWindow,
+  result: ExtractWindowResult,
+  line: WindowLine,
+): Promise<WindowStatus> {
   let commit: ExtractionCommit | null = null
   try {
     const payload = buildCommitPayload(window, result, runId)
@@ -310,7 +411,7 @@ async function runWindow(
       ...payload,
       stats: { anchor_kind: anchor.anchorKind, ...callStats(result.call), ...payload.stats },
     }
-    const stored = await store.extractionCommit(runId, commit)
+    const stored = await deps.store.extractionCommit(runId, commit)
     line(
       'succeeded',
       ` statements=${result.statements.length} observations=${result.observations.length}` +
@@ -318,24 +419,26 @@ async function runWindow(
     )
     return 'succeeded'
   } catch (err) {
-    await store.extractionFail(runId, {
+    await deps.store.extractionFail(runId, {
       error: describeError(err),
       failure: 'held',
+      counted: true,
       stats: commit?.stats ?? { anchor_kind: anchor.anchorKind, ...callStats(result.call) },
     })
     line('held', ` error=${errorLabel(err)}`)
-    logIfExhausted(log, anchor, 'held')
+    logIfExhausted(deps.log, anchor, 'held')
     return 'held'
   }
 }
 
 /**
- * Names the anchor when the failure just recorded is its last: the pending
- * read no longer hands it out, and its session's later anchors run.
+ * Names the anchor when the counted failure just recorded is its last: the
+ * pending read no longer hands it out, and its session's later anchors run.
+ * Only called for a counted failure; an uncounted one never exhausts.
  */
 function logIfExhausted(log: (line: string) => void, anchor: PendingAnchor, failure: ExtractionErrorClass): void {
   const held = anchor.heldFailures + (failure === 'held' ? 1 : 0)
-  const transient = anchor.failures - anchor.heldFailures + (failure === 'transient' ? 1 : 0)
+  const transient = anchor.transientFailures + (failure === 'transient' ? 1 : 0)
   if (held < EXTRACTION_HELD_FAILURES_MAX && transient < EXTRACTION_TRANSIENT_FAILURES_MAX) return
   log(
     `extraction: session=${prefix(anchor.sessionId)} anchor=${prefix(anchor.anchorId)} exhausted` +

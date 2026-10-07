@@ -149,10 +149,11 @@ export interface ExtractionPendingQuery {
 
 /**
  * The next anchor of one session: its earliest anchor still pending, due now.
- * `failures` counts its failed runs of both classes at the version asked (the
- * count its backoff follows), `heldFailures` the held ones among them. A run
- * still open on it is named by `runningRunId`; a new run cannot begin until
- * that one is closed.
+ * `failures` counts every failed run at the version asked, counted or not
+ * (the count its backoff follows); `heldFailures` and `transientFailures` the
+ * counted ones of each class, the counts its limits apply to. A run still
+ * open on it is named by `runningRunId`; a new run cannot begin until that one
+ * is closed.
  */
 export interface PendingAnchor {
   anchorId: string
@@ -161,6 +162,7 @@ export interface PendingAnchor {
   occurredAt: Date
   failures: number
   heldFailures: number
+  transientFailures: number
   runningRunId: string | null
   runningStartedAt: Date | null
 }
@@ -175,10 +177,15 @@ export interface ExtractionBegin {
   model: string | null
 }
 
-/** How a run failed. `stats` holds counts only, never text. */
+/**
+ * How a run failed. `counted` says whether the failure counts toward the
+ * anchor's limit for its class: only when the provider is shown to be up, so
+ * an outage never exhausts an anchor. `stats` holds counts only, never text.
+ */
 export interface ExtractionFailure {
   error: string
   failure: ExtractionErrorClass
+  counted: boolean
   stats: Record<string, unknown>
 }
 
@@ -332,9 +339,9 @@ export interface CaptureStore {
   /**
    * Up to `limit` anchors to extract next, oldest first and at most one per
    * session: each session's earliest anchor with no succeeded run, fewer
-   * than 3 held and fewer than 6 transient failures at `version`, and only
-   * once the backoff for its failures of both classes has passed since the
-   * latest. Anchors are MK utterances, and a trailing assistant
+   * than 3 counted held and fewer than 6 counted transient failures at
+   * `version`, and only once the backoff for all its failures, counted or
+   * not, has passed since the latest. Anchors are MK utterances, and a trailing assistant
    * turn once its session has ended or been idle for `idleMs`.
    */
   extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]>

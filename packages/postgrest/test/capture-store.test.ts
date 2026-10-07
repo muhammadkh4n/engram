@@ -488,6 +488,7 @@ describe('PostgRestCaptureStore extraction', () => {
       occurred_at: '2026-09-14T09:00:00+00:00',
       failures: 3,
       held_failures: 1,
+      transient_failures: 1,
       running_run_id: RUN,
       running_started_at: '2026-09-14T09:05:00+00:00',
     }
@@ -507,6 +508,7 @@ describe('PostgRestCaptureStore extraction', () => {
         occurredAt: new Date('2026-09-14T09:00:00.000Z'),
         failures: 3,
         heldFailures: 1,
+        transientFailures: 1,
         runningRunId: RUN,
         runningStartedAt: new Date('2026-09-14T09:05:00.000Z'),
       },
@@ -526,12 +528,16 @@ describe('PostgRestCaptureStore extraction', () => {
     await expect(storeWith({ data: [bad], error: null }).store.extractionPending(query)).rejects.toThrow(
       'extractionPending failed: the RPC returned an unexpected row',
     )
-    const moreHeldThanFailed = { ...bad, anchor_kind: 'user_prompt', failures: 1, held_failures: 2 }
-    await expect(storeWith({ data: [moreHeldThanFailed], error: null }).store.extractionPending(query)).rejects.toThrow(
+    const moreCountedThanFailed = { ...bad, anchor_kind: 'user_prompt', failures: 2, held_failures: 1, transient_failures: 2 }
+    await expect(storeWith({ data: [moreCountedThanFailed], error: null }).store.extractionPending(query)).rejects.toThrow(
       'extractionPending failed: the RPC returned an unexpected row',
     )
-    const noHeldCount = { ...bad, anchor_kind: 'user_prompt' }
+    const noHeldCount = { ...bad, anchor_kind: 'user_prompt', transient_failures: 0 }
     await expect(storeWith({ data: [noHeldCount], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const noTransientCount = { ...bad, anchor_kind: 'user_prompt', held_failures: 0 }
+    await expect(storeWith({ data: [noTransientCount], error: null }).store.extractionPending(query)).rejects.toThrow(
       'extractionPending failed: the RPC returned an unexpected row',
     )
     const halfOpen = { ...bad, anchor_kind: 'user_prompt', running_run_id: RUN }
@@ -572,22 +578,25 @@ describe('PostgRestCaptureStore extraction', () => {
     ).rejects.toThrow('extractionBegin failed: the RPC returned no run id')
   })
 
-  it('closes a run through engram_extraction_fail with its class, and makes the error text storable', async () => {
+  it('closes a run through engram_extraction_fail with its class and count, and makes the error text storable', async () => {
     const { store, calls } = storeWith({ data: true, error: null })
     await expect(
-      store.extractionFail(RUN, { error: 'bad\u0000reply \ud800', failure: 'held', stats: { reply_chars: 12 } }),
+      store.extractionFail(RUN, { error: 'bad\u0000reply \ud800', failure: 'held', counted: true, stats: { reply_chars: 12 } }),
     ).resolves.toBe(true)
     expect(calls).toEqual([
       {
         fn: 'engram_extraction_fail',
-        args: { p_run: RUN, p_error: 'bad�reply �', p_failure: 'held', p_stats: { reply_chars: 12 } },
+        args: { p_run: RUN, p_error: 'bad�reply �', p_failure: 'held', p_counted: true, p_stats: { reply_chars: 12 } },
       },
     ])
     await expect(
-      store.extractionFail(RUN, { error: 'x', failure: 'later' as 'held', stats: {} }),
+      store.extractionFail(RUN, { error: 'x', failure: 'later' as 'held', counted: true, stats: {} }),
     ).rejects.toThrow('failure must be transient or held')
+    await expect(
+      store.extractionFail(RUN, { error: 'x', failure: 'transient', counted: 'yes' as unknown as boolean, stats: {} }),
+    ).rejects.toThrow('counted must be a boolean')
     expect(calls).toHaveLength(1)
-    await expect(storeWith({ data: null, error: null }).store.extractionFail(RUN, { error: 'x', failure: 'transient', stats: {} })).rejects.toThrow(
+    await expect(storeWith({ data: null, error: null }).store.extractionFail(RUN, { error: 'x', failure: 'transient', counted: false, stats: {} })).rejects.toThrow(
       'extractionFail failed: the RPC returned no result',
     )
   })
