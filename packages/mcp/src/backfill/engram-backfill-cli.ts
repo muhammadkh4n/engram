@@ -10,6 +10,8 @@
  *   - transcripts: every Claude Code main-session transcript under
  *     `--projects-dir`, oldest first, from the backfill's own cursor. Files
  *     modified in the last hour are left to live capture.
+ *   - history: the prompts in `--history-file` of every session that has no
+ *     transcript left, pastes put back; a bang command is not a prompt.
  *
  * Dry run by default: prints what would be sent, sends nothing and writes no
  * state. `--apply` spools to the backfill's own state directory and drains it
@@ -19,6 +21,7 @@
  *
  * Usage:
  *   engram-backfill transcripts [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
+ *   engram-backfill history [--history-file FILE] [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]
  *
  * Sending flags:
  *   --target URL        the server (default ENGRAM_SERVER_URL); events go to its /capture/events
@@ -32,11 +35,13 @@
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { ProjectRegistry } from '../capture-events/project-registry.js'
 import { captureEventsEndpoint } from '../capture/endpoint.js'
 import { captureClientInfo } from '../capture/events.js'
 import { isEntryPoint } from '../ingest/entry-point.js'
 import { openPrivateHandle } from '../ingest/private-files.js'
-import { createProjectResolver, loadOverrides, loadResolverRegistry } from './project-resolver.js'
+import { type HistorySummary, runHistory } from './history.js'
+import { createProjectResolver, loadOverrides, loadResolverRegistry, type ProjectResolver } from './project-resolver.js'
 import { BACKFILL_CLIENT_NAME, type SendTarget } from './send.js'
 import {
   backfillPaths,
@@ -51,7 +56,7 @@ import { runTranscripts, type TranscriptsSummary } from './transcripts.js'
 
 type Env = Record<string, string | undefined>
 
-export const COMMANDS = ['transcripts'] as const
+export const COMMANDS = ['transcripts', 'history'] as const
 export type BackfillCommand = (typeof COMMANDS)[number]
 
 export interface BackfillCliArgs {
@@ -64,7 +69,10 @@ export interface BackfillCliArgs {
   stateDir: string | null
   overrides: string | null
   projectsDir: string | null
+  historyFile: string | null
 }
+
+type BackfillSummary = TranscriptsSummary | HistorySummary
 
 export interface CliIo {
   out: (text: string) => void
@@ -76,9 +84,11 @@ export class UsageError extends Error {}
 const USAGE =
   'engram-backfill — replay past sessions through the capture route (dry run by default)\n' +
   '  engram-backfill transcripts [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]\n' +
+  '  engram-backfill history [--history-file FILE] [--projects-dir DIR] [--overrides FILE] [sending flags] [--apply] [--json]\n' +
   '  Commands:\n' +
   '  transcripts          Claude Code main-session transcripts, oldest first; files modified in\n' +
   '                       the last hour are left to live capture\n' +
+  '  history              prompts from the history file of sessions with no transcript left\n' +
   '  Sending flags:\n' +
   '  --target URL         the server (default ENGRAM_SERVER_URL)\n' +
   '  --token-file FILE    the capture token (default ENGRAM_CAPTURE_TOKEN_FILE, else ENGRAM_CAPTURE_TOKEN)\n' +
@@ -87,6 +97,10 @@ const USAGE =
   '  transcripts:\n' +
   '  --projects-dir DIR   default ~/.claude/projects\n' +
   '  --overrides FILE     JSON object: raw project value -> project name or null\n' +
+  '  history:\n' +
+  '  --history-file FILE  default ~/.claude/history.jsonl; pastes stored by hash are read from its paste-cache/\n' +
+  '  --projects-dir DIR   the transcripts that decide which sessions are covered (default ~/.claude/projects)\n' +
+  '  --overrides FILE     as for transcripts\n' +
   '  Common:\n' +
   '  --apply              send, and move cursors once the server acknowledged\n' +
   '  --json               print the summary as JSON\n'
@@ -98,7 +112,16 @@ const VALUE_FLAGS = {
   '--state-dir': 'stateDir',
   '--overrides': 'overrides',
   '--projects-dir': 'projectsDir',
+  '--history-file': 'historyFile',
 } as const satisfies Record<string, keyof BackfillCliArgs>
+
+const SENDING_FLAGS = ['--target', '--token-file', '--registry', '--state-dir', '--apply', '--json']
+
+/** The flags each command takes; another command's flag is a usage error, not silently ignored. */
+const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
+  transcripts: new Set([...SENDING_FLAGS, '--projects-dir', '--overrides']),
+  history: new Set([...SENDING_FLAGS, '--history-file', '--projects-dir', '--overrides']),
+}
 
 function isCommand(value: string): value is BackfillCommand {
   return (COMMANDS as readonly string[]).includes(value)
@@ -120,16 +143,21 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     stateDir: null,
     overrides: null,
     projectsDir: null,
+    historyFile: null,
   }
   for (let i = 0; i < rest.length; i++) {
-    const flag = rest[i]
+    const flag = rest[i]!
+    if (!COMMAND_FLAGS[command].has(flag)) {
+      const known = flag in VALUE_FLAGS || SENDING_FLAGS.includes(flag)
+      throw new UsageError(known ? `${command} does not take ${flag}` : `unknown flag "${flag}"`)
+    }
     if (flag === '--apply') args.apply = true
     else if (flag === '--json') args.json = true
-    else if (Object.hasOwn(VALUE_FLAGS, flag)) {
+    else {
       const value = rest[++i]?.trim()
       if (!value || value.startsWith('--')) throw new UsageError(`${flag} requires a value`)
       args[VALUE_FLAGS[flag as keyof typeof VALUE_FLAGS]] = value
-    } else throw new UsageError(`unknown flag "${flag}"`)
+    }
   }
   return args
 }
@@ -177,13 +205,25 @@ async function tokenFileFor(
   return { file: path, cleanup: () => fs.rm(path, { force: true }) }
 }
 
-export function formatTranscriptsSummary(s: TranscriptsSummary): string {
-  const pairs = (counts: Record<string, number>): string =>
-    Object.keys(counts).length === 0 ? 'none' : Object.entries(counts).map(([k, n]) => `${k}=${n}`).join(' ')
+function pairs(counts: Record<string, number>): string {
+  return Object.keys(counts).length === 0 ? 'none' : Object.entries(counts).map(([k, n]) => `${k}=${n}`).join(' ')
+}
+
+/** The lines every command prints: what it read, then what the server answered. */
+function commandLines(s: BackfillSummary): string {
+  if (s.command === 'transcripts') {
+    return (
+      `  files: found=${s.files.found} read=${s.files.read} skipped_recent=${s.files.skipped_recent} ` +
+      `skipped_unchanged=${s.files.skipped_unchanged} not_reached=${s.files.not_reached}\n`
+    )
+  }
+  return `  entries: ${pairs({ ...s.entries })}\n`
+}
+
+export function formatSummary(s: BackfillSummary): string {
   return (
-    `${s.apply ? 'apply' : 'dry run'}: transcripts\n` +
-    `  files: found=${s.files.found} read=${s.files.read} skipped_recent=${s.files.skipped_recent} ` +
-    `skipped_unchanged=${s.files.skipped_unchanged} not_reached=${s.files.not_reached}\n` +
+    `${s.apply ? 'apply' : 'dry run'}: ${s.command}\n` +
+    commandLines(s) +
     `  events: ${pairs(s.events)}\n` +
     `  accepted=${s.accepted} duplicates=${s.duplicates}\n` +
     `  rejected: ${pairs(s.rejected)}\n` +
@@ -191,18 +231,43 @@ export function formatTranscriptsSummary(s: TranscriptsSummary): string {
   )
 }
 
-async function runTranscriptsCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<TranscriptsSummary> {
+interface CommandContext {
+  env: Env
+  registryFile: string
+  registry: ProjectRegistry
+  resolver: ProjectResolver
+  paths: BackfillPaths
+  log: (line: string) => void
+}
+
+function runSource(args: BackfillCliArgs, ctx: CommandContext, send: SendTarget | undefined): Promise<BackfillSummary> {
+  const home = ctx.env.HOME || homedir()
+  const projectsDir = args.projectsDir ? expandHome(args.projectsDir, ctx.env) : join(home, '.claude', 'projects')
+  const common = { env: ctx.env, log: ctx.log, ...(send ? { send } : {}) }
+  if (args.command === 'transcripts') {
+    return runTranscripts({ ...common, projectsDir, registry: ctx.registry, resolver: ctx.resolver, paths: ctx.paths })
+  }
+  const historyFile = args.historyFile ? expandHome(args.historyFile, ctx.env) : join(home, '.claude', 'history.jsonl')
+  return runHistory({ ...common, historyFile, projectsDir, resolver: ctx.resolver })
+}
+
+async function runCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<BackfillSummary> {
   const endpoint = endpointOf(required(args.target ?? env.ENGRAM_SERVER_URL, '--target or ENGRAM_SERVER_URL'))
-  const registryFile = required(args.registry ?? env.ENGRAM_PROJECT_REGISTRY_FILE, '--registry or ENGRAM_PROJECT_REGISTRY_FILE')
+  const registryArg = required(args.registry ?? env.ENGRAM_PROJECT_REGISTRY_FILE, '--registry or ENGRAM_PROJECT_REGISTRY_FILE')
+  const registryFile = expandHome(registryArg, env)
   const registry = loadResolverRegistry(registryFile, env)
   const overrides = args.overrides ? loadOverrides(args.overrides, env) : new Map<string, string | null>()
-  const resolver = createProjectResolver({ registry, overrides }, env)
-  const paths = backfillPaths(args.stateDir ? expandHome(args.stateDir, env) : defaultStateDir(endpoint, env))
-  const projectsDir = args.projectsDir ? expandHome(args.projectsDir, env) : join(env.HOME || homedir(), '.claude', 'projects')
-  const log = (line: string): void => io.err(`[engram-backfill] ${line}\n`)
-  const base = { env, projectsDir, registry, resolver, paths, log }
-  if (!args.apply) return runTranscripts(base)
+  const ctx: CommandContext = {
+    env,
+    registryFile,
+    registry,
+    resolver: createProjectResolver({ registry, overrides }, env),
+    paths: backfillPaths(args.stateDir ? expandHome(args.stateDir, env) : defaultStateDir(endpoint, env)),
+    log: (line: string): void => io.err(`[engram-backfill] ${line}\n`),
+  }
+  if (!args.apply) return runSource(args, ctx, undefined)
 
+  const { paths } = ctx
   const state = await openStateDir(paths, endpoint)
   return withRunLock(paths, async () => {
     const token = await tokenFileFor(args, env, paths)
@@ -214,8 +279,8 @@ async function runTranscriptsCommand(args: BackfillCliArgs, env: Env, io: CliIo)
         tokenFile: token.file,
         client: { name: BACKFILL_CLIENT_NAME, version: captureClientInfo().version },
       }
-      const summary = await runTranscripts({ ...base, send })
-      await saveBackfillState(paths, withRun(state, 'transcripts', summary, new Date()))
+      const summary = await runSource(args, ctx, send)
+      await saveBackfillState(paths, withRun(state, args.command, summary, new Date()))
       return summary
     } finally {
       await token.cleanup()
@@ -237,8 +302,8 @@ export async function runBackfillCli(argv: readonly string[], env: Env, io: CliI
     return 0
   }
   try {
-    const summary = await runTranscriptsCommand(args, env, io)
-    io.out(args.json ? `${JSON.stringify(summary)}\n` : formatTranscriptsSummary(summary))
+    const summary = await runCommand(args, env, io)
+    io.out(args.json ? `${JSON.stringify(summary)}\n` : formatSummary(summary))
     return summary.stopped === null ? 0 : 1
   } catch (err) {
     if (err instanceof UsageError) {
