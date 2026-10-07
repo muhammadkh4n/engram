@@ -1,3 +1,4 @@
+import type { DocumentNoteSyncResult, DocumentNoteWrite } from './documents.js'
 import type {
   ForgetEffect,
   ForgottenMemory,
@@ -45,6 +46,14 @@ export interface ItemStore {
   unretireItems(ids: readonly string[], reason: string, channel: string): Promise<ItemActionResult[]>
   /** False when `oldId` is already superseded by `newId`. One pair per call. */
   supersedeItem(oldId: string, newId: string): Promise<boolean>
+  /**
+   * Applies one vault note in one transaction: each section's current
+   * version is kept, restored, superseded by a new item or created, and the
+   * sections the note no longer holds are retired. A note whose version and
+   * deleted state are stored is `unchanged`; one seen before the stored
+   * version is `stale`; neither writes anything.
+   */
+  syncDocumentNote(note: DocumentNoteWrite): Promise<DocumentNoteSyncResult>
   invariantCounts(): Promise<InvariantCounts>
 }
 

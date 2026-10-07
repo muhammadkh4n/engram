@@ -1,6 +1,16 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { ITEM_INVARIANTS, ItemConstraintError, findPostgresUnsafeText, generateId } from '@engram-mem/core'
+import {
+  DOCUMENT_NOTE_STATUSES,
+  DOCUMENT_SECTIONS_MAX,
+  ITEM_INVARIANTS,
+  ItemConstraintError,
+  findPostgresUnsafeText,
+  generateId,
+} from '@engram-mem/core'
 import type {
+  DocumentNoteSyncResult,
+  DocumentNoteWrite,
+  DocumentSectionCounts,
   ForgetEffect,
   ForgetStore,
   ForgottenMemory,
@@ -237,6 +247,21 @@ export class PostgRestItemStore implements ItemStore {
   }
 
   /**
+   * One call, one transaction. A call rolled back as a deadlock victim
+   * applied nothing and runs again; a repeat after success is `unchanged`.
+   */
+  async syncDocumentNote(note: DocumentNoteWrite): Promise<DocumentNoteSyncResult> {
+    if (note.sections.length > DOCUMENT_SECTIONS_MAX) {
+      throw new Error(`syncDocumentNote failed: ${note.sections.length} sections, at most ${DOCUMENT_SECTIONS_MAX}`)
+    }
+    const pNote = toNoteObject(note)
+    refuseUnsafeText('syncDocumentNote', 'note.', pNote)
+    const { data, error } = await this.rpcRetryingRollbacks('engram_sync_document_note', { p_note: pNote })
+    if (error) throw toStoreError('syncDocumentNote', error)
+    return fromSyncResult(data)
+  }
+
+  /**
    * Runs an RPC up to MAX_ATTEMPTS times while PostgreSQL rolls it back as a
    * deadlock victim or a serialization failure, and returns the last result.
    * Any other error, or success, returns at once. Each call is one
@@ -333,6 +358,72 @@ function isoDate(value: Date, field: string, position: number): string {
     throw new Error(`insertItems failed: item ${position}: ${field} has a year outside 1 to 9999`)
   }
   return value.toISOString()
+}
+
+function noteDate(value: Date, field: string): string {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new Error(`syncDocumentNote failed: ${field} is not a valid date`)
+  }
+  const year = value.getUTCFullYear()
+  if (year < 1 || year > 9999) {
+    throw new Error(`syncDocumentNote failed: ${field} has a year outside 1 to 9999`)
+  }
+  return value.toISOString()
+}
+
+function toNoteObject(note: DocumentNoteWrite): Record<string, unknown> {
+  return {
+    path: note.path,
+    note_version: note.noteVersion,
+    seen_at: noteDate(note.seenAt, 'seenAt'),
+    mtime: noteDate(note.mtime, 'mtime'),
+    deleted: note.deleted,
+    frontmatter: note.frontmatter,
+    project_id: note.projectId,
+    workspace_id: note.workspaceId,
+    plan_slug: note.planSlug,
+    sections: note.sections.map((section) => ({
+      heading_path: [...section.headingPath],
+      ordinal: section.ordinal,
+      index: section.index,
+      text: section.text,
+      kind: section.kind,
+      search_text: section.searchText,
+      hits: section.hits.map((hit) => ({ field: hit.field, detector: hit.detector, secret_name: hit.secretName })),
+    })),
+  }
+}
+
+const SECTION_COUNT_COLUMNS: ReadonlyArray<[keyof DocumentSectionCounts, string]> = [
+  ['created', 'created'],
+  ['superseded', 'superseded'],
+  ['unchanged', 'unchanged'],
+  ['retired', 'retired'],
+  ['restored', 'restored'],
+  ['keptForgotten', 'kept_forgotten'],
+  ['keptRetired', 'kept_retired'],
+  ['skippedEmpty', 'skipped_empty'],
+]
+
+/** The function's jsonb answer, checked rather than cast: a shape it does not have fails the call. */
+function fromSyncResult(data: unknown): DocumentNoteSyncResult {
+  const row = (data ?? {}) as { status?: unknown; sections?: unknown; item_ids?: unknown }
+  const status = DOCUMENT_NOTE_STATUSES.find((s) => s === row.status)
+  if (status === undefined || !Array.isArray(row.item_ids)) {
+    throw new Error('syncDocumentNote failed: the database answered without a status or item ids')
+  }
+  let sections: DocumentSectionCounts | null = null
+  if (row.sections != null) {
+    const counts = row.sections as Record<string, unknown>
+    sections = Object.fromEntries(
+      SECTION_COUNT_COLUMNS.map(([key, column]) => {
+        const value = Number(counts[column])
+        if (!Number.isInteger(value)) throw new Error(`syncDocumentNote failed: no count for ${column}`)
+        return [key, value]
+      }),
+    ) as unknown as DocumentSectionCounts
+  }
+  return { status, sections, itemIds: row.item_ids.map(String) }
 }
 
 /** Optional columns are sent only when set, so an omitted one takes its column default. */

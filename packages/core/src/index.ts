@@ -35,6 +35,20 @@ export type {
   InvariantCounts,
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
+export {
+  DOCUMENT_SECTION_KINDS,
+  DOCUMENT_SECTIONS_MAX,
+  DOCUMENT_REMOVED_REASON,
+  DOCUMENT_NOTE_STATUSES,
+} from './items/documents.js'
+export type {
+  DocumentSectionKind,
+  DocumentSectionWrite,
+  DocumentNoteWrite,
+  DocumentNoteStatus,
+  DocumentSectionCounts,
+  DocumentNoteSyncResult,
+} from './items/documents.js'
 export type { ItemStore } from './items/item-store.js'
 export {
   EMBEDDING_ATTEMPTS_MAX,

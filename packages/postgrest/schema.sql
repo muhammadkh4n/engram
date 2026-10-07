@@ -1535,6 +1535,44 @@ CREATE TABLE IF NOT EXISTS public.memory_item_actions (
 
 
 --
+-- Name: memory_document_notes; Type: TABLE; Schema: public; Owner: -
+--
+-- One row per vault note engram_sync_document_note has applied: the version
+-- it applied last, seen_at (the producer's clock when it saw that version,
+-- the only order between a path's versions), mtime (the device's time, which
+-- dates a version and orders nothing), the scrubbed frontmatter, the scope
+-- the note's sections were filed under, and deleted_at while the note is
+-- deleted. path is the primary key, so its UTF-8 length is bounded to fit a
+-- btree index row (2,704 bytes).
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_document_notes (
+    path text PRIMARY KEY,
+    source text NOT NULL,
+    note_version text NOT NULL,
+    seen_at timestamp with time zone NOT NULL,
+    mtime timestamp with time zone NOT NULL,
+    frontmatter jsonb,
+    project_id text,
+    workspace_id text,
+    plan_slug text,
+    deleted_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_document_notes_path_check CHECK (char_length(path) <= 1024 AND octet_length(path) <= 2600 AND path ~ '\S'),
+    CONSTRAINT memory_document_notes_source_check CHECK (source = 'vault'),
+    CONSTRAINT memory_document_notes_note_version_check CHECK (char_length(note_version) <= 128 AND note_version <> ''),
+    CONSTRAINT memory_document_notes_frontmatter_check CHECK (frontmatter IS NULL OR jsonb_typeof(frontmatter) = 'object'),
+    CONSTRAINT memory_document_notes_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (plan_slug IS NULL OR plan_slug ~ '^[a-z0-9][a-z0-9-]{0,127}$')),
+    CONSTRAINT memory_document_notes_finite_check CHECK (public.engram_time_in_range(seen_at)
+        AND public.engram_time_in_range(mtime)
+        AND public.engram_time_in_range(deleted_at)
+        AND public.engram_time_in_range(updated_at))
+);
+
+
+--
 -- Name: memory_extraction_runs memory_extraction_runs_anchor_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2155,6 +2193,54 @@ $$;
 -- is the uuid engram_legacy_row_id reads from source.id, fixed-length, so it
 -- fits a btree row whatever text source.id holds.
 CREATE INDEX IF NOT EXISTS idx_items_legacy_source ON public.memory_items USING btree (public.engram_legacy_row_id(source)) WHERE (class = 'legacy');
+
+-- The note of a document section (source.path) and the section's key
+-- (source.path, source.heading_path, source.ordinal), each as the uuid formed
+-- by the first 16 bytes of a SHA-256, or NULL when source.path is not a
+-- string. A path may hold 1,024 characters and a heading path six of 500,
+-- more than a btree index row holds; a uuid key is fixed-length. The key
+-- hashes the JSON array [path, heading_path, ordinal], so no two keys share
+-- an input. convert_to is STABLE because it looks an encoding name up; with a
+-- fixed name it returns the same bytes for the same text, so both functions
+-- are IMMUTABLE, as an index expression must be.
+CREATE OR REPLACE FUNCTION public.engram_document_note_key(p_source jsonb) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN pg_catalog.jsonb_typeof(p_source OPERATOR(pg_catalog.->) 'path') OPERATOR(pg_catalog.=) 'string'
+              THEN pg_catalog.encode(pg_catalog.substring(pg_catalog.sha256(pg_catalog.convert_to(
+                     p_source OPERATOR(pg_catalog.->>) 'path', 'UTF8')), 1, 16), 'hex')::pg_catalog.uuid END
+$$;
+
+CREATE OR REPLACE FUNCTION public.engram_document_section_key(p_source jsonb) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN pg_catalog.jsonb_typeof(p_source OPERATOR(pg_catalog.->) 'path') OPERATOR(pg_catalog.=) 'string'
+              THEN pg_catalog.encode(pg_catalog.substring(pg_catalog.sha256(pg_catalog.convert_to(
+                     pg_catalog.jsonb_build_array(p_source OPERATOR(pg_catalog.->) 'path',
+                                                  p_source OPERATOR(pg_catalog.->) 'heading_path',
+                                                  p_source OPERATOR(pg_catalog.->) 'ordinal')::pg_catalog.text,
+                     'UTF8')), 1, 16), 'hex')::pg_catalog.uuid END
+$$;
+
+-- idx_items_document_note finds every version of a note's sections, current,
+-- superseded or forgotten. memory_items_document_head_excl keeps one head per
+-- section key: the version neither superseded nor forgotten, retired or not.
+-- It is an exclusion constraint on equality, which is a unique index that can
+-- be deferred: a changed section's new version is inserted before the old
+-- head can name it in superseded_by (a foreign key), so for that moment the
+-- key has two heads. engram_sync_document_note defers it for the note and
+-- sets it IMMEDIATE again before it returns. A constraint has no IF NOT
+-- EXISTS, so it is added only when absent.
+CREATE INDEX IF NOT EXISTS idx_items_document_note ON public.memory_items USING btree (public.engram_document_note_key(source)) WHERE (class = 'document_section');
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+                  WHERE conname = 'memory_items_document_head_excl' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE public.memory_items ADD CONSTRAINT memory_items_document_head_excl
+      EXCLUDE USING btree (public.engram_document_section_key(source) WITH =)
+      WHERE (class = 'document_section' AND superseded_by IS NULL AND forgotten_at IS NULL)
+      DEFERRABLE INITIALLY IMMEDIATE;
+  END IF;
+END $$;
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
 -- first read of items still waiting for a vector. Its predicate is that
@@ -3562,6 +3648,328 @@ BEGIN
   SELECT (t.r ->> 'id')::uuid, t.r ->> 'outcome', t.r ->> 'register_ref'
     FROM jsonb_array_elements(v_rows) WITH ORDINALITY AS t(r, k)
    ORDER BY t.k;
+END; $$;
+
+
+--
+-- Name: engram_sync_document_note(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Applies one vault note in one transaction. p_note is an object with exactly
+-- the keys path, note_version, seen_at, mtime, deleted, frontmatter,
+-- project_id, workspace_id, plan_slug and sections, and each section exactly
+-- heading_path, ordinal, index, text, kind, search_text and hits: text and
+-- frontmatter already scrubbed, hits one {field, detector, secret_name} per
+-- value the scrub masked. A section's key is (path, heading_path, ordinal);
+-- its head is the key's item that is neither superseded nor forgotten.
+-- 1. The stored row's note_version and deleted state: unchanged. Otherwise a
+--    seen_at older than the stored one: stale. Neither writes anything.
+-- 2. Each section in index order, its text hashed as content_hash is:
+--    - blank after trim: skipped_empty, and its key counts as absent;
+--    - no head: kept_forgotten when a forgotten version of the key has the
+--      hash (forgotten words do not come back), else a new item: created;
+--    - a head with the hash: unretired when it was retired as 'removed from
+--      note' (restored), kept_retired when retired for another reason, else
+--      unchanged;
+--    - a head with another hash: kept_forgotten as above, else a new item that
+--      supersedes the head: superseded. A retired head keeps its retirement
+--      and is superseded in place; engram_supersede_item leaves a retired
+--      item alone, but a key keeps one head.
+-- 3. Heads of the note whose key is absent (every head, when deleted) that are
+--    not retired are retired as 'removed from note': retired.
+-- 4. The note row is upserted, with deleted_at the delete's mtime until the
+--    note returns. Each new item gets its hits as memory_secret_hits rows.
+-- A new item is class document_section, kind the section's, speaker artifact,
+-- trust 1, in the note's project, workspace and plan, with occurred_at the
+-- note's mtime. A successor must occur strictly later and device clocks order
+-- nothing, so a version whose mtime is not after its head's occurred_at takes
+-- the head's time plus one microsecond. source is {type 'vault', path,
+-- heading_path, ordinal, index, note_version, event_key}, the event key
+-- 'vault:<sha256 of path>:<sha256 of the heading_path JSON>:<ordinal>:<hash>'.
+-- A text that returns to a version its key had before finds that key taken
+-- by the earlier item, so ':<id of the head it supersedes>' is appended.
+-- Returns {status, sections, item_ids}: the counts (null unless applied) and
+-- the new items' ids. The forget advisory key (7308892986227385959) is taken
+-- exclusively before any row lock, as every function that locks existing
+-- items does, so two syncs of one note also run one after the other. A
+-- malformed argument raises 22023, a refused rule 23514 or 23P01.
+CREATE OR REPLACE FUNCTION public.engram_sync_document_note(p_note jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  c_removed CONSTANT text := 'removed from note';
+  c_time CONSTANT text := '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$';
+  c_note_keys CONSTANT text[] := ARRAY['deleted', 'frontmatter', 'mtime', 'note_version', 'path', 'plan_slug', 'project_id',
+                                       'sections', 'seen_at', 'workspace_id'];
+  c_section_keys CONSTANT text[] := ARRAY['heading_path', 'hits', 'index', 'kind', 'ordinal', 'search_text', 'text'];
+  c_kinds CONSTANT text[] := ARRAY['note', 'plan_readme', 'plan_phase', 'plan_ledger', 'plan_ledger_log', 'finding', 'audit', 'research'];
+  v_problem text;
+  v_field text;
+  v_path text;
+  v_path_hash text;
+  v_note_key uuid;
+  v_deleted boolean;
+  v_seen timestamp with time zone;
+  v_mtime timestamp with time zone;
+  v_stored public.memory_document_notes%ROWTYPE;
+  v_section jsonb;
+  v_key uuid;
+  v_hash text;
+  v_head record;
+  v_was_forgotten boolean;
+  v_event_key text;
+  v_new uuid;
+  v_present uuid[] := '{}'::uuid[];
+  v_new_ids uuid[] := '{}'::uuid[];
+  v_gone uuid[];
+  v_count integer;
+  v_created integer := 0;
+  v_superseded integer := 0;
+  v_unchanged integer := 0;
+  v_retired integer := 0;
+  v_restored integer := 0;
+  v_kept_forgotten integer := 0;
+  v_kept_retired integer := 0;
+  v_skipped integer := 0;
+BEGIN
+  IF p_note IS NULL OR jsonb_typeof(p_note) <> 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_document_note: p_note must be a JSON object';
+  END IF;
+  SELECT format('p_note has the key %s, which is not a note field', quote_ident(left(k.key, 63))) INTO v_problem
+    FROM jsonb_object_keys(p_note) AS k(key)
+   WHERE NOT k.key = ANY (c_note_keys)
+   ORDER BY k.key
+   LIMIT 1;
+  IF v_problem IS NULL AND NOT p_note ?& c_note_keys THEN
+    v_problem := 'p_note must hold every note field';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'path') <> 'string'
+                            OR char_length(p_note ->> 'path') NOT BETWEEN 1 AND 1024
+                            OR octet_length(p_note ->> 'path') > 2600) THEN
+    v_problem := 'path must be a string of 1 to 1024 characters and at most 2600 UTF-8 bytes';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'note_version') <> 'string'
+                            OR char_length(p_note ->> 'note_version') NOT BETWEEN 1 AND 128) THEN
+    v_problem := 'note_version must be a string of 1 to 128 characters';
+  END IF;
+  IF v_problem IS NULL THEN
+    FOREACH v_field IN ARRAY ARRAY['seen_at', 'mtime'] LOOP
+      IF jsonb_typeof(p_note -> v_field) <> 'string' OR (p_note ->> v_field) !~ c_time
+         OR NOT pg_input_is_valid(p_note ->> v_field, 'timestamptz') THEN
+        v_problem := format('%s must be ISO-8601 with Z or an offset', v_field);
+      ELSIF (p_note ->> v_field)::timestamptz > now() + interval '10 minutes' THEN
+        v_problem := format('%s is more than 10 minutes ahead of now', v_field);
+      ELSIF NOT public.engram_time_in_range((p_note ->> v_field)::timestamptz) THEN
+        v_problem := format('%s is before year 1 in UTC', v_field);
+      END IF;
+      EXIT WHEN v_problem IS NOT NULL;
+    END LOOP;
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'deleted') <> 'boolean' THEN
+    v_problem := 'deleted must be a boolean';
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'frontmatter') NOT IN ('object', 'null') THEN
+    v_problem := 'frontmatter must be an object or null';
+  END IF;
+  IF v_problem IS NULL THEN
+    SELECT format('%s must be a string or null', f.key) INTO v_problem
+      FROM unnest(ARRAY['project_id', 'workspace_id', 'plan_slug']) AS f(key)
+     WHERE jsonb_typeof(p_note -> f.key) NOT IN ('string', 'null')
+     LIMIT 1;
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'project_id') = 'string'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_projects p WHERE p.id = p_note ->> 'project_id' AND p.kind = 'project') THEN
+    v_problem := 'project_id names no registered project';
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'workspace_id') = 'string'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_projects w WHERE w.id = p_note ->> 'workspace_id' AND w.kind = 'workspace') THEN
+    v_problem := 'workspace_id names no registered workspace';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'sections') <> 'array' OR jsonb_array_length(p_note -> 'sections') > 2000) THEN
+    v_problem := 'sections must be an array of at most 2000 sections';
+  END IF;
+  IF v_problem IS NULL AND (p_note -> 'deleted') = 'true'::jsonb
+     AND (jsonb_array_length(p_note -> 'sections') > 0 OR jsonb_typeof(p_note -> 'frontmatter') <> 'null') THEN
+    v_problem := 'a deleted note has no sections and a null frontmatter';
+  END IF;
+  IF v_problem IS NULL THEN
+    SELECT format('section %s %s', s.n, r.reason) INTO v_problem
+      FROM jsonb_array_elements(p_note -> 'sections') WITH ORDINALITY AS s(e, n)
+     CROSS JOIN LATERAL (
+       SELECT CASE
+         WHEN jsonb_typeof(s.e) <> 'object' THEN 'is not a JSON object'
+         WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(s.e) AS k(key) WHERE NOT k.key = ANY (c_section_keys))
+              OR NOT s.e ?& c_section_keys THEN
+           'must hold exactly heading_path, ordinal, index, text, kind, search_text and hits'
+         WHEN jsonb_typeof(s.e -> 'heading_path') <> 'array' OR jsonb_array_length(s.e -> 'heading_path') > 6
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements(s.e -> 'heading_path') AS h(v)
+                          WHERE jsonb_typeof(h.v) <> 'string' OR char_length(h.v #>> '{}') NOT BETWEEN 1 AND 500) THEN
+           'heading_path must hold 0 to 6 strings of 1 to 500 characters'
+         WHEN jsonb_typeof(s.e -> 'ordinal') <> 'number' OR (s.e ->> 'ordinal') !~ '^[0-9]{1,4}$' THEN
+           'ordinal must be an integer from 0 to 9999'
+         WHEN jsonb_typeof(s.e -> 'index') <> 'number' OR (s.e ->> 'index') !~ '^[0-9]{1,9}$' THEN
+           'index must be a non-negative integer'
+         WHEN jsonb_typeof(s.e -> 'text') <> 'string' OR jsonb_typeof(s.e -> 'search_text') <> 'string' THEN
+           'text and search_text must be strings'
+         WHEN jsonb_typeof(s.e -> 'kind') <> 'string' OR NOT (s.e ->> 'kind') = ANY (c_kinds) THEN
+           'kind must be a document section kind'
+         WHEN jsonb_typeof(s.e -> 'hits') <> 'array'
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements(s.e -> 'hits') AS h(v)
+                          WHERE jsonb_typeof(h.v) <> 'object'
+                             OR EXISTS (SELECT 1 FROM jsonb_object_keys(h.v) AS k(key)
+                                         WHERE k.key NOT IN ('field', 'detector', 'secret_name'))
+                             OR jsonb_typeof(h.v -> 'field') IS DISTINCT FROM 'string'
+                             OR jsonb_typeof(h.v -> 'detector') IS DISTINCT FROM 'string'
+                             OR jsonb_typeof(h.v -> 'secret_name') IS NULL
+                             OR jsonb_typeof(h.v -> 'secret_name') NOT IN ('string', 'null')) THEN
+           'hits must hold objects of exactly field, detector and secret_name'
+       END AS reason) AS r
+     WHERE r.reason IS NOT NULL
+     ORDER BY s.n
+     LIMIT 1;
+  END IF;
+  IF v_problem IS NULL AND EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(p_note -> 'sections') AS s(e)
+     GROUP BY s.e -> 'heading_path', s.e -> 'ordinal'
+    HAVING count(*) > 1) THEN
+    v_problem := 'two sections have the same heading_path and ordinal';
+  END IF;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_document_note: ' || v_problem;
+  END IF;
+
+  v_path := p_note ->> 'path';
+  v_path_hash := encode(sha256(convert_to(v_path, 'UTF8')), 'hex');
+  v_note_key := public.engram_document_note_key(jsonb_build_object('path', v_path));
+  v_deleted := (p_note -> 'deleted') = 'true'::jsonb;
+  v_seen := (p_note ->> 'seen_at')::timestamptz;
+  v_mtime := (p_note ->> 'mtime')::timestamptz;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  SELECT d.* INTO v_stored FROM public.memory_document_notes d WHERE d.path = v_path FOR UPDATE;
+  IF FOUND THEN
+    IF v_stored.note_version = p_note ->> 'note_version' AND (v_stored.deleted_at IS NOT NULL) = v_deleted THEN
+      RETURN jsonb_build_object('status', 'unchanged', 'sections', NULL::jsonb, 'item_ids', '[]'::jsonb);
+    END IF;
+    IF v_seen < v_stored.seen_at THEN
+      RETURN jsonb_build_object('status', 'stale', 'sections', NULL::jsonb, 'item_ids', '[]'::jsonb);
+    END IF;
+  END IF;
+
+  SET CONSTRAINTS public.memory_items_document_head_excl DEFERRED;
+
+  FOR v_section IN
+    SELECT s.e
+      FROM jsonb_array_elements(p_note -> 'sections') WITH ORDINALITY AS s(e, n)
+     ORDER BY (s.e ->> 'index')::bigint, s.n
+  LOOP
+    IF (v_section ->> 'text') !~ '\S' THEN
+      v_skipped := v_skipped + 1;
+      CONTINUE;
+    END IF;
+    v_key := public.engram_document_section_key(jsonb_build_object(
+               'path', v_path, 'heading_path', v_section -> 'heading_path', 'ordinal', v_section -> 'ordinal'));
+    v_present := v_present || v_key;
+    v_hash := encode(sha256(convert_to(v_section ->> 'text', 'UTF8')), 'hex');
+
+    SELECT i.id, i.content_hash, i.occurred_at, i.retired_at, i.retired_reason INTO v_head
+      FROM public.memory_items i
+     WHERE i.class = 'document_section' AND public.engram_document_section_key(i.source) = v_key
+       AND i.superseded_by IS NULL AND i.forgotten_at IS NULL;
+    IF FOUND AND v_head.content_hash = v_hash THEN
+      IF v_head.retired_at IS NULL THEN
+        v_unchanged := v_unchanged + 1;
+      ELSIF v_head.retired_reason = c_removed THEN
+        PERFORM public.engram_unretire_items(ARRAY[v_head.id]);
+        v_restored := v_restored + 1;
+      ELSE
+        v_kept_retired := v_kept_retired + 1;
+      END IF;
+      CONTINUE;
+    END IF;
+
+    SELECT EXISTS (
+      SELECT 1
+        FROM public.memory_items i
+       WHERE i.class = 'document_section' AND public.engram_document_note_key(i.source) = v_note_key
+         AND public.engram_document_section_key(i.source) = v_key
+         AND i.forgotten_at IS NOT NULL AND i.content_hash = v_hash) INTO v_was_forgotten;
+    IF v_was_forgotten THEN
+      v_kept_forgotten := v_kept_forgotten + 1;
+      CONTINUE;
+    END IF;
+
+    v_event_key := format('vault:%s:%s:%s:%s', v_path_hash,
+                          encode(sha256(convert_to((v_section -> 'heading_path')::text, 'UTF8')), 'hex'),
+                          v_section ->> 'ordinal', v_hash);
+    IF v_head.id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.memory_items i WHERE (i.source ? 'event_key') AND (i.source ->> 'event_key') = v_event_key) THEN
+      v_event_key := v_event_key || ':' || v_head.id::text;
+    END IF;
+    INSERT INTO public.memory_items AS m (
+      class, kind, speaker, trust, project_id, workspace_id, plan_slug, content, search_text, occurred_at, source)
+    VALUES ('document_section', v_section ->> 'kind', 'artifact', 1,
+            p_note ->> 'project_id', p_note ->> 'workspace_id', p_note ->> 'plan_slug',
+            v_section ->> 'text', v_section ->> 'search_text',
+            CASE WHEN v_head.id IS NULL OR v_mtime > v_head.occurred_at THEN v_mtime
+                 ELSE v_head.occurred_at + interval '1 microsecond' END,
+            jsonb_build_object('type', 'vault', 'path', v_path, 'heading_path', v_section -> 'heading_path',
+                               'ordinal', v_section -> 'ordinal', 'index', v_section -> 'index',
+                               'note_version', p_note -> 'note_version', 'event_key', v_event_key))
+    RETURNING m.id INTO v_new;
+    v_new_ids := v_new_ids || v_new;
+    INSERT INTO public.memory_secret_hits (target_table, target_id, field, detector, secret_name)
+    SELECT 'memory_items', v_new::text, h.v ->> 'field', h.v ->> 'detector', h.v ->> 'secret_name'
+      FROM jsonb_array_elements(v_section -> 'hits') WITH ORDINALITY AS h(v, n)
+     ORDER BY h.n;
+
+    IF v_head.id IS NULL THEN
+      v_created := v_created + 1;
+    ELSE
+      IF v_head.retired_at IS NULL THEN
+        PERFORM public.engram_supersede_item(v_head.id, v_new);
+      ELSE
+        UPDATE public.memory_items m SET superseded_by = v_new WHERE m.id = v_head.id;
+      END IF;
+      v_superseded := v_superseded + 1;
+    END IF;
+  END LOOP;
+
+  SELECT coalesce(array_agg(i.id ORDER BY i.id), '{}'::uuid[]) INTO v_gone
+    FROM public.memory_items i
+   WHERE i.class = 'document_section' AND public.engram_document_note_key(i.source) = v_note_key
+     AND (i.source ->> 'path') = v_path
+     AND i.superseded_by IS NULL AND i.forgotten_at IS NULL AND i.retired_at IS NULL
+     AND NOT public.engram_document_section_key(i.source) = ANY (v_present);
+  FOR v_count IN 0 .. (cardinality(v_gone) + 49) / 50 - 1 LOOP
+    v_retired := v_retired + (SELECT count(*)::integer
+                                FROM public.engram_retire_items(v_gone[v_count * 50 + 1 : v_count * 50 + 50], c_removed));
+  END LOOP;
+
+  INSERT INTO public.memory_document_notes AS d (
+    path, source, note_version, seen_at, mtime, frontmatter, project_id, workspace_id, plan_slug, deleted_at, updated_at)
+  VALUES (v_path, 'vault', p_note ->> 'note_version', v_seen, v_mtime,
+          CASE WHEN jsonb_typeof(p_note -> 'frontmatter') = 'object' THEN p_note -> 'frontmatter' END,
+          p_note ->> 'project_id', p_note ->> 'workspace_id', p_note ->> 'plan_slug',
+          CASE WHEN v_deleted THEN v_mtime END, now())
+  ON CONFLICT (path) DO UPDATE
+     SET note_version = EXCLUDED.note_version, seen_at = EXCLUDED.seen_at, mtime = EXCLUDED.mtime,
+         frontmatter = EXCLUDED.frontmatter, project_id = EXCLUDED.project_id,
+         workspace_id = EXCLUDED.workspace_id, plan_slug = EXCLUDED.plan_slug,
+         deleted_at = CASE WHEN v_deleted THEN coalesce(d.deleted_at, EXCLUDED.deleted_at) END,
+         updated_at = EXCLUDED.updated_at;
+
+  SET CONSTRAINTS public.memory_items_document_head_excl IMMEDIATE;
+  RETURN jsonb_build_object(
+    'status', 'applied',
+    'sections', jsonb_build_object('created', v_created, 'superseded', v_superseded, 'unchanged', v_unchanged,
+                                   'retired', v_retired, 'restored', v_restored, 'kept_forgotten', v_kept_forgotten,
+                                   'kept_retired', v_kept_retired, 'skipped_empty', v_skipped),
+    'item_ids', to_jsonb(v_new_ids));
 END; $$;
 
 
@@ -6797,6 +7205,12 @@ ALTER TABLE public.memory_secret_hits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_item_actions ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_document_notes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_document_notes ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -6932,6 +7346,14 @@ CREATE POLICY service_role_all ON public.memory_item_actions TO service_role USI
 
 
 --
+-- Name: memory_document_notes service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_document_notes;
+CREATE POLICY service_role_all ON public.memory_document_notes TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Item store table privileges, identical on every database.
 --
 -- A fresh database grants a new table to no role but its owner, while the
@@ -6949,7 +7371,7 @@ CREATE POLICY service_role_all ON public.memory_item_actions TO service_role USI
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits, public.memory_item_actions FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM PUBLIC, service_role;
 REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
@@ -6961,7 +7383,7 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits, public.memory_item_actions FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM %I', role_name);
       EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
@@ -6978,6 +7400,7 @@ GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 GRANT SELECT ON TABLE public.memory_session_state TO service_role;
 GRANT SELECT ON TABLE public.memory_item_actions TO service_role;
+GRANT SELECT ON TABLE public.memory_document_notes TO service_role;
 
 
 --
@@ -7073,6 +7496,9 @@ REVOKE EXECUTE ON FUNCTION public.engram_forget_memories(uuid[], text, text) FRO
 REVOKE EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
@@ -7154,6 +7580,9 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
@@ -7224,6 +7653,9 @@ GRANT EXECUTE ON FUNCTION public.engram_forget_memories(uuid[], text, text) TO s
 GRANT EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;

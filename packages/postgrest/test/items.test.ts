@@ -761,3 +761,88 @@ describe('PostgRestItemStore request time zone', () => {
     }
   })
 })
+
+describe('PostgRestItemStore.syncDocumentNote', () => {
+  const docNote = {
+    path: 'Tstdocs/Notes/tst-unit.md',
+    noteVersion: 'v1',
+    seenAt: new Date('2026-03-04T05:06:07.000Z'),
+    mtime: new Date('2026-03-04T05:00:00.000Z'),
+    deleted: false,
+    frontmatter: null,
+    projectId: 'tst-project',
+    workspaceId: null,
+    planSlug: null,
+    sections: [
+      {
+        headingPath: ['Goal'],
+        ordinal: 0,
+        index: 1,
+        text: 'ship it',
+        kind: 'note' as const,
+        searchText: 'tst-unit.md > Goal: ship it',
+        hits: [{ field: 'content', detector: 'registered', secretName: 'TST_KEY' }],
+      },
+    ],
+  }
+
+  it('sends the note as snake_case to engram_sync_document_note and maps the counts back', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: {
+        data: {
+          status: 'applied',
+          sections: { created: 1, superseded: 0, unchanged: 0, retired: 0, restored: 0, kept_forgotten: 0, kept_retired: 0, skipped_empty: 0 },
+          item_ids: [ID_A],
+        },
+        error: null,
+      },
+    })
+    const result = await storeWith(client).syncDocumentNote(docNote)
+    expect(rpcCalls).toEqual([
+      {
+        fn: 'engram_sync_document_note',
+        args: {
+          p_note: {
+            path: 'Tstdocs/Notes/tst-unit.md',
+            note_version: 'v1',
+            seen_at: '2026-03-04T05:06:07.000Z',
+            mtime: '2026-03-04T05:00:00.000Z',
+            deleted: false,
+            frontmatter: null,
+            project_id: 'tst-project',
+            workspace_id: null,
+            plan_slug: null,
+            sections: [
+              {
+                heading_path: ['Goal'],
+                ordinal: 0,
+                index: 1,
+                text: 'ship it',
+                kind: 'note',
+                search_text: 'tst-unit.md > Goal: ship it',
+                hits: [{ field: 'content', detector: 'registered', secret_name: 'TST_KEY' }],
+              },
+            ],
+          },
+        },
+      },
+    ])
+    expect(result).toEqual({
+      status: 'applied',
+      sections: { created: 1, superseded: 0, unchanged: 0, retired: 0, restored: 0, keptForgotten: 0, keptRetired: 0, skippedEmpty: 0 },
+      itemIds: [ID_A],
+    })
+  })
+
+  it('refuses text PostgreSQL cannot hold before any request, naming the path and not the text', async () => {
+    const { client, rpcCalls } = mockClient()
+    const bad = { ...docNote, sections: [{ ...docNote.sections[0]!, text: 'bad \u0000 byte' }] }
+    await expect(storeWith(client).syncDocumentNote(bad)).rejects.toThrow(/note\.sections\[0\]\.text/)
+    expect(rpcCalls).toEqual([])
+  })
+
+  it('fails on an answer without a status instead of guessing one', async () => {
+    const { client } = mockClient({ rpc: { data: { sections: null }, error: null } })
+    await expect(storeWith(client).syncDocumentNote(docNote)).rejects.toThrow(/without a status/)
+  })
+})
