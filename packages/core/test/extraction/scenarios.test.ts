@@ -84,6 +84,7 @@ class OneWindowStore implements ExtractionStore {
         occurredAt: new Date(anchor.occurred_at),
         failures: 0,
         heldFailures: 0,
+        transientFailures: 0,
         runningRunId: null,
         runningStartedAt: null,
       },

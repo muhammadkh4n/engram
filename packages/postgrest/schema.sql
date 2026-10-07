@@ -3838,30 +3838,39 @@ END; $$;
 -- succeeded by engram_extraction_commit or as failed by engram_extraction_fail.
 -- A failure's stats.failure is 'held' when the reply or the commit failed and
 -- 'transient' when the call did (an empty or moderated reply, a provider or
--- network fault). Both back the anchor off; each class has its own limit.
+-- network fault). stats.counted says whether it counts toward its class's
+-- limit: only when the provider was shown to be up, so an outage backs
+-- anchors off without exhausting them. Every failure backs the anchor off.
 --
 
 --
 -- Name: engram_extraction_pending(text, integer, integer, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- CREATE OR REPLACE cannot change a function's result columns, so the
+-- function is dropped first: a database holding an earlier column list then
+-- converges when this file is applied again.
+DROP FUNCTION IF EXISTS public.engram_extraction_pending(text, integer, integer, timestamp with time zone);
+
 -- The anchors to extract next at p_version, at most one per session: each
 -- session's earliest pending anchor by (occurred_at, id), returned only when
 -- it is due, ordered by occurred_at and cut at p_limit (1 to 1000). An anchor
--- is pending while it has no succeeded run, fewer than 3 held failures and
--- fewer than 6 transient ones, so a later anchor waits behind a pending
--- earlier one, due or not, and an exhausted anchor no longer holds its session
--- back. It is due when it has no failure, or once p_now reaches the latest
--- failure's end plus the backoff for its count n of failures of both classes:
--- 60 seconds doubled n - 1 times, capped at 6 hours, the schedule the worker's
--- own backoff uses. A window that keeps failing, whatever the class, so
--- yields the head of the oldest-first queue to the sessions behind it. Due-ness
--- is decided here, before the limit, so sessions waiting out a backoff never
--- crowd due ones out. failures counts both classes and held_failures the held
--- ones; running_run_id and running_started_at name a run still open on the
--- anchor, which the caller closes as failed once it is stale (its worker died)
--- before beginning a new one.
-CREATE OR REPLACE FUNCTION public.engram_extraction_pending(p_version text, p_limit integer, p_idle_seconds integer, p_now timestamp with time zone) RETURNS TABLE(anchor_item_id uuid, session_id text, anchor_kind text, occurred_at timestamp with time zone, failures integer, held_failures integer, running_run_id uuid, running_started_at timestamp with time zone)
+-- is pending while it has no succeeded run, fewer than 3 counted held failures
+-- and fewer than 6 counted transient ones, so a later anchor waits behind a
+-- pending earlier one, due or not, and an exhausted anchor no longer holds its
+-- session back. A failure counts only when its run's stats.counted is true;
+-- one without it (an outage) never exhausts an anchor. It is due when it has
+-- no failure, or once p_now reaches the latest failure's end plus the backoff
+-- for its count n of failures, counted or not: 60 seconds doubled n - 1 times,
+-- capped at 6 hours, the schedule the worker's own backoff uses. A window that
+-- keeps failing, whatever the class, so yields the head of the oldest-first
+-- queue to the sessions behind it. Due-ness is decided here, before the limit,
+-- so sessions waiting out a backoff never crowd due ones out. failures counts
+-- every failed run, held_failures and transient_failures the counted ones of
+-- each class; running_run_id and running_started_at name a run still open on
+-- the anchor, which the caller closes as failed once it is stale (its worker
+-- died) before beginning a new one.
+CREATE OR REPLACE FUNCTION public.engram_extraction_pending(p_version text, p_limit integer, p_idle_seconds integer, p_now timestamp with time zone) RETURNS TABLE(anchor_item_id uuid, session_id text, anchor_kind text, occurred_at timestamp with time zone, failures integer, held_failures integer, transient_failures integer, running_run_id uuid, running_started_at timestamp with time zone)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -3902,7 +3911,8 @@ BEGIN
     SELECT r.anchor_item_id AS aid,
            bool_or(r.status = 'succeeded') AS succeeded,
            (count(*) FILTER (WHERE r.status = 'failed'))::integer AS failed,
-           (count(*) FILTER (WHERE r.status = 'failed' AND r.stats ->> 'failure' = 'held'))::integer AS held,
+           (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "held", "counted": true}'))::integer AS held,
+           (count(*) FILTER (WHERE r.status = 'failed' AND r.stats @> '{"failure": "transient", "counted": true}'))::integer AS transient,
            max(coalesce(r.finished_at, r.started_at)) FILTER (WHERE r.status = 'failed') AS last_failed,
            (array_agg(r.id ORDER BY r.started_at DESC, r.id DESC) FILTER (WHERE r.status = 'running'))[1] AS running_id,
            max(r.started_at) FILTER (WHERE r.status = 'running') AS running_at
@@ -3910,16 +3920,17 @@ BEGIN
      WHERE r.extractor_version = p_version AND r.anchor_item_id IS NOT NULL
      GROUP BY r.anchor_item_id
   ), pending AS (
-    SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.failed, 0) AS failed, coalesce(r.held, 0) AS held, r.last_failed,
+    SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.failed, 0) AS failed, coalesce(r.held, 0) AS held,
+           coalesce(r.transient, 0) AS transient, r.last_failed,
            r.running_id, r.running_at,
            row_number() OVER (PARTITION BY a.sid ORDER BY a.t_at, a.id) AS place
       FROM anchor a
       LEFT JOIN run r ON r.aid = a.id
      WHERE NOT coalesce(r.succeeded, false)
        AND coalesce(r.held, 0) < 3
-       AND coalesce(r.failed, 0) - coalesce(r.held, 0) < 6
+       AND coalesce(r.transient, 0) < 6
   )
-  SELECT p.id, p.sid, p.kind, p.t_at, p.failed, p.held, p.running_id, p.running_at
+  SELECT p.id, p.sid, p.kind, p.t_at, p.failed, p.held, p.transient, p.running_id, p.running_at
     FROM pending p
    WHERE p.place = 1
      AND (p.failed = 0 OR p_now >= p.last_failed + make_interval(secs => least(60 * power(2, p.failed - 1), 21600)))
@@ -4135,15 +4146,20 @@ END; $$;
 
 
 --
--- Name: engram_extraction_fail(uuid, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_fail(uuid, text, text, boolean, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
+
+-- p_counted was added to this function; the earlier signature is dropped so
+-- it does not stay behind as a second overload.
+DROP FUNCTION IF EXISTS public.engram_extraction_fail(uuid, text, text, jsonb);
 
 -- Closes a running run as failed: finished_at, error (its first 500
 -- characters, NULL when blank) and stats, which are p_stats (counts only,
--- never text) with failure set to p_failure, 'held' or 'transient'. Returns
--- false and changes nothing when the run is not running: a commit or an
--- earlier close came first.
-CREATE OR REPLACE FUNCTION public.engram_extraction_fail(p_run uuid, p_error text, p_failure text, p_stats jsonb) RETURNS boolean
+-- never text) with failure set to p_failure, 'held' or 'transient', and
+-- counted to p_counted, whether the failure counts toward the anchor's limit
+-- for its class. Returns false and changes nothing when the run is not
+-- running: a commit or an earlier close came first.
+CREATE OR REPLACE FUNCTION public.engram_extraction_fail(p_run uuid, p_error text, p_failure text, p_counted boolean, p_stats jsonb) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -4156,6 +4172,10 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_fail: p_failure must be transient or held';
   END IF;
+  IF p_counted IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_extraction_fail: p_counted must not be NULL';
+  END IF;
   IF p_stats IS NOT NULL AND jsonb_typeof(p_stats) <> 'object' THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_fail: p_stats must be a JSON object or NULL';
@@ -4165,7 +4185,7 @@ BEGIN
      SET status = 'failed',
          finished_at = now(),
          error = CASE WHEN p_error ~ '\S' THEN left(p_error, 500) END,
-         stats = coalesce(p_stats, '{}'::jsonb) || jsonb_build_object('failure', p_failure)
+         stats = coalesce(p_stats, '{}'::jsonb) || jsonb_build_object('failure', p_failure, 'counted', p_counted)
    WHERE r.id = p_run AND r.status = 'running';
   RETURN FOUND;
 END; $$;
@@ -4785,7 +4805,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
@@ -4844,7 +4864,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
@@ -4893,7 +4913,7 @@ GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;

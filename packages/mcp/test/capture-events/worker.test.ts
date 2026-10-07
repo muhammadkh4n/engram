@@ -577,6 +577,7 @@ function anchor(n: number): PendingAnchor {
     occurredAt: new Date('2026-10-01T09:00:00Z'),
     failures: 0,
     heldFailures: 0,
+    transientFailures: 0,
     runningRunId: null,
     runningStartedAt: null,
   }
