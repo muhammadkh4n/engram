@@ -379,3 +379,16 @@ export function sqlstateOf(err: unknown): string | null {
   const code = (err as { code?: unknown }).code
   return typeof code === 'string' && SQLSTATE.test(code) ? code : null
 }
+
+/** SQLSTATE classes 22 (data exception) and 23 (integrity constraint violation). */
+const DATA_REFUSAL_CLASSES = new Set(['22', '23'])
+
+/**
+ * True when the store refused the data it was given (a SQLSTATE in class 22
+ * or 23). Any other failure (no SQLSTATE, a PostgREST code, a timeout or a
+ * lost connection) says nothing about the data.
+ */
+export function isDataRefusal(err: unknown): boolean {
+  const code = sqlstateOf(err)
+  return code !== null && DATA_REFUSAL_CLASSES.has(code.slice(0, 2))
+}

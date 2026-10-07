@@ -594,6 +594,16 @@ export function classifyExtractionError(err: unknown): ExtractionErrorClass {
   return 'held'
 }
 
+/**
+ * The provider answered with an HTTP status and refused the request for what
+ * it carried (400, 413, 422 and the like), so it is up. A status
+ * classifyExtractionError calls transient, or no status at all, does not show
+ * the provider is up.
+ */
+export function isProviderRefusal(err: unknown): boolean {
+  return httpStatus(err) !== undefined && classifyExtractionError(err) === 'held'
+}
+
 /** A key, billing or permission rejection (401, 402, 403): transient for the
  *  batch, but it needs an operator, so callers log it at error level. */
 export function isCredentialError(err: unknown): boolean {

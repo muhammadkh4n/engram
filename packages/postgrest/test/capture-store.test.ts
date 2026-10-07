@@ -669,6 +669,19 @@ describe('PostgRestCaptureStore extraction', () => {
     )
   })
 
+  it('gives a commit it refuses before sending the class 22 SQLSTATE PostgreSQL would give the same data', async () => {
+    const { store, calls } = storeWith({ data: null, error: null })
+    const refusal = (commit: Parameters<typeof store.extractionCommit>[1]) =>
+      store.extractionCommit(RUN, commit).catch((e: unknown) => e)
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ content: 'a\u0000b' })], stats: {} }))).toBe('22P05')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ context: '\ud800' })], stats: {} }))).toBe('22P05')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ occurredAt: new Date(Number.NaN) })], stats: {} }))).toBe('22007')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ occurredAt: new Date(Date.UTC(10_000, 0, 1)) })], stats: {} }))).toBe('22008')
+    const tooMany = Array.from({ length: 501 }, () => item())
+    expect(sqlstateOf(await refusal({ subjects: [], items: tooMany, stats: {} }))).toBe('22023')
+    expect(calls).toEqual([])
+  })
+
   it('reports a refused quote as ItemConstraintError naming the trigger, without details', async () => {
     const { store } = storeWith({
       data: null,

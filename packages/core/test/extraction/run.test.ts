@@ -9,6 +9,7 @@ import type {
   ExtractionPendingQuery,
   PendingAnchor,
 } from '../../src/items/capture-store.js'
+import { ItemConstraintError } from '../../src/items/item-store.js'
 import { EXTRACTOR_VERSION } from '../../src/extraction/prompt.js'
 import {
   EXTRACTION_HELD_FAILURES_MAX,
@@ -63,7 +64,8 @@ class FakeStore implements ExtractionStore {
   readonly runs: FakeRun[] = []
   readonly commits: Array<{ anchorId: string; commit: ExtractionCommit }> = []
   readonly calls: string[] = []
-  commitError: Error | null = null
+  /** The error the commit of an anchor's run throws, if any. */
+  commitError: ((anchorId: string) => Error | null) | null = null
   private nextRun = 1
 
   constructor(private readonly clock: { now: number }) {}
@@ -205,8 +207,9 @@ class FakeStore implements ExtractionStore {
 
   async extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
     this.calls.push(`commit ${runId}`)
-    if (this.commitError) throw this.commitError
     const run = this.runs.find((r) => r.id === runId)!
+    const refused = this.commitError?.(run.anchorId)
+    if (refused) throw refused
     expect(run.status).toBe('running')
     Object.assign(run, { status: 'succeeded', finishedAt: new Date(this.clock.now), stats: commit.stats })
     this.commits.push({ anchorId: run.anchorId, commit })
@@ -243,6 +246,21 @@ type Responder = (req: CompleteJsonRequest) => Reply
 
 const PROBE_ANSWER: Reply = { text: '{"ok":true}' }
 const down = (): Error => Object.assign(new Error('upstream unavailable'), { status: 503 })
+const badRequest = (): Error => Object.assign(new Error('bad request'), { status: 400 })
+
+/**
+ * A store error as the PostgREST store builds one: the SQLSTATE or PGRST code
+ * rides as `code`, and a failure with no code (fetch failed) carries none.
+ */
+function storeError(operation: string, code: string, message: string): Error {
+  const err = new Error(`${operation} failed (${code || 'unknown'}): ${message}`)
+  return code ? Object.assign(err, { code }) : err
+}
+
+/** A refused item rule as the PostgREST store builds it for class 23. */
+function ruleError(code: string, constraint: string): Error {
+  return Object.assign(new ItemConstraintError(constraint, `violates constraint "${constraint}"`), { code })
+}
 
 /**
  * Window calls are answered by `replies` (a list consumed in order, then
@@ -451,19 +469,182 @@ describe('runExtractionTick', () => {
     expect(logs.some((l) => l.includes('exhausted'))).toBe(false)
   })
 
-  it('ends the tick without a model call when the store cannot read a window, and counts nothing', async () => {
-    const { store, requests, tick } = setup()
+  it.each([
+    ['a fetch failure', storeError('extractionWindow', '', 'TypeError: fetch failed')],
+    ['PGRST001', storeError('extractionWindow', 'PGRST001', 'Database client error. Retrying the connection.')],
+    ['57014', storeError('extractionWindow', '57014', 'canceling statement due to statement timeout')],
+  ])('counts nothing and ends the tick without a model call when the window read fails with %s, then extracts the anchor', async (_name, err) => {
+    const { clock, store, requests, logs, tick } = setup()
     const first = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
-    store.addAnchor('tst-session-2', T0 - 60_000)
-    store.extractionWindow = async () => {
-      throw Object.assign(new Error('the store is unreachable'), { status: 503 })
+    const second = store.addAnchor('tst-session-2', T0 - 60_000)
+    const read = store.extractionWindow.bind(store)
+    let failing = true
+    store.extractionWindow = async (anchorId: string) => {
+      if (failing) throw err
+      return read(anchorId)
     }
 
     const result = await tick()
 
     expect(requests).toEqual([])
     expect(store.runsOf(first.id)).toMatchObject([{ status: 'failed', failure: 'transient', counted: false }])
-    expect(result).toMatchObject({ windows: 1, transient: 1 })
+    expect(store.runsOf(second.id)).toEqual([])
+    expect(result).toMatchObject({ windows: 1, succeeded: 0, held: 0 })
+    expect(logs.some((l) => /store/.test(l) && /tick ends/.test(l))).toBe(true)
+
+    failing = false
+    clock.now += factExtractionBackoffMs(1)
+    await tick()
+    expect(store.commits.map((c) => c.anchorId)).toEqual([first.id, second.id])
+  })
+
+  it('holds and counts a window that cannot be built from what the store returned, without a model call', async () => {
+    const { store, requests, tick } = setup()
+    const broken = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
+    const other = store.addAnchor('tst-session-2', T0 - 60_000)
+    const read = store.extractionWindow.bind(store)
+    store.extractionWindow = async (anchorId: string) => {
+      const raw = await read(anchorId)
+      return anchorId === broken.id ? ({ ...raw, anchor: null } as unknown as RawExtractionWindow) : raw
+    }
+
+    const result = await tick()
+
+    expect(store.runsOf(broken.id)).toMatchObject([{ status: 'failed', failure: 'held', counted: true }])
+    expect(windowRequests(requests)).toHaveLength(1)
+    expect(requests.filter(isProbeRequest)).toEqual([])
+    expect(store.commits.map((c) => c.anchorId)).toEqual([other.id])
+    expect(result).toMatchObject({ windows: 2, held: 1, succeeded: 1 })
+  })
+
+  it('counts nothing and ends the tick when the commit fails with 57014, then extracts the anchor', async () => {
+    const { clock, store, requests, logs, tick } = setup()
+    const first = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
+    const second = store.addAnchor('tst-session-2', T0 - 60_000)
+    store.commitError = () => storeError('extractionCommit', '57014', 'canceling statement due to statement timeout')
+
+    const result = await tick()
+
+    expect(store.runsOf(first.id)).toMatchObject([{ status: 'failed', failure: 'transient', counted: false }])
+    expect(store.runsOf(second.id)).toEqual([])
+    expect(windowRequests(requests)).toHaveLength(1)
+    expect(requests.filter(isProbeRequest)).toEqual([])
+    expect(result).toMatchObject({ windows: 1, succeeded: 0, held: 0 })
+    expect(logs.some((l) => /store/.test(l) && /tick ends/.test(l))).toBe(true)
+
+    store.commitError = null
+    clock.now += factExtractionBackoffMs(1)
+    await tick()
+    expect(store.commits.map((c) => c.anchorId)).toEqual([first.id, second.id])
+  })
+
+  it.each([
+    ['22023', (): Error => storeError('extractionCommit', '22023', 'engram_extraction_commit: item 1 names no subject')],
+    ['23505', (): Error => ruleError('23505', 'idx_items_event_key')],
+  ])('holds a commit the store refused with %s, exhausts the anchor at its third, and runs the session\'s next anchor', async (_code, refuse) => {
+    const { clock, store, requests, logs, tick } = setup()
+    const stuck = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
+    const next = store.addAnchor('tst-session-1', T0 - 60_000)
+    store.commitError = (anchorId) => (anchorId === stuck.id ? refuse() : null)
+
+    for (let n = 1; n <= MAX_HELD; n++) {
+      await tick()
+      expect(store.heldFailures(stuck.id, EXTRACTOR_VERSION)).toHaveLength(n)
+      if (n < MAX_HELD) {
+        expect(store.commits).toEqual([])
+        expect(logs.filter((l) => l.includes('exhausted'))).toEqual([])
+      }
+      clock.now += factExtractionBackoffMs(n)
+    }
+
+    expect(requests.filter(isProbeRequest)).toEqual([])
+    expect(store.commits.map((c) => c.anchorId)).toEqual([next.id])
+    const exhausted = logs.filter((l) => l.includes('exhausted'))
+    expect(exhausted).toEqual([expect.stringContaining(`anchor=${stuck.id.slice(0, 8)}`)])
+    expect(exhausted[0]).toContain('held=3')
+  })
+
+  it('counts a 503 whose probe is refused with a 400, and exhausts the window at its sixth failure', async () => {
+    const { clock, store, requests, logs, tick } = setup(
+      (req) => (req.user.includes('REFUSED') ? down() : { text: EMPTY_LISTS }),
+      badRequest,
+    )
+    const stuck = store.addAnchor('tst-session-1', T0 - 2 * 60_000, 'REFUSED: Use TST-77 here.')
+    const next = store.addAnchor('tst-session-1', T0 - 60_000)
+
+    for (let n = 1; n <= MAX_TRANSIENT; n++) {
+      await tick()
+      expect(store.transientFailures(stuck.id, EXTRACTOR_VERSION)).toHaveLength(n)
+      if (n < MAX_TRANSIENT) expect(logs.filter((l) => l.includes('exhausted'))).toEqual([])
+      clock.now += factExtractionBackoffMs(n)
+    }
+
+    expect(requests.filter(isProbeRequest)).toHaveLength(MAX_TRANSIENT)
+    expect(store.uncountedFailures(stuck.id, EXTRACTOR_VERSION)).toEqual([])
+    expect(store.commits.map((c) => c.anchorId)).toEqual([next.id])
+    const exhausted = logs.filter((l) => l.includes('exhausted'))
+    expect(exhausted).toEqual([expect.stringContaining(`anchor=${stuck.id.slice(0, 8)}`)])
+    expect(exhausted[0]).toContain('transient=6')
+  })
+
+  it.each([
+    ['answered', (): Reply => PROBE_ANSWER, true],
+    ['refused with a 400', badRequest, true],
+    ['unanswered with a 503', down, false],
+    ['failed with no status', (): Reply => new Error('socket hang up'), false],
+  ])('lets the probe decide a window call that failed with no status: probe %s', async (_name, probe, counted) => {
+    const { store, requests, tick } = setup(
+      (req) => (req.user.includes('ODD') ? new Error('the adapter broke') : { text: EMPTY_LISTS }),
+      probe,
+    )
+    const odd = store.addAnchor('tst-session-1', T0 - 2 * 60_000, 'ODD one')
+    const other = store.addAnchor('tst-session-2', T0 - 60_000)
+
+    await tick()
+
+    expect(requests.map(isProbeRequest)).toEqual(counted ? [false, true, false] : [false, true])
+    expect(store.runsOf(odd.id)).toMatchObject([{ status: 'failed', failure: 'held', counted }])
+    expect(store.commits.map((c) => c.anchorId)).toEqual(counted ? [other.id] : [])
+  })
+
+  it.each([
+    ['an unreadable reply', (): Reply[] => [{ text: 'not json' }]],
+    [
+      'a refused commit',
+      (store: FakeStore): Reply[] => {
+        store.commitError = () => ruleError('23514', 'memory_items_content_check')
+        return []
+      },
+    ],
+    [
+      'a window that cannot be built',
+      (store: FakeStore): Reply[] => {
+        store.extractionWindow = async () => ({ anchor: null }) as unknown as RawExtractionWindow
+        return []
+      },
+    ],
+  ])('names no anchor exhausted when %s reaches the limit but closed no run', async (_name, arrange) => {
+    const replies: Reply[] = []
+    const { clock, store, logs, tick } = setup(replies)
+    replies.push(...arrange(store))
+    const anchor = store.addAnchor('tst-session-1', T0 - 60 * 60_000)
+    for (let i = 0; i < MAX_HELD - 1; i++) {
+      store.addRun(anchor.id, {
+        status: 'failed',
+        failure: 'held',
+        counted: true,
+        startedAt: new Date(T0 - 50 * 60_000),
+        finishedAt: new Date(T0 - 50 * 60_000),
+      })
+    }
+    // Another process closed the run first, so this close changed nothing.
+    store.extractionFail = async () => false
+    clock.now = T0 + FACT_EXTRACTION_BACKOFF_MAX_MS
+
+    await tick()
+
+    expect(logs.some((l) => l.includes('status=held'))).toBe(true)
+    expect(logs.some((l) => l.includes('exhausted'))).toBe(false)
   })
 
   it('exhausts a lone session\'s moderated anchor at its sixth failure, logs it, and runs the session\'s next anchor', async () => {
@@ -528,7 +709,7 @@ describe('runExtractionTick', () => {
     expect(store.runsOf(anchor.id)[0]).toMatchObject({ status: 'failed', failure: 'held' })
     expect(store.runsOf(anchor.id)[0]!.stats).toMatchObject({ finish_reason: 'length', anchor_kind: 'user_prompt' })
 
-    store.commitError = new Error('refused')
+    store.commitError = () => ruleError('23514', 'memory_items_content_check')
     clock.now += factExtractionBackoffMs(1)
     await tick()
     expect(store.runsOf(anchor.id)[1]).toMatchObject({ status: 'failed', failure: 'held' })
