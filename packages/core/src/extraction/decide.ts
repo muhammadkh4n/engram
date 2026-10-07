@@ -6,14 +6,15 @@
  * beside the item that changes it).
  *
  * After the gate and before the commit, each new item that the commit will
- * store and that names a stored subject gets a candidate read: the current
+ * store and that names a stored subject, and each standing statement on a
+ * subject the commit creates, gets a candidate read: the current
  * items of its class on its subject in the anchor's scope that occurred no
  * later than it (a backfilled old session never sees its future), for a
  * statement also the observations on that subject, which it may correct, and
  * for a standing statement the active register entries on its subject's
- * label, which it may restate or change.
- * Items its own links already name are left out, as is an item whose words
- * are stored already. One model call then covers every item that has
+ * label, which it may restate or change (on a new subject, these are all it
+ * can meet). Items its own links already name are left out, as is an item
+ * whose words are stored already. One model call then covers every item that has
  * candidates, newest DECISION_CANDIDATES_MAX each. Its decisions become link
  * proposals that may name only that item's candidates, and the link rules
  * check them with the reply's own.
@@ -82,24 +83,28 @@ export interface ParsedDecision {
 export type ParsedDecisions = { ok: true; decisions: ParsedDecision[]; invalid: number } | { ok: false; reason: string }
 
 /**
- * Items that will be stored and name a stored subject. An item the reply
- * already settled as a pure restatement is not stored, so it needs no
- * decision; the targets each item's own accepted links name are excluded
- * from its read.
+ * Items that will be stored and name a stored subject, and standing
+ * statements on a new subject, which may restate or change a register entry
+ * filed under that label. An item the reply already settled as a pure
+ * restatement is not stored, so it needs no decision; the targets each
+ * item's own accepted links name are excluded from its read.
  */
 export function candidateQueries(draft: CommitDraft): CandidateQueries {
   const { accepted } = draftLinks(draft)
   const indexes: number[] = []
   const queries: ExtractionCandidateQuery[] = []
   draft.items.forEach((item, index) => {
-    if (item.subjectId === null) return
+    const standing = item.class === 'mk_statement' && item.standing === true
+    const subjectLabel = item.subjectId === null ? draft.sources[index]!.subjectLabel : null
+    if (item.subjectId === null && !(standing && subjectLabel !== null)) return
     const own = accepted.filter((l) => l.item === index)
     if (own.some((l) => l.rel === 'restates') && !own.some((l) => l.rel === 'supersedes')) return
     indexes.push(index)
     queries.push({
       subjectId: item.subjectId,
+      subjectLabel,
       class: item.class,
-      standing: item.class === 'mk_statement' && item.standing === true,
+      standing,
       occurredAt: item.occurredAt,
       content: item.content,
       eventKey: String(item.source.event_key),

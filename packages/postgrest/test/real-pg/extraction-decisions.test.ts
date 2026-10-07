@@ -203,6 +203,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the decision pass through Post
   function query(item: ExtractionItem, exclude: string[] = []): ExtractionCandidateQuery {
     return {
       subjectId: item.subjectId!,
+      subjectLabel: null,
       class: item.class,
       standing: item.standing === true,
       occurredAt: item.occurredAt,
@@ -388,13 +389,13 @@ describe.skipIf(!realPgImage || !postgrestImage)('the decision pass through Post
     ])
   }, TEST_TIMEOUT_MS)
 
-  it('refuses candidates_read on an item that names no stored subject', async () => {
+  it('refuses candidates_read on a one-off statement that names no stored subject', async () => {
     const [now] = await seed(said('Postgres only.', '2026-10-04T09:00:00Z'))
     const run = await store.extractionBegin({ anchorId: now!.id, sessionId: SESSION, version: 'race-2', model: null })
     const item = { ...statement(now!, 'Postgres only', generateId()), subjectId: null, subjectKey: 'new-1', candidatesRead: [] }
 
     await expect(
       store.extractionCommit(run!, { subjects: [{ key: 'new-1', projectId: 'tst-repo', label: 'storage' }], items: [item], stats: {} }),
-    ).rejects.toThrow(/candidates_read needs a subject_id/)
+    ).rejects.toThrow(/candidates_read needs a subject_id, or a standing statement on a new subject/)
   }, TEST_TIMEOUT_MS)
 })

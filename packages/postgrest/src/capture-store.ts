@@ -295,6 +295,7 @@ export class PostgRestCaptureStore implements CaptureStore {
     if (!isUuid(anchorId)) return null
     const payload = items.map((item, index) => ({
       subject_id: item.subjectId,
+      subject_label: item.subjectLabel,
       class: item.class,
       standing: item.standing,
       occurred_at: isoTime(item.occurredAt, index + 1),

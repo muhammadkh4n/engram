@@ -251,7 +251,10 @@ export interface ExtractionItem {
  * links already name, which are not read again.
  */
 export interface ExtractionCandidateQuery {
-  subjectId: string
+  /** Null when the item names a subject the commit creates: nothing is filed under it yet. */
+  subjectId: string | null
+  /** The new subject's label, given with a null subjectId; a register entry matches on it. */
+  subjectLabel: string | null
   class: 'mk_statement' | 'observation'
   /** A standing statement is also weighed against the active register entries on its subject's label. */
   standing: boolean

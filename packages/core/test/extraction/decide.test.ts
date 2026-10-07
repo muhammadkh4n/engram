@@ -191,9 +191,11 @@ describe('the decision pass', () => {
     expect(commit.stats.decisions).toMatchObject({ independent: 1 })
   })
 
-  it('makes no candidate read and no decision call for an item on a new subject', async () => {
+  it('makes no candidate read and no decision call for a one-off statement on a new subject', async () => {
     const fixture = load('01-older-ruling-superseded')
-    const reply = fixture.reply.replace('{"id":"subj-1"}', '{"new":"database engines"}')
+    const reply = fixture.reply
+      .replace('{"id":"subj-1"}', '{"new":"database engines"}')
+      .replace('"standing":true', '"standing":false')
     const store = new FixtureStore(fixture.window, fixture.reads)
     const { intelligence, requests } = replying(reply)
 
@@ -203,6 +205,21 @@ describe('the decision pass', () => {
     expect(store.candidateCalls).toEqual([])
     expect(store.commits[0]!.items[0]!.candidatesRead).toBeUndefined()
     expect(store.commits[0]!.stats).toMatchObject({ model_calls: 1, decision_calls: 0, candidates_truncated: 0 })
+  })
+
+  it('reads the register entries by label for a standing statement on a new subject', async () => {
+    const fixture = load('01-older-ruling-superseded')
+    const reply = fixture.reply.replace('{"id":"subj-1"}', '{"new":"database engines"}')
+    const store = new FixtureStore(fixture.window, [{ stored: null, repeatOf: null, total: 0, read: [], candidates: [] }])
+    const { intelligence, requests } = replying(reply)
+
+    await runExtractionTick({ store, intelligence, model: 'tst-chat-model', log: () => {} })
+
+    expect(requests.map((r) => r.label)).toEqual(['extraction'])
+    expect(store.candidateCalls[0]!.items).toMatchObject([
+      { subjectId: null, subjectLabel: 'database engines', class: 'mk_statement', standing: true },
+    ])
+    expect(store.commits[0]!.items[0]!.candidatesRead).toEqual([])
   })
 
   it('makes no decision call when the read finds nothing current on the subject, and still records the read', async () => {
