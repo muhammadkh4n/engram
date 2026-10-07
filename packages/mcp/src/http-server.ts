@@ -11,6 +11,7 @@ import {
   getCaptureDeps,
   recallOutputPolicyAtStartup,
   captureModelFromEnv,
+  parseExtractWindowsPerTickEnv,
   chatIntelligenceOptionsFromEnv,
   parseSalienceThresholdEnv,
 } from './server-core.js'
@@ -147,6 +148,7 @@ export async function main(): Promise<void> {
   // of silently gating every capture at a value nobody chose.
   const threshold = parseSalienceThresholdEnv()
   const captureModel = captureModelFromEnv()
+  const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
   recallOutputPolicyAtStartup()
   const log = (line: string): void => {
     process.stderr.write(`[engram-mcp-http] ${line}\n`)
@@ -180,6 +182,7 @@ export async function main(): Promise<void> {
           ...chatIntelligenceOptionsFromEnv(),
         }),
         model: captureModel,
+        windowsPerTick: extractWindowsPerTick,
       },
       sessionIndex: { store },
       log,

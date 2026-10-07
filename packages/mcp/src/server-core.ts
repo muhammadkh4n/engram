@@ -24,6 +24,9 @@ import {
   DEFAULT_RELATED_SHARE,
   degradedRecallNotice,
   supersessionSettingsFromEnv,
+  EXTRACTION_WINDOWS_PER_TICK,
+  EXTRACTION_WINDOWS_PER_TICK_MAX,
+  isExtractionWindowsPerTick,
 } from '@engram-mem/core'
 import type {
   StorageAdapter,
@@ -309,6 +312,23 @@ export function parseSalienceThresholdEnv(env: NodeJS.ProcessEnv = process.env):
   const n = /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw) ? Number(raw) : NaN
   if (!Number.isFinite(n) || n < 0 || n > 1) {
     throw new Error(`ENGRAM_SALIENCE_THRESHOLD must be a number between 0 and 1, got "${raw}"`)
+  }
+  return n
+}
+
+/**
+ * ENGRAM_EXTRACT_WINDOWS_PER_TICK: the extraction windows one worker tick
+ * runs at most, an integer from 1 to 200 (default 20). Anything else fails
+ * startup, so a typo never stops extraction one tick at a time.
+ */
+export function parseExtractWindowsPerTickEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['ENGRAM_EXTRACT_WINDOWS_PER_TICK']?.trim()
+  if (!raw) return EXTRACTION_WINDOWS_PER_TICK
+  const n = /^\d+$/.test(raw) ? Number(raw) : NaN
+  if (!isExtractionWindowsPerTick(n)) {
+    throw new Error(
+      `ENGRAM_EXTRACT_WINDOWS_PER_TICK must be an integer from 1 to ${EXTRACTION_WINDOWS_PER_TICK_MAX}, got "${raw}"`,
+    )
   }
   return n
 }

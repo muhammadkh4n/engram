@@ -96,6 +96,8 @@ export interface CaptureWorkerExtraction {
   intelligence: IntelligenceAdapter | undefined
   /** The configured chat model, recorded on each run. */
   model: string
+  /** Windows one tick runs at most; checked at startup (parseExtractWindowsPerTickEnv). */
+  windowsPerTick?: number
 }
 
 export interface CaptureWorker {
@@ -289,9 +291,9 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
 
   const extract = async (): Promise<Pick<ExtractionTickResult, 'full'>> => {
     if (opts.extraction === undefined) return { full: false }
-    const { store: extractionStore, intelligence, model } = opts.extraction
+    const { store: extractionStore, intelligence, model, windowsPerTick } = opts.extraction
     try {
-      return await runExtractionTick({ store: extractionStore, intelligence, model, log })
+      return await runExtractionTick({ store: extractionStore, intelligence, model, windowsPerTick, log })
     } catch (err) {
       log(`capture worker: extraction failed: ${describeError(err)}`)
       return { full: false }

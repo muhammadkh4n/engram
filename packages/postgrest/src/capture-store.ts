@@ -259,12 +259,20 @@ export class PostgRestCaptureStore implements CaptureStore {
     return (data as unknown as Array<Record<string, unknown>>).map(toPendingAnchor)
   }
 
-  async extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null> {
+  async extractionWindow(
+    anchorId: string,
+    subjectLimit: number,
+    recentLimit: number,
+    version: string,
+  ): Promise<RawExtractionWindow | null> {
     if (!Number.isInteger(subjectLimit) || subjectLimit < 1 || subjectLimit > EXTRACTION_WINDOW_SUBJECTS_MAX) {
       throw new Error(`extractionWindow: subjectLimit must be an integer from 1 to ${EXTRACTION_WINDOW_SUBJECTS_MAX}`)
     }
     if (!Number.isInteger(recentLimit) || recentLimit < 1 || recentLimit > EXTRACTION_WINDOW_RECENT_MAX) {
       throw new Error(`extractionWindow: recentLimit must be an integer from 1 to ${EXTRACTION_WINDOW_RECENT_MAX}`)
+    }
+    if (typeof version !== 'string' || !/\S/.test(version) || version.length > 64) {
+      throw new Error('extractionWindow: version must be a non-blank text of at most 64 characters')
     }
     // A malformed id names no utterance; PostgREST would refuse the whole call.
     if (!isUuid(anchorId)) return null
@@ -272,6 +280,7 @@ export class PostgRestCaptureStore implements CaptureStore {
       p_anchor: anchorId,
       p_subject_limit: subjectLimit,
       p_recent_limit: recentLimit,
+      p_version: version,
     })
     if (error) throw toStoreError('extractionWindow', error)
     if (data === null) return null

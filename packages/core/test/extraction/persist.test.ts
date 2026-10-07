@@ -237,6 +237,15 @@ describe('buildCommitPayload', () => {
     expect(commit.subjects[0]!.label).toBe('nul � bytes')
   })
 
+  it('names the turn it extracts observations from, and none when the turn was already observed', () => {
+    const reply = { statements: [statement({})], observations: [] }
+    expect(buildCommitPayload(window, gated(window, reply), RUN).stats['observation_sources']).toEqual([window.turn!.id])
+    const observed = { ...window, turn: { ...window.turn!, alreadyObserved: true } }
+    expect(buildCommitPayload(observed, gated(observed, reply), RUN).stats['observation_sources']).toEqual([])
+    const noTurn = { ...window, turn: null }
+    expect(buildCommitPayload(noTurn, gated(noTurn, reply), RUN).stats['observation_sources']).toEqual([])
+  })
+
   it('counts proposals, stores and rejections per side, never text', () => {
     const reply = {
       statements: [statement({}), statement({ quote: 'words MK never wrote' })],
@@ -244,6 +253,7 @@ describe('buildCommitPayload', () => {
     }
     const { stats } = buildCommitPayload(window, gated(window, reply), RUN)
     expect(stats).toEqual({
+      observation_sources: [window.turn!.id],
       statements: { proposed: 2, stored: 1, rejected: 1 },
       observations: { proposed: 3, stored: 1, rejected: 2, trust2: 0, trust3: 1 },
       rejected: [

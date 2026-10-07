@@ -19,6 +19,8 @@ import {
   EXTRACTION_STALE_RUN_MS,
   EXTRACTION_TRANSIENT_FAILURES_MAX,
   EXTRACTION_WINDOWS_PER_TICK,
+  EXTRACTION_WINDOWS_PER_TICK_MAX,
+  isExtractionWindowsPerTick,
   runExtractionTick,
   SESSION_IDLE_MS,
   type ExtractionStore,
@@ -71,6 +73,23 @@ class FakeStore implements ExtractionStore {
   private nextRun = 1
 
   constructor(private readonly clock: { now: number }) {}
+
+  private readonly received = new Map<string, number>()
+
+  /** Sets when the session's latest event was received. */
+  setReceived(sessionId: string, ms: number): void {
+    this.received.set(sessionId, ms)
+  }
+
+  /**
+   * When the session's latest event was received; unset, a session added
+   * earlier counts as received later, so it is handed out first.
+   */
+  receivedAt(sessionId: string): number {
+    const set = this.received.get(sessionId)
+    if (set !== undefined) return set
+    return -this.anchors.findIndex((a) => a.sessionId === sessionId)
+  }
 
   addAnchor(sessionId: string, occurredAt: number, content = PRIVATE_TEXT): FakeAnchor {
     const anchor = { id: uuid(100 + this.anchors.length), sessionId, occurredAt: new Date(occurredAt), content }
@@ -131,16 +150,25 @@ class FakeStore implements ExtractionStore {
         )
       })
       .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id))
-    const firstPerSession = new Map<string, FakeAnchor>()
-    for (const anchor of open) if (!firstPerSession.has(anchor.sessionId)) firstPerSession.set(anchor.sessionId, anchor)
-    const due = [...firstPerSession.values()].filter((a) => {
+    // As the RPC: sessions most recently received first, each session's
+    // anchors in order, up to its first one still backing off.
+    const isDue = (a: FakeAnchor): boolean => {
       const failed = this.failedRuns(a.id, query.version)
       if (failed.length === 0) return true
       const last = Math.max(...failed.map((r) => (r.finishedAt ?? r.startedAt).getTime()))
       return query.now.getTime() >= last + factExtractionBackoffMs(failed.length)
+    }
+    const bySession = new Map<string, FakeAnchor[]>()
+    for (const anchor of open) bySession.set(anchor.sessionId, [...(bySession.get(anchor.sessionId) ?? []), anchor])
+    const sessions = [...bySession.keys()].sort(
+      (a, b) => this.receivedAt(b) - this.receivedAt(a) || a.localeCompare(b),
+    )
+    const due = sessions.flatMap((sid) => {
+      const anchors = bySession.get(sid)!
+      const blocked = anchors.findIndex((a) => !isDue(a))
+      return blocked === -1 ? anchors : anchors.slice(0, blocked)
     })
     return due
-      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id))
       .slice(0, query.limit)
       .map((a) => {
         const running = this.runsOf(a.id).find((r) => r.status === 'running' && r.version === query.version)
@@ -761,6 +789,48 @@ describe('runExtractionTick', () => {
     const second = await tick()
     expect(second).toMatchObject({ windows: 5, succeeded: 5, full: false })
     expect(store.commits).toHaveLength(25)
+  })
+
+  it('runs the most recently received sessions first when the budget is smaller than the backlog', async () => {
+    const { clock, store } = setup()
+    const { intelligence } = adapter([], () => PROBE_ANSWER)
+    const oldest = store.addAnchor('tst-session-old', T0 - 50 * 60_000)
+    const live = store.addAnchor('tst-session-live', T0 - 40 * 60_000)
+    const middle = store.addAnchor('tst-session-mid', T0 - 45 * 60_000)
+    store.setReceived('tst-session-old', T0 - 50 * 60_000)
+    store.setReceived('tst-session-mid', T0 - 20 * 60_000)
+    store.setReceived('tst-session-live', T0 - 60_000)
+    const tick = () =>
+      runExtractionTick({
+        store,
+        intelligence,
+        model: 'tst-chat-model',
+        now: () => new Date(clock.now),
+        windowsPerTick: 2,
+        log: () => {},
+      })
+
+    expect(await tick()).toEqual({ windows: 2, succeeded: 2, held: 0, transient: 0, full: true })
+    expect(store.commits.map((c) => c.anchorId)).toEqual([live.id, middle.id])
+    expect(await tick()).toEqual({ windows: 1, succeeded: 1, held: 0, transient: 0, full: false })
+    expect(store.commits.map((c) => c.anchorId)).toEqual([live.id, middle.id, oldest.id])
+  })
+
+  it('runs a session\'s later windows only after its earlier one succeeded', async () => {
+    const { store, tick } = setup((req) => (req.user.includes('BROKEN') ? { text: 'not json' } : { text: statementReply('Use TST-77') }))
+    const broken = store.addAnchor('tst-session-1', T0 - 3 * 60_000, 'BROKEN: Use TST-77 here.')
+    const behind = store.addAnchor('tst-session-1', T0 - 2 * 60_000)
+    const other = store.addAnchor('tst-session-2', T0 - 60_000)
+
+    expect(await tick()).toMatchObject({ windows: 2, succeeded: 1, held: 1 })
+    expect(store.runsOf(behind.id)).toEqual([])
+    expect(store.commits.map((c) => c.anchorId)).toEqual([other.id])
+    expect(store.runsOf(broken.id)).toMatchObject([{ status: 'failed', failure: 'held' }])
+  })
+
+  it('accepts a budget from 1 to the maximum only', () => {
+    expect([1, EXTRACTION_WINDOWS_PER_TICK, EXTRACTION_WINDOWS_PER_TICK_MAX].every(isExtractionWindowsPerTick)).toBe(true)
+    expect([0, -1, 1.5, EXTRACTION_WINDOWS_PER_TICK_MAX + 1, Number.NaN, '20'].some(isExtractionWindowsPerTick)).toBe(false)
   })
 
   it('closes a stale running run as transient and runs the anchor after its backoff; a live run is left alone', async () => {

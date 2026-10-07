@@ -491,22 +491,31 @@ export interface CaptureStore {
   scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]>
 
   /**
-   * Up to `limit` anchors to extract next, oldest first and at most one per
-   * session: each session's earliest anchor with no succeeded run, fewer
-   * than 3 counted held and fewer than 6 counted transient failures at
-   * `version`, and only once the backoff for all its failures, counted or
-   * not, has passed since the latest. Anchors are MK utterances, and a trailing assistant
-   * turn once its session has ended or been idle for `idleMs`.
+   * Up to `limit` anchors to extract next: sessions most recently received
+   * first, each session's anchors in event order. An anchor is pending at
+   * `version` while it has no succeeded run, fewer than 3 counted held and
+   * fewer than 6 counted transient failures; a session's pending anchors
+   * are handed out from its earliest on, up to the first one still in the
+   * backoff for all its failures, counted or not. Anchors are MK utterances,
+   * however few a session holds, and a trailing assistant turn once its
+   * session has ended with no later event or received nothing for `idleMs`,
+   * with none of its events waiting for materialize.
    */
   extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]>
 
   /**
-   * The window around an anchor as the RPC returns it, or null when the
-   * anchor is gone (missing or forgotten). Lists up to `subjectLimit` active
-   * subjects of its scope and up to `recentLimit` current statements and
-   * observations.
+   * The window around an anchor as the RPC returns it for extractor
+   * `version`, or null when the anchor is gone (missing or forgotten). Lists
+   * up to `subjectLimit` active subjects of its scope and up to
+   * `recentLimit` current statements and observations. Its assistant turn is
+   * marked observed when a succeeded run at `version` already extracted it.
    */
-  extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null>
+  extractionWindow(
+    anchorId: string,
+    subjectLimit: number,
+    recentLimit: number,
+    version: string,
+  ): Promise<RawExtractionWindow | null>
 
   /**
    * One read per item, in input order, of what that item must be weighed

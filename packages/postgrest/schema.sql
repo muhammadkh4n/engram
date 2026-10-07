@@ -3939,9 +3939,8 @@ END; $$;
 --
 -- Extraction. A window is built around an anchor: every MK prompt or dialog
 -- answer that is not forgotten, and an assistant turn that no MK utterance of
--- its session follows (a trailing turn) once its session has ended, by a
--- session_end event at or after the turn or by p_idle_seconds without a
--- capture event. memory_extraction_runs records each attempt at one anchor and
+-- its session follows (a trailing turn) once its session has ended with no
+-- later event or received nothing for p_idle_seconds. memory_extraction_runs records each attempt at one anchor and
 -- extractor version: inserted as running before the model call, closed as
 -- succeeded by engram_extraction_commit or as failed by engram_extraction_fail.
 -- A failure's stats.failure is 'held' when the reply or the commit failed and
@@ -3960,24 +3959,31 @@ END; $$;
 -- converges when this file is applied again.
 DROP FUNCTION IF EXISTS public.engram_extraction_pending(text, integer, integer, timestamp with time zone);
 
--- The anchors to extract next at p_version, at most one per session: each
--- session's earliest pending anchor by (occurred_at, id), returned only when
--- it is due, ordered by occurred_at and cut at p_limit (1 to 1000). An anchor
--- is pending while it has no succeeded run, fewer than 3 counted held failures
--- and fewer than 6 counted transient ones, so a later anchor waits behind a
--- pending earlier one, due or not, and an exhausted anchor no longer holds its
--- session back. A failure counts only when its run's stats.counted is true;
--- one without it (an outage) never exhausts an anchor. It is due when it has
--- no failure, or once p_now reaches the latest failure's end plus the backoff
--- for its count n of failures, counted or not: 60 seconds doubled n - 1 times,
--- capped at 6 hours, the schedule the worker's own backoff uses. A window that
--- keeps failing, whatever the class, so yields the head of the oldest-first
--- queue to the sessions behind it. Due-ness is decided here, before the limit,
--- so sessions waiting out a backoff never crowd due ones out. failures counts
--- every failed run, held_failures and transient_failures the counted ones of
--- each class; running_run_id and running_started_at name a run still open on
--- the anchor, which the caller closes as failed once it is stale (its worker
--- died) before beginning a new one.
+-- The anchors to extract next at p_version, cut at p_limit (1 to 1000).
+-- Sessions come most recently received first (memory_session_state
+-- .last_received_at), so a live session is never queued behind a backlog;
+-- each session's anchors come in (occurred_at, id) order. An anchor is
+-- pending while it has no succeeded run, fewer than 3 counted held failures
+-- and fewer than 6 counted transient ones; there is no minimum per session,
+-- so a session's one MK utterance is pending as soon as it is stored. A
+-- session's pending anchors are returned from its earliest on, up to the
+-- first one that is not due: a later anchor waits behind a pending earlier
+-- one, and an exhausted anchor no longer holds its session back. A failure
+-- counts only when its run's stats.counted is true; one without it (an
+-- outage) never exhausts an anchor. An anchor is due when it has no failure,
+-- or once p_now reaches the latest failure's end plus the backoff for its
+-- count n of failures, counted or not: 60 seconds doubled n - 1 times, capped
+-- at 6 hours, the schedule the worker's own backoff uses. Due-ness is decided
+-- here, before the limit, so sessions waiting out a backoff never crowd due
+-- ones out. A trailing assistant turn (no MK utterance of its session follows
+-- it) is an anchor only while its session may be closed: it ended with no
+-- later event, or nothing of it was received in the p_idle_seconds before
+-- p_now (received time, so a backlog stored long after its events happened
+-- is not idle), and no event of it waits for engram_capture_materialize.
+-- failures counts every failed run, held_failures and transient_failures the
+-- counted ones of each class; running_run_id and running_started_at name a
+-- run still open on the anchor, which the caller closes as failed once it is
+-- stale (its worker died) before beginning a new one.
 CREATE OR REPLACE FUNCTION public.engram_extraction_pending(p_version text, p_limit integer, p_idle_seconds integer, p_now timestamp with time zone) RETURNS TABLE(anchor_item_id uuid, session_id text, anchor_kind text, occurred_at timestamp with time zone, failures integer, held_failures integer, transient_failures integer, running_run_id uuid, running_started_at timestamp with time zone)
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
@@ -4005,16 +4011,21 @@ BEGIN
     SELECT u.id, u.kind, u.session_id AS sid, u.occurred_at AS t_at
       FROM public.memory_items u
      WHERE u.class = 'utterance' AND u.forgotten_at IS NULL AND u.session_id IS NOT NULL
+  ), closable AS (
+    SELECT s.session_id AS sid
+      FROM public.memory_session_state s
+     WHERE (s.ended_at >= s.last_event_at
+            OR s.last_received_at < p_now - make_interval(secs => p_idle_seconds))
+       AND NOT EXISTS (SELECT 1
+                         FROM public.memory_capture_events c
+                        WHERE c.session_id = s.session_id AND c.processed_at IS NULL AND c.attempts < 3)
   ), anchor AS (
     SELECT u.id, u.sid, CASE WHEN u.kind = 'assistant_turn' THEN 'trailing' ELSE u.kind END AS kind, u.t_at
       FROM utterance u
      WHERE u.kind IN ('user_prompt', 'user_answer')
         OR (NOT EXISTS (SELECT 1 FROM utterance m
                          WHERE m.sid = u.sid AND m.kind IN ('user_prompt', 'user_answer') AND m.t_at > u.t_at)
-            AND (EXISTS (SELECT 1 FROM public.memory_capture_events e
-                          WHERE e.session_id = u.sid AND e.type = 'session_end' AND e.occurred_at >= u.t_at)
-                 OR (SELECT max(e.occurred_at) FROM public.memory_capture_events e WHERE e.session_id = u.sid)
-                      <= p_now - make_interval(secs => p_idle_seconds)))
+            AND EXISTS (SELECT 1 FROM closable c WHERE c.sid = u.sid))
   ), run AS (
     SELECT r.anchor_item_id AS aid,
            bool_or(r.status = 'succeeded') AS succeeded,
@@ -4029,20 +4040,25 @@ BEGIN
      GROUP BY r.anchor_item_id
   ), pending AS (
     SELECT a.id, a.sid, a.kind, a.t_at, coalesce(r.failed, 0) AS failed, coalesce(r.held, 0) AS held,
-           coalesce(r.transient, 0) AS transient, r.last_failed,
-           r.running_id, r.running_at,
-           row_number() OVER (PARTITION BY a.sid ORDER BY a.t_at, a.id) AS place
+           coalesce(r.transient, 0) AS transient, r.running_id, r.running_at,
+           (coalesce(r.failed, 0) = 0
+            OR p_now >= r.last_failed + make_interval(secs => least(60 * power(2, r.failed - 1), 21600))) AS due
       FROM anchor a
       LEFT JOIN run r ON r.aid = a.id
      WHERE NOT coalesce(r.succeeded, false)
        AND coalesce(r.held, 0) < 3
        AND coalesce(r.transient, 0) < 6
+  ), queued AS (
+    SELECT p.*,
+           bool_and(p.due) OVER (PARTITION BY p.sid ORDER BY p.t_at, p.id) AS clear,
+           s.last_received_at AS received_at
+      FROM pending p
+      LEFT JOIN public.memory_session_state s ON s.session_id = p.sid
   )
-  SELECT p.id, p.sid, p.kind, p.t_at, p.failed, p.held, p.transient, p.running_id, p.running_at
-    FROM pending p
-   WHERE p.place = 1
-     AND (p.failed = 0 OR p_now >= p.last_failed + make_interval(secs => least(60 * power(2, p.failed - 1), 21600)))
-   ORDER BY p.t_at, p.id
+  SELECT q.id, q.sid, q.kind, q.t_at, q.failed, q.held, q.transient, q.running_id, q.running_at
+    FROM queued q
+   WHERE q.clear
+   ORDER BY q.received_at DESC NULLS LAST, q.sid, q.t_at, q.id
    LIMIT p_limit;
 END; $$;
 
@@ -4277,11 +4293,13 @@ END; $$;
 
 
 --
--- Name: engram_extraction_window(uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_extraction_window(uuid, integer, integer, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- The window around one anchor as JSON, or NULL when p_anchor names no
--- utterance or a forgotten one:
+DROP FUNCTION IF EXISTS public.engram_extraction_window(uuid, integer, integer);
+
+-- The window around one anchor as JSON, as extractor version p_version
+-- builds it, or NULL when p_anchor names no utterance or a forgotten one:
 -- - anchor: the utterance's id, kind, session_id, project_id, workspace_id,
 --   content, context, occurred_at and source;
 -- - anchor_event: the payload and plan_dirs of the capture event its
@@ -4289,10 +4307,11 @@ END; $$;
 -- - turn: for a prompt, the latest assistant turn of its session before it
 --   that is not forgotten; null otherwise (a trailing anchor is its own turn,
 --   a dialog answer carries its question);
--- - observed: true when an earlier window already showed that turn, so each
---   turn yields observations once: a prompt of the session lies between the
---   turn and this anchor, or the turn ran as a trailing anchor and succeeded
---   before the session went on;
+-- - observed: true when a succeeded run at p_version already extracted that
+--   turn's observations: the turn was its anchor (a trailing turn flushed
+--   before the session went on) or is in its stats.observation_sources. Each
+--   turn so yields observations once per version, and a run that never
+--   succeeded (an exhausted anchor) leaves its turn to the next window;
 -- - subjects: up to p_subject_limit (1 to 1000) active subjects of the scope,
 --   most recently used first, with last_used_at. A subject is active while a
 --   current item (not forgotten, retired or superseded) is filed under it;
@@ -4317,7 +4336,7 @@ END; $$;
 -- scoped to a plan is in scope only under that plan, the slug of the anchor
 -- event's first plan folder, and one scoped to a session only in that session.
 -- Times are UTC ISO 8601 with microseconds, whatever the session TimeZone.
-CREATE OR REPLACE FUNCTION public.engram_extraction_window(p_anchor uuid, p_subject_limit integer, p_recent_limit integer) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.engram_extraction_window(p_anchor uuid, p_subject_limit integer, p_recent_limit integer, p_version text) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -4345,6 +4364,10 @@ BEGIN
   IF p_recent_limit IS NULL OR p_recent_limit NOT BETWEEN 1 AND 200 THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_extraction_window: p_recent_limit must be from 1 to 200';
+  END IF;
+  IF p_version IS NULL OR p_version !~ '\S' OR char_length(p_version) > 64 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_extraction_window: p_version must be a non-blank text of at most 64 characters';
   END IF;
 
   SELECT * INTO a
@@ -4374,14 +4397,11 @@ BEGIN
         'id', t.id, 'kind', t.kind, 'session_id', t.session_id, 'project_id', t.project_id,
         'workspace_id', t.workspace_id, 'content', t.content, 'context', t.context,
         'occurred_at', to_char(t.occurred_at AT TIME ZONE 'UTC', v_time), 'source', t.source);
-      -- A prompt after the turn and before this anchor saw the same turn as
-      -- its latest one, since no turn lies between them.
-      v_observed := EXISTS (SELECT 1 FROM public.memory_items p
-                             WHERE p.class = 'utterance' AND p.kind = 'user_prompt' AND p.forgotten_at IS NULL
-                               AND p.session_id = a.session_id AND p.occurred_at > t.occurred_at
-                               AND (p.occurred_at, p.id) < (a.occurred_at, a.id))
-                 OR EXISTS (SELECT 1 FROM public.memory_extraction_runs r
-                             WHERE r.anchor_item_id = t.id AND r.status = 'succeeded');
+      v_observed := EXISTS (SELECT 1 FROM public.memory_extraction_runs r
+                             WHERE r.extractor_version = p_version AND r.status = 'succeeded'
+                               AND (r.anchor_item_id = t.id
+                                    OR (jsonb_typeof(r.stats -> 'observation_sources') = 'array'
+                                        AND r.stats -> 'observation_sources' ? t.id::text)));
       v_ref_text := t.content;
     END IF;
   ELSIF a.kind = 'assistant_turn' THEN
@@ -5871,7 +5891,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) 
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM PUBLIC;
@@ -5939,7 +5959,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) FROM %I', role_name);
@@ -5996,7 +6016,7 @@ GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) T
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_extraction_window(uuid, integer, integer, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_candidates(uuid, jsonb, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_plan_slug(text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items, public.memory_items, text) TO service_role;

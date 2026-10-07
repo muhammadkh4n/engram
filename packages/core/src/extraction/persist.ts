@@ -98,7 +98,13 @@ export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: 
       ...window.shown.map(shownTarget),
     ],
     retractions: scan.retractions,
-    stats: { ...gateStats(gated), ...(scanned ? { retractions_unresolved: scan.unresolved } : {}) },
+    stats: {
+      ...gateStats(gated),
+      // The turns this run extracts observations from: a later window shows
+      // them again only as context, so each turn is extracted once per version.
+      observation_sources: scanned ? [window.turn!.id] : [],
+      ...(scanned ? { retractions_unresolved: scan.unresolved } : {}),
+    },
   }
 }
 

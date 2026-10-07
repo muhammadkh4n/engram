@@ -3,9 +3,13 @@
  * has current items on its subject to be weighed against, recorded as one run
  * row per anchor and extractor version.
  *
- * A tick takes the due anchors the store hands out (each session's earliest
- * pending anchor, oldest first, backoff already applied in SQL), opens a run
- * on each, calls the model, gates the reply, runs the decision pass
+ * A tick takes the due anchors the store hands out (sessions most recently
+ * received first, each session's anchors in event order, backoff already
+ * applied in SQL), up to its budget of windows, and runs them one at a time:
+ * a window lists what the windows before it stored, so they never overlap.
+ * A session whose window does not succeed yields its later anchors to the
+ * next fetch, where they wait behind it. Each run opens on its anchor, calls
+ * the model, gates the reply, runs the decision pass
  * (./decide.ts) and commits the accepted items and links with the run's close
  * in one transaction. A failed decision read or call closes the run as the
  * window's own read or call would. A run that does not commit is
@@ -83,8 +87,10 @@ import {
 
 /** A session with no capture event for this long has ended. */
 export const SESSION_IDLE_MS = 30 * 60_000
-/** Windows one tick runs at most. */
+/** Windows one tick runs at most, unless the worker is given another budget. */
 export const EXTRACTION_WINDOWS_PER_TICK = 20
+/** The largest budget a tick may be given. */
+export const EXTRACTION_WINDOWS_PER_TICK_MAX = 200
 /** A run still `running` after this long was abandoned by its process. */
 export const EXTRACTION_STALE_RUN_MS = 10 * 60_000
 /** Held failures after which an anchor is no longer pending (the pending RPC holds the same number). */
@@ -250,7 +256,18 @@ export interface ExtractionTickDeps {
   model: string | null
   /** The clock due-ness, idleness and staleness are judged by. */
   now?: () => Date
+  /**
+   * Windows the tick runs at most, an integer from 1 to
+   * EXTRACTION_WINDOWS_PER_TICK_MAX (default EXTRACTION_WINDOWS_PER_TICK);
+   * the caller checks it once, at startup (isExtractionWindowsPerTick).
+   */
+  windowsPerTick?: number
   log: (line: string) => void
+}
+
+/** Whether `value` is a budget a tick may be given. */
+export function isExtractionWindowsPerTick(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= EXTRACTION_WINDOWS_PER_TICK_MAX
 }
 
 export interface ExtractionTickResult {
@@ -278,8 +295,8 @@ const EMPTY_TICK: ExtractionTickResult = { windows: 0, succeeded: 0, held: 0, tr
 let reportedNoCompleteJson = false
 
 /**
- * Runs up to EXTRACTION_WINDOWS_PER_TICK windows. Never throws: a store
- * failure outside a run ends the tick with a log line.
+ * Runs up to `windowsPerTick` windows. Never throws: a store failure outside
+ * a run ends the tick with a log line.
  */
 export async function runExtractionTick(deps: ExtractionTickDeps): Promise<ExtractionTickResult> {
   const { intelligence, log } = deps
@@ -290,39 +307,45 @@ export async function runExtractionTick(deps: ExtractionTickDeps): Promise<Extra
     }
     return { ...EMPTY_TICK }
   }
+  const budget = deps.windowsPerTick ?? EXTRACTION_WINDOWS_PER_TICK
   const counts = { ...EMPTY_TICK }
   try {
-    await runWindows({ ...deps, intelligence }, counts)
+    await runWindows({ ...deps, intelligence }, budget, counts)
   } catch (err) {
     log(`extraction: tick stopped: ${describeError(err)}`)
   }
-  return { ...counts, full: counts.windows >= EXTRACTION_WINDOWS_PER_TICK }
+  return { ...counts, full: counts.windows >= budget }
 }
 
-async function runWindows(deps: TickDeps, counts: ExtractionTickResult): Promise<void> {
+async function runWindows(deps: TickDeps, budget: number, counts: ExtractionTickResult): Promise<void> {
   const now = deps.now ?? (() => new Date())
   // An anchor handed out twice in one tick (held by another process, gone)
   // is not retried here; a fetch that brings nothing new ends the tick.
   const seen = new Set<string>()
-  while (counts.windows < EXTRACTION_WINDOWS_PER_TICK) {
+  while (counts.windows < budget) {
     const pending = await deps.store.extractionPending({
       version: EXTRACTOR_VERSION,
-      limit: EXTRACTION_WINDOWS_PER_TICK - counts.windows,
+      limit: budget - counts.windows,
       idleMs: SESSION_IDLE_MS,
       now: now(),
     })
     const fresh = pending.filter((anchor) => !seen.has(anchor.anchorId))
     if (fresh.length === 0) return
+    // A session's later anchors wait behind one that did not succeed; the
+    // next fetch hands them out again only once it has.
+    const halted = new Set<string>()
     for (const anchor of fresh) {
+      if (halted.has(anchor.sessionId)) continue
       seen.add(anchor.anchorId)
       const status = await runWindow(deps, anchor, now)
+      if (status !== 'succeeded' && status !== 'gone') halted.add(anchor.sessionId)
       if (status === 'skipped') continue
       counts.windows += 1
       if (status === 'succeeded') counts.succeeded += 1
       else if (status === 'held') counts.held += 1
       else if (status === 'transient' || status === 'outage') counts.transient += 1
       if (status === 'outage') return
-      if (counts.windows >= EXTRACTION_WINDOWS_PER_TICK) return
+      if (counts.windows >= budget) return
     }
   }
 }
@@ -351,7 +374,12 @@ async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date)
 
   let raw: RawExtractionWindow | null
   try {
-    raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT)
+    raw = await store.extractionWindow(
+      anchor.anchorId,
+      EXTRACTION_WINDOW_SUBJECTS_MAX,
+      RECENT_LISTING_LIMIT,
+      EXTRACTOR_VERSION,
+    )
   } catch (err) {
     return failStore(deps, anchor, runId, err, {}, line)
   }

@@ -529,16 +529,16 @@ describe('PostgRestCaptureStore extraction', () => {
   it('reads a window from engram_extraction_window, null for a gone anchor, without asking for a malformed id', async () => {
     const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turn: null, observed: false, subjects: [] }
     const { store, calls } = storeWith({ data: window, error: null })
-    await expect(store.extractionWindow(ANCHOR, 500, 40)).resolves.toEqual(window)
+    await expect(store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toEqual(window)
     expect(calls).toEqual([
-      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40 } },
+      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40, p_version: 'tst-extractor' } },
     ])
-    await expect(store.extractionWindow('not-a-uuid', 500, 40)).resolves.toBeNull()
-    await expect(store.extractionWindow(ANCHOR, 0, 40)).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
-    await expect(store.extractionWindow(ANCHOR, 500, 201)).rejects.toThrow('recentLimit must be an integer from 1 to 200')
+    await expect(store.extractionWindow('not-a-uuid', 500, 40, 'tst-extractor')).resolves.toBeNull()
+    await expect(store.extractionWindow(ANCHOR, 0, 40, 'tst-extractor')).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
+    await expect(store.extractionWindow(ANCHOR, 500, 201, 'tst-extractor')).rejects.toThrow('recentLimit must be an integer from 1 to 200')
     expect(calls).toHaveLength(1)
-    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40)).resolves.toBeNull()
-    await expect(storeWith({ data: { turn: null }, error: null }).store.extractionWindow(ANCHOR, 500, 40)).rejects.toThrow(
+    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).resolves.toBeNull()
+    await expect(storeWith({ data: { turn: null }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor')).rejects.toThrow(
       'extractionWindow failed: the RPC returned no window',
     )
   })
