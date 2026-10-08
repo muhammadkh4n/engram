@@ -58,6 +58,7 @@ describe.skipIf(!realPgImage)('the pending-embedding index on real Postgres', ()
             AND forgotten_at IS NULL
             AND embedding_attempts < 5
             AND NOT (class = 'utterance' AND speaker = 'assistant')
+            AND (embedding_claimed_by = '00000000-0000-4000-8000-00000000c0de'::uuid OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())
           ORDER BY i.created_at, i.id LIMIT 32;`,
       )
       expect(plan).toContain('idx_items_pending_embedding')
@@ -65,7 +66,7 @@ describe.skipIf(!realPgImage)('the pending-embedding index on real Postgres', ()
       const before = await tuplesRead()
       // The forced flush runs when this statement ends, so the next read sees its index reads.
       const returned = await session.run(
-        `SELECT pg_stat_force_next_flush(), (SELECT count(*) FROM public.engram_items_pending_embedding(32));`,
+        `SELECT pg_stat_force_next_flush(), (SELECT count(*) FROM public.engram_items_pending_embedding(32, gen_random_uuid()));`,
       )
       expect(returned.trim()).toBe('|0')
       expect((await tuplesRead()) - before).toBe(0)

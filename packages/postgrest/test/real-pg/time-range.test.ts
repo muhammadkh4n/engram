@@ -25,6 +25,7 @@ const ITEM_TABLES = [
   'memory_item_entities',
   'memory_item_links',
   'memory_capture_events',
+  'memory_capture_event_counts',
   'memory_secret_hits',
 ] as const
 
@@ -191,6 +192,7 @@ describe.skipIf(!realPgImage)('times on the item store tables stay within years 
       'memory_items.forgotten_at': ['memory_items_finite_check'],
       'memory_item_links.created_at': ['memory_item_links_finite_check'],
       'memory_items.created_at': ['memory_items_finite_check'],
+      'memory_items.embedding_claimed_until': ['memory_items_embedding_claim_check'],
       'memory_projects.updated_at': ['memory_projects_finite_check'],
       'memory_secret_hits.found_at': ['memory_secret_hits_finite_check'],
       'memory_subjects.created_at': ['memory_subjects_finite_check'],

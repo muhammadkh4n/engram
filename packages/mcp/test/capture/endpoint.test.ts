@@ -29,6 +29,11 @@ describe('captureEventsEndpoint', () => {
     expect(captureEventsEndpoint('https://host/capture/events/')).toBe('https://host/capture/events')
     expect(captureEventsEndpoint('https://host')).toBe('https://host/capture/events')
   })
+  it('throws on a URL that is not http or https, without the URL in the message', () => {
+    for (const bad of ['rexvps:3850', 'tst-user:tst-pass@rexvps:3850/mcp', 'not a url', 'ftp://rexvps/mcp']) {
+      expect(() => captureEventsEndpoint(bad)).toThrow(/^server URL is not an http\(s\) URL$/)
+    }
+  })
 })
 
 describe('readCaptureToken', () => {

@@ -171,12 +171,14 @@ export interface NewItem {
 /**
  * The outcome of one insert, in input order. `inserted` is false when an item
  * with the same `source.event_key` was already stored; `id` is then that
- * item's id.
+ * item's id, and `forgotten` says whether that stored item is forgotten. An
+ * inserted item is never forgotten.
  */
 export interface InsertedItem {
   id: string
   eventKey: string | null
   inserted: boolean
+  forgotten: boolean
 }
 
 /**

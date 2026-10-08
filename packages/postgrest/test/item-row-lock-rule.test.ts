@@ -55,16 +55,24 @@ function functions(): SqlFunction[] {
   }))
 }
 
-const MEMORY_ITEMS = /\bpublic\.memory_items\b(?!_)/
-const LOCKING_CLAUSE = /\bFOR\s+(?:NO\s+KEY\s+UPDATE|KEY\s+SHARE|UPDATE|SHARE)\b(?:\s+OF\s+\w+)?(?:\s+(?:NOWAIT|SKIP\s+LOCKED))?/gi
-const WRITE_STATEMENT = /\b(?:UPDATE|DELETE\s+FROM)\s+public\.memory_items\b(?!_)/gi
-const UPSERT = /\bINSERT\s+INTO\s+public\.memory_items\b(?!_)[^;]*?\bON\s+CONFLICT\b[^;]*?\bDO\s+UPDATE\b/gi
-const INSERT = /\bINSERT\s+INTO\s+public\.memory_items\b(?!_)/i
+/**
+ * memory_items as PL/pgSQL may spell it: with or without the schema, after
+ * ONLY, in any letter case, or as a quoted identifier. Every pattern below is
+ * case-insensitive and built on this one, so no spelling escapes the rule.
+ */
+const TABLE = String.raw`(?:\bONLY\s+)?(?:(?:\bpublic|"public")\s*\.\s*)?(?:\bmemory_items|"memory_items")(?![\w$"])`
+const MEMORY_ITEMS = new RegExp(TABLE, 'i')
+const LOCKING_CLAUSE =
+  /\bFOR\s+(?:NO\s+KEY\s+UPDATE|KEY\s+SHARE|UPDATE|SHARE)\b(?:\s+OF\s+[\w".]+(?:\s*,\s*[\w".]+)*)?(?:\s+(?:NOWAIT|SKIP\s+LOCKED))?/gi
+const WRITE_STATEMENT = new RegExp(String.raw`\b(?:UPDATE|DELETE\s+FROM)\s+` + TABLE, 'gi')
+const UPSERT = new RegExp(String.raw`\bINSERT\s+INTO\s+` + TABLE + String.raw`[^;]*?\bON\s+CONFLICT\b[^;]*?\bDO\s+UPDATE\b`, 'gi')
+const INSERT = new RegExp(String.raw`\bINSERT\s+INTO\s+` + TABLE, 'i')
+const SUPERSESSION_WRITE = new RegExp(String.raw`\bUPDATE\s+` + TABLE + String.raw`[^;]*\bSET\b[^;]*\b"?superseded_by"?\s*=`, 'i')
 
 /** Where the statement holding a locking clause starts: after the previous statement end or the last BEGIN. */
 function statementStart(body: string, at: number): number {
   const before = body.slice(0, at)
-  const lastBegin = [...before.matchAll(/\bBEGIN\b/g)].pop()?.index ?? -1
+  const lastBegin = [...before.matchAll(/\bBEGIN\b/gi)].pop()?.index ?? -1
   return Math.max(before.lastIndexOf(';') + 1, lastBegin < 0 ? 0 : lastBegin + 'BEGIN'.length)
 }
 
@@ -77,6 +85,17 @@ function rowLocks(body: string): number[] {
   const writes = [...body.matchAll(WRITE_STATEMENT)].map((m) => m.index!)
   const upserts = [...body.matchAll(UPSERT)].map((m) => m.index!)
   return [...clauses, ...writes, ...upserts].sort((a, b) => a - b)
+}
+
+/** Why a body breaks the exclusive-key rule, or null when it keeps it. */
+function exclusiveRuleViolation(name: string, body: string): string | null {
+  const firstLock = rowLocks(body)[0]
+  if (firstLock === undefined) return null
+  const exclusiveAt = body.indexOf(EXCLUSIVE)
+  if (exclusiveAt < 0) return `${name} never takes ${EXCLUSIVE}`
+  if (exclusiveAt > firstLock) return `${name} locks a row before ${EXCLUSIVE}`
+  if (body.includes(SHARED)) return `${name} also takes the key shared`
+  return null
 }
 
 const all = functions()
@@ -114,7 +133,7 @@ const TRIGGER_COVERS: Record<string, () => void> = {
   memory_items_supersession: () => {
     expect(trigger('memory_items_supersession')).toMatch(/AFTER UPDATE OF superseded_by ON public\.memory_items /)
     const writers = all
-      .filter((f) => /\bUPDATE public\.memory_items\b(?!_)[^;]*\bSET\b[^;]*\bsuperseded_by\s*=/.test(f.body))
+      .filter((f) => SUPERSESSION_WRITE.test(f.body))
       .map((f) => f.name)
     for (const writer of writers) {
       expect(writer === 'memory_items_forget_cascade' || writer.startsWith('engram_'), writer).toBe(true)
@@ -154,10 +173,7 @@ describe('the forget advisory key orders every row lock on memory_items', () => 
   it.each(lockers.filter((f) => !f.isTrigger).map((f) => [f.name, f] as const))(
     '%s takes the key exclusively before its first row lock',
     (_name, f) => {
-      const exclusiveAt = f.body.indexOf(EXCLUSIVE)
-      expect(exclusiveAt, `${f.name} never takes ${EXCLUSIVE}`).toBeGreaterThanOrEqual(0)
-      expect(exclusiveAt, `${f.name} locks a row before ${EXCLUSIVE}`).toBeLessThan(rowLocks(f.body)[0]!)
-      expect(f.body.includes(SHARED), `${f.name} also takes the key shared`).toBe(false)
+      expect(exclusiveRuleViolation(f.name, f.body)).toBeNull()
     },
   )
 
@@ -187,5 +203,56 @@ describe('the forget advisory key orders every row lock on memory_items', () => 
   it('a row with lineage takes the key shared whoever inserts it', () => {
     TRIGGER_COVERS.memory_items_lineage!()
     expect(trigger('memory_items_before_insert')).toMatch(/BEFORE INSERT ON public\.memory_items FOR EACH ROW/)
+  })
+})
+
+describe('the row-lock matcher sees every spelling of memory_items', () => {
+  const locking = [
+    'UPDATE memory_items SET retired_at = now() WHERE id = p_id;',
+    'UPDATE ONLY public.memory_items SET retired_at = now() WHERE id = p_id;',
+    'update "memory_items" set retired_at = now() where id = p_id;',
+    'PERFORM 1 FROM memory_items WHERE id = p_id FOR SHARE OF memory_items;',
+    'UPDATE PUBLIC.MEMORY_ITEMS SET retired_at = now() WHERE id = p_id;',
+    'DELETE FROM ONLY "public"."memory_items" WHERE id = p_id;',
+    'SELECT i.id INTO v_id FROM "memory_items" i WHERE i.id = p_id FOR NO KEY UPDATE OF i;',
+    'INSERT INTO Memory_Items (id) VALUES (p_id) ON CONFLICT (id) DO UPDATE SET retired_at = now();',
+  ]
+
+  it.each(locking.map((stmt) => [stmt] as const))('a body without the key fails on: %s', (stmt) => {
+    const body = squash(`BEGIN ${stmt} RETURN; END;`)
+    expect(rowLocks(body)).toHaveLength(1)
+    expect(exclusiveRuleViolation('f', body)).toBe(`f never takes ${EXCLUSIVE}`)
+  })
+
+  it.each(locking.map((stmt) => [stmt] as const))('the key taken first passes on: %s', (stmt) => {
+    const body = squash(`BEGIN PERFORM ${EXCLUSIVE}; ${stmt} RETURN; END;`)
+    expect(exclusiveRuleViolation('f', body)).toBeNull()
+  })
+
+  it('the key taken after the row lock fails', () => {
+    const body = squash(`BEGIN update "memory_items" set retired_at = now() where id = p_id; PERFORM ${EXCLUSIVE}; END;`)
+    expect(exclusiveRuleViolation('f', body)).toBe(`f locks a row before ${EXCLUSIVE}`)
+  })
+
+  it.each([
+    ['insert into "memory_items" (id) values (p_id);'],
+    ['INSERT INTO ONLY memory_items (id) VALUES (p_id);'],
+    ['INSERT INTO Public.Memory_Items (id) VALUES (p_id);'],
+  ] as const)('an insert is recognized in: %s', (stmt) => {
+    expect(INSERT.test(stmt)).toBe(true)
+  })
+
+  it.each([
+    ['UPDATE public.memory_items_archive SET retired_at = now() WHERE id = p_id;'],
+    ['UPDATE "memory_items_archive" SET retired_at = now() WHERE id = p_id;'],
+    ['PERFORM 1 FROM public.memory_subjects WHERE item_id = p_id FOR SHARE;'],
+    ['DELETE FROM public.memory_item_entities WHERE item_id = p_id;'],
+  ] as const)('another table is not taken for memory_items: %s', (stmt) => {
+    expect(rowLocks(squash(`BEGIN ${stmt} END;`))).toEqual([])
+  })
+
+  it('a supersession write is recognized in any spelling', () => {
+    expect(SUPERSESSION_WRITE.test('update ONLY "public"."memory_items" set "superseded_by" = p_new where id = p_old;')).toBe(true)
+    expect(SUPERSESSION_WRITE.test('UPDATE memory_items SET retired_at = now() WHERE id = p_id;')).toBe(false)
   })
 })

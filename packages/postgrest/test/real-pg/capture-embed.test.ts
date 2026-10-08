@@ -4,6 +4,8 @@
  * - an MK utterance, an artifact and a legacy item with no vector (one whose
  *   masked text could not keep the old vector) are pending; an assistant
  *   utterance and a forgotten item are not, nor a legacy item once it has one;
+ * - the pending read returns the head of each search text, never more than
+ *   the embed text builder keeps;
  * - engram_items_set_embeddings writes a row once, and a repeat writes 0;
  * - a forgotten item takes no embedding;
  * - a malformed vector is an invalid argument and writes nothing;
@@ -16,12 +18,15 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { EMBED_MAX_CHARS, buildTextToEmbed } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '../../src/capture-store.js'
 import { postgrestImage, realPgImage, startRealPg, type PostgrestEndpoint, type RealPg } from './harness.js'
 
 const SETUP_TIMEOUT_MS = 120_000
 const TEST_TIMEOUT_MS = 60_000
 const MODEL = 'sample-embed:1536:v2'
+/** One claimant for every read and refusal here, so each read sees the items earlier reads claimed. */
+const CLAIMANT = randomUUID()
 
 function jsonb(value: unknown): string {
   return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`
@@ -75,7 +80,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
   }
 
   async function pendingIds(): Promise<string[]> {
-    return (await store.pendingEmbeddings(256)).map((p) => p.id)
+    return (await store.pendingEmbeddings(256, CLAIMANT)).map((p) => p.id)
   }
 
   it(
@@ -104,7 +109,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
       ])) as [string, string, string, string, string]
       await forget(forgotten)
 
-      const pending = await store.pendingEmbeddings(256)
+      const pending = await store.pendingEmbeddings(256, CLAIMANT)
       const ids = pending.map((p) => p.id)
       expect(ids).toEqual(expect.arrayContaining([mk, commit, legacy]))
       expect(ids).not.toContain(assistant)
@@ -115,6 +120,28 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
 
       await expect(store.setEmbeddings([{ id: legacy, embedding: vector(0.5), model: MODEL }])).resolves.toBe(1)
       expect((await store.pendingEmbeddings(256)).map((p) => p.id)).not.toContain(legacy)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'returns only the head of a long search text, and the head embeds to the same text as the whole',
+    async () => {
+      const ascii = `Sample head. ${'x'.repeat(EMBED_MAX_CHARS * 2)}`
+      const emoji = '🙂'.repeat(EMBED_MAX_CHARS + 500)
+      const [asciiId, emojiId] = (await insertItems([
+        item({ content: 'A long sample prompt.', search_text: ascii }),
+        item({ content: 'A long sample prompt of emoji.', search_text: emoji }),
+      ])) as [string, string]
+
+      const pending = await store.pendingEmbeddings(256, CLAIMANT)
+      const asciiHead = pending.find((p) => p.id === asciiId)!.searchText
+      const emojiHead = pending.find((p) => p.id === emojiId)!.searchText
+      expect(asciiHead).toBe(ascii.slice(0, EMBED_MAX_CHARS))
+      // PostgreSQL counts characters, so an all-astral head is twice as long in UTF-16 units.
+      expect(emojiHead).toBe('🙂'.repeat(EMBED_MAX_CHARS))
+      expect(buildTextToEmbed({ cleanText: asciiHead })).toBe(buildTextToEmbed({ cleanText: ascii }))
+      expect(buildTextToEmbed({ cleanText: emojiHead })).toBe(buildTextToEmbed({ cleanText: emoji }))
     },
     TEST_TIMEOUT_MS,
   )
@@ -169,7 +196,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
           { id, embedding: vector(0.2), model: MODEL },
         ]),
       ).rejects.toThrow('setEmbeddings failed (22023): engram_items_set_embeddings: objects 1 and 2 share an id')
-      await expect(store.pendingEmbeddings(0)).rejects.toThrow('limit must be an integer from 1 to 256')
+      await expect(store.pendingEmbeddings(0, CLAIMANT)).rejects.toThrow('limit must be an integer from 1 to 256')
       expect(await pendingIds()).toContain(id)
     },
     TEST_TIMEOUT_MS,
@@ -186,22 +213,22 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
       const longError = `400 Invalid 'input': ${'x'.repeat(600)}`
 
       for (let attempt = 1; attempt <= 4; attempt++) {
-        await expect(store.recordEmbeddingFailures([{ id, error: longError }])).resolves.toBe(1)
+        await expect(store.recordEmbeddingFailures([{ id, error: longError }], CLAIMANT)).resolves.toBe(1)
         expect(await pendingIds()).toContain(id)
       }
       await expect(store.embeddingFailedCount()).resolves.toBe(before)
-      await expect(store.recordEmbeddingFailures([{ id, error: '400 Invalid input: the fifth refusal' }])).resolves.toBe(1)
+      await expect(store.recordEmbeddingFailures([{ id, error: '400 Invalid input: the fifth refusal' }], CLAIMANT)).resolves.toBe(1)
       const ids = await pendingIds()
       expect(ids).not.toContain(id)
       expect(ids).toContain(other)
       await expect(store.embeddingFailedCount()).resolves.toBe(before + 1)
-      await expect(store.recordEmbeddingFailures([{ id, error: 'a sixth refusal' }])).resolves.toBe(0)
+      await expect(store.recordEmbeddingFailures([{ id, error: 'a sixth refusal' }], CLAIMANT)).resolves.toBe(0)
 
       expect(
         await pg.psql(`SELECT embedding_attempts || ' ' || embedding_error FROM public.memory_items WHERE id = '${id}';`),
       ).toBe('5 400 Invalid input: the fifth refusal')
       const [cut] = (await insertItems([item({ content: 'A sample prompt with a long refusal.' })])) as [string]
-      await store.recordEmbeddingFailures([{ id: cut, error: longError }])
+      await store.recordEmbeddingFailures([{ id: cut, error: longError }], CLAIMANT)
       expect(
         await pg.psql(`SELECT char_length(embedding_error) FROM public.memory_items WHERE id = '${cut}';`),
       ).toBe('500')
@@ -222,23 +249,23 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
         store.recordEmbeddingFailures([
           { id: gone, error: '400 refused' },
           { id: done, error: '400 refused' },
-        ]),
+        ], CLAIMANT),
       ).resolves.toBe(0)
       expect(
         await pg.psql(`SELECT sum(embedding_attempts) FROM public.memory_items WHERE id IN ('${gone}', '${done}');`),
       ).toBe('0')
 
-      await expect(store.recordEmbeddingFailures([{ id: 'not-a-uuid', error: '400 refused' }])).rejects.toThrow(
+      await expect(store.recordEmbeddingFailures([{ id: 'not-a-uuid', error: '400 refused' }], CLAIMANT)).rejects.toThrow(
         'recordEmbeddingFailures failed (22023): engram_items_record_embedding_failures: object 1: id must be a uuid string',
       )
-      await expect(store.recordEmbeddingFailures([{ id: done, error: ' \n' }])).rejects.toThrow(
+      await expect(store.recordEmbeddingFailures([{ id: done, error: ' \n' }], CLAIMANT)).rejects.toThrow(
         'engram_items_record_embedding_failures: object 1: error must be a string that is not blank in its first 500 characters',
       )
       await expect(
         store.recordEmbeddingFailures([
           { id: done, error: '400 refused' },
           { id: done, error: '400 refused' },
-        ]),
+        ], CLAIMANT),
       ).rejects.toThrow('engram_items_record_embedding_failures: objects 1 and 2 share an id')
     },
     TEST_TIMEOUT_MS,
@@ -255,9 +282,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
         await store.recordEmbeddingFailures([
           { id: one, error: '400 refused' },
           { id: two, error: '400 refused' },
-        ])
+        ], CLAIMANT)
       }
-      await store.recordEmbeddingFailures([{ id: tried, error: '400 refused once' }])
+      await store.recordEmbeddingFailures([{ id: tried, error: '400 refused once' }], CLAIMANT)
       expect(await pendingIds()).not.toContain(one)
       const failed = await store.embeddingFailedCount()
 

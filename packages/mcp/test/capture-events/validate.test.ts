@@ -50,6 +50,12 @@ function withoutPayloadKey(event: FixtureEvent, key: string): FixtureEvent {
   return { ...event, payload }
 }
 
+function sessionDecision(): FixtureEvent {
+  let event = withPayload('ledger_decision', { by: 'session' })
+  for (const key of ['quote', 'source', 'said_as', 'question']) event = withoutPayloadKey(event, key)
+  return event
+}
+
 describe('parseCaptureEventsRequest — fixtures', () => {
   it.each([...CAPTURE_EVENT_TYPES])('accepts the %s fixture unchanged', (type) => {
     const fixture = validEvent(type)
@@ -264,11 +270,59 @@ describe('parseCaptureEventsRequest — user_answer', () => {
 describe('parseCaptureEventsRequest — ledger, register and candidate rules', () => {
   it('rejects a ledger_decision by mk without a quote', () => {
     const event = withoutPayloadKey(validEvent('ledger_decision'), 'quote')
-    expect(expectRejected(event).reason).toBe('payload with by "mk" requires quote and source')
+    expect(expectRejected(event).reason).toBe('payload with by "mk" requires quote, source, said_as and question')
   })
 
   it('accepts a ledger_decision by the session without a quote or source', () => {
-    expectValid(withoutPayloadKey(withoutPayloadKey(withPayload('ledger_decision', { by: 'session' }), 'quote'), 'source'))
+    expectValid(sessionDecision())
+  })
+
+  it.each(['words', 'choice'] as const)('accepts a ledger_decision by mk said as %s, with or without its question', (saidAs) => {
+    const asked = expectValid(withPayload('ledger_decision', { said_as: saidAs, question: 'Timer or cron?' }))
+    expect(asked.event.payload).toMatchObject({ said_as: saidAs, question: 'Timer or cron?' })
+    const unasked = expectValid(withPayload('ledger_decision', { said_as: saidAs, question: null }))
+    expect(unasked.event.payload).toMatchObject({ said_as: saidAs, question: null })
+  })
+
+  it.each(['said_as', 'question'])('rejects a ledger_decision by mk without %s', (key) => {
+    const r = expectRejected(withoutPayloadKey(validEvent('ledger_decision'), key))
+    expect(r.reason).toBe('payload with by "mk" requires quote, source, said_as and question')
+  })
+
+  it('rejects a ledger_decision said_as outside words and choice', () => {
+    expect(expectRejected(withPayload('ledger_decision', { said_as: 'paraphrase' })).reason).toBe(
+      'payload.said_as must be one of words, choice',
+    )
+  })
+
+  it.each([
+    ['said_as', 'choice'],
+    ['said_as', 'words'],
+    ['question', null],
+    ['question', 'Timer or cron?'],
+    ['quote', 'use a timer'],
+    ['source', 'session 2026-10-04'],
+  ])('rejects a ledger_decision by the session carrying %s', (key, value) => {
+    const event = sessionDecision()
+    event.payload[key] = value
+    expect(expectRejected(event).reason).toBe('payload with by "session" carries no quote, source, said_as or question')
+  })
+
+  it.each(['words', 'choice'] as const)('accepts a register_entry said as %s', (saidAs) => {
+    const { event } = expectValid(withPayload('register_entry', { said_as: saidAs }))
+    expect(event.payload).toMatchObject({ said_as: saidAs })
+  })
+
+  it('rejects a register_entry without said_as', () => {
+    expect(expectRejected(withoutPayloadKey(validEvent('register_entry'), 'said_as')).reason).toBe(
+      'payload: missing field(s): said_as',
+    )
+  })
+
+  it.each([null, 'quote', ''])('rejects a register_entry said_as %j', (saidAs) => {
+    expect(expectRejected(withPayload('register_entry', { said_as: saidAs })).reason).toBe(
+      'payload.said_as must be one of words, choice',
+    )
   })
 
   it('rejects candidate_status recorded without register_id', () => {
