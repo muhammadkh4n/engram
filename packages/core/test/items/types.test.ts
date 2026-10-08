@@ -72,13 +72,14 @@ describe('item vocabularies', () => {
     expect(new Set(CAPTURE_EVENT_TYPES).size).toBe(12)
   })
 
-  it('lists the five invariant counts in the order the database returns them', () => {
+  it('lists the six invariant counts in the order the database returns them', () => {
     expect(ITEM_INVARIANTS).toEqual([
       'assistant_authored_mk_claims',
       'quote_not_in_lineage',
       'lineage_to_forgotten',
       'utterance_time_mismatch',
       'unregistered_project',
+      'salvage_quote_not_in_lineage',
     ])
   })
 

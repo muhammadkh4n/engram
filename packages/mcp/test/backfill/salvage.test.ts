@@ -17,6 +17,10 @@ import {
 } from '../../src/backfill/salvage.js'
 import {
   parseSalvageReply,
+  SALVAGE_QUOTE_MAX_CHARS,
+  SALVAGE_REPLY_MAX_ITEMS,
+  SALVAGE_REPLY_MAX_TOKENS,
+  SALVAGE_REPLY_MIN_CHARS_PER_TOKEN,
   SALVAGE_REPLY_SCHEMA,
   SALVAGE_SYSTEM_PROMPT,
   SALVAGE_VERSION,
@@ -28,6 +32,8 @@ const LATER = 'tst-salvage-later'
 
 interface Recorded {
   rows: LegacyRow[]
+  /** The current salvage observations the store lists, when the recording had any. */
+  observations?: SalvageObservationRow[]
   reply: string
 }
 
@@ -156,6 +162,7 @@ describe('legacy salvage gate on recorded replies', () => {
     expect(window.observations).toHaveLength(1)
     expect(window.observations[0]).toMatchObject({
       claim: 'The store runs on Postgres only',
+      quote: 'the store runs on Postgres only',
       lineage: [assistant.id],
       occurredAt: '2026-03-02T09:01:30.000Z',
       projectId: 'tst-app',
@@ -173,6 +180,28 @@ describe('legacy salvage gate on recorded replies', () => {
     expect(window.proposed).toBe(4)
     expect(window.rejected).toEqual({ evidence_context_only: 1, evidence_out_of_window: 1, schema: 1 })
     expect(window.observations.map((o) => o.lineage)).toEqual([[fixture.rows[0]!.id, fixture.rows[1]!.id]])
+  })
+
+  it('rejects a reply restating the listing from a one-row window: no quote is in the row, nothing is stored', async () => {
+    const fixture = recorded('salvage-one-row-listing')
+    const model = fakeModel(fixture.reply)
+    const runs = fakeRuns()
+    const store = fakeStore({ rows: fixture.rows, observations: fixture.observations })
+    const result = await salvageSession(OPEN, deps(store, model.intelligence, runs))
+
+    expect(fixture.rows).toHaveLength(1)
+    expect(model.requests[0]!.user).toContain('obs-5 (project tst-app; subject Release flow; 2026-03-04)')
+    expect(result.windows[0]).toMatchObject({
+      status: 'stored',
+      proposed: 5,
+      rejected: { quote_not_found: 5 },
+      observations: [],
+      itemIds: [],
+      restatements: 0,
+    })
+    const commit = runs.runs[0]!.commits[0]!
+    expect(commit.items).toEqual([])
+    expect(commit.stats).toMatchObject({ proposed: 5, stored: 0, rejected_by_reason: { quote_not_found: 5 } })
   })
 })
 
@@ -258,9 +287,10 @@ describe('legacy salvage rows', () => {
 
 describe('legacy salvage runs', () => {
   it('stores the knowledge at trust 3 with the cited row as lineage and its time', async () => {
-    const { fixture, window, runs } = await gatedRun('salvage-we-decided')
+    const { fixture, window, runs, model } = await gatedRun('salvage-we-decided')
     const assistant = fixture.rows[1]!
 
+    expect(model.requests[0]!.maxTokens).toBe(SALVAGE_REPLY_MAX_TOKENS)
     expect(runs.runs).toHaveLength(1)
     const run = runs.runs[0]!
     expect(run).toMatchObject({ windowKey: window.key, model: 'tst-model', status: 'succeeded' })
@@ -287,6 +317,7 @@ describe('legacy salvage runs', () => {
         run_id: run.id,
         window_key: window.key,
         time_basis: 'evidence',
+        quote: 'the store runs on Postgres only',
       },
     })
     expect(commit.stats).toMatchObject({ rows_in: 2, proposed: 2, stored: 1, rejected_by_reason: { attributed: 1 }, attempts: 1 })
@@ -365,6 +396,7 @@ describe('legacy salvage gate rules', () => {
   const propose = (over: object) => ({
     index: 0,
     claim: 'The capture route answers on port 3850.',
+    quote: 'answers on port 3850',
     kind: 'fact' as const,
     subject: { id: 'subj-1' },
     evidence: [1],
@@ -394,10 +426,151 @@ describe('legacy salvage gate rules', () => {
   })
 })
 
+describe('legacy salvage quote rule', () => {
+  const asked = row({
+    role: 'user',
+    producer: 'claude-code-hook',
+    content: 'Asked whether the capture route still answers on port 3000.',
+    occurred_at: '2026-03-04T09:00:00Z',
+  })
+  const said = row({
+    content: 'The capture route answers on port 3850; it moved off ‘port 3000’ in March and runs in "strict" mode.',
+    occurred_at: '2026-03-04T09:01:00Z',
+  })
+  const window = planSession(OPEN, [asked, said]).windows[0]!
+  const listing = { subjects: [], observations: [] }
+  const propose = (quote: string, over: object = {}) => ({
+    index: 0,
+    claim: 'The capture route answers on port 3850.',
+    quote,
+    kind: 'fact' as const,
+    subject: { new: 'Capture route' },
+    evidence: [1, 2],
+    supersedes: [],
+    ...over,
+  })
+
+  it('passes a claim citing rows 1 and 2 whose quote is only in row 2, and keeps the quote', () => {
+    const result = gateSalvage(window, listing, [propose('The capture route answers on port 3850')])
+
+    expect(result.rejected).toEqual({})
+    expect(result.observations[0]).toMatchObject({
+      quote: 'The capture route answers on port 3850',
+      lineage: [asked.id, said.id],
+    })
+  })
+
+  it('rejects a quote found only in a context-only user row, and a quote found in no row', () => {
+    const result = gateSalvage(window, listing, [
+      propose('Asked whether the capture route still answers on port 3000'),
+      propose('The capture route answers on port 4000', { index: 1, claim: 'The capture route answers on port 4000.' }),
+    ])
+
+    expect(result.rejected).toEqual({ quote_not_found: 2 })
+    expect(result.observations).toEqual([])
+  })
+
+  it('finds a quote across curly quotes and whitespace runs', () => {
+    const result = gateSalvage(window, listing, [
+      propose("it moved off 'port 3000'  in\n March"),
+      propose('runs in “strict”   mode', { index: 1, claim: 'The capture route runs in strict mode.' }),
+    ])
+
+    expect(result.rejected).toEqual({})
+    expect(result.observations).toHaveLength(2)
+  })
+
+  it('reads a row as the window shows it, so words past the row cut are not found', () => {
+    const long = row({ content: `${'x'.repeat(SALVAGE_ROW_MAX_CHARS)} tail words` })
+    const cut = planSession(OPEN, [long]).windows[0]!
+
+    expect(gateSalvage(cut, listing, [propose('tail words', { evidence: [1] })]).rejected).toEqual({ quote_not_found: 1 })
+  })
+})
+
+describe('legacy salvage reply cap', () => {
+  const item = SALVAGE_REPLY_SCHEMA.properties.observations.items.properties
+  const longestKind = [...item.kind.enum].reduce((a, b) => (b.length > a.length ? b : a))
+  /** One observation with every field at the bound the schema gives it. */
+  const longestItem = () => ({
+    claim: 'c'.repeat(item.claim.maxLength),
+    quote: 'q'.repeat(item.quote.maxLength),
+    kind: longestKind,
+    subject: { new: 'l'.repeat(item.subject.oneOf[1].properties.new.maxLength) },
+    evidence: Array.from({ length: item.evidence.maxItems }, () => item.evidence.items.maximum),
+    supersedes: Array.from({ length: item.supersedes.maxItems }, () => 'o'.repeat(item.supersedes.items.maxLength)),
+  })
+  const valid = {
+    claim: 'The capture route answers on port 3850.',
+    quote: 'answers on port 3850',
+    kind: 'fact',
+    subject: { id: 'subj-1' },
+    evidence: [1],
+    supersedes: [],
+  }
+
+  it('covers a reply of the most items it may hold, every field at its maximum, at two chars per token', () => {
+    const reply = JSON.stringify({ observations: Array.from({ length: SALVAGE_REPLY_MAX_ITEMS }, longestItem) })
+    const parsed = parseSalvageReply(reply)
+
+    expect(parsed).toMatchObject({ ok: true, schemaRejected: [] })
+    expect(parsed.ok && parsed.observations).toHaveLength(SALVAGE_REPLY_MAX_ITEMS)
+    expect(SALVAGE_REPLY_MIN_CHARS_PER_TOKEN).toBe(2)
+    expect(SALVAGE_REPLY_MAX_TOKENS * SALVAGE_REPLY_MIN_CHARS_PER_TOKEN).toBeGreaterThanOrEqual(
+      `\`\`\`json\n${reply}\n\`\`\``.length,
+    )
+  })
+
+  it('asks every window for the same cap, whatever the size of its prompt', async () => {
+    const small = row({})
+    const large = row({ session_id: LATER, content: 'z'.repeat(SALVAGE_ROW_MAX_CHARS) })
+    const model = fakeModel('{"observations":[]}')
+    await salvageSession(OPEN, deps(fakeStore({ rows: [small, large] }), model.intelligence))
+    await salvageSession(LATER, deps(fakeStore({ rows: [small, large] }), model.intelligence))
+
+    expect(model.requests[1]!.user.length).toBeGreaterThan(model.requests[0]!.user.length + SALVAGE_ROW_MAX_CHARS / 2)
+    expect(model.requests.map((r) => r.maxTokens)).toEqual([SALVAGE_REPLY_MAX_TOKENS, SALVAGE_REPLY_MAX_TOKENS])
+  })
+
+  it('counts the items past the most a reply may hold as schema rejections', async () => {
+    const items = Array.from({ length: SALVAGE_REPLY_MAX_ITEMS + 1 }, (_, i) => ({
+      ...valid,
+      claim: `The capture route answers on port 3850, check ${i}.`,
+      subject: { new: 'Capture route' },
+    }))
+    const reply = JSON.stringify({ observations: items })
+    expect(parseSalvageReply(reply)).toMatchObject({ ok: true, schemaRejected: [SALVAGE_REPLY_MAX_ITEMS] })
+
+    const model = fakeModel(reply)
+    const result = await salvageSession(OPEN, deps(fakeStore({ rows: [row({})] }), model.intelligence))
+    const window = result.windows[0]!
+    expect(window).toMatchObject({ status: 'stored', proposed: SALVAGE_REPLY_MAX_ITEMS + 1, rejected: { schema: 1 } })
+    expect(window.status === 'stored' && window.observations).toHaveLength(SALVAGE_REPLY_MAX_ITEMS)
+  })
+
+  it('rejects an item past any bound the cap counts on, or without a quote', () => {
+    const over = [
+      { ...valid, quote: 'q'.repeat(SALVAGE_QUOTE_MAX_CHARS + 1) },
+      { ...valid, quote: '   ' },
+      { ...valid, evidence: [0] },
+      { ...valid, evidence: [item.evidence.items.maximum + 1] },
+      { ...valid, subject: { new: 'l'.repeat(item.subject.oneOf[1].properties.new.maxLength + 1) } },
+      { ...valid, subject: { id: 'subj-'.padEnd(item.subject.oneOf[0].properties.id.maxLength + 1, '9') } },
+      { ...valid, supersedes: Array.from({ length: item.supersedes.maxItems + 1 }, (_, i) => `obs-${i + 1}`) },
+      { claim: valid.claim, kind: 'fact', subject: valid.subject, evidence: [1], supersedes: [] },
+    ]
+    const parsed = parseSalvageReply(JSON.stringify({ observations: [valid, ...over] }))
+
+    expect(parsed).toMatchObject({ ok: true, schemaRejected: over.map((_, i) => i + 1) })
+    expect(parsed.ok && parsed.observations.map((o) => o.index)).toEqual([0])
+  })
+})
+
 describe('legacy salvage prompt version', () => {
   // Editing the prompt or the reply schema without a new version fails this pin.
   const PINNED_SHA256: Record<string, string> = {
     'legacy-salvage-v1': '1d3fef35fc8f85281172a144d035eb409b5d672928c0157bb449657da05634db',
+    'legacy-salvage-v2': '80c6dd3c9b560ea967833cc7a2fce5bdf6138b1b3ce31ff828d66b014ae7b9ef',
   }
 
   it('pins the prompt and reply schema of the current version', () => {

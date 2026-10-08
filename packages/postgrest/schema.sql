@@ -8059,6 +8059,12 @@ END; $$;
 --   failing the count.
 -- - unregistered_project: items whose project_id is not a registered project,
 --   or whose workspace_id is not a registered workspace.
+-- - salvage_quote_not_in_lineage: live observations of the legacy salvage
+--   (source.extractor 'legacy-salvage') whose source.quote is missing, not a
+--   string, or does not occur, under the quote rule, in the content of any
+--   item in their lineage. The salvage gate refuses such an observation
+--   before it is written; no trigger checks it, so a non-zero count means a
+--   writer bypassed the gate.
 -- Forgotten items are counted too, except where the invariant is about live
 -- items: forgetting hides an item, it does not make a broken row valid.
 CREATE OR REPLACE FUNCTION public.engram_invariant_counts() RETURNS TABLE(name text, violations bigint)
@@ -8107,7 +8113,20 @@ CREATE OR REPLACE FUNCTION public.engram_invariant_counts() RETURNS TABLE(name t
          WHERE (i.project_id IS NOT NULL AND NOT EXISTS (
                   SELECT 1 FROM public.memory_projects p WHERE p.id = i.project_id AND p.kind = 'project'))
             OR (i.workspace_id IS NOT NULL AND NOT EXISTS (
-                  SELECT 1 FROM public.memory_projects w WHERE w.id = i.workspace_id AND w.kind = 'workspace'))))
+                  SELECT 1 FROM public.memory_projects w WHERE w.id = i.workspace_id AND w.kind = 'workspace')))),
+      (6, 'salvage_quote_not_in_lineage', (
+        SELECT count(*)
+          FROM public.memory_items o
+         WHERE o.class = 'observation'
+           AND (o.source ->> 'extractor') = 'legacy-salvage'
+           AND o.forgotten_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+               FROM public.memory_items l
+              WHERE l.id = ANY (o.lineage)
+                AND jsonb_typeof(o.source -> 'quote') = 'string'
+                AND public.engram_norm_quote(o.source ->> 'quote') <> ''
+                AND strpos(public.engram_norm_quote(l.content), public.engram_norm_quote(o.source ->> 'quote')) > 0)))
     ) AS v(ord, name, violations)
    ORDER BY v.ord
 $$;

@@ -29,5 +29,5 @@
       "legacy_superseded_by": null
     }
   ],
-  "reply": "{\"observations\":[{\"claim\":\"We decided to drop SQLite\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]},{\"claim\":\"The store runs on Postgres only\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]}]}"
+  "reply": "{\"observations\":[{\"claim\":\"We decided to drop SQLite\",\"quote\":\"We decided to drop SQLite\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]},{\"claim\":\"The store runs on Postgres only\",\"quote\":\"the store runs on Postgres only\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[2],\"supersedes\":[]}]}"
 }

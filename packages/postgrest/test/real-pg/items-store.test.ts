@@ -318,6 +318,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
       lineage_to_forgotten: 0,
       utterance_time_mismatch: 0,
       unregistered_project: 0,
+      salvage_quote_not_in_lineage: 0,
     })
   }, TEST_TIMEOUT_MS)
 

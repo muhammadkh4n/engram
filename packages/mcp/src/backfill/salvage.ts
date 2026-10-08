@@ -22,10 +22,13 @@
  * already superseded.
  *
  * The gate is pure: every evidence number names a row of the window and one
- * of them a citable row; the claim attributes no decision or wish to MK, the
- * user or "we"; project and workspace are what all cited rows share, and the
- * subject belongs to that project; and each superseded observation passes the
- * same link rules extraction applies.
+ * of them a citable row; the quote occurs, under the quote rule, in a cited
+ * citable row as the window shows it, so a claim stands on words of its own
+ * evidence and never on the listing or on an old rewrite of MK's prompt; the
+ * claim attributes no decision or wish to MK, the user or "we"; project and
+ * workspace are what all cited rows share, and the subject belongs to that
+ * project; and each superseded observation passes the same link rules
+ * extraction applies.
  */
 import { createHash } from 'node:crypto'
 import {
@@ -37,7 +40,6 @@ import {
   type ExtractionFailure,
   type ExtractionItem,
   type ExtractionNewSubject,
-  extractionMaxTokens,
   finishCommit,
   generateId,
   type IntelligenceAdapter,
@@ -48,6 +50,7 @@ import {
   normalizeQuote,
   observationEntities,
   orderSubjects,
+  quoteOccursIn,
   SUBJECT_LABEL_MAX_CHARS,
   SUBJECT_LABEL_MIN_CHARS,
   SUBJECT_LISTING_LIMIT,
@@ -57,19 +60,23 @@ import {
 import {
   type ListedObservation,
   type ListedSubject,
+  OBSERVATION_ALIAS_PREFIX,
   parseSalvageReply,
   type ProposedSalvage,
   renderSalvageMessage,
   SALVAGE_LABEL,
+  SALVAGE_OBSERVATION_LISTING,
+  SALVAGE_REPLY_MAX_TOKENS,
   SALVAGE_SYSTEM_PROMPT,
   SALVAGE_VERSION,
+  SALVAGE_WINDOW_MAX_CHARS,
   type SalvageListing,
+  SUBJECT_ALIAS_PREFIX,
 } from './salvage-prompt.js'
 
-export const SALVAGE_WINDOW_MAX_CHARS = 24_000
+// The reply schema bounds row numbers and supersedes aliases by these, so they live beside it.
+export { SALVAGE_OBSERVATION_LISTING, SALVAGE_WINDOW_MAX_CHARS } from './salvage-prompt.js'
 export const SALVAGE_ROW_MAX_CHARS = 6_000
-/** Current salvage observations each window's prompt lists. */
-export const SALVAGE_OBSERVATION_LISTING = 20
 
 /** Producers whose assistant and system episodes are citable. */
 export const CITABLE_PRODUCERS: ReadonlySet<string> = new Set(['claude-code-hook-stop', 'claude-code', 'none'])
@@ -157,6 +164,8 @@ export interface WindowRow {
   n: number
   id: string
   citable: boolean
+  /** The row's text as the window shows it (shownText). */
+  text: string
   occurredAt: string
   projectId: string | null
   workspaceId: string | null
@@ -257,6 +266,7 @@ function toWindow(
       n: i + 1,
       id: e.row.id,
       citable: e.citable,
+      text: shownText(e.row),
       occurredAt: isoTime(e.row.occurred_at),
       projectId: e.row.project_id,
       workspaceId: e.row.workspace_id,
@@ -265,11 +275,21 @@ function toWindow(
   }
 }
 
-/** `[n] <yyyy-mm-dd hh:mm> <label>: <text>`, on one line, the text cut at SALVAGE_ROW_MAX_CHARS. */
+/** `[n] <yyyy-mm-dd hh:mm> <label>: <text>`, on one line, the text as shownText gives it. */
 export function renderRow(n: number, row: LegacyRow): string {
   const time = isoTime(row.occurred_at)
-  const text = cutCodePoints(row.content.replace(/\s+/g, ' ').trim(), SALVAGE_ROW_MAX_CHARS)
-  return `[${n}] ${time.slice(0, 10)} ${time.slice(11, 16)} ${rowLabel(row)}: ${text}`
+  return `[${n}] ${time.slice(0, 10)} ${time.slice(11, 16)} ${rowLabel(row)}: ${shownText(row)}`
+}
+
+/**
+ * A row's text as the window shows it: normalized by the quote rule, which
+ * also puts it on one line, then cut at SALVAGE_ROW_MAX_CHARS. Normalizing
+ * before the cut makes the shown text a prefix of the normalized content, so
+ * a quote the gate finds in a shown row also occurs in the stored lineage
+ * item, where the store's invariant looks for it.
+ */
+export function shownText(row: LegacyRow): string {
+  return cutCodePoints(normalizeQuote(row.content), SALVAGE_ROW_MAX_CHARS)
 }
 
 function rowLabel(row: LegacyRow): string {
@@ -288,6 +308,8 @@ export type SalvageGatedSubject =
 export interface GatedSalvage {
   index: number
   claim: string
+  /** Words of a cited citable row, as the reply gave them; stored as the observation's `source.quote`. */
+  quote: string
   kind: ProposedSalvage['kind']
   subject: SalvageGatedSubject
   /** The cited row numbers, each once, in the order given. */
@@ -342,6 +364,7 @@ function gateOne(window: SalvageWindow, listing: SalvageListing, p: ProposedSalv
   if (evidence.some((n) => n < 1 || n > window.rows.length)) return { ok: false, reason: 'evidence_out_of_window' }
   const rows = evidence.map((n) => window.rows[n - 1]!)
   if (!rows.some((r) => r.citable)) return { ok: false, reason: 'evidence_context_only' }
+  if (!rows.some((r) => r.citable && quoteOccursIn(p.quote, r.text))) return { ok: false, reason: 'quote_not_found' }
   if (attributed(p.claim)) return { ok: false, reason: 'attributed' }
 
   const projectId = shared(rows.map((r) => r.projectId))
@@ -365,6 +388,7 @@ function gateOne(window: SalvageWindow, listing: SalvageListing, p: ProposedSalv
     value: {
       index: p.index,
       claim: p.claim,
+      quote: p.quote,
       kind: p.kind,
       subject,
       evidence,
@@ -521,6 +545,7 @@ export function salvageCommit(
         run_id: runId,
         window_key: window.key,
         time_basis: 'evidence',
+        quote: toPostgresText(o.quote),
       },
       lineage: [...o.lineage],
       entities: observationEntities(claim, [], projects).map((e) => ({ entity: e.entity, entityType: e.entity_type })),
@@ -682,13 +707,13 @@ export async function salvageListing(store: SalvageStore, window: SalvageWindow)
   ])
   return {
     subjects: orderSubjects(subjects, window.text, SUBJECT_LISTING_LIMIT).map((s, i) => ({
-      alias: `subj-${i + 1}`,
+      alias: `${SUBJECT_ALIAS_PREFIX}${i + 1}`,
       id: s.id,
       label: s.label,
       projectId: s.project_id,
     })),
     observations: observations.slice(0, SALVAGE_OBSERVATION_LISTING).map((o, i) => ({
-      alias: `obs-${i + 1}`,
+      alias: `${OBSERVATION_ALIAS_PREFIX}${i + 1}`,
       id: o.id,
       kind: o.kind,
       subjectId: o.subject_id,
@@ -701,7 +726,12 @@ export async function salvageListing(store: SalvageStore, window: SalvageWindow)
   }
 }
 
-/** Asks the model once, at temperature 0 in JSON mode, and gates the reply. A failed call rejects with its own error. */
+/**
+ * Asks the model once, at temperature 0 in JSON mode, and gates the reply. A
+ * failed call rejects with its own error. The reply cap follows the reply
+ * schema, not the prompt's size, so a window that yields many observations is
+ * not cut off.
+ */
 export async function runSalvageWindow(window: SalvageWindow, deps: SalvageDeps): Promise<SalvageWindowOutcome> {
   const completeJson = deps.intelligence.completeJson
   if (!completeJson) throw new Error('the legacy salvage needs an intelligence adapter with completeJson')
@@ -712,7 +742,7 @@ export async function runSalvageWindow(window: SalvageWindow, deps: SalvageDeps)
     label: SALVAGE_LABEL,
     system: SALVAGE_SYSTEM_PROMPT,
     user,
-    maxTokens: extractionMaxTokens(user),
+    maxTokens: SALVAGE_REPLY_MAX_TOKENS,
   })
   const base: WindowOutcomeBase = {
     key: window.key,

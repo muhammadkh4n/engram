@@ -65,6 +65,8 @@ export interface SampleRow {
   id: string
   content: string
   context: string | null
+  /** The item's `source.quote`, when its source carries one. */
+  quote: string | null
   occurred_at: string
   project_id: string | null
   lineage: string[]
@@ -411,7 +413,10 @@ function samplesSection(r: BackfillReport): string {
     (s.salvage_observations
       .map(
         (o, i) =>
-          sampleBlock(i + 1, o, [['claim', o.content]]) +
+          sampleBlock(i + 1, o, [
+            ['claim', o.content],
+            ['quote', o.quote],
+          ]) +
           (o.evidence.length === 0
             ? '   - evidence: none readable\n'
             : o.evidence.map((e) => `   - evidence \`${e.id}\` ${e.occurred_at.slice(0, 10)}: ${sampleText(e.content)}\n`).join('')),

@@ -200,7 +200,7 @@ export function postgrestReportStore(client: PostgrestClient): ReportStore {
       for (let i = 0; i < unique.length; i += IDS_PER_READ) {
         const { data, error } = await client
           .from('memory_items')
-          .select('id, content, context, occurred_at, project_id, lineage')
+          .select('id, content, context, quote:source->>quote, occurred_at, project_id, lineage')
           .in('id', unique.slice(i, i + IDS_PER_READ))
         if (error || !data) failed('read sampled items', error)
         for (const r of data as Array<Record<string, unknown>>) {
@@ -208,6 +208,7 @@ export function postgrestReportStore(client: PostgrestClient): ReportStore {
             id: String(r.id),
             content: String(r.content ?? ''),
             context: text(r.context),
+            quote: text(r.quote),
             occurred_at: String(r.occurred_at),
             project_id: text(r.project_id),
             lineage: Array.isArray(r.lineage) ? r.lineage.map(String) : [],

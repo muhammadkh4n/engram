@@ -38,7 +38,16 @@ function facet(id: string, over: Partial<ItemFacet> = {}): ItemFacet {
 }
 
 function sample(id: string, over: Partial<SampleRow> = {}): SampleRow {
-  return { id, content: `text of ${id}`, context: null, occurred_at: '2026-01-02T00:00:00Z', project_id: 'tst-app', lineage: [], ...over }
+  return {
+    id,
+    content: `text of ${id}`,
+    context: null,
+    quote: null,
+    occurred_at: '2026-01-02T00:00:00Z',
+    project_id: 'tst-app',
+    lineage: [],
+    ...over,
+  }
 }
 
 interface FakeData {
@@ -259,7 +268,9 @@ describe('backfill report samples', () => {
     }
     data.rows = [
       ...data.populations.register_candidates.map((id) => sample(id, { content: `quote ${id}`, context: `question ${id}` })),
-      ...data.populations.salvage_observations.map((id, i) => sample(id, { content: `claim ${id}`, lineage: [uuid(9000 + i)] })),
+      ...data.populations.salvage_observations.map((id, i) =>
+        sample(id, { content: `claim ${id}`, quote: `quote of ${id}`, lineage: [uuid(9000 + i)] }),
+      ),
       ...data.populations.salvage_observations.map((_, i) => sample(uuid(9000 + i), { content: `evidence ${i}` })),
       ...data.populations.legacy_utterances.map((id) => sample(id, { content: 'x'.repeat(SAMPLE_TEXT_CHARS + 10) })),
     ]
@@ -279,6 +290,9 @@ describe('backfill report samples', () => {
     expect(md).toContain(`   - quote: quote ${candidate.id}\n   - question: question ${candidate.id}\n`)
     expect(md).toContain('### Salvage observations (60 of 80)')
     expect(md).toMatch(/ {3}- evidence `[0-9a-f-]{36}` 2026-01-02: evidence \d+\n/)
+    for (const o of r.samples.salvage_observations) {
+      expect(md).toContain(`   - claim: claim ${o.id}\n   - quote: quote of ${o.id}\n   - evidence \``)
+    }
     expect(md).toContain(`   - text: ${'x'.repeat(SAMPLE_TEXT_CHARS)} [cut]\n`)
     expect(md).toContain('### History utterances (0 of 0)\n\n_none_')
   })

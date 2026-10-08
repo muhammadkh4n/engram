@@ -38,12 +38,29 @@ const DIGEST = '00000000-0000-4000-8000-000000000d21'
 const FACT_OLD = '00000000-0000-4000-8000-000000000d31'
 const FACT_NEW = '00000000-0000-4000-8000-000000000d32'
 const COVERING_UTTERANCE = '00000000-0000-4000-8000-000000000d41'
+const OBS_MISQUOTED = '00000000-0000-4000-8000-000000000d51'
+const OBS_UNQUOTED = '00000000-0000-4000-8000-000000000d52'
 
 const SAID_AT = '2026-03-02T09:01:30Z'
+const QUOTE = 'the store runs on Postgres only'
 const REPLY = JSON.stringify({
   observations: [
-    { claim: 'We decided to drop SQLite', kind: 'fact', subject: { new: 'Storage backend' }, evidence: [2], supersedes: [] },
-    { claim: 'The store runs on Postgres only', kind: 'fact', subject: { new: 'Storage backend' }, evidence: [2], supersedes: [] },
+    {
+      claim: 'We decided to drop SQLite',
+      quote: 'We decided to drop SQLite',
+      kind: 'fact',
+      subject: { new: 'Storage backend' },
+      evidence: [2],
+      supersedes: [],
+    },
+    {
+      claim: 'The store runs on Postgres only',
+      quote: QUOTE,
+      kind: 'fact',
+      subject: { new: 'Storage backend' },
+      evidence: [2],
+      supersedes: [],
+    },
   ],
 })
 
@@ -186,6 +203,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy salvage on real Postgre
         run_id: window.runId,
         window_key: window.key,
         time_basis: 'evidence',
+        quote: QUOTE,
       },
       label: 'Storage backend',
       extraction_run_id: window.runId,
@@ -260,5 +278,30 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy salvage on real Postgre
     await expect(pg.psqlAs('anon', call)).rejects.toThrow(/permission denied for function engram_salvage_begin/)
     await expect(pg.psqlAs('authenticated', call)).rejects.toThrow(/permission denied for function engram_salvage_begin/)
     await expect(pg.psqlAs('service_role', call)).resolves.toMatch(/^[0-9a-f-]{36}$/)
+  }, TEST_TIMEOUT_MS)
+
+  it('counts salvage observations whose quote is missing or in no lineage item, and keeps the count over a re-apply', async () => {
+    const violations = async (): Promise<number> =>
+      Number(await pg.psql(`SELECT violations FROM public.engram_invariant_counts() WHERE name = 'salvage_quote_not_in_lineage'`))
+    // The observation the salvage stored above quotes its lineage row.
+    expect(await violations()).toBe(0)
+
+    const observation = (id: string, content: string, source: object) => `
+      INSERT INTO public.memory_items
+          (id, class, kind, speaker, trust, project_id, workspace_id, session_id, subject_id, content, search_text,
+           occurred_at, source, lineage, content_hash)
+        VALUES ('${id}', 'observation', 'fact', 'assistant', 3, 'tst-app', 'tst-ws', '${OPEN}',
+          (SELECT id FROM public.memory_subjects WHERE label = 'Storage backend'), '${content}', '${content}',
+          '${SAID_AT}', '${JSON.stringify(source)}'::jsonb, ARRAY['${EP_SAID}']::uuid[], md5('${content}'));`
+    const salvaged = { type: 'extraction', extractor: 'legacy-salvage', time_basis: 'evidence' }
+    await pg.psql(observation(OBS_MISQUOTED, 'The store keeps a SQLite fallback', { ...salvaged, quote: 'keeps a SQLite fallback' }))
+    expect(await violations()).toBe(1)
+    await pg.psql(observation(OBS_UNQUOTED, 'The store has one adapter', salvaged))
+    expect(await violations()).toBe(2)
+
+    const before = await pg.dumpSchema()
+    await pg.applySchema()
+    expect(await pg.dumpSchema()).toBe(before)
+    expect(await violations()).toBe(2)
   }, TEST_TIMEOUT_MS)
 })
