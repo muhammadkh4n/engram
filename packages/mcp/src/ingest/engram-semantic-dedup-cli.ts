@@ -37,6 +37,7 @@
  * NEO4J_USER and NEO4J_PASSWORD
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { existsSync } from 'node:fs'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { chunk } from './embed-backfill-lib.js'
@@ -72,8 +73,7 @@ interface Args {
 }
 
 function fail(message: string): never {
-  console.error(`${TAG} ${message}`)
-  process.exit(1)
+  throw new CliExit(1, `${TAG} ${message}`)
 }
 
 function parsePositiveInt(raw: string | undefined, flag: string): number {
@@ -133,7 +133,7 @@ function parseArgs(argv: readonly string[]): Args {
     else if (a === '--rollback-csv') args.rollbackPath = parsePath(argv[++i], 'rollback-csv')
     else if (a === '--help' || a === '-h') {
       console.log(HELP)
-      process.exit(0)
+      throw new CliExit(0)
     } else fail(`unknown argument "${a}"`)
   }
   if (args.apply && args.mergeSim === null) fail(`--apply requires --merge-sim S (S >= ${MERGE_SIM_FLOOR})`)
@@ -214,7 +214,4 @@ async function main(): Promise<void> {
   if (args.apply) console.error(`${TAG} ${graphOutcomeLine(report.graph)}`)
 }
 
-main().catch((err) => {
-  console.error(`${TAG} FATAL:`, err instanceof Error ? err.message : err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error(`${TAG} FATAL:`, e instanceof Error ? e.message : e)))

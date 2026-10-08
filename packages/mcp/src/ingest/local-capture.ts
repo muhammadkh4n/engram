@@ -130,7 +130,7 @@ async function withLocalDeps(
     if (opened.memory) {
       // Wait for fire-and-forget graph decomposition to finish before the
       // process exits. Without this, the CLI can return immediately after
-      // the SQL insert and process.exit() kills the inflight Neo4j write.
+      // the SQL insert and its exit kills the inflight Neo4j write.
       await opened.memory.flushPendingWrites()
     }
     return { outcome, model: outcome.model }

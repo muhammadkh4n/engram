@@ -5,6 +5,7 @@
  * failure, and is gone within HOOK_EXIT_MS whatever the worker does.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { type ChildProcess, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { closeSync } from 'node:fs'
 import { dirname, extname, join } from 'node:path'
@@ -83,6 +84,8 @@ async function readStdin(): Promise<string> {
 /** The body of a hook entry file: read stdin, start the worker, exit 0. */
 export function runHookEntry(kind: WorkerKind): void {
   const at = new Date().toISOString()
+  // Exits at once: the deadline bounds the hook even when stdin never closes,
+  // so it must not wait on a stdout/stderr reader; the hook writes nothing.
   const safety = setTimeout(() => process.exit(0), HOOK_EXIT_MS)
   safety.unref()
   readStdin()
@@ -90,5 +93,5 @@ export function runHookEntry(kind: WorkerKind): void {
       startWorker(kind, raw, { env: process.env, at })
     })
     .catch(() => undefined)
-    .finally(() => process.exit(0))
+    .finally(() => exitWhenFlushed(0))
 }

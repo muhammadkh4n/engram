@@ -29,6 +29,7 @@
  * Cost: ~$0.0001 per row with gpt-4o-mini. 5000 episodes ≈ $0.50.
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { buildTextToEmbed, EMBED_TEXT_VERSION } from '@engram-mem/core'
@@ -74,7 +75,7 @@ function parseArgs(argv: string[]): Args {
           '  --concurrency N      parallel LLM calls (default 4)\n' +
           '  --page-size N        rows per fetch (default 100)\n',
       )
-      process.exit(0)
+      throw new CliExit(0)
     }
   }
   return args
@@ -190,8 +191,7 @@ async function main(): Promise<void> {
   const supabaseKey = process.env['SUPABASE_KEY']
   const openaiApiKey = process.env['OPENAI_API_KEY']
   if (!supabaseUrl || !supabaseKey || !openaiApiKey) {
-    console.error('[engram-contextual-backfill] Missing SUPABASE_URL / SUPABASE_KEY / OPENAI_API_KEY')
-    process.exit(1)
+    throw new CliExit(1, '[engram-contextual-backfill] Missing SUPABASE_URL / SUPABASE_KEY / OPENAI_API_KEY')
   }
 
   const client = new PostgrestClient(supabaseUrl, {
@@ -199,8 +199,7 @@ async function main(): Promise<void> {
   })
   const intelligence = openaiIntelligence({ apiKey: openaiApiKey })
   if (!intelligence.contextualizeChunk) {
-    console.error('[engram-contextual-backfill] openaiIntelligence does not expose contextualizeChunk — wrong adapter version')
-    process.exit(1)
+    throw new CliExit(1, '[engram-contextual-backfill] openaiIntelligence does not expose contextualizeChunk — wrong adapter version')
   }
 
   console.log(
@@ -235,8 +234,7 @@ async function main(): Promise<void> {
 
     const { data, error } = await q
     if (error) {
-      console.error(`[engram-contextual-backfill] fetch failed: ${error.message}`)
-      process.exit(2)
+      throw new CliExit(2, `[engram-contextual-backfill] fetch failed: ${error.message}`)
     }
     const rows = (data ?? []) as EpisodeRow[]
     if (rows.length === 0) break
@@ -303,7 +301,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('[engram-contextual-backfill] FATAL:', err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error('[engram-contextual-backfill] FATAL:', e)))

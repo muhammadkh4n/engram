@@ -14,6 +14,7 @@
  * provider or store fault; 2 --version is not this build's extractor
  * version; 3 the run stopped at --max-calls.
  */
+import { exitWhenFlushed } from '../cli-exit.js'
 import { closeSync, writeSync } from 'node:fs'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
@@ -89,5 +90,5 @@ export async function main(argv: readonly string[]): Promise<number> {
 }
 
 if (isEntryPoint(import.meta.url)) {
-  main(process.argv.slice(2)).then((code) => process.exit(code))
+  main(process.argv.slice(2)).then((code) => exitWhenFlushed(code))
 }

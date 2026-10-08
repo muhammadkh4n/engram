@@ -54,6 +54,7 @@
  * Both: ENGRAM_SALIENCE_DISABLED=1 exits without capturing.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { readFileSync } from 'node:fs'
 import { CAPTURE_CONTENT_MAX_CHARS } from '../capture-route.js'
 import type { CaptureInput, CaptureOutcome } from './capture.js'
@@ -459,17 +460,17 @@ if (isEntryPoint(import.meta.url)) {
   const timeoutMs = process.env['ENGRAM_SERVER_URL'] ? SERVER_TIMEOUT_MS : LOCAL_TIMEOUT_MS
   const timeoutId = setTimeout(() => {
     process.stderr.write(`${LOG_PREFIX} timeout after ${timeoutMs / 1000}s, exiting\n`)
-    process.exit(3)
+    void exitWhenFlushed(3)
   }, timeoutMs)
   timeoutId.unref()
 
   // Force a clean exit even if HTTP or store clients hold keep-alive agents
   // or background timers.
   runIngestCli(process.argv.slice(2)).then(
-    (code) => process.exit(code),
+    (code) => exitWhenFlushed(code),
     (err: unknown) => {
       process.stderr.write(`${LOG_PREFIX} FATAL: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
-      process.exit(1)
+      return exitWhenFlushed(1)
     },
   )
 }

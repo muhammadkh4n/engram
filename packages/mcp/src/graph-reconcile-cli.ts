@@ -39,6 +39,7 @@
  * (--undo needs only the NEO4J_* variables)
  */
 
+import { CliExit, exitOnError } from './cli-exit.js'
 import { appendFile, readFile } from 'node:fs/promises'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { tryCreateGraph } from './graph-helper.js'
@@ -74,8 +75,7 @@ const HELP =
   '  --delete-missing or --delete-orphans.\n'
 
 function fail(message: string): never {
-  console.error(`${TAG} ${message}`)
-  process.exit(1)
+  throw new CliExit(1, `${TAG} ${message}`)
 }
 
 async function undo(path: string, batchSize: number): Promise<void> {
@@ -106,8 +106,7 @@ async function main(): Promise<void> {
     args = parseReconcileArgs(process.argv.slice(2))
   } catch (err) {
     if (err instanceof ReconcileArgsError) {
-      console.error(`${TAG} ${err.message}\n\n${HELP}`)
-      process.exit(1)
+      throw new CliExit(1, `${TAG} ${err.message}\n\n${HELP}`)
     }
     throw err
   }
@@ -152,7 +151,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(`${TAG} FATAL:`, err instanceof Error ? err.message : err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error(`${TAG} FATAL:`, e instanceof Error ? e.message : e)))

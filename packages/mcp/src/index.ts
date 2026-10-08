@@ -8,6 +8,7 @@
  * For the shared HTTP deployment see index-http.ts.
  */
 
+import { exitWhenFlushed } from './cli-exit.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { consolidationAtStartup, createEngramServer, recallOutputPolicyAtStartup } from './server-core.js'
 
@@ -23,5 +24,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   process.stderr.write(`[engram-mcp] Fatal: ${err instanceof Error ? err.message : String(err)}\n`)
-  process.exit(1)
+  return exitWhenFlushed(1)
 })

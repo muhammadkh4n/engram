@@ -37,6 +37,7 @@
  * chars / 4. Run with --dry-run first to see the estimate before spending.
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { openaiIntelligence } from '@engram-mem/openai'
 import type { IntelligenceAdapter } from '@engram-mem/core'
@@ -90,12 +91,12 @@ function isTier(value: string): value is Tier {
 function parsePositiveInt(raw: string | undefined, flagName: string): number {
   const n = Number(raw)
   if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    console.error(
+    throw new CliExit(
+      1,
       `[engram-embed-backfill] --${flagName} requires a positive integer, got ${
         raw === undefined ? '(missing value)' : `"${raw}"`
       }`,
     )
-    process.exit(1)
   }
   return n
 }
@@ -115,8 +116,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === '--tier') {
       const t = argv[++i] ?? ''
       if (!isTier(t)) {
-        console.error(`[engram-embed-backfill] unknown --tier "${t}" (expected one of ${ALL_TIERS.join(', ')})`)
-        process.exit(1)
+        throw new CliExit(1, `[engram-embed-backfill] unknown --tier "${t}" (expected one of ${ALL_TIERS.join(', ')})`)
       }
       tiers.push(t)
     } else if (a === '--limit') args.limit = parsePositiveInt(argv[++i], 'limit')
@@ -131,7 +131,7 @@ function parseArgs(argv: string[]): Args {
           '  --batch-size N     texts per OpenAI embeddings call (default 64)\n' +
           '  --page-size N      rows per DB page fetch (default 200)\n',
       )
-      process.exit(0)
+      throw new CliExit(0)
     }
   }
   args.tiers = tiers.length > 0 ? [...new Set(tiers)] : [...ALL_TIERS]
@@ -345,8 +345,7 @@ async function main(): Promise<void> {
   const supabaseKey = process.env['SUPABASE_KEY']
   const openaiApiKey = process.env['OPENAI_API_KEY']
   if (!supabaseUrl || !supabaseKey || !openaiApiKey) {
-    console.error('[engram-embed-backfill] Missing SUPABASE_URL / SUPABASE_KEY / OPENAI_API_KEY')
-    process.exit(1)
+    throw new CliExit(1, '[engram-embed-backfill] Missing SUPABASE_URL / SUPABASE_KEY / OPENAI_API_KEY')
   }
 
   const client = new PostgrestClient(supabaseUrl, {
@@ -411,7 +410,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error('[engram-embed-backfill] FATAL:', err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error('[engram-embed-backfill] FATAL:', e)))

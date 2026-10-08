@@ -28,6 +28,7 @@
  * Roots come from ENGRAM_PROJECT_GROUPS_FILE (`roots`).
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { createReadStream } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -152,8 +153,7 @@ const HELP =
   '  Roots come from ENGRAM_PROJECT_GROUPS_FILE.\n'
 
 function fail(message: string): never {
-  console.error(`${TAG} ${message}`)
-  process.exit(1)
+  throw new CliExit(1, `${TAG} ${message}`)
 }
 
 export function parseSessionMapArgs(
@@ -175,7 +175,7 @@ export function parseSessionMapArgs(
       since = parsed
     } else if (a === '--help' || a === '-h') {
       console.log(HELP)
-      process.exit(0)
+      throw new CliExit(0)
     } else fail(`unknown argument "${a}"`)
   }
   const groupsFile = env['ENGRAM_PROJECT_GROUPS_FILE']?.trim() || undefined
@@ -183,13 +183,14 @@ export function parseSessionMapArgs(
 }
 
 if (isEntryPoint(import.meta.url)) {
-  const opts = parseSessionMapArgs(process.argv.slice(2))
-  mapSessionProjects(opts)
+  // Parsed inside the chain so a usage error exits through exitOnError.
+  Promise.resolve()
+    .then(() => mapSessionProjects(parseSessionMapArgs(process.argv.slice(2))))
     .then((map) => {
       process.stdout.write(formatSessionMap(map) + '\n')
       console.error(
         `${TAG} ${Object.keys(map.sessions).length} sessions mapped, ${map.errors.length} errors`,
       )
     })
-    .catch((err: unknown) => fail(messageOf(err)))
+    .catch((err: unknown) => exitOnError(err, (e) => console.error(`${TAG} ${messageOf(e)}`)))
 }

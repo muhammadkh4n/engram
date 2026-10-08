@@ -26,6 +26,7 @@
  *   engram-shell-setup status      # show current state
  */
 
+import { exitWhenFlushed } from './cli-exit.js'
 import { execSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -296,5 +297,5 @@ switch (cmd) {
   default:
     process.stderr.write(`unknown command: ${cmd}\n`)
     process.stderr.write('usage: engram-shell-setup [install|uninstall|status]\n')
-    process.exit(1)
+    void exitWhenFlushed(1)
 }

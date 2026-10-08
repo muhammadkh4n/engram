@@ -58,6 +58,7 @@
  * Exit codes: 0 done, 1 stopped or failed, 2 usage, 3 extract reached --max-calls.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { promises as fs, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -709,7 +710,7 @@ if (isEntryPoint(import.meta.url)) {
     out: (text) => process.stdout.write(text),
     err: (text) => process.stderr.write(text),
   }).then(
-    (code) => process.exit(code),
-    () => process.exit(1),
+    (code) => exitWhenFlushed(code),
+    () => exitWhenFlushed(1),
   )
 }
