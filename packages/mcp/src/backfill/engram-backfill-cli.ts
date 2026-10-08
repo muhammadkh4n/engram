@@ -24,6 +24,9 @@
  *     the server's ENGRAM_CHAT_* settings): every session with pending
  *     extraction or salvage work, oldest first across every source. A dry run
  *     lists the sessions and their windows and calls no model.
+ *   - report (on the server): a markdown report for review: counts by class
+ *     and source, legacy completeness, invariant counts, extraction and
+ *     capture health, and seeded samples. Reads only.
  *
  * Dry run by default: prints what would be sent, sends nothing and writes no
  * state. `--apply` spools to the backfill's own state directory and drains it
@@ -39,6 +42,7 @@
  *   engram-backfill legacy-copy --map FILE [--registry FILE] [--apply] [--json]
  *   engram-backfill legacy-utterances [--target URL] [--token-file FILE] [--state-dir DIR] [--apply] [--json]
  *   engram-backfill extract [--max-calls N --apply] [--json]
+ *   engram-backfill report --out FILE --sample-seed N [--json]
  *
  * Sending flags:
  *   --target URL        the server (default ENGRAM_SERVER_URL); events go to its /capture/events
@@ -58,6 +62,8 @@ import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { captureModelFromEnv, chatIntelligenceOptionsFromEnv } from '../server-core.js'
 import { ExtractRefused, runExtractPass, type ExtractPassSummary } from './extract.js'
 import { postgrestSalvageStore } from './salvage-store.js'
+import { buildReport, formatReport, type BackfillReport } from './report.js'
+import { postgrestReportStore } from './report-store.js'
 import type { ProjectRegistry } from '../capture-events/project-registry.js'
 import { captureEventsEndpoint } from '../capture/endpoint.js'
 import { captureClientInfo } from '../capture/events.js'
@@ -96,7 +102,7 @@ import { runTranscripts, type TranscriptsSummary } from './transcripts.js'
 
 type Env = Record<string, string | undefined>
 
-export const COMMANDS = ['transcripts', 'history', 'git', 'legacy-copy', 'legacy-utterances', 'extract'] as const
+export const COMMANDS = ['transcripts', 'history', 'git', 'legacy-copy', 'legacy-utterances', 'extract', 'report'] as const
 export type BackfillCommand = (typeof COMMANDS)[number]
 
 export interface BackfillCliArgs {
@@ -107,6 +113,8 @@ export interface BackfillCliArgs {
   map: string | null
   mapOut: string | null
   maxCalls: number | null
+  out: string | null
+  sampleSeed: number | null
   target: string | null
   tokenFile: string | null
   registry: string | null
@@ -145,6 +153,7 @@ const USAGE =
   '  legacy-utterances    MK\'s own words in old prompt-capture rows, as prompts (server; SUPABASE_URL,\n' +
   '                       SUPABASE_KEY)\n' +
   '  extract              every pending session, oldest first across every source (server; ENGRAM_EXTRACTION=hold)\n' +
+  '  report               a markdown report of the store for review, with seeded samples (server; reads only)\n' +
   '  Sending flags:\n' +
   '  --target URL         the server (default ENGRAM_SERVER_URL)\n' +
   '  --token-file FILE    the capture token (default ENGRAM_CAPTURE_TOKEN_FILE, else ENGRAM_CAPTURE_TOKEN)\n' +
@@ -173,6 +182,9 @@ const USAGE =
   '  --token-file FILE    as for the sending commands; --state-dir as well\n' +
   '  extract:\n' +
   '  --max-calls N        required with --apply: model calls this run may make; at the cap it exits 3\n' +
+  '  report:\n' +
+  '  --out FILE           where to write the markdown (required; written owner-only)\n' +
+  '  --sample-seed N      the seed the samples are drawn with, 0 to 4294967295 (required)\n' +
   '  Common:\n' +
   '  --apply              send, and move cursors once the server acknowledged\n' +
   '  --json               print the summary as JSON\n'
@@ -188,6 +200,7 @@ const VALUE_FLAGS = {
   '--since': 'since',
   '--map': 'map',
   '--map-out': 'mapOut',
+  '--out': 'out',
 } as const satisfies Record<string, keyof BackfillCliArgs>
 
 const REPEATED_FLAGS = {
@@ -207,6 +220,7 @@ const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
   'legacy-copy': new Set(['--plan', '--map-out', '--map', '--registry', '--overrides', '--apply', '--json']),
   'legacy-utterances': new Set(['--target', '--token-file', '--state-dir', '--apply', '--json']),
   extract: new Set(['--max-calls', '--apply', '--json']),
+  report: new Set(['--out', '--sample-seed', '--json']),
 }
 
 function isCommand(value: string): value is BackfillCommand {
@@ -227,6 +241,8 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     map: null,
     mapOut: null,
     maxCalls: null,
+    out: null,
+    sampleSeed: null,
     target: null,
     tokenFile: null,
     registry: null,
@@ -242,7 +258,7 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i]!
     if (!COMMAND_FLAGS[command].has(flag)) {
-      const known = flag in VALUE_FLAGS || flag in REPEATED_FLAGS || SWITCH_FLAGS.includes(flag) || flag === '--max-calls'
+      const known = flag in VALUE_FLAGS || flag in REPEATED_FLAGS || SWITCH_FLAGS.includes(flag) || flag === '--max-calls' || flag === '--sample-seed'
       throw new UsageError(known ? `${command} does not take ${flag}` : `unknown flag "${flag}"`)
     }
     if (flag === '--apply') args.apply = true
@@ -253,6 +269,7 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
       if (!value || value.startsWith('--')) throw new UsageError(`${flag} requires a value`)
       if (Object.hasOwn(REPEATED_FLAGS, flag)) args[REPEATED_FLAGS[flag as keyof typeof REPEATED_FLAGS]].push(value)
       else if (flag === '--max-calls') args.maxCalls = maxCallsOf(value)
+      else if (flag === '--sample-seed') args.sampleSeed = sampleSeedOf(value)
       else args[VALUE_FLAGS[flag as keyof typeof VALUE_FLAGS]] = value
     }
   }
@@ -264,7 +281,18 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
   if (command === 'extract' && args.apply && args.maxCalls === null) {
     throw new UsageError('extract --apply needs --max-calls: every window is a paid model call')
   }
+  if (command === 'report' && (args.out === null || args.sampleSeed === null)) {
+    throw new UsageError('report needs --out and --sample-seed')
+  }
   return args
+}
+
+function sampleSeedOf(value: string): number {
+  const n = Number(value)
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(n) || n > 0xffffffff) {
+    throw new UsageError('--sample-seed must be a whole number from 0 to 4294967295')
+  }
+  return n
 }
 
 function maxCallsOf(value: string): number {
@@ -424,7 +452,7 @@ async function runCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<B
 // ── Legacy commands (server side) ───────────────────────────────────────
 
 interface LegacyOutcome {
-  summary: LegacyPlan | LegacyCopySummary | LegacyUtterancesSummary | ExtractPassSummary
+  summary: LegacyPlan | LegacyCopySummary | LegacyUtterancesSummary | ExtractPassSummary | ReportSummary
   text: string
   ok: boolean
   /** Overrides the exit code that `ok` gives. */
@@ -581,6 +609,40 @@ async function runExtractCommand(args: BackfillCliArgs, env: Env, io: CliIo): Pr
   return { summary, text: formatExtractPass(summary), ok: exitCode === 0, exitCode }
 }
 
+interface ReportSummary {
+  out: string
+  seed: number
+  items: number
+  invariants_violated: number
+  mk_words_excluded: number
+  unprocessed_events: number
+}
+
+function reportSummary(report: BackfillReport, out: string): ReportSummary {
+  return {
+    out,
+    seed: report.seed,
+    items: report.items.reduce((n, i) => n + i.live + i.forgotten, 0),
+    invariants_violated: report.invariants.filter((i) => i.violations !== 0).length,
+    mk_words_excluded: report.mk_words.excluded,
+    unprocessed_events: report.capture.unprocessed,
+  }
+}
+
+async function runReportCommand(args: BackfillCliArgs, env: Env): Promise<LegacyOutcome> {
+  const report = await buildReport(postgrestReportStore(storeClient(env)), { seed: args.sampleSeed!, now: new Date() })
+  const out = expandHome(args.out!, env)
+  // Owner-only: the samples quote stored memory text.
+  await fs.writeFile(out, formatReport(report), { mode: 0o600 })
+  await fs.chmod(out, 0o600)
+  const summary = reportSummary(report, out)
+  const text =
+    `report written to ${summary.out}\n` +
+    `  items=${summary.items} invariants_violated=${summary.invariants_violated} ` +
+    `mk_words_excluded=${summary.mk_words_excluded} unprocessed_events=${summary.unprocessed_events}\n`
+  return { summary, text, ok: true }
+}
+
 /** Runs one command and returns the exit code. */
 export async function runBackfillCli(argv: readonly string[], env: Env, io: CliIo): Promise<number> {
   let args: BackfillCliArgs | 'help'
@@ -595,13 +657,15 @@ export async function runBackfillCli(argv: readonly string[], env: Env, io: CliI
     return 0
   }
   try {
-    if (args.command === 'legacy-copy' || args.command === 'legacy-utterances' || args.command === 'extract') {
+    if (args.command === 'legacy-copy' || args.command === 'legacy-utterances' || args.command === 'extract' || args.command === 'report') {
       const run =
         args.command === 'legacy-copy'
           ? runLegacyCopyCommand
           : args.command === 'extract'
             ? runExtractCommand
-            : runLegacyUtterancesCommand
+            : args.command === 'report'
+              ? runReportCommand
+              : runLegacyUtterancesCommand
       const outcome = await run(args, env, io)
       io.out(args.json ? `${JSON.stringify(outcome.summary)}\n` : outcome.text)
       return outcome.exitCode ?? (outcome.ok ? 0 : 1)

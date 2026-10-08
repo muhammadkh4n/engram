@@ -6,10 +6,11 @@
  *   item has no copied vector; entities come from the scrubbed text;
  * - nothing is sent while a copy step, the forgets included, has work left;
  * - a forgotten row is never sent, a covered session is skipped, the cut flag
- *   follows the raw turn's length, and a second run gets duplicates only.
+ *   follows the raw turn's length, and a second run gets duplicates only;
+ * - the report's counts match the tables, and one seed reproduces it.
  */
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -235,5 +236,39 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy copy and legacy utteran
     expect(run.code, run.err).toBe(0)
     expect(JSON.parse(run.out)).toMatchObject({ sent: 2, accepted: 0, duplicates: 2, stopped: null })
     expect(await capturedEvents()).toBe(2)
+  }, TEST_TIMEOUT_MS)
+
+  it('writes a report whose counts match the tables and that the same seed reproduces', async () => {
+    const out = join(dir, 'report.md')
+    const run = await cli('report', '--out', out, '--sample-seed', '11', '--json')
+    expect(run.code, run.err).toBe(0)
+    // The covering utterance is inserted without its capture event, so the
+    // time invariant counts it; the report must show the store's own counts.
+    const invariants = (await pg.psql(`SELECT string_agg(name || ' | ' || violations, E'\\n' ORDER BY name)
+        FROM public.engram_invariant_counts()`)).split('\n')
+    const violated = Number(await pg.psql('SELECT count(*) FROM public.engram_invariant_counts() WHERE violations <> 0'))
+    expect(JSON.parse(run.out)).toMatchObject({ out, seed: 11, invariants_violated: violated, mk_words_excluded: 0, unprocessed_events: 0 })
+    expect(statSync(out).mode & 0o777).toBe(0o600)
+    const md = readFileSync(out, 'utf8')
+    const episodes = await pg.psql(`SELECT concat_ws(' | ', 'memory_episodes', 'legacy_episode',
+        (SELECT count(*) FROM public.memory_episodes),
+        (SELECT count(*) FROM public.memory_episodes WHERE forgotten_at IS NOT NULL),
+        (SELECT count(*) FROM public.memory_items WHERE class = 'legacy' AND kind = 'legacy_episode'),
+        (SELECT count(*) FROM public.memory_items WHERE class = 'legacy' AND kind = 'legacy_episode' AND forgotten_at IS NOT NULL),
+        (SELECT count(*) FROM public.memory_episodes o WHERE NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)),
+        (SELECT count(DISTINCT h.target_id) FROM public.memory_secret_hits h JOIN public.memory_items i ON i.id::text = h.target_id
+          WHERE h.target_table = 'memory_items' AND h.field = 'content' AND i.kind = 'legacy_episode'))`)
+    expect(md).toContain(`| ${episodes} |`)
+    expect(md).toMatch(/\| memory_episodes \| legacy_episode \| \d+ \| \d+ \| \d+ \| \d+ \| 0 \| [1-9]\d* \|/)
+    const mk = await pg.psql("SELECT count(*) FROM public.memory_items WHERE class = 'utterance' AND speaker = 'mk' AND forgotten_at IS NULL")
+    expect(md).toContain(`0 of ${mk} MK utterances (must be 0).`)
+    for (const line of invariants) expect(md).toContain(`| ${line} |`)
+    expect(md).toContain(violated === 0 ? 'Every invariant holds.' : `${violated} invariant(s) violated.`)
+    expect(md).toContain('| tst-app |')
+
+    const again = await cli('report', '--out', join(dir, 'report-again.md'), '--sample-seed', '11')
+    expect(again.code, again.err).toBe(0)
+    const body = (text: string): string => text.replace(/^Generated .*$/m, '')
+    expect(body(readFileSync(join(dir, 'report-again.md'), 'utf8'))).toBe(body(md))
   }, TEST_TIMEOUT_MS)
 })
