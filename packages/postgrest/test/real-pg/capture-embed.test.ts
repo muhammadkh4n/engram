@@ -119,7 +119,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
       )
 
       await expect(store.setEmbeddings([{ id: legacy, embedding: vector(0.5), model: MODEL }])).resolves.toBe(1)
-      expect((await store.pendingEmbeddings(256)).map((p) => p.id)).not.toContain(legacy)
+      expect((await store.pendingEmbeddings(256, CLAIMANT)).map((p) => p.id)).not.toContain(legacy)
     },
     TEST_TIMEOUT_MS,
   )
