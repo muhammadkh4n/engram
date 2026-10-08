@@ -170,7 +170,7 @@ describe('runCaptureEventsRequest', () => {
           index: 1,
           session_id: 'sess-a1',
           event_uuid: 'evt-register_entry-1',
-          reason: "payload.scope: names no registry project with the entry id's prefix",
+          reason: "payload.scope: no registry vault folder has the entry id's prefix",
         },
       ],
     })
