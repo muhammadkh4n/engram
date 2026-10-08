@@ -14,7 +14,7 @@ import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { ensurePrivateDir } from '../ingest/private-files.js'
-import { acquireFileLock, releaseFileLock, writePrivateFileAtomic } from '../capture/transcript-cursor.js'
+import { acquireFileLease, writePrivateFileAtomic } from '../capture/transcript-cursor.js'
 
 type Env = Record<string, string | undefined>
 
@@ -102,13 +102,17 @@ export function withRun(state: BackfillState, command: string, summary: unknown,
   return { ...state, runs: { ...state.runs, [command]: { finished_at: at.toISOString(), summary } } }
 }
 
-/** Runs `fn` holding the state directory's run lock; a second run against the same directory fails at once. */
+/**
+ * Runs `fn` holding the state directory's run lock as a lease, renewed while
+ * `fn` runs, so a run longer than the stale window is never taken over; a
+ * second run against the same directory fails at once.
+ */
 export async function withRunLock<T>(paths: BackfillPaths, fn: () => Promise<T>): Promise<T> {
-  const token = await acquireFileLock(paths.runLock, { staleMs: RUN_LOCK_STALE_MS, waitMs: 0 })
-  if (token === undefined) throw new Error(`another backfill run holds ${paths.runLock}`)
+  const lease = await acquireFileLease(paths.runLock, { staleMs: RUN_LOCK_STALE_MS, waitMs: 0 })
+  if (lease === undefined) throw new Error(`another backfill run holds ${paths.runLock}`)
   try {
     return await fn()
   } finally {
-    await releaseFileLock(paths.runLock, token)
+    await lease.release()
   }
 }

@@ -11,7 +11,8 @@ import { join } from 'node:path'
 import { scrubEvent } from '../capture-events/scrub.js'
 import type { CaptureClient, CaptureEvent } from '../capture/events.js'
 import { readyForRoute } from '../capture/route-fit.js'
-import { drainSpool, type DrainStop, writeDeadLetters, writeSpoolBatch } from '../capture/spool.js'
+import { drainSpool, type DrainStop } from '../capture/spool-drain.js'
+import { writeDeadLetters, writeSpoolBatch } from '../capture/spool.js'
 
 type Env = Record<string, string | undefined>
 

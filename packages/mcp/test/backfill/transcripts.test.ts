@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, wr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runBackfillCli } from '../../src/backfill/engram-backfill-cli.js'
-import { drainSpool } from '../../src/capture/spool.js'
+import { drainSpool } from '../../src/capture/spool-drain.js'
 import { spoolTranscript } from '../../src/capture/spool-transcript.js'
 import { type CaptureStub, type CaptureStubReply, type CaptureStubRequest, startCaptureStub } from '../capture/stub-server.js'
 import { assistantText, at, humanPrompt, turnEnd, uuid, writeTranscript } from '../capture/transcripts.js'
