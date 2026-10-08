@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { type CompleteJsonRequest, resetDefaultSecretRegistry } from '@engram-mem/core'
+import { type CompleteJsonRequest, defaultSecretRegistry, resetDefaultSecretRegistry } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { LEGACY_STEPS, postgrestLegacyCopyStore, runLegacyStep } from '../../src/backfill/legacy-copy.js'
@@ -122,8 +122,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy salvage on real Postgre
       projects: [{ id: 'tst-app', kind: 'project' }],
       apply: true,
       log: () => {},
+      status: () => defaultSecretRegistry().status(),
     }
-    for (const step of LEGACY_STEPS) await runLegacyStep(opts, step)
+    for (const step of LEGACY_STEPS) expect((await runLegacyStep(opts, step)).refused).toBeNull()
   }, SETUP_TIMEOUT_MS)
 
   afterAll(async () => {

@@ -7,14 +7,16 @@
  * - nothing is sent while a copy step, the forgets included, has work left;
  * - a forgotten row is never sent, a covered session is skipped, the cut flag
  *   follows the raw turn's length, and a second run gets duplicates only;
- * - the report's counts match the tables, and one seed reproduces it.
+ * - the report's counts match the tables, and one seed reproduces it;
+ * - with the secret sources unset or unreadable the copy inserts nothing and
+ *   names the reason, and once the file is readable the next run copies.
  */
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { resetDefaultSecretRegistry, type SecretRegistryStatus } from '@engram-mem/core'
+import { defaultSecretRegistry, resetDefaultSecretRegistry, type SecretRegistryStatus } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { runBackfillCli } from '../../src/backfill/engram-backfill-cli.js'
@@ -38,6 +40,7 @@ const EP_COVERED = '00000000-0000-4000-8000-000000000b04'
 const EP_FORGOTTEN = '00000000-0000-4000-8000-000000000b05'
 const EP_SECRET = '00000000-0000-4000-8000-000000000b06'
 const EP_GONE_REPO = '00000000-0000-4000-8000-000000000b07'
+const EP_LATE = '00000000-0000-4000-8000-000000000b08'
 const DIGEST = '00000000-0000-4000-8000-000000000b21'
 const COVERING_UTTERANCE = '00000000-0000-4000-8000-000000000b31'
 
@@ -165,7 +168,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy copy and legacy utteran
   it('plans the project map with each raw value and its rule', async () => {
     const run = await cli('legacy-copy', '--plan', '--map-out', join(dir, 'map.json'), '--json')
     expect(run.code, run.err).toBe(0)
-    const plan = JSON.parse(run.out) as { entries: Array<Record<string, unknown>> }
+    const plan = JSON.parse(run.out) as { entries: Array<Record<string, unknown>>; copy_refused: string | null }
+    expect(plan.copy_refused).toBeNull()
     expect(plan.entries).toEqual([
       { raw: null, rows: { memory_episodes: 0, memory_digests: 1, memory_semantic: 0 }, project_id: null, workspace_id: null, rule: 'null_project' },
       { raw: 'tst-app', rows: { memory_episodes: 6, memory_digests: 0, memory_semantic: 0 }, project_id: 'tst-app', workspace_id: 'tst-ws', rule: 'repository' },
@@ -183,8 +187,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy copy and legacy utteran
     expect(before.err).toMatch(/refused: the legacy copy step episodes has work left/)
 
     const map = JSON.parse(readFileSync(join(dir, 'map.json'), 'utf8')) as Record<string, never>
-    const opts = { store: postgrestLegacyCopyStore(client), map, projects: [{ id: 'tst-app', kind: 'project' }], apply: true, log: (line: string) => copyLog.push(line) }
-    for (const step of LEGACY_STEPS.slice(0, 4)) await runLegacyStep(opts, step)
+    const opts = { store: postgrestLegacyCopyStore(client), map, projects: [{ id: 'tst-app', kind: 'project' }], apply: true, log: (line: string) => copyLog.push(line), status: () => defaultSecretRegistry().status() }
+    for (const step of LEGACY_STEPS.slice(0, 4)) expect((await runLegacyStep(opts, step)).refused).toBeNull()
 
     const beforeForgets = await utterances()
     expect(beforeForgets.code).toBe(1)
@@ -270,5 +274,47 @@ describe.skipIf(!realPgImage || !postgrestImage)('legacy copy and legacy utteran
     expect(again.code, again.err).toBe(0)
     const body = (text: string): string => text.replace(/^Generated .*$/m, '')
     expect(body(readFileSync(join(dir, 'report-again.md'), 'utf8'))).toBe(body(md))
+  }, TEST_TIMEOUT_MS)
+
+  it('copies nothing while the secret registry is degraded, and copies once the sources file is readable', async () => {
+    await pg.psql(`INSERT INTO public.memory_episodes (id, session_id, role, content, embedding, metadata, created_at, project_id, forgotten_at)
+      VALUES ('${EP_LATE}', '${OPEN}', 'assistant', ${text(`the late token is ${FIXTURE_SECRET}`)}, ${VECTOR}, '{"source": "hook-stop"}',
+        '2026-03-01T09:07:00Z', 'tst-app', NULL);`)
+    const sources = join(dir, 'sources.json')
+    const copy = (): Promise<{ code: number; out: string; err: string }> =>
+      cli('legacy-copy', '--map', join(dir, 'map.json'), '--apply', '--json')
+    const lateItems = (): Promise<string> => pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = '${EP_LATE}'`)
+
+    vi.stubEnv('ENGRAM_SECRET_SOURCES_FILE', '')
+    resetDefaultSecretRegistry()
+    const unset = await copy()
+    expect(unset.code).toBe(1)
+    expect(JSON.parse(unset.out)).toMatchObject({ refused: 'the secret registry read no sources configuration', steps: [] })
+    expect(unset.err).toContain('refused: the secret registry read no sources configuration')
+    const plan = await cli('legacy-copy', '--plan', '--map-out', join(dir, 'map-degraded.json'), '--json')
+    expect(plan.code).toBe(1)
+    expect(JSON.parse(plan.out)).toMatchObject({ copy_refused: 'the secret registry read no sources configuration' })
+    expect(await lateItems()).toBe('0')
+
+    vi.stubEnv('ENGRAM_SECRET_SOURCES_FILE', sources)
+    chmodSync(sources, 0o000)
+    resetDefaultSecretRegistry()
+    try {
+      const unreadable = await copy()
+      expect(unreadable.code).toBe(1)
+      expect(JSON.parse(unreadable.out)).toMatchObject({ refused: `the secret registry could not read: ${sources}`, steps: [] })
+      expect(await lateItems()).toBe('0')
+    } finally {
+      chmodSync(sources, 0o644)
+    }
+
+    // A fresh process builds its registry anew; the reset stands in for one.
+    resetDefaultSecretRegistry()
+    const healthy = await copy()
+    expect(healthy.code, healthy.err).toBe(0)
+    expect(JSON.parse(healthy.out)).toMatchObject({ refused: null })
+    expect(await lateItems()).toBe('1')
+    expect(await pg.psql(`SELECT count(*) FROM public.memory_items WHERE id = '${EP_LATE}' AND content LIKE '%${FIXTURE_SECRET}%'`)).toBe('0')
+    expect(await pg.psql(`SELECT secret_name FROM public.memory_secret_hits WHERE target_id = '${EP_LATE}'`)).toBe('FIXTURE_SECRET')
   }, TEST_TIMEOUT_MS)
 })

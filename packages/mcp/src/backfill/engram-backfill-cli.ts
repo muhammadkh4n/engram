@@ -14,10 +14,15 @@
  *     transcript left, pastes put back; a bang command is not a prompt.
  *   - git: the user's non-merge commits on each registered repository's
  *     default branch, each built as the post-commit hook builds it.
- *   - legacy-copy (on the server, SUPABASE_URL and SUPABASE_KEY): `--plan`
- *     lists every raw project value of the old memory tables with what the
+ *   - legacy-copy (on the server, SUPABASE_URL, SUPABASE_KEY,
+ *     ENGRAM_SECRET_SOURCES_FILE and the project registry): `--plan` lists
+ *     every raw project value of the old memory tables with what the
  *     resolver makes of it and writes the project map; `--map` copies every
  *     old row into the item store as a legacy item, scrubbed before insert.
+ *     Both check the secret registry the scrub uses: while it read no sources
+ *     configuration or could not read a source, `--plan` says a copy would
+ *     refuse and exits 1, and `--map` stops before the next batch and exits 1
+ *     with the reason and the counts so far.
  *   - legacy-utterances (on the server): MK's own words in old prompt-capture
  *     rows, sent as prompts to the capture route of `--target`.
  *   - extract (on the server, with ENGRAM_EXTRACTION=hold, OPENAI_API_KEY and
@@ -57,6 +62,7 @@ import { promises as fs, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { PostgrestClient } from '@supabase/postgrest-js'
+import { defaultSecretRegistry, type SecretRegistryStatus } from '@engram-mem/core'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { PostgRestCaptureStore } from '@engram-mem/postgrest'
 import { captureModelFromEnv, chatIntelligenceOptionsFromEnv } from '../server-core.js'
@@ -149,7 +155,8 @@ const USAGE =
   '  history              prompts from the history file of sessions with no transcript left\n' +
   '  git                  your non-merge commits on each registered repository\'s default branch\n' +
   '  legacy-copy          the old memory tables into the item store as legacy items (server; SUPABASE_URL,\n' +
-  '                       SUPABASE_KEY)\n' +
+  '                       SUPABASE_KEY, ENGRAM_SECRET_SOURCES_FILE, ENGRAM_PROJECT_REGISTRY_FILE); refuses\n' +
+  '                       while the secret registry is degraded\n' +
   '  legacy-utterances    MK\'s own words in old prompt-capture rows, as prompts (server; SUPABASE_URL,\n' +
   '                       SUPABASE_KEY)\n' +
   '  extract              every pending session, oldest first across every source (server; ENGRAM_EXTRACTION=hold)\n' +
@@ -487,7 +494,11 @@ export function formatLegacyPlan(plan: LegacyPlan, mapFile: string): string {
       `digests=${e.rows.memory_digests} facts=${e.rows.memory_semantic} -> ` +
       `project=${e.project_id ?? '-'} workspace=${e.workspace_id ?? '-'} rule=${e.rule}\n`,
   )
-  return `plan: legacy-copy\n  raw project values:\n${lines.join('') || '    none\n'}  map written to ${mapFile}\n`
+  const registry = plan.copy_refused === null ? 'ok' : `${plan.copy_refused}; a copy would refuse`
+  return (
+    `plan: legacy-copy\n  raw project values:\n${lines.join('') || '    none\n'}  map written to ${mapFile}\n` +
+    `  secret registry: ${registry}\n`
+  )
 }
 
 export function formatLegacyCopy(s: LegacyCopySummary): string {
@@ -498,6 +509,7 @@ export function formatLegacyCopy(s: LegacyCopySummary): string {
   return (
     `${s.apply ? 'apply' : 'dry run'}: legacy-copy\n` +
     `  unmapped: ${s.unmapped.length === 0 ? 'none' : s.unmapped.join(', ')}\n` +
+    (s.refused === null ? '' : `  refused: ${s.refused}\n`) +
     `  steps:\n${steps.join('')}`
   )
 }
@@ -513,16 +525,19 @@ export function formatLegacyUtterances(s: LegacyUtterancesSummary): string {
   )
 }
 
+/** The process-wide registry `scrubSecrets` masks with; the legacy copy refuses while it is degraded. */
+const secretStatus = (): SecretRegistryStatus => defaultSecretRegistry().status()
+
 async function runLegacyCopyCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<LegacyOutcome> {
   const registryArg = required(args.registry ?? env.ENGRAM_PROJECT_REGISTRY_FILE, '--registry or ENGRAM_PROJECT_REGISTRY_FILE')
   const registry = loadResolverRegistry(expandHome(registryArg, env), env)
   const store = postgrestLegacyCopyStore(storeClient(env))
   if (args.plan) {
     const overrides = args.overrides ? loadOverrides(args.overrides, env) : new Map<string, string | null>()
-    const plan = await planLegacyProjects(store, createProjectResolver({ registry, overrides }, env))
+    const plan = await planLegacyProjects(store, createProjectResolver({ registry, overrides }, env), secretStatus)
     const mapFile = expandHome(args.mapOut!, env)
     await fs.writeFile(mapFile, `${JSON.stringify(plan.map, null, 2)}\n`)
-    return { summary: plan, text: formatLegacyPlan(plan, mapFile), ok: true }
+    return { summary: plan, text: formatLegacyPlan(plan, mapFile), ok: plan.copy_refused === null }
   }
   const map = parseProjectMap(readJsonFile(expandHome(args.map!, env), 'map file'))
   const summary = await runLegacyCopy({
@@ -531,8 +546,10 @@ async function runLegacyCopyCommand(args: BackfillCliArgs, env: Env, io: CliIo):
     projects: registryRows(registry).map((r) => ({ id: r.id, kind: r.kind })),
     apply: args.apply,
     log: (line) => io.err(`[engram-backfill] ${line}\n`),
+    status: secretStatus,
   })
-  return { summary, text: formatLegacyCopy(summary), ok: true }
+  if (summary.refused !== null) io.err(`[engram-backfill] refused: ${summary.refused}\n`)
+  return { summary, text: formatLegacyCopy(summary), ok: summary.refused === null }
 }
 
 async function runLegacyUtterancesCommand(args: BackfillCliArgs, env: Env, io: CliIo): Promise<LegacyOutcome> {

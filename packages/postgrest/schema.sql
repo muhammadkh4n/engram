@@ -2270,11 +2270,13 @@ END $$;
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
 -- first read of items still waiting for a vector. Its predicate is that
 -- function's WHERE, word for word, so it holds only the backlog embedding
--- drains: assistant utterances and legacy rows are never embedded by the
--- worker, and an index that held them would be walked whole on every idle
--- call. CREATE INDEX IF NOT EXISTS keeps an existing index whatever its
--- predicate, so an index built before the embedding_attempts clause, or one
--- that still left session indexes out, is dropped first and rebuilt;
+-- drains: assistant utterances are never embedded by the worker, and an
+-- index that held them would be walked whole on every idle call. A legacy
+-- item copied with its old vector is not NULL and so never enters it; one
+-- whose text was masked has no vector and waits here like any other item.
+-- CREATE INDEX IF NOT EXISTS keeps an existing index whatever its predicate,
+-- so an index built before the embedding_attempts clause, or one that still
+-- left session indexes or legacy items out, is dropped first and rebuilt;
 -- otherwise the planner could no longer match it to the function and every
 -- call would scan the table.
 DO $$ BEGIN
@@ -2284,11 +2286,12 @@ DO $$ BEGIN
               WHERE c.relname = 'idx_items_pending_embedding'
                 AND c.relnamespace = 'public'::regnamespace
                 AND (pg_catalog.pg_get_expr(x.indpred, x.indrelid) NOT LIKE '%(embedding_attempts < 5)%'
-                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%session_index%')) THEN
+                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%session_index%'
+                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%legacy%')) THEN
     DROP INDEX public.idx_items_pending_embedding;
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class <> 'legacy');
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant'));
 
 
 --
@@ -4586,11 +4589,13 @@ END; $$;
 --
 
 -- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
--- no embedding, not forgotten, fewer than 5 refused embedding attempts, not
--- an assistant utterance, and not a legacy item. Assistant turns are trust 3
--- and never ranked by vector; legacy rows are embedded by their own writer or
--- not at all. A session index is written without a vector and waits here
--- like any other item. Read only; idx_items_pending_embedding serves the
+-- no embedding, not forgotten, fewer than 5 refused embedding attempts, and
+-- not an assistant utterance. Assistant turns are trust 3 and never ranked
+-- by vector. A legacy item keeps its old row's vector when its text was
+-- copied unchanged, so it is never listed; one whose text was masked has no
+-- vector, since the old one embeds the secret, and is listed here to get one
+-- of the masked text. A session index is written without a vector and waits
+-- here like any other item. Read only; idx_items_pending_embedding serves the
 -- order, and its predicate repeats this WHERE word for word so the planner
 -- proves the match and the index holds no row this function skips. The WHERE
 -- columns are unqualified to keep that text identical; none of them is an
@@ -4611,7 +4616,6 @@ BEGIN
      AND forgotten_at IS NULL
      AND embedding_attempts < 5
      AND NOT (class = 'utterance' AND speaker = 'assistant')
-     AND class <> 'legacy'
    ORDER BY i.created_at, i.id
    LIMIT p_limit;
 END; $$;

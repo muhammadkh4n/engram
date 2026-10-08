@@ -7,7 +7,9 @@
  * - a supersession is linked only to a strictly later fact;
  * - what the old tables had forgotten is forgotten last, with everything
  *   built on it;
- * - a second run copies nothing, and no old table is written.
+ * - a second run copies nothing, and no old table is written;
+ * - a masked item, which has no vector, is listed for the embedding pass and
+ *   one that kept its old vector is not.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { realPgImage, startRealPg, type RealPg } from './harness.js'
@@ -353,6 +355,27 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
     expect(await copy('forgets', null)).toEqual({ step: 'forgets', copied: 0, remaining: 0 })
     expect(await count('SELECT count(*) FROM public.memory_items')).toBe(9)
     expect(await count('SELECT count(*) FROM public.memory_secret_hits')).toBe(1)
+  }, TEST_TIMEOUT_MS)
+
+  it('lists the masked item for the embedding pass, never one that kept its vector, also after a second schema apply', async () => {
+    const pendingEmbedding = (): Promise<string> =>
+      pg.psqlAs('service_role', `SELECT coalesce(string_agg(id::text || '|' || search_text, ',' ORDER BY id), '')
+                                   FROM public.engram_items_pending_embedding(256);`)
+    const indexDef = `SELECT c.oid::text || '|' || pg_catalog.pg_get_indexdef(c.oid) FROM pg_catalog.pg_class c
+                       WHERE c.relname = 'idx_items_pending_embedding' AND c.relnamespace = 'public'::regnamespace`
+    expect(await count("SELECT count(*) FROM public.memory_items WHERE class = 'legacy' AND embedding IS NOT NULL AND forgotten_at IS NULL")).toBe(4)
+    expect(await pendingEmbedding()).toBe(`${EP_MASKED}|${MASKED_TEXT}`)
+
+    const index = await pg.psql(indexDef)
+    expect(index).not.toContain('legacy')
+    await pg.applySchema()
+    expect(await pg.psql(indexDef)).toBe(index)
+    expect(await pendingEmbedding()).toBe(`${EP_MASKED}|${MASKED_TEXT}`)
+
+    await pg.psqlAs('service_role', `SELECT public.engram_items_set_embeddings(jsonb_build_array(jsonb_build_object(
+        'id', '${EP_MASKED}', 'model', 'text-embedding-3-small',
+        'embedding', (SELECT jsonb_agg(0.25) FROM generate_series(1, 1536)))));`)
+    expect(await pendingEmbedding()).toBe('')
   }, TEST_TIMEOUT_MS)
 
   it('leaves every old table unchanged and the items unchanged by a second schema apply', async () => {

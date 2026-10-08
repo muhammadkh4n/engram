@@ -13,10 +13,17 @@
  * which writes the items, their masks and their entities in one statement.
  * No unscrubbed text is ever inserted. Masks are logged by row id, detector
  * and secret name, never by value.
+ *
+ * Stored content is immutable, so a value the registry failed to mask could
+ * only ever be removed by forgetting its item. The copy therefore checks the
+ * registry before the run and around every batch, and refuses while it read
+ * no sources configuration or could not read a source, as the capture route
+ * does.
  */
 
-import { scrubSecrets, statementEntities } from '@engram-mem/core'
+import { scrubSecrets, statementEntities, type SecretRegistryStatus } from '@engram-mem/core'
 import type { PostgrestClient } from '@supabase/postgrest-js'
+import { degradedReason } from '../capture-events/route.js'
 import type { ProjectResolver, ResolverRule } from './project-resolver.js'
 
 export const LEGACY_TABLES = ['memory_episodes', 'memory_digests', 'memory_semantic'] as const
@@ -89,6 +96,8 @@ export interface LegacyPlan {
   mode: 'plan'
   entries: LegacyPlanEntry[]
   map: ProjectMap
+  /** Why a copy started now would refuse (the secret registry is degraded), or null. */
+  copy_refused: string | null
 }
 
 async function rawValueCounts(store: LegacyCopyStore): Promise<Map<string | null, Record<LegacyTable, number>>> {
@@ -102,7 +111,11 @@ async function rawValueCounts(store: LegacyCopyStore): Promise<Map<string | null
   return counts
 }
 
-export async function planLegacyProjects(store: LegacyCopyStore, resolve: ProjectResolver): Promise<LegacyPlan> {
+export async function planLegacyProjects(
+  store: LegacyCopyStore,
+  resolve: ProjectResolver,
+  status: () => SecretRegistryStatus,
+): Promise<LegacyPlan> {
   const entries: LegacyPlanEntry[] = []
   const map: ProjectMap = {}
   for (const [raw, rows] of await rawValueCounts(store)) {
@@ -115,7 +128,13 @@ export async function planLegacyProjects(store: LegacyCopyStore, resolve: Projec
     map[raw] = { project_id: r.project_id, workspace_id: r.workspace_id }
   }
   entries.sort((a, b) => (a.raw ?? '').localeCompare(b.raw ?? '') || (a.raw === null ? -1 : 1))
-  return { command: 'legacy-copy', mode: 'plan', entries, map: Object.fromEntries(Object.entries(map).sort()) }
+  return {
+    command: 'legacy-copy',
+    mode: 'plan',
+    entries,
+    map: Object.fromEntries(Object.entries(map).sort()),
+    copy_refused: degradedReason(status()),
+  }
 }
 
 /** Reads a project map as `--plan --map-out` writes it; a value of another shape throws. */
@@ -152,6 +171,8 @@ export interface LegacyCopySummary {
   apply: boolean
   /** Raw project values the map does not name; a copy refuses to start while any is left. */
   unmapped: string[]
+  /** Why the run stopped before a batch: the secret registry was degraded. `steps` holds the counts so far. */
+  refused: string | null
   steps: LegacyStepSummary[]
 }
 
@@ -162,6 +183,14 @@ export interface LegacyCopyOptions {
   apply: boolean
   log: (line: string) => void
   batchRows?: number
+  /** The status of the registry `scrubSecrets` masks with. */
+  status: () => SecretRegistryStatus
+}
+
+/** One step's counts, and why it stopped before a batch, if it did. */
+export interface LegacyStepRun {
+  summary: LegacyStepSummary
+  refused: string | null
 }
 
 /** The row as `engram_legacy_copy` takes it: scrubbed text, its masks, and the entities of the scrubbed text. */
@@ -178,13 +207,18 @@ export async function prepareLegacyRow(
   }
 }
 
-async function copyRows(opts: LegacyCopyOptions, step: LegacyStep): Promise<LegacyStepSummary> {
+async function copyRows(opts: LegacyCopyOptions, step: LegacyStep): Promise<LegacyStepRun> {
   const summary: LegacyStepSummary = { step, copied: 0, remaining: 0, sent: 0, masked: 0, entities: 0 }
   for (;;) {
+    const before = degradedReason(opts.status())
+    if (before !== null) return { summary, refused: before }
     const pending = await opts.store.pending(step, opts.batchRows ?? COPY_BATCH_ROWS)
-    if (pending.length === 0) return summary
+    if (pending.length === 0) return { summary, refused: null }
     const rows: LegacyCopyRow[] = []
     for (const row of pending) rows.push(await prepareLegacyRow(row, opts.projects))
+    // Scrubbing may rebuild the registry; a batch it scrubbed while degraded is not sent.
+    const after = degradedReason(opts.status())
+    if (after !== null) return { summary, refused: after }
     for (const row of rows) {
       for (const m of row.masks) opts.log(`masked ${step} ${row.id}: ${m.detector} ${m.secret_name ?? '(unnamed)'}`)
     }
@@ -198,11 +232,14 @@ async function copyRows(opts: LegacyCopyOptions, step: LegacyStep): Promise<Lega
   }
 }
 
-/** Runs one step to completion; a copy step goes batch by batch, the other two in one call. */
-export async function runLegacyStep(opts: LegacyCopyOptions, step: LegacyStep): Promise<LegacyStepSummary> {
+/**
+ * Runs one step to completion; a copy step goes batch by batch, the other two
+ * in one call. The other two send no text, so only a copy step can refuse.
+ */
+export async function runLegacyStep(opts: LegacyCopyOptions, step: LegacyStep): Promise<LegacyStepRun> {
   if ((COPY_STEPS as readonly string[]).includes(step)) return copyRows(opts, step)
   const result = await opts.store.copy(step, opts.map, null)
-  return { ...result, sent: 0, masked: 0, entities: 0 }
+  return { summary: { ...result, sent: 0, masked: 0, entities: 0 }, refused: null }
 }
 
 async function unmappedValues(store: LegacyCopyStore, map: ProjectMap): Promise<string[]> {
@@ -214,13 +251,16 @@ async function unmappedValues(store: LegacyCopyStore, map: ProjectMap): Promise<
  * Copies every old row, links the supersessions and forgets what the old
  * tables had forgotten. A dry run reports each step's pending work and the
  * unmapped project values, and writes nothing. `memory_procedural` is never
- * copied, so rows in it stop the run.
+ * copied, so rows in it stop the run. A degraded secret registry stops it
+ * before the first batch, or before any later one, with the counts so far.
  */
 export async function runLegacyCopy(opts: LegacyCopyOptions): Promise<LegacyCopySummary> {
   const procedural = await opts.store.proceduralRows()
   if (procedural > 0) throw new Error(`memory_procedural has ${procedural} rows, which the legacy copy does not carry`)
   const unmapped = await unmappedValues(opts.store, opts.map)
-  const summary: LegacyCopySummary = { command: 'legacy-copy', mode: 'copy', apply: opts.apply, unmapped, steps: [] }
+  const summary: LegacyCopySummary = { command: 'legacy-copy', mode: 'copy', apply: opts.apply, unmapped, refused: null, steps: [] }
+  const degraded = degradedReason(opts.status())
+  if (degraded !== null) return { ...summary, refused: degraded }
   if (!opts.apply) {
     for (const step of LEGACY_STEPS) {
       summary.steps.push({ step, copied: 0, remaining: await opts.store.pendingCount(step), sent: 0, masked: 0, entities: 0 })
@@ -229,9 +269,10 @@ export async function runLegacyCopy(opts: LegacyCopyOptions): Promise<LegacyCopy
   }
   if (unmapped.length > 0) throw new Error(`the map does not name ${unmapped.length} raw project value(s): ${unmapped.join(', ')}`)
   for (const step of LEGACY_STEPS) {
-    const result = await runLegacyStep(opts, step)
-    summary.steps.push(result)
-    if (result.remaining > 0) throw new Error(`step ${step} still has ${result.remaining} rows of work left`)
+    const run = await runLegacyStep(opts, step)
+    summary.steps.push(run.summary)
+    if (run.refused !== null) return { ...summary, refused: run.refused }
+    if (run.summary.remaining > 0) throw new Error(`step ${step} still has ${run.summary.remaining} rows of work left`)
   }
   return summary
 }
