@@ -55,6 +55,7 @@ import { gateWindow, type GateResult } from './gate.js'
 import { buildCommitPayload } from './persist.js'
 import { EXTRACTION_SYSTEM_PROMPT, EXTRACTOR_VERSION } from './prompt.js'
 import { parseReply } from './reply.js'
+import { cutWholeChars } from '../text/cut-text.js'
 import {
   buildWindow,
   extractionMaxTokens,
@@ -518,5 +519,5 @@ function errorLabel(err: unknown): string {
 /** `<code or name>: <message>`, the message capped; never a stack or a row. */
 function describeError(err: unknown): string {
   if (!(err instanceof Error)) return 'unknown error'
-  return `${errorLabel(err)}: ${err.message.slice(0, ERROR_MESSAGE_MAX_CHARS)}`
+  return `${errorLabel(err)}: ${cutWholeChars(err.message, ERROR_MESSAGE_MAX_CHARS)}`
 }
