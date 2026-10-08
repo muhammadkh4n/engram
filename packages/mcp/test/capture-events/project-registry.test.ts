@@ -105,13 +105,34 @@ describe('parseProjectRegistry', () => {
     )
   })
 
-  it('refuses a prefix used twice, across projects and workspaces', () => {
+  it('refuses a prefix that names two vault folders, across projects and workspaces', () => {
     const doc = sampleDoc()
     doc.projects['loose-repo'].register_prefix = 'TST'
-    expect(refusal(doc)).toBe('project registry: projects.loose-repo.register_prefix: prefix is already used by another entry')
+    expect(refusal(doc)).toBe('project registry: projects.loose-repo.register_prefix: prefix already names another vault folder')
     const crossed = sampleDoc()
     crossed.projects['loose-repo'].register_prefix = 'TSTW'
-    expect(refusal(crossed)).toMatch(/^project registry: projects\.loose-repo\.register_prefix: /)
+    crossed.projects['loose-repo'].vault_folder = 'Elsewhere'
+    expect(refusal(crossed)).toBe(
+      'project registry: projects.loose-repo.register_prefix: prefix already names another vault folder',
+    )
+  })
+
+  it('accepts repositories that keep their rulings in one folder sharing its prefix', () => {
+    const doc = sampleDoc()
+    doc.projects['loose-repo'] = { workspace: 'ws-test', vault_folder: 'Sample Workspace', register_prefix: 'TSTW' }
+    doc.projects['third-repo'] = { workspace: 'ws-test', vault_folder: 'Sample Workspace', register_prefix: 'TSTW' }
+    const registry = parseProjectRegistry(doc)
+    expect([...registry.projects.values()].filter((p) => p.registerPrefix === 'TSTW').map((p) => p.id)).toEqual([
+      'loose-repo',
+      'third-repo',
+    ])
+  })
+
+  it('refuses a vault folder given a second prefix', () => {
+    const doc = sampleDoc()
+    doc.projects['loose-repo'].vault_folder = 'Sample Repo'
+    doc.projects['loose-repo'].register_prefix = 'TSTX'
+    expect(refusal(doc)).toBe('project registry: projects.loose-repo.register_prefix: vault folder already has another prefix')
   })
 
   it('refuses an id that is both a project and a workspace', () => {
