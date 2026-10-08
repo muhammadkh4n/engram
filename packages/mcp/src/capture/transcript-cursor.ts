@@ -235,7 +235,7 @@ async function removeStaleLock(path: string, staleMs: number): Promise<boolean> 
 }
 
 /** The lock's token, or undefined when another holder kept it for `waitMs`. */
-export async function acquireFileLock(path: string, opts: FileLockOptions): Promise<string | undefined> {
+async function acquireFileLock(path: string, opts: FileLockOptions): Promise<string | undefined> {
   const token = `${process.pid} ${Date.now()} ${randomBytes(6).toString('hex')}`
   const deadline = Date.now() + opts.waitMs
   let backoffMs = LOCK_RETRY_MIN_MS
@@ -250,7 +250,7 @@ export async function acquireFileLock(path: string, opts: FileLockOptions): Prom
 }
 
 /** Removes the lock only while it still carries this holder's token. */
-export async function releaseFileLock(path: string, token: string): Promise<void> {
+async function releaseFileLock(path: string, token: string): Promise<void> {
   try {
     if ((await fs.readFile(path, 'utf8')).trim() === token) await fs.rm(path, { force: true })
   } catch (err) {
@@ -258,12 +258,8 @@ export async function releaseFileLock(path: string, token: string): Promise<void
   }
 }
 
-/**
- * Marks the lock fresh while it still carries this holder's token, so a
- * holder that works past `staleMs` is not taken over; false when the lock is
- * gone or another holder's, and the caller must stop.
- */
-export async function refreshFileLock(path: string, token: string): Promise<boolean> {
+/** Marks the lock fresh while it still carries this holder's token; false when it is gone or another holder's. */
+async function refreshFileLock(path: string, token: string): Promise<boolean> {
   try {
     if ((await fs.readFile(path, 'utf8')).trim() !== token) return false
     const now = new Date()
@@ -274,6 +270,86 @@ export async function refreshFileLock(path: string, token: string): Promise<bool
     throw err
   }
 }
+
+/** A held lock that renews itself; see `acquireFileLease`. */
+export interface FileLease {
+  /** True once a renewal found the lock gone or another holder's: the holder must stop before its next write. */
+  readonly lost: boolean
+  /** Renews the lock now; false, and lost from then on, when it is no longer this holder's. */
+  renew(): Promise<boolean>
+  /** Stops renewing and removes the lock while it still carries this holder's token. */
+  release(): Promise<void>
+}
+
+class RenewingLease implements FileLease {
+  private isLost = false
+  private renewing: Promise<boolean> | null = null
+  private readonly timer: ReturnType<typeof setInterval>
+
+  constructor(
+    private readonly path: string,
+    private readonly token: string,
+    staleMs: number,
+  ) {
+    this.timer = setInterval(() => void this.renew(), Math.max(1, Math.floor(staleMs / 3)))
+    this.timer.unref?.()
+  }
+
+  get lost(): boolean {
+    return this.isLost
+  }
+
+  renew(): Promise<boolean> {
+    if (this.isLost) return Promise.resolve(false)
+    // A timer tick and an explicit renewal share one in-flight check.
+    this.renewing ??= this.refresh().finally(() => {
+      this.renewing = null
+    })
+    return this.renewing
+  }
+
+  async release(): Promise<void> {
+    clearInterval(this.timer)
+    await this.renewing
+    await releaseFileLock(this.path, this.token)
+  }
+
+  /** Never rejects: a lock whose file cannot be checked cannot be shown to be held, so it counts as lost. */
+  private async refresh(): Promise<boolean> {
+    let held: boolean
+    try {
+      held = await refreshFileLock(this.path, this.token)
+    } catch {
+      held = false
+    }
+    if (!held) {
+      this.isLost = true
+      clearInterval(this.timer)
+    }
+    return held
+  }
+}
+
+/**
+ * Takes `path` as a lease: the lock file's mtime is renewed every third of
+ * `staleMs` while held, so a holder working longer than `staleMs` is not
+ * taken over as stale. Undefined when another holder kept the lock for
+ * `waitMs`. A renewal that finds the lock gone or another holder's marks the
+ * lease lost; the holder checks `lost` (or `renew()`) before each write that
+ * another holder's work could contradict.
+ */
+export async function acquireFileLease(path: string, opts: FileLockOptions): Promise<FileLease | undefined> {
+  const token = await acquireFileLock(path, opts)
+  return token === undefined ? undefined : new RenewingLease(path, token, opts.staleMs)
+}
+
+/** What a read is asked to do. A close request is the stronger one: it also closes a turn still open at EOF. */
+export interface ReadRequest {
+  forceClose: boolean
+}
+
+const CLOSE_REQUEST = 'close'
+const READ_REQUEST = 'read'
 
 /** Removes `path`; true when it existed. */
 async function consume(path: string): Promise<boolean> {
@@ -286,42 +362,102 @@ async function consume(path: string): Promise<boolean> {
   }
 }
 
-async function touch(path: string): Promise<void> {
-  const handle = await openPrivateHandle(path, 'a')
-  await handle.close()
+/**
+ * `<dir>.again/`, one file per waiting request. A directory of its own,
+ * because a name prefix in the shared root could also match the files of a
+ * session whose id starts with this one's followed by `.again.`.
+ */
+function requestDir(root: string, name: string): string {
+  return join(root, `${name}.again`)
 }
 
 /**
- * Runs `fn` holding `<root>/<dir>.lock`. A reader that cannot take the lock
- * within the wait touches `<dir>.again` and returns undefined: the holder
- * finds that file after its read, removes it and reads once more before it
- * releases the lock, so the lines that reader came for are not left unread.
+ * Leaves a request for the holder as a file of its own. It is written under
+ * a `.`-prefixed temp name and renamed into place, so the holder never reads
+ * a request half written, and no waiter writes into another's file.
+ */
+async function leaveRequest(dir: string, request: ReadRequest): Promise<void> {
+  ensurePrivateDir(dir)
+  const path = join(dir, `${process.pid}-${randomBytes(4).toString('hex')}`)
+  await writePrivateFileAtomic(path, `${request.forceClose ? CLOSE_REQUEST : READ_REQUEST}\n`)
+}
+
+/**
+ * Takes every request waiting in `dir`, or null when none is. Only renamed
+ * request files are listed (a temp name starts with `.`), and each one is
+ * read whole before it is removed; a request published after the listing is
+ * found by the next take.
+ */
+async function takeRequests(dir: string): Promise<ReadRequest | null> {
+  let names: string[]
+  try {
+    names = (await fs.readdir(dir)).filter((n) => !n.startsWith('.'))
+  } catch (err) {
+    if (isErrno(err, 'ENOENT')) return null
+    throw err
+  }
+  let taken = false
+  let forceClose = false
+  for (const n of names) {
+    const path = join(dir, n)
+    let text: string
+    try {
+      text = await fs.readFile(path, 'utf8')
+    } catch (err) {
+      if (isErrno(err, 'ENOENT')) continue
+      throw err
+    }
+    await consume(path)
+    taken = true
+    if (text.split('\n').includes(CLOSE_REQUEST)) forceClose = true
+  }
+  return taken ? { forceClose } : null
+}
+
+/**
+ * Runs `fn` holding `<root>/<dir>.lock` as a lease, so a read longer than the
+ * lock's stale age keeps it. A reader that cannot take the lock within the
+ * wait leaves its request as a file in `<dir>.again/` and returns undefined:
+ * the holder takes those files after its read and reads once more before it releases the
+ * lock, so the lines that reader came for are not left unread. Every read is
+ * asked for the strongest request among the caller's and the ones waiting, so
+ * a session end that found the lock busy still closes the final turn. `fn`
+ * gets the lease and must not save a cursor once it is lost, since the holder
+ * that took the lock over may already have saved a later one; a lost lease
+ * reads no more and leaves the waiting requests to that holder.
  */
 export async function withReaderLock<T>(
   root: string,
   sessionId: string,
-  fn: () => Promise<T>,
-  opts: Partial<FileLockOptions> = {},
+  fn: (lease: FileLease, read: ReadRequest) => Promise<T>,
+  opts: Partial<FileLockOptions> & { forceClose?: boolean } = {},
 ): Promise<T | undefined> {
   ensurePrivateDir(root)
   const name = sessionFileName(sessionId)
   const lockPath = join(root, `${name}.lock`)
-  const againPath = join(root, `${name}.again`)
-  const token = await acquireFileLock(lockPath, {
+  const requests = requestDir(root, name)
+  const own: ReadRequest = { forceClose: opts.forceClose === true }
+  const lease = await acquireFileLease(lockPath, {
     staleMs: opts.staleMs ?? READER_LOCK_STALE_MS,
     waitMs: opts.waitMs ?? READER_LOCK_WAIT_MS,
   })
-  if (token === undefined) {
-    await touch(againPath)
+  if (lease === undefined) {
+    await leaveRequest(requests, own)
     return undefined
   }
+  const strongest = (waiting: ReadRequest | null): ReadRequest => ({
+    forceClose: own.forceClose || waiting?.forceClose === true,
+  })
   try {
     // A leftover from an earlier holder is covered by this first read.
-    await consume(againPath)
-    let result = await fn()
-    while (await consume(againPath)) result = await fn()
+    let result = await fn(lease, strongest(await takeRequests(requests)))
+    while (!lease.lost) {
+      const waiting = await takeRequests(requests)
+      if (waiting === null) break
+      result = await fn(lease, strongest(waiting))
+    }
     return result
   } finally {
-    await releaseFileLock(lockPath, token)
+    await lease.release()
   }
 }

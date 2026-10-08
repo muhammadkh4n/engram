@@ -11,7 +11,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import type { CaptureStore, ProjectRow } from '@engram-mem/core'
+import { cutWholeChars, type CaptureStore, type ProjectRow } from '@engram-mem/core'
 import type { CaptureEvent } from './contract.js'
 
 export const PROJECT_REGISTRY_VERSION = 1
@@ -68,7 +68,7 @@ function fail(path: string, rule: string): never {
 /** `a.b` for a key that is a plain identifier, `a["…"]` (JSON-quoted, cut to 100 chars) otherwise. */
 function child(path: string, key: string): string {
   const plain = REGISTRY_ID_PATTERN.test(key) || /^[a-z_]+$/.test(key)
-  const part = plain ? key : `[${JSON.stringify(key.slice(0, 100))}]`
+  const part = plain ? key : `[${JSON.stringify(cutWholeChars(key, 100))}]`
   if (!path) return part
   return plain ? `${path}.${part}` : `${path}${part}`
 }

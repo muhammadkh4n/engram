@@ -1,3 +1,5 @@
+import { cutWholeChars, tailWholeChars } from '../text/cut-text.js'
+
 /**
  * Upper bound, in UTF-16 code units, on the text sent to the embedding model
  * for one message. When a message is longer, its head is kept: the opening of
@@ -23,7 +25,7 @@ const utf8Decoder = new TextDecoder()
  * a character boundary. Text within both bounds is returned unchanged.
  */
 export function capEmbedText(text: string): string {
-  const head = text.length > EMBED_MAX_CHARS ? text.slice(0, EMBED_MAX_CHARS) : text
+  const head = cutWholeChars(text, EMBED_MAX_CHARS)
   // One UTF-16 code unit encodes to at most 3 UTF-8 bytes.
   if (head.length * 3 <= EMBED_MAX_UTF8_BYTES) return head
   const bytes = utf8Encoder.encode(head)
@@ -72,6 +74,8 @@ export interface EmbedTextInput {
  *  - a message > 20 chars on its own: the message head;
  *  - a short message: the raw string content when there is one (too little
  *    clean text to embed meaningfully), else the clean text.
+ * Every cut keeps whole characters: a split surrogate pair is malformed
+ * text to the embedding provider.
  */
 export function buildTextToEmbed(input: EmbedTextInput): string {
   return capEmbedText(buildUncapped(input))
@@ -81,21 +85,21 @@ function buildUncapped(input: EmbedTextInput): string {
   const { cleanText, rawContent, preamble, contextTurns } = input
 
   if (preamble) {
-    return `${preamble.trim()}\n\n${cleanText}`.slice(0, EMBED_MAX_CHARS)
+    return cutWholeChars(`${preamble.trim()}\n\n${cleanText}`, EMBED_MAX_CHARS)
   }
 
   if (cleanText.length > 20) {
     if (contextTurns && contextTurns.length > 0) {
       const room = EMBED_MAX_CHARS - cleanText.length - 1
       if (room <= 0) {
-        return cleanText.slice(0, EMBED_MAX_CHARS)
+        return cutWholeChars(cleanText, EMBED_MAX_CHARS)
       }
       const contextBudget = Math.min(EMBED_CONTEXT_MAX_CHARS, room)
-      const context = contextTurns.join('\n').slice(-contextBudget)
+      const context = tailWholeChars(contextTurns.join('\n'), contextBudget)
       return `${context}\n${cleanText}`
     }
-    return cleanText.slice(0, EMBED_MAX_CHARS)
+    return cutWholeChars(cleanText, EMBED_MAX_CHARS)
   }
 
-  return (rawContent ?? cleanText).slice(0, EMBED_MAX_CHARS)
+  return cutWholeChars(rawContent ?? cleanText, EMBED_MAX_CHARS)
 }

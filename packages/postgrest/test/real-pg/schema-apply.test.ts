@@ -173,6 +173,26 @@ describe.skipIf(!realPgImage)('schema.sql and bm25.sql on real Postgres', () => 
     expect(await pg.psql("SELECT has_function_privilege('service_role', 'public.memory_items_before_update()', 'EXECUTE')")).toBe('f')
   }, TEST_TIMEOUT_MS)
 
+  it('replaces an insert function that returns an earlier result shape', async () => {
+    const resultShape = () =>
+      pg.psql("SELECT pg_get_function_result('public.engram_insert_items(jsonb)'::regprocedure)")
+    const grants = () =>
+      pg.psql(`SELECT r || '|' || has_function_privilege(r, 'public.engram_insert_items(jsonb)', 'EXECUTE')
+               FROM unnest(ARRAY['service_role', 'anon', 'authenticated']) AS r ORDER BY r`)
+    const fresh = { shape: await resultShape(), grants: await grants() }
+    expect(fresh.shape).toContain('forgotten boolean')
+    await pg.psql(`DROP FUNCTION public.engram_insert_items(jsonb);
+      CREATE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean)
+        LANGUAGE sql AS $$ SELECT 1, NULL::uuid, false $$`)
+    expect(await resultShape()).not.toContain('forgotten')
+
+    await pg.applySchema()
+
+    expect(await resultShape()).toBe(fresh.shape)
+    expect(await grants()).toBe(fresh.grants)
+    expect(fresh.grants).toContain('service_role|t')
+  }, TEST_TIMEOUT_MS)
+
   it('stores the storage parameters on memory_items', async () => {
     const options = (await pg.psql("SELECT unnest(reloptions) FROM pg_class WHERE oid = 'public.memory_items'::regclass"))
       .split('\n')

@@ -79,6 +79,7 @@ function registerEntry(id: string, status: string, minutes: number, supersedes: 
       subject: 'importer flags',
       said_at: at(minutes),
       quote: 'every importer ships behind a flag',
+      said_as: 'words',
       question: null,
       verified: 'transcript line 12',
       applies_to: [],
@@ -254,6 +255,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
             by: 'mk',
             quote: 'ship it behind a flag',
             source: 'session of 2026-10-01',
+            said_as: 'words',
+            question: null,
           },
           { occurredAt: at(4) },
         ),
@@ -272,6 +275,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
             subject: 'importer flags',
             said_at: at(6),
             quote: 'every importer ships behind a flag',
+            said_as: 'words',
             question: 'Should importers ship dark?',
             verified: 'transcript line 12',
             applies_to: ['importers', 'flags'],
@@ -391,6 +395,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
           by: 'mk',
           quote: 'ship it behind a flag',
           quote_source: 'session of 2026-10-01',
+          said_as: 'words',
           version_of: 'ledger-decision:sample-plan:flag-rollout',
         },
       })
@@ -442,6 +447,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
           scope: 'project:sample-repo',
           file: '/notes/Sample/Rulings.md',
           said_at: at(6),
+          said_as: 'words',
           verified: 'transcript line 12',
           applies_to: ['importers', 'flags'],
           triggers: ['new importer'],
@@ -524,6 +530,90 @@ describe.skipIf(!realPgImage || !postgrestImage)('engram_capture_materialize thr
       expect(second.content).toBe('Neither, use 7070.')
       expect(second.context).toBe('[Port] Which port?\n- 8080: default')
       expect(second.search_text).toBe('Q: Which port?\n\nResponse: Neither, use 7070.')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'renders a picked option as MK chose and a typed quote as MK words, each with the question it answers',
+    async () => {
+      const mkDecision = (id: string, saidAs: string, question: string | null, minutes: number): StoredEvent =>
+        event(
+          'sess-said-as',
+          'ledger_decision',
+          {
+            plan: 'sample-plan',
+            id,
+            class: 'A',
+            trigger: '',
+            ruling: 'The worker runs from a timer.',
+            by: 'mk',
+            quote: 'Timer (Recommended)',
+            source: 'transcript sess-x line 4',
+            said_as: saidAs,
+            question,
+          },
+          { occurredAt: at(minutes) },
+        )
+      const entry = (id: string, saidAs: string, question: string | null, minutes: number): StoredEvent =>
+        event(
+          'sess-said-as',
+          'register_entry',
+          {
+            id,
+            status: 'active',
+            subject: 'worker schedule',
+            said_at: at(minutes),
+            quote: 'Timer (Recommended)',
+            said_as: saidAs,
+            question,
+            verified: 'transcript line 4',
+            applies_to: [],
+            triggers: [],
+            supersedes: [],
+            restated: [],
+            scope: 'global',
+            file: '/notes/Sample/Rulings.md',
+          },
+          { occurredAt: at(minutes) },
+        )
+      const [choiceAsked, choiceUnasked, wordsAsked, entryChoiceAsked, entryChoiceUnasked, entryWordsAsked] = (await ingest([
+        mkDecision('sched-1', 'choice', 'Timer or cron?', 1),
+        mkDecision('sched-2', 'choice', null, 2),
+        mkDecision('sched-3', 'words', 'Timer or cron?', 3),
+        entry('R-TST-31', 'choice', 'Timer or cron?', 4),
+        entry('R-TST-32', 'choice', '  ', 5),
+        entry('R-TST-33', 'words', 'Timer or cron?', 6),
+      ])) as [string, string, string, string, string, string]
+
+      await expect(store.materialize(200)).resolves.toEqual(counts(6, 0, 0, 0, 0))
+
+      const head = (id: string) => `sample-plan ${id} (class A)\nThe worker runs from a timer.\n`
+      const decided = await itemOf(choiceAsked)
+      expect(decided.content).toBe('The worker runs from a timer.')
+      expect(decided.search_text).toBe(`${head('sched-1')}MK chose: "Timer (Recommended)"${DOT}answering: "Timer or cron?"`)
+      expect(decided.source).toMatchObject({ by: 'mk', said_as: 'choice', question: 'Timer or cron?' })
+      const unasked = await itemOf(choiceUnasked)
+      expect(unasked.search_text).toBe(`${head('sched-2')}MK chose: "Timer (Recommended)"`)
+      expect(unasked.source).toMatchObject({ said_as: 'choice' })
+      expect(unasked.source).not.toHaveProperty('question')
+      const typed = await itemOf(wordsAsked)
+      expect(typed.search_text).toBe(`${head('sched-3')}MK: "Timer (Recommended)"${DOT}answering: "Timer or cron?"`)
+      expect(typed.source).toMatchObject({ said_as: 'words', question: 'Timer or cron?' })
+
+      const entryHead = (id: string) => `${id}${DOT}active${DOT}worker schedule${DOT}`
+      const chosen = await itemOf(entryChoiceAsked)
+      expect(chosen.content).toBe(
+        `${entryHead('R-TST-31')}MK chose, ${at(4)}: "Timer (Recommended)"${DOT}answering: "Timer or cron?"`,
+      )
+      expect(chosen.context).toBe('Timer or cron?')
+      expect(chosen.source).toMatchObject({ said_as: 'choice' })
+      const chosenUnasked = await itemOf(entryChoiceUnasked)
+      expect(chosenUnasked.content).toBe(`${entryHead('R-TST-32')}MK chose, ${at(5)}: "Timer (Recommended)"`)
+      expect(chosenUnasked.context).toBeNull()
+      const said = await itemOf(entryWordsAsked)
+      expect(said.content).toBe(`${entryHead('R-TST-33')}MK, ${at(6)}: "Timer (Recommended)"${DOT}answering: "Timer or cron?"`)
+      expect(said.source).toMatchObject({ said_as: 'words' })
     },
     TEST_TIMEOUT_MS,
   )
