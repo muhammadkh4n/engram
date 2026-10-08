@@ -180,7 +180,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('documents sync, one transactio
 
     const pending = await pg.psqlAs(
       'service_role',
-      `SELECT count(*) FROM public.engram_items_pending_embedding(256) p WHERE p.id = ANY ('{${result.itemIds.join(',')}}'::uuid[])`,
+      `SELECT count(*) FROM public.engram_items_pending_embedding(256, '00000000-0000-4000-8000-00000000d0c5'::uuid) p WHERE p.id = ANY ('{${result.itemIds.join(',')}}'::uuid[])`,
     )
     expect(pending).toBe('2')
     const row = await pg.psql(`SELECT json_build_object('v', note_version, 'deleted', deleted_at IS NOT NULL, 'fm', frontmatter)
