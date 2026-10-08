@@ -33,6 +33,56 @@ interface Allowed {
 
 const ALLOWED: readonly Allowed[] = [
   {
+    file: 'packages/core/src/extraction/decide.ts',
+    line: 'read.candidates.slice(0, DECISION_CANDIDATES_MAX)',
+    reason: 'cuts an array of candidates, not a string',
+  },
+  {
+    file: 'packages/core/src/extraction/decide.ts',
+    line: 'item.occurredAt.slice(0, 10)',
+    reason: 'an ISO 8601 timestamp is ASCII; its first ten characters are the date',
+  },
+  {
+    file: 'packages/core/src/extraction/decide.ts',
+    line: 'c.occurredAt.slice(0, 10)',
+    reason: 'an ISO 8601 timestamp is ASCII; its first ten characters are the date',
+  },
+  {
+    file: 'packages/core/src/extraction/decide.ts',
+    line: "points.slice(0, max).join('')",
+    reason: 'cuts an array of code points, so no pair is split',
+  },
+  {
+    file: 'packages/core/src/extraction/retractions.ts',
+    line: 'sentence.slice(0, match.index)',
+    reason: 'ends where an ASCII retraction phrase matched, and the cut text is only read for negation words, never stored',
+  },
+  {
+    file: 'packages/core/src/extraction/retractions.ts',
+    line: 'split(/\\s+/).slice(-NEGATION_LOOKBACK_WORDS)',
+    reason: 'cuts an array of words, not a string',
+  },
+  {
+    file: 'packages/core/src/extraction/session-index.ts',
+    line: 'at.toISOString().slice(0, 19)',
+    reason: 'an ISO 8601 timestamp is ASCII; its first nineteen characters are the time to the second',
+  },
+  {
+    file: 'packages/core/src/extraction/session-index.ts',
+    line: ".trim()).slice(0, max).join('')",
+    reason: 'cuts an array of code points, so no pair is split',
+  },
+  {
+    file: 'packages/core/src/extraction/session-index.ts',
+    line: 's.sha.slice(0, SHA_SHOWN)',
+    reason: 'a commit sha is ASCII hex',
+  },
+  {
+    file: 'packages/core/src/extraction/window.ts',
+    line: '[...firsts.values()].slice(0, SHOWN_LISTING_LIMIT)',
+    reason: 'cuts an array of listed items, not a string',
+  },
+  {
     file: 'packages/core/src/utils/event-date.ts',
     line: 'd.toISOString().slice(0, 10)',
     reason: 'an ISO 8601 timestamp is ASCII; its first ten characters are the date',
