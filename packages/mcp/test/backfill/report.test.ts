@@ -297,6 +297,12 @@ describe('backfill report samples', () => {
     expect(md).toContain('### History utterances (0 of 0)\n\n_none_')
   })
 
+  it('says plainly that no salvage observation is stored when there is none', async () => {
+    const r = await buildReport(fakeStore(emptyData()), { seed: 7, now: NOW })
+    expect(r.populations.salvage_observations).toBe(0)
+    expect(formatReport(r)).toContain('### Salvage observations (0 of 0)\n\n_none_\n')
+  })
+
   it('gives the same samples for the same seed, whatever order the store lists ids in', async () => {
     const a = await buildReport(fakeStore(sampled()), { seed: 7, now: NOW })
     const reversed = sampled()

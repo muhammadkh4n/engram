@@ -27,8 +27,11 @@
  *     rows, sent as prompts to the capture route of `--target`.
  *   - extract (on the server, with ENGRAM_EXTRACTION=hold, OPENAI_API_KEY and
  *     the server's ENGRAM_CHAT_* settings): every session with pending
- *     extraction or salvage work, oldest first across every source. A dry run
- *     lists the sessions and their windows and calls no model.
+ *     extraction work, oldest first across every source. A dry run lists the
+ *     sessions and their windows and calls no model. `--salvage` (off by
+ *     default) also salvages the old rows' sessions into observations; without
+ *     it the pass makes no salvage call and opens no salvage run, and its
+ *     summary says which way it ran.
  *   - report (on the server): a markdown report for review: counts by class
  *     and source, legacy completeness, invariant counts, extraction and
  *     capture health, and seeded samples. Reads only.
@@ -46,7 +49,7 @@
  *   engram-backfill legacy-copy --plan --map-out FILE [--registry FILE] [--overrides FILE] [--json]
  *   engram-backfill legacy-copy --map FILE [--registry FILE] [--apply] [--json]
  *   engram-backfill legacy-utterances [--target URL] [--token-file FILE] [--state-dir DIR] [--apply] [--json]
- *   engram-backfill extract [--max-calls N --apply] [--json]
+ *   engram-backfill extract [--salvage] [--max-calls N --apply] [--json]
  *   engram-backfill report --out FILE --sample-seed N [--json]
  *
  * Sending flags:
@@ -117,6 +120,7 @@ export interface BackfillCliArgs {
   apply: boolean
   json: boolean
   plan: boolean
+  salvage: boolean
   map: string | null
   mapOut: string | null
   maxCalls: number | null
@@ -190,6 +194,7 @@ const USAGE =
   '  --token-file FILE    as for the sending commands; --state-dir as well\n' +
   '  extract:\n' +
   '  --max-calls N        required with --apply: model calls this run may make; at the cap it exits 3\n' +
+  '  --salvage            also salvage the old rows\' sessions into observations (off by default)\n' +
   '  report:\n' +
   '  --out FILE           where to write the markdown (required; written owner-only)\n' +
   '  --sample-seed N      the seed the samples are drawn with, 0 to 4294967295 (required)\n' +
@@ -218,7 +223,7 @@ const REPEATED_FLAGS = {
 } as const satisfies Record<string, keyof BackfillCliArgs>
 
 const SENDING_FLAGS = ['--target', '--token-file', '--registry', '--state-dir', '--apply', '--json']
-const SWITCH_FLAGS = ['--apply', '--json', '--plan']
+const SWITCH_FLAGS = ['--apply', '--json', '--plan', '--salvage']
 
 /** The flags each command takes; another command's flag is a usage error, not silently ignored. */
 const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
@@ -227,7 +232,7 @@ const COMMAND_FLAGS: Record<BackfillCommand, ReadonlySet<string>> = {
   git: new Set([...SENDING_FLAGS, '--repo', '--repos-under', '--author-email', '--since']),
   'legacy-copy': new Set(['--plan', '--map-out', '--map', '--registry', '--overrides', '--apply', '--json']),
   'legacy-utterances': new Set(['--target', '--token-file', '--state-dir', '--apply', '--json']),
-  extract: new Set(['--max-calls', '--apply', '--json']),
+  extract: new Set(['--max-calls', '--salvage', '--apply', '--json']),
   report: new Set(['--out', '--sample-seed', '--json']),
 }
 
@@ -246,6 +251,7 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     apply: false,
     json: false,
     plan: false,
+    salvage: false,
     map: null,
     mapOut: null,
     maxCalls: null,
@@ -272,6 +278,7 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs |
     if (flag === '--apply') args.apply = true
     else if (flag === '--json') args.json = true
     else if (flag === '--plan') args.plan = true
+    else if (flag === '--salvage') args.salvage = true
     else {
       const value = rest[++i]?.trim()
       if (!value || value.startsWith('--')) throw new UsageError(`${flag} requires a value`)
@@ -597,6 +604,7 @@ export function formatExtractPass(s: ExtractPassSummary): string {
   })
   return (
     `${s.apply ? 'apply' : 'dry run'}: extract\n` +
+    `  salvage: ${s.salvage ? 'included' : 'off (run with --salvage to include it)'}\n` +
     `  calls=${s.calls} max_calls=${s.maxCalls ?? '-'} capped=${s.capped} failed=${s.failed}\n` +
     `  sessions (oldest first):\n${lines.join('') || '    none\n'}` +
     `  stopped: ${s.stopped ?? 'none'}\n`
@@ -611,7 +619,7 @@ async function runExtractCommand(args: BackfillCliArgs, env: Env, io: CliIo): Pr
   if (args.apply && !apiKey) throw new UsageError('OPENAI_API_KEY is required with --apply')
   const captureStore = new PostgRestCaptureStore({ url, key })
   const { exitCode, summary } = await runExtractPass(
-    { apply: args.apply, maxCalls: args.maxCalls },
+    { apply: args.apply, maxCalls: args.maxCalls, salvage: args.salvage },
     {
       env,
       guards: postgrestLegacyUtteranceStore(client),

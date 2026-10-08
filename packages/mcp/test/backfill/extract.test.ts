@@ -24,6 +24,7 @@ import type {
 import { EXTRACT_EXIT_CAPPED, EXTRACT_EXIT_OK, ExtractRefused, runExtractPass, type ExtractPassDeps } from '../../src/backfill/extract.js'
 import type { ExtractStore } from '../../src/ingest/extract-lib.js'
 import { LegacyUtterancesRefused } from '../../src/backfill/legacy-utterances.js'
+import { formatExtractPass, parseBackfillCliArgs, UsageError } from '../../src/backfill/engram-backfill-cli.js'
 import type { LegacyRow, SalvageRunStore, SalvageStore } from '../../src/backfill/salvage.js'
 
 const HELD = { ENGRAM_EXTRACTION: 'hold' }
@@ -213,7 +214,7 @@ describe('extract: the ordered pass', () => {
     const model = recordedModel()
     const { d } = deps({ extraction, salvage, intelligence: model.intelligence })
 
-    const { exitCode, summary } = await runExtractPass({ apply: true, maxCalls: 10 }, d)
+    const { exitCode, summary } = await runExtractPass({ apply: true, maxCalls: 10, salvage: true }, d)
 
     expect(exitCode).toBe(EXTRACT_EXIT_OK)
     expect(summary.sessions.map((s) => s.session)).toEqual([HISTORY.sessionId, SALVAGE_SESSION, TRANSCRIPT.sessionId])
@@ -240,7 +241,7 @@ describe('extract: the ordered pass', () => {
     const model = recordedModel()
     for (const env of [{}, { ENGRAM_EXTRACTION: 'on' }]) {
       const { d } = deps({ extraction: new FakeExtractionStore(RECEIVED), salvage: salvageFakes(), env, intelligence: model.intelligence })
-      await expect(runExtractPass({ apply: true, maxCalls: 10 }, d)).rejects.toThrow(ExtractRefused)
+      await expect(runExtractPass({ apply: true, maxCalls: 10, salvage: true }, d)).rejects.toThrow(ExtractRefused)
     }
     expect(model.requests).toEqual([])
   })
@@ -251,14 +252,14 @@ describe('extract: the ordered pass', () => {
       salvage: salvageFakes(),
       guards: { unsettledCaptureEvents: async () => 2, legacyStepWithWork: async () => null, unforgottenLegacyItems: async () => 0 },
     })
-    await expect(runExtractPass({ apply: false, maxCalls: null }, d)).rejects.toThrow(LegacyUtterancesRefused)
+    await expect(runExtractPass({ apply: false, maxCalls: null, salvage: true }, d)).rejects.toThrow(LegacyUtterancesRefused)
   })
 
   it('exits 3 at the call cap, and a re-run resumes and finishes in order', async () => {
     const extraction = new FakeExtractionStore(RECEIVED)
     const salvage = salvageFakes()
     const first = recordedModel()
-    const capped = await runExtractPass({ apply: true, maxCalls: 2 }, deps({ extraction, salvage, intelligence: first.intelligence }).d)
+    const capped = await runExtractPass({ apply: true, maxCalls: 2, salvage: true }, deps({ extraction, salvage, intelligence: first.intelligence }).d)
 
     expect(capped.exitCode).toBe(EXTRACT_EXIT_CAPPED)
     expect(capped.summary).toMatchObject({ capped: true, calls: 2 })
@@ -267,7 +268,7 @@ describe('extract: the ordered pass', () => {
     expect(salvage.order).toEqual([SALVAGE_SESSION])
 
     const second = recordedModel()
-    const rerun = await runExtractPass({ apply: true, maxCalls: 2 }, deps({ extraction, salvage, intelligence: second.intelligence }).d)
+    const rerun = await runExtractPass({ apply: true, maxCalls: 2, salvage: true }, deps({ extraction, salvage, intelligence: second.intelligence }).d)
     expect(rerun.exitCode).toBe(EXTRACT_EXIT_OK)
     expect(rerun.summary.sessions.map((s) => s.session)).toEqual([TRANSCRIPT.sessionId])
     expect(second.requests).toHaveLength(1)
@@ -278,7 +279,7 @@ describe('extract: the ordered pass', () => {
     const model = recordedModel()
     const salvage = salvageFakes()
     const { d } = deps({ extraction: new FakeExtractionStore(RECEIVED), salvage, intelligence: model.intelligence })
-    const { exitCode, summary } = await runExtractPass({ apply: false, maxCalls: null }, d)
+    const { exitCode, summary } = await runExtractPass({ apply: false, maxCalls: null, salvage: true }, d)
 
     expect(exitCode).toBe(EXTRACT_EXIT_OK)
     expect(model.requests).toEqual([])
@@ -294,8 +295,93 @@ describe('extract: the ordered pass', () => {
   it('lists a live session and leaves it to the worker', async () => {
     const extraction = new FakeExtractionStore(RECEIVED, new Set([TRANSCRIPT.sessionId]))
     const { d } = deps({ extraction, salvage: salvageFakes() })
-    const { summary } = await runExtractPass({ apply: true, maxCalls: 10 }, d)
+    const { summary } = await runExtractPass({ apply: true, maxCalls: 10, salvage: true }, d)
     expect(summary.sessions.find((s) => s.session === TRANSCRIPT.sessionId)).toMatchObject({ leftToWorker: true })
     expect(extraction.order).toEqual([HISTORY.sessionId])
+  })
+})
+
+/** The salvage fakes with every store read and every run opened recorded. */
+function watchedSalvage() {
+  const salvage = salvageFakes()
+  const reads: string[] = []
+  const begun: string[] = []
+  const store = Object.fromEntries(
+    Object.entries(salvage.store).map(([name, fn]) => [
+      name,
+      (...args: unknown[]) => {
+        reads.push(name)
+        return (fn as (...a: unknown[]) => unknown)(...args)
+      },
+    ]),
+  ) as unknown as SalvageStore
+  const runs: SalvageRunStore = {
+    ...salvage.runs,
+    salvageBegin: async (run) => {
+      begun.push(run.windowKey)
+      return salvage.runs.salvageBegin(run)
+    },
+  }
+  return { ...salvage, store, runs, reads, begun }
+}
+
+describe('extract: salvage only when asked', () => {
+  it('without --salvage a dry run lists only the extraction sessions, in earliest-anchor order, and reads no salvage session', async () => {
+    const model = recordedModel()
+    const salvage = watchedSalvage()
+    const { d } = deps({ extraction: new FakeExtractionStore(RECEIVED), salvage, intelligence: model.intelligence })
+    const { exitCode, summary } = await runExtractPass({ apply: false, maxCalls: null, salvage: false }, d)
+
+    expect(exitCode).toBe(EXTRACT_EXIT_OK)
+    expect(summary.salvage).toBe(false)
+    expect(summary.sessions.map((s) => [s.session, s.salvage, s.windows!.map((w) => w.kind)])).toEqual([
+      [HISTORY.sessionId, false, ['user_prompt']],
+      [TRANSCRIPT.sessionId, false, ['user_prompt']],
+    ])
+    expect(salvage.reads).toEqual([])
+    expect(model.requests).toEqual([])
+    expect(formatExtractPass(summary)).toContain('  salvage: off (run with --salvage to include it)\n')
+  })
+
+  it('without --salvage apply makes no salvage call, opens no salvage run and extracts oldest anchor first', async () => {
+    const extraction = new FakeExtractionStore(RECEIVED)
+    const model = recordedModel()
+    const salvage = watchedSalvage()
+    const { d } = deps({ extraction, salvage, intelligence: model.intelligence })
+    const { exitCode, summary } = await runExtractPass({ apply: true, maxCalls: 10, salvage: false }, d)
+
+    expect(exitCode).toBe(EXTRACT_EXIT_OK)
+    expect(summary).toMatchObject({ salvage: false, calls: 2 })
+    expect(summary.sessions.map((s) => s.session)).toEqual([HISTORY.sessionId, TRANSCRIPT.sessionId])
+    expect(summary.sessions.every((s) => s.salvaged === undefined)).toBe(true)
+    expect(model.requests).toHaveLength(2)
+    expect(model.requests.some((r) => r.user.includes(SALVAGE.rows[1]!.content.slice(0, 40)))).toBe(false)
+    expect(salvage.begun).toEqual([])
+    expect(salvage.order).toEqual([])
+    expect(salvage.reads).toEqual([])
+    expect(extraction.order).toEqual([HISTORY.sessionId, TRANSCRIPT.sessionId])
+  })
+
+  it('with --salvage the summary says salvage was included', async () => {
+    const { d } = deps({ extraction: new FakeExtractionStore(RECEIVED), salvage: salvageFakes() })
+    const { summary } = await runExtractPass({ apply: false, maxCalls: null, salvage: true }, d)
+    expect(summary.salvage).toBe(true)
+    expect(formatExtractPass(summary)).toContain('  salvage: included\n')
+  })
+
+  it('the CLI takes --salvage on extract only, off by default', () => {
+    expect(parseBackfillCliArgs(['extract'])).toMatchObject({ command: 'extract', salvage: false })
+    expect(parseBackfillCliArgs(['extract', '--salvage', '--max-calls', '5', '--apply'])).toMatchObject({ salvage: true, maxCalls: 5, apply: true })
+    expect(() => parseBackfillCliArgs(['report', '--out', '/tmp/r.md', '--sample-seed', '1', '--salvage'])).toThrow('report does not take --salvage')
+    for (const argv of [
+      ['transcripts', '--salvage'],
+      ['history', '--salvage'],
+      ['git', '--repo', '/tmp/r', '--salvage'],
+      ['legacy-copy', '--map', '/tmp/m.json', '--salvage'],
+      ['legacy-utterances', '--salvage'],
+    ]) {
+      expect(() => parseBackfillCliArgs(argv)).toThrow(UsageError)
+      expect(() => parseBackfillCliArgs(argv)).toThrow(`${argv[0]} does not take --salvage`)
+    }
   })
 })

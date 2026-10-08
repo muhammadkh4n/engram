@@ -11,8 +11,13 @@
  * work:
  * - an extraction window (an anchor no succeeded run extracted at any
  *   extractor version), the first of the session's pending anchors;
- * - a salvage window of the old rows, the first row of its first pending
- *   window.
+ * - with salvage included, a salvage window of the old rows, the first row of
+ *   its first pending window.
+ *
+ * Salvage is off unless the caller asks for it: the old rows are already
+ * copied as legacy items, and a salvage observation is a model's reading of
+ * them, so a pass without it reads no salvage session, makes no salvage call
+ * and opens no salvage run. The summary records whether it was included.
  *
  * Per session the salvage windows run first, then its extraction windows
  * through the per-session driver (gap fill). A session the driver finds live
@@ -74,6 +79,8 @@ export interface ExtractPassOptions {
   apply: boolean
   /** Required with apply. */
   maxCalls: number | null
+  /** Salvage the old rows' sessions too; off, only extraction anchors are listed and run. */
+  salvage: boolean
 }
 
 export interface PassWindow {
@@ -102,6 +109,8 @@ export interface ExtractPassSummary {
   command: 'extract'
   apply: boolean
   maxCalls: number | null
+  /** Whether salvage sessions were listed and run. */
+  salvage: boolean
   calls: number
   capped: boolean
   failed: boolean
@@ -128,11 +137,12 @@ export async function runExtractPass(opts: ExtractPassOptions, deps: ExtractPass
     throw new Error('extract --apply needs --max-calls and a chat model')
   }
 
-  const sessions = await pendingSessions(deps)
+  const sessions = await pendingSessions(opts.salvage, deps)
   const summary: ExtractPassSummary = {
     command: 'extract',
     apply: opts.apply,
     maxCalls: opts.maxCalls,
+    salvage: opts.salvage,
     calls: 0,
     capped: false,
     failed: false,
@@ -197,9 +207,9 @@ export async function runExtractPass(opts: ExtractPassOptions, deps: ExtractPass
  * The session listing is read oldest first and paged by its first time, so
  * a response cut at the server's row cap loses no session.
  */
-async function pendingSessions(deps: ExtractPassDeps): Promise<PendingSession[]> {
+async function pendingSessions(includeSalvage: boolean, deps: ExtractPassDeps): Promise<PendingSession[]> {
   const byId = new Map<string, PendingSession>()
-  for (const ref of await salvageSessions(deps.salvage)) {
+  for (const ref of includeSalvage ? await salvageSessions(deps.salvage) : []) {
     byId.set(ref.sessionId, { session: ref.sessionId, at: Date.parse(ref.firstAt), salvage: true, anchors: [] })
   }
   const listed = new Set<string>()
