@@ -33,6 +33,7 @@ import type {
   SessionIndexSource,
 } from '../items/capture-store.js'
 import { sessionIndexEventKey } from './links.js'
+import { cutWholeChars } from '../text/cut-text.js'
 
 /** A session with no new event for this long is indexed even without a session_end. */
 export const SESSION_INDEX_IDLE_MS = 30 * 60 * 1000
@@ -218,5 +219,5 @@ function describeError(err: unknown): string {
   if (!(err instanceof Error)) return 'unknown error'
   const code = (err as { code?: unknown }).code
   const label = typeof code === 'string' || typeof code === 'number' ? String(code) : err.name
-  return `${label}: ${err.message.slice(0, 500)}`
+  return `${label}: ${cutWholeChars(err.message, 500)}`
 }
