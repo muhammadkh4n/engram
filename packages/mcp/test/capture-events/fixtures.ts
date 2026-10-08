@@ -61,6 +61,8 @@ const PAYLOADS: { [T in CaptureEventType]: () => Record<string, unknown> } = {
     by: 'mk',
     quote: 'use a timer, not cron',
     source: 'session 2026-10-04',
+    said_as: 'words',
+    question: null,
   }),
   ledger_ruling: () => ({
     plan: 'sample-plan',
@@ -76,6 +78,7 @@ const PAYLOADS: { [T in CaptureEventType]: () => Record<string, unknown> } = {
     subject: 'worker schedule',
     said_at: '2026-10-04T09:00:00Z',
     quote: 'use a timer, not cron',
+    said_as: 'words',
     question: null,
     verified: 'session transcript',
     applies_to: ['sample-repo'],

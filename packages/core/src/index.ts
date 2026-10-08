@@ -33,6 +33,7 @@ export type { ItemStore } from './items/item-store.js'
 export {
   EMBEDDING_ATTEMPTS_MAX,
   EMBEDDING_BATCH_MAX,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
   EMBEDDING_ERROR_MAX_CHARS,
   EXTRACTION_COMMIT_ITEMS_MAX,
   EXTRACTION_PENDING_LIMIT_MAX,
@@ -67,6 +68,7 @@ export type {
 } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
+export { cutWholeChars, tailWholeChars } from './text/cut-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {
