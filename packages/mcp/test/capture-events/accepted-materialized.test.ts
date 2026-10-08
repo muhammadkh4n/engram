@@ -97,6 +97,8 @@ function corpus(): FixtureEvent[] {
       by: 'mk',
       quote: long('q', MAX),
       source: long('s', 1024),
+      said_as: 'choice',
+      question: `${long('k', 2000)} 日本語\u0000?`,
     }),
     edge('ledger_ruling', { phase: long('9', 32), task: long('9', 32), ruling: 'Batches of 32 rows.', why: '  ' }),
     edge('briefing_shown', {
@@ -107,6 +109,7 @@ function corpus(): FixtureEvent[] {
       id: `R-TST-${long('7', 58)}`,
       subject: wide(200),
       question: '  ',
+      said_as: 'choice',
       verified: long('v', 1024),
       applies_to: Array.from({ length: 50 }, () => long('a', 200)),
       triggers: Array.from({ length: 20 }, () => long('t', 64)),

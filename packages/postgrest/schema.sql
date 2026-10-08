@@ -1187,6 +1187,11 @@ CREATE TABLE IF NOT EXISTS public.sensory_snapshots (
 -- writer, the RPCs or a direct PostgREST request, can store an item the rules
 -- refuse.
 --
+-- Three words name an item's state, here and in every comment below: live
+-- means not forgotten; in force means live and not retired; current means in
+-- force and not superseded. Retiring an item takes it out of force but keeps
+-- it live, so it still stands in a supersession chain.
+--
 -- The tables are created in foreign-key order: subjects, extraction runs and
 -- projects first, then memory_items, then the tables that point at items.
 -- memory_extraction_runs.anchor_item_id points back at memory_items, so its
@@ -1422,6 +1427,26 @@ CREATE TABLE IF NOT EXISTS public.memory_capture_events (
 
 
 --
+-- Name: memory_capture_event_counts; Type: TABLE; Schema: public; Owner: -
+--
+-- Running counts of capture events by state, so engram_capture_materialize
+-- reports table-wide pending and dead counts without reading every
+-- unprocessed event. The counts are the column sums over all rows:
+-- memory_capture_events_count adds one row per change in an event's state,
+-- insert-only so concurrent ingests never wait on each other, and
+-- engram_capture_materialize folds the rows into one under its lock. pending
+-- counts events with processed_at NULL and fewer than 3 attempts, dead those
+-- with processed_at NULL and 3 attempts or more.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_capture_event_counts (
+    id bigserial PRIMARY KEY,
+    pending bigint NOT NULL,
+    dead bigint NOT NULL
+);
+
+
+--
 -- Name: memory_secret_hits; Type: TABLE; Schema: public; Owner: -
 --
 -- One row per value masked before storage: where it was and which detector
@@ -1481,6 +1506,13 @@ ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_fa
 --   so one text the model can never take does not stop embedding for every
 --   newer item; engram_items_embedding_failed_count reports how many left,
 --   and engram_items_reset_embedding_failures returns them to the queue.
+-- - embedding_claimed_by and embedding_claimed_until: the capture worker
+--   that read the item for embedding, and when that claim lapses. The pending
+--   read claims what it returns for 120 seconds and a worker renews its
+--   claims while its pass runs, so two server processes never send the same
+--   item to the provider; a crashed worker's claim lapses on its own.
+--   memory_items_embedding_claim_check sets both or neither and keeps the
+--   lapse time in range, as every timestamptz column of the item store is.
 -- - memory_items_version_of_check bounds source.version_of as
 --   memory_items_source_check bounds source.event_key: a non-blank string of
 --   at most 512 characters, so every idx_items_version_of key fits a btree
@@ -1491,6 +1523,8 @@ ALTER TABLE public.memory_items SET (fillfactor = 90, autovacuum_vacuum_scale_fa
 
 ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_attempts smallint DEFAULT 0 NOT NULL;
 ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_error text;
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_claimed_by uuid;
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS embedding_claimed_until timestamp with time zone;
 
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_version_of_check' AND conrelid = 'public.memory_items'::regclass) THEN
@@ -1503,7 +1537,25 @@ DO $$ BEGIN
       ADD CONSTRAINT memory_items_embedding_attempts_check CHECK (embedding_attempts BETWEEN 0 AND 5
         AND (embedding_error IS NULL OR (embedding_error ~ '\S' AND char_length(embedding_error) <= 500)));
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_embedding_claim_check' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE ONLY public.memory_items
+      ADD CONSTRAINT memory_items_embedding_claim_check CHECK (public.engram_time_in_range(embedding_claimed_until)
+        AND (embedding_claimed_by IS NULL) = (embedding_claimed_until IS NULL));
+  END IF;
 END $$;
+
+
+--
+-- Columns memory_capture_events gained after it was first provisioned, added
+-- the same idempotent way.
+-- - backfill: the event was posted by the history backfill (client name
+--   'engram-backfill') or recovers a prompt from history (payload.origin).
+--   Generated at insert, so engram_capture_materialize ranks sessions from
+--   idx_capture_events_candidates instead of reading every pending payload.
+--
+
+ALTER TABLE public.memory_capture_events ADD COLUMN IF NOT EXISTS backfill boolean NOT NULL
+    GENERATED ALWAYS AS ((payload ? 'origin') OR coalesce((client ->> 'name') = 'engram-backfill', false)) STORED;
 
 
 --
@@ -2002,7 +2054,11 @@ CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (l
 CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
 CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
-CREATE INDEX IF NOT EXISTS idx_capture_events_pending ON public.memory_capture_events USING btree (occurred_at, id) WHERE (processed_at IS NULL);
+-- Materialize candidates in session and event-time order: one probe finds
+-- each session's earliest candidate, a range scan its next ones. Replaces an
+-- index over every unprocessed event in time order, which no ranking used.
+DROP INDEX IF EXISTS public.idx_capture_events_pending;
+CREATE INDEX IF NOT EXISTS idx_capture_events_candidates ON public.memory_capture_events USING btree (session_id, occurred_at, id) INCLUDE (backfill) WHERE (processed_at IS NULL AND attempts < 3);
 CREATE INDEX IF NOT EXISTS idx_capture_events_session ON public.memory_capture_events USING btree (session_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extraction_runs USING btree (session_id, started_at);
 
@@ -2014,11 +2070,13 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
--- first read of items still waiting for a vector. Its predicate is that
--- function's WHERE, word for word, so it holds only the backlog embedding
--- drains: assistant utterances, session indexes and legacy rows are never
--- embedded by the worker, and an index that held them would be walked whole
--- on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
+-- first read of items still waiting for a vector. Its predicate is the
+-- eligibility clauses of that function's WHERE, word for word, so it holds
+-- only the backlog embedding drains; the claim clause is checked on the rows
+-- the index returns, so only items under another worker's live claim (at
+-- most a few batches) are read and passed over. Assistant utterances,
+-- session indexes and legacy rows are never embedded by the worker, and an
+-- index that held them would be walked whole on every idle call. CREATE INDEX IF NOT EXISTS keeps an existing index
 -- whatever its predicate, so an index built before the embedding_attempts
 -- clause is dropped first and rebuilt with it; otherwise the planner could no
 -- longer match it to the function and every call would scan the table.
@@ -2125,11 +2183,12 @@ END; $$;
 --   not forgotten, has the same class and occurred strictly later (pointing
 --   at itself is left to memory_items_supersession_check).
 -- - superseded_by moves from an item X to another valid successor, or back
---   to NULL, only when X is no longer live: forgotten (the forget cascade
---   hands the supersession to the next live successor) or retired (a writer
---   that retires a successor may restore or re-point what it superseded).
---   The rule reads X's state, not who is writing: while X is live the
---   supersession stands, and only a forget or a retirement of X releases it.
+--   to NULL, only when X is no longer in force: forgotten (the forget
+--   cascade hands the supersession to the nearest successor still live) or
+--   retired (a writer that retires a successor may restore or re-point what
+--   it superseded). The rule reads X's state, not who is writing: while X is
+--   in force the supersession stands, and only a forget or a retirement of X
+--   releases it.
 -- - a forgotten item's superseded_by, retired_at and retired_reason never
 --   change again, and superseded_by does not change in the UPDATE that
 --   forgets an item.
@@ -2364,8 +2423,9 @@ END; $$;
 --     nest one level deep whatever the depth of the lineage. UNION, not
 --     UNION ALL, ends the walk on a lineage cycle.
 -- (b) every live item this one superseded is re-pointed to the nearest live
---     item further along the superseded_by chain, read now; when none remains
---     it is restored (superseded_by cleared). valid_to follows superseded_by
+--     item further along the superseded_by chain, read now, retired included:
+--     retiring an item does not bring back the item it replaced. When none
+--     remains it is restored (superseded_by cleared). valid_to follows superseded_by
 --     through memory_items_before_update. The walk stops at an id it has
 --     already seen, so a cycle not yet refused at commit cannot loop it.
 CREATE OR REPLACE FUNCTION public.memory_items_forget_cascade() RETURNS trigger
@@ -2438,6 +2498,84 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 
 
 --
+-- Name: memory_capture_events_count(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Keeps memory_capture_event_counts in step with memory_capture_events. As a
+-- row trigger it adds one row holding the change in pending and dead that an
+-- insert, update or delete makes, and nothing when the event's state is
+-- unchanged; as a TRUNCATE trigger it clears the counts with the events.
+CREATE OR REPLACE FUNCTION public.memory_capture_events_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_pending bigint := 0;
+  v_dead bigint := 0;
+BEGIN
+  IF TG_OP = 'TRUNCATE' THEN
+    DELETE FROM public.memory_capture_event_counts;
+    RETURN NULL;
+  END IF;
+  IF TG_OP <> 'INSERT' THEN
+    IF OLD.processed_at IS NULL THEN
+      IF OLD.attempts < 3 THEN v_pending := v_pending - 1; ELSE v_dead := v_dead - 1; END IF;
+    END IF;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    IF NEW.processed_at IS NULL THEN
+      IF NEW.attempts < 3 THEN v_pending := v_pending + 1; ELSE v_dead := v_dead + 1; END IF;
+    END IF;
+  END IF;
+  IF v_pending <> 0 OR v_dead <> 0 THEN
+    INSERT INTO public.memory_capture_event_counts (pending, dead) VALUES (v_pending, v_dead);
+  END IF;
+  RETURN NULL;
+END; $$;
+
+
+--
+-- Name: memory_capture_events triggers; Type: TRIGGER; Schema: public; Owner: -
+--
+-- Only processed_at and attempts move an event between pending, dead and
+-- processed, so updates of other columns skip the count.
+--
+-- A database that stored events before the counts existed starts from a count
+-- of them. The triggers and that seed share one transaction, opened by the
+-- table lock: applied with a plain psql -f, separate statements would commit
+-- the triggers first, an ingest or materialize landing before the seed would
+-- write a delta row, the seed would see a non-empty counts table and be
+-- skipped, and pending would stay short by every event stored before the
+-- triggers. Under the lock no event changes until the commit, so the counts
+-- table is empty here exactly when the triggers are new or no event is
+-- pending or dead, and counting then is right in both cases.
+--
+-- The lock is ACCESS EXCLUSIVE, the mode DROP TRIGGER needs, taken before any
+-- other statement so the block never upgrades a lock it holds. A materialize
+-- pass reads the events and then updates them; a weaker lock that blocks
+-- writes (SHARE ROW EXCLUSIVE) would be granted beside the pass's read, the
+-- DROP TRIGGER would then wait on that read, and the pass's UPDATE would wait
+-- on the lock already held: a deadlock that rolls back the pass or stops the
+-- apply partway. Asked for first, the lock simply waits for the pass to
+-- commit.
+--
+
+DO $$ BEGIN
+  LOCK TABLE public.memory_capture_events IN ACCESS EXCLUSIVE MODE;
+  DROP TRIGGER IF EXISTS memory_capture_events_count ON public.memory_capture_events;
+  CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();
+  DROP TRIGGER IF EXISTS memory_capture_events_count_truncate ON public.memory_capture_events;
+  CREATE TRIGGER memory_capture_events_count_truncate AFTER TRUNCATE ON public.memory_capture_events FOR EACH STATEMENT EXECUTE FUNCTION public.memory_capture_events_count();
+  IF NOT EXISTS (SELECT 1 FROM public.memory_capture_event_counts) THEN
+    INSERT INTO public.memory_capture_event_counts (pending, dead)
+    SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)
+      FROM public.memory_capture_events c
+     WHERE c.processed_at IS NULL;
+  END IF;
+END $$;
+
+
+--
 -- Item store RPCs, the only way service_role writes the item store: it may
 -- SELECT the tables and nothing more (see the privileges section). Each write
 -- that needs more than one statement or must be idempotent is one call:
@@ -2455,6 +2593,12 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- Name: engram_insert_items(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
+
+-- CREATE OR REPLACE cannot change the result columns, so a database holding an
+-- earlier result shape of this function would refuse the re-apply. Its grants
+-- are re-issued below.
+DROP FUNCTION IF EXISTS public.engram_insert_items(jsonb);
+
 -- Inserts 1 to 500 items given as JSON objects keyed by column name. Every
 -- column may be sent except the ones the database or a later write owns:
 -- superseded_by, valid_to, restated_at, retired_at, retired_reason,
@@ -2471,16 +2615,23 @@ CREATE TRIGGER memory_items_forget_cascade AFTER UPDATE OF forgotten_at ON publi
 -- now(), the clock skew a capture client is allowed; a later time is a wrong
 -- clock, not an event. The four-digit year and that limit keep it below year
 -- 10000; a year-1 time with a positive offset is still 1 BC in UTC, which
--- engram_time_in_range refuses, so that is reported by position too. source.event_key holds at most 512 characters, the
--- bound that keeps it inside a unique btree index row; a longer key is
--- refused here by position instead of failing the index. An object whose
--- source.event_key is already stored, or
--- appears earlier in the same call, is skipped and reported with the stored id
--- and inserted = false, so a retried delivery is a no-op. One row per object
--- comes back, in input order. The deferred lineage and supersession checks run at
--- the caller's commit, so a statement may come before the utterance it quotes
--- and one failing object fails them all.
-CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean)
+-- engram_time_in_range refuses, so that is reported by position too. source.event_key is absent or a
+-- non-blank string of at most 512 characters, the bound that keeps it inside
+-- a unique btree index row; any other key (a JSON null, a number, a blank
+-- string, a longer string) is refused here by position instead of failing
+-- memory_items_source_check or the index with no position. An object whose
+-- source.event_key is already stored, or appears earlier in the same call, is
+-- skipped and reported with the stored id and inserted = false, so a retried
+-- delivery is a no-op; forgotten says whether that stored item is forgotten
+-- (an inserted item never is). A lineage entry naming a skipped object's id
+-- names the stored item instead, so a replay of an utterance and a new item
+-- derived from it can arrive in one call. An inserted object whose lineage
+-- names a forgotten item, directly or through a skipped object, is refused by
+-- position. One row per object comes back, in input order. The deferred
+-- lineage and supersession checks run at the caller's commit, so a statement
+-- may come before the utterance it quotes and one failing object fails them
+-- all.
+CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean, forgotten boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -2488,6 +2639,10 @@ DECLARE
   v_count integer;
   v_problem text;
   v_ids uuid[];
+  v_resolved uuid[];
+  v_skipped boolean[];
+  v_lineage jsonb;
+  v_raced integer;
   v_inserted uuid[];
   v_result_ids uuid[];
   v_result_added boolean[];
@@ -2556,6 +2711,10 @@ BEGIN
                     AND jsonb_typeof(f.value -> 'event_key') = 'string'
                     AND char_length(f.value ->> 'event_key') > 512 THEN
                  format('object %s: source.event_key is longer than 512 characters', f.n)
+               WHEN f.col = 'source'
+                    AND (f.value ? 'event_key')
+                    AND NOT (jsonb_typeof(f.value -> 'event_key') = 'string' AND (f.value ->> 'event_key') ~ '\S') THEN
+                 format('object %s: source.event_key must be absent or a non-blank string of at most 512 characters', f.n)
              END AS reason
         FROM field f
     )
@@ -2608,6 +2767,58 @@ BEGIN
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
      ORDER BY t.n);
 
+  -- Every object is resolved before a row is written: an object whose event
+  -- key is stored, or held by an earlier object of the call, is skipped and
+  -- stands for that item. Another object may name a skipped object's id in
+  -- its lineage, as the caller's handle for the item it was derived from, so
+  -- lineage is rewritten through this map; the stored id is then what the
+  -- lineage check reads, instead of an id that is never written.
+  WITH obj AS (
+    SELECT t.n, t.e -> 'source' ->> 'event_key' AS event_key
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+  ), firsts AS (
+    SELECT o.n, o.event_key,
+           CASE WHEN o.event_key IS NULL THEN o.n
+                ELSE first_value(o.n) OVER (PARTITION BY o.event_key ORDER BY o.n) END AS first_n
+      FROM obj o
+  )
+  SELECT array_agg(coalesce(s.stored_id, v_ids[f.first_n::integer]) ORDER BY f.n),
+         array_agg(s.stored_id IS NOT NULL OR f.first_n < f.n ORDER BY f.n)
+    INTO v_resolved, v_skipped
+    FROM firsts f
+    LEFT JOIN LATERAL (
+      SELECT x.id AS stored_id
+        FROM public.memory_items x
+       WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = f.event_key
+    ) s ON true;
+
+  SELECT jsonb_agg(
+           CASE WHEN jsonb_typeof(t.e -> 'lineage') = 'array' THEN
+             (SELECT coalesce(jsonb_agg(to_jsonb(coalesce(v_resolved[array_position(v_ids, l.value::uuid)], l.value::uuid)) ORDER BY l.k), '[]'::jsonb)
+                FROM jsonb_array_elements_text(t.e -> 'lineage') WITH ORDINALITY AS l(value, k))
+           ELSE '[]'::jsonb END
+           ORDER BY t.n)
+    INTO v_lineage
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n);
+
+  -- A lineage naming a forgotten item fails memory_items_lineage at commit
+  -- with no position; it is named here, by the stored id or through a
+  -- skipped object. The forget lock held shared above keeps a forget from
+  -- changing what this reads before the call commits.
+  SELECT format('object %s: lineage names a forgotten item', t.n) INTO v_problem
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+   WHERE NOT v_skipped[t.n::integer]
+     AND EXISTS (SELECT 1
+                   FROM jsonb_array_elements_text(v_lineage -> (t.n::integer - 1)) AS l(value)
+                   JOIN public.memory_items x ON x.id = l.value::uuid
+                  WHERE x.forgotten_at IS NOT NULL)
+   ORDER BY t.n
+   LIMIT 1;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_insert_items: ' || v_problem;
+  END IF;
+
   WITH added AS (
     INSERT INTO public.memory_items AS m (
       id, class, kind, speaker, trust, project_id, workspace_id, plan_slug, session_id, subject_id,
@@ -2633,16 +2844,37 @@ BEGIN
            t.e ->> 'register_status',
            t.e ->> 'register_ref',
            t.e -> 'source',
-           CASE WHEN jsonb_typeof(t.e -> 'lineage') = 'array'
-                THEN ARRAY(SELECT l.value::uuid FROM jsonb_array_elements_text(t.e -> 'lineage') WITH ORDINALITY AS l(value, k) ORDER BY l.k)
-                ELSE '{}'::uuid[] END,
+           ARRAY(SELECT l.value::uuid
+                   FROM jsonb_array_elements_text(v_lineage -> (t.n::integer - 1)) WITH ORDINALITY AS l(value, k)
+                  ORDER BY l.k),
            (t.e ->> 'extraction_run_id')::uuid
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+     WHERE NOT v_skipped[t.n::integer]
      ORDER BY t.n
     ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING
     RETURNING m.id
   )
   SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+
+  -- An object resolved for insert that ON CONFLICT skipped had its event key
+  -- committed by a concurrent call after the lookup above. When an object of
+  -- this call names it in lineage, that lineage now names an id that is never
+  -- written; a serialization failure rolls the call back, and its retry
+  -- resolves the key to the stored item.
+  SELECT t.n::integer INTO v_raced
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+   WHERE NOT v_skipped[t.n::integer]
+     AND NOT v_ids[t.n::integer] = ANY (v_inserted)
+     AND EXISTS (SELECT 1
+                   FROM jsonb_array_elements(p_items) WITH ORDINALITY AS o(e, m)
+                  CROSS JOIN LATERAL jsonb_array_elements_text(v_lineage -> (o.m::integer - 1)) AS l(value)
+                  WHERE NOT v_skipped[o.m::integer] AND l.value::uuid = v_ids[t.n::integer])
+   ORDER BY t.n
+   LIMIT 1;
+  IF v_raced IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
+      MESSAGE = format('engram_insert_items: object %s was stored by a concurrent call, retry the call', v_raced);
+  END IF;
 
   -- v_ids holds no id twice, so an id in v_inserted names its position
   -- exactly. Every other object was skipped on its event key, whose stored
@@ -2666,8 +2898,9 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  SELECT r.n::integer, r.item_id, r.added
+  SELECT r.n::integer, r.item_id, r.added, x.forgotten_at IS NOT NULL
     FROM unnest(v_result_ids, v_result_added) WITH ORDINALITY AS r(item_id, added, n)
+    JOIN public.memory_items x ON x.id = r.item_id
    ORDER BY r.n;
 END; $$;
 
@@ -3188,6 +3421,12 @@ END; $$;
 -- then everything by (occurred_at, id). Every event of a session shares its
 -- session's rank, so a backlog never delays live capture and a session's
 -- events always run in event-time order.
+-- A call reads in proportion to p_limit and to the sessions with candidates,
+-- never to the backlog: one probe of idx_capture_events_candidates per
+-- session finds its earliest candidate (and so its rank, from the backfill
+-- column), and sessions are then merged in rank order, each read only below
+-- the p_limit-th best event so far. A session whose earliest candidate ranks
+-- after that event cannot contribute, nor can any session after it.
 -- Each event runs in its own subtransaction with the deferred constraint
 -- triggers forced at its end (SET CONSTRAINTS ALL IMMEDIATE), so a broken
 -- invariant fails that event alone: attempts goes up by one, error keeps the
@@ -3226,13 +3465,23 @@ END; $$;
 -- which would release it on a failure.
 -- Returns {"locked": true, "processed", "failed", "skipped", "pending",
 -- "dead"}: processed counts events marked processed by this call, skipped
--- included; pending (candidates left) and dead (3 attempts) are table-wide.
+-- included; pending (candidates left) and dead (3 attempts) are table-wide,
+-- read from memory_capture_event_counts, whose rows the call folds into one.
 CREATE OR REPLACE FUNCTION public.engram_capture_materialize(p_limit integer DEFAULT 200) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 DECLARE
-  v_ids bigint[];
+  v_ids bigint[] := '{}'::bigint[];
+  v_ranks boolean[] := '{}'::boolean[];
+  v_times timestamp with time zone[] := '{}'::timestamp with time zone[];
+  v_session record;
+  v_below_rank boolean;
+  v_below_at timestamp with time zone;
+  v_below_id bigint;
+  v_upto_at timestamp with time zone;
+  v_upto_id bigint;
+  v_count_rows bigint;
   v_id bigint;
   e public.memory_capture_events%ROWTYPE;
   p jsonb;
@@ -3268,15 +3517,64 @@ BEGIN
     RETURN jsonb_build_object('locked', false);
   END IF;
 
-  v_ids := ARRAY(
-    SELECT c.id
-      FROM (SELECT ev.id, ev.occurred_at,
-                   first_value((ev.payload ? 'origin') OR (ev.client ->> 'name') IS NOT DISTINCT FROM 'engram-backfill')
-                     OVER (PARTITION BY ev.session_id ORDER BY ev.occurred_at, ev.id) AS backfill
-              FROM public.memory_capture_events ev
-             WHERE ev.processed_at IS NULL AND ev.attempts < 3) AS c
-     ORDER BY c.backfill, c.occurred_at, c.id
-     LIMIT p_limit);
+  -- v_ids, v_ranks and v_times hold the best candidates so far in rank
+  -- order; once there are p_limit of them, the last is the bound below which
+  -- a later session's events must rank to displace it.
+  FOR v_session IN
+    WITH RECURSIVE heads AS (
+      (SELECT c.session_id, c.occurred_at, c.id, c.backfill
+         FROM public.memory_capture_events c
+        WHERE c.processed_at IS NULL AND c.attempts < 3
+        ORDER BY c.session_id, c.occurred_at, c.id
+        LIMIT 1)
+      UNION ALL
+      SELECT n.session_id, n.occurred_at, n.id, n.backfill
+        FROM heads h
+       CROSS JOIN LATERAL (
+         SELECT c.session_id, c.occurred_at, c.id, c.backfill
+           FROM public.memory_capture_events c
+          WHERE c.processed_at IS NULL AND c.attempts < 3 AND c.session_id > h.session_id
+          ORDER BY c.session_id, c.occurred_at, c.id
+          LIMIT 1) AS n
+    )
+    SELECT h.session_id, h.backfill, h.occurred_at, h.id
+      FROM heads h
+     ORDER BY h.backfill, h.occurred_at, h.id
+     LIMIT p_limit
+  LOOP
+    EXIT WHEN cardinality(v_ids) = p_limit
+          AND (v_session.backfill, v_session.occurred_at, v_session.id) > (v_below_rank, v_below_at, v_below_id);
+    -- A plain row comparison, so the scan stops at the bound as an index
+    -- condition instead of filtering the rest of the session.
+    IF cardinality(v_ids) = p_limit AND v_session.backfill = v_below_rank THEN
+      v_upto_at := v_below_at;
+      v_upto_id := v_below_id;
+    ELSE
+      v_upto_at := 'infinity';
+      v_upto_id := 9223372036854775807;
+    END IF;
+    SELECT coalesce(array_agg(m.id ORDER BY m.rank, m.occurred_at, m.id), '{}'),
+           coalesce(array_agg(m.rank ORDER BY m.rank, m.occurred_at, m.id), '{}'),
+           coalesce(array_agg(m.occurred_at ORDER BY m.rank, m.occurred_at, m.id), '{}')
+      INTO v_ids, v_ranks, v_times
+      FROM (SELECT u.id, u.rank, u.occurred_at
+              FROM (SELECT b.id, b.rank, b.occurred_at
+                      FROM unnest(v_ids, v_ranks, v_times) AS b(id, rank, occurred_at)
+                    UNION ALL
+                    (SELECT c.id, v_session.backfill, c.occurred_at
+                       FROM public.memory_capture_events c
+                      WHERE c.processed_at IS NULL AND c.attempts < 3 AND c.session_id = v_session.session_id
+                        AND (c.occurred_at, c.id) < (v_upto_at, v_upto_id)
+                      ORDER BY c.occurred_at, c.id
+                      LIMIT p_limit)) AS u
+             ORDER BY u.rank, u.occurred_at, u.id
+             LIMIT p_limit) AS m;
+    IF cardinality(v_ids) = p_limit THEN
+      v_below_rank := v_ranks[p_limit];
+      v_below_at := v_times[p_limit];
+      v_below_id := v_ids[p_limit];
+    END IF;
+  END LOOP;
 
   FOREACH v_id IN ARRAY v_ids LOOP
     SELECT * INTO e FROM public.memory_capture_events c WHERE c.id = v_id;
@@ -3381,11 +3679,16 @@ BEGIN
                               format('%s %s (class %s)', p ->> 'plan', p ->> 'id', p ->> 'class')
                                 || CASE WHEN (p ->> 'trigger') ~ '\S' THEN ': ' || (p ->> 'trigger') ELSE '' END,
                               p ->> 'ruling',
-                              CASE WHEN (p ->> 'quote') ~ '\S' THEN format('MK: "%s"', p ->> 'quote') END);
+                              CASE WHEN (p ->> 'quote') ~ '\S' THEN
+                                CASE WHEN (p ->> 'said_as') = 'choice' THEN 'MK chose: "' ELSE 'MK: "' END
+                                  || (p ->> 'quote') || '"'
+                                  || CASE WHEN (p ->> 'question') ~ '\S' THEN v_dot || 'answering: "' || (p ->> 'question') || '"' ELSE '' END
+                              END);
         v_version_of := format('ledger-decision:%s:%s', p ->> 'plan', p ->> 'id');
         v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
         v_source := jsonb_build_object('type', 'ledger', 'plan', p -> 'plan', 'decision_id', p -> 'id', 'class', p -> 'class',
-                                       'by', p -> 'by', 'quote', p -> 'quote', 'quote_source', p -> 'source');
+                                       'by', p -> 'by', 'quote', p -> 'quote', 'quote_source', p -> 'source',
+                                       'said_as', p -> 'said_as', 'question', p -> 'question');
 
       WHEN 'ledger_ruling' THEN
         v_class := 'artifact';
@@ -3401,7 +3704,8 @@ BEGIN
         v_class := 'artifact';
         v_kind := 'ruling_entry';
         v_content := concat(p ->> 'id', v_dot, p ->> 'status', v_dot, p ->> 'subject', v_dot,
-                            'MK, ', p ->> 'said_at', ': "', p ->> 'quote', '"',
+                            CASE WHEN (p ->> 'said_as') = 'choice' THEN 'MK chose, ' ELSE 'MK, ' END,
+                            p ->> 'said_at', ': "', p ->> 'quote', '"',
                             CASE WHEN (p ->> 'question') ~ '\S' THEN v_dot || 'answering: "' || (p ->> 'question') || '"' END);
         v_context := CASE WHEN (p ->> 'question') ~ '\S' THEN p ->> 'question' END;
         v_search := concat_ws(E'\n', v_content,
@@ -3412,7 +3716,7 @@ BEGIN
         v_version_of := 'register:' || (p ->> 'id');
         v_key := v_version_of || ':' || encode(sha256(convert_to(p::text, 'UTF8')), 'hex');
         v_source := jsonb_build_object('type', 'register', 'id', p -> 'id', 'status', p -> 'status', 'subject', p -> 'subject',
-                                       'scope', p -> 'scope', 'file', p -> 'file', 'said_at', p -> 'said_at',
+                                       'scope', p -> 'scope', 'file', p -> 'file', 'said_at', p -> 'said_at', 'said_as', p -> 'said_as',
                                        'verified', p -> 'verified', 'applies_to', p -> 'applies_to', 'triggers', p -> 'triggers',
                                        'supersedes', p -> 'supersedes', 'restated', p -> 'restated');
 
@@ -3519,31 +3823,53 @@ BEGIN
     END;
   END LOOP;
 
-  SELECT count(*) FILTER (WHERE c.attempts < 3), count(*) FILTER (WHERE c.attempts >= 3)
-    INTO v_pending, v_dead
-    FROM public.memory_capture_events c
-   WHERE c.processed_at IS NULL;
+  SELECT count(*), coalesce(sum(n.pending), 0), coalesce(sum(n.dead), 0)
+    INTO v_count_rows, v_pending, v_dead
+    FROM public.memory_capture_event_counts n;
+  IF v_count_rows > 1 THEN
+    -- The sum of the deleted rows, not of the rows read above: an ingest
+    -- that committed in between is counted in its own rows either way.
+    WITH folded AS (DELETE FROM public.memory_capture_event_counts RETURNING pending, dead)
+    SELECT coalesce(sum(f.pending), 0), coalesce(sum(f.dead), 0) INTO v_pending, v_dead FROM folded f;
+    INSERT INTO public.memory_capture_event_counts (pending, dead) VALUES (v_pending, v_dead);
+  END IF;
   RETURN jsonb_build_object('locked', true, 'processed', v_processed, 'failed', v_failed, 'skipped', v_skipped,
                             'pending', v_pending, 'dead', v_dead);
 END; $$;
 
 
 --
--- Name: engram_items_pending_embedding(integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_pending_embedding(integer, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- Up to p_limit (1 to 256) items that still need an embedding, oldest first:
--- no embedding, not forgotten, fewer than 5 refused embedding attempts, not
--- an assistant utterance, and not a session_index or legacy item. Assistant
--- turns are trust 3 and never ranked
--- by vector; session indexes and legacy rows are embedded by their own
--- writers or not at all. Read only; idx_items_pending_embedding serves the
--- order, and its predicate repeats this WHERE word for word so the planner
+-- The signature without p_claimant read without claiming; dropping it leaves
+-- no unclaimed read for a caller to reach.
+DROP FUNCTION IF EXISTS public.engram_items_pending_embedding(integer);
+
+-- Claims and returns up to p_limit (1 to 256) items that still need an
+-- embedding, oldest first: no embedding, not forgotten, fewer than 5 refused
+-- embedding attempts, not an assistant utterance, and not a session_index or
+-- legacy item. Assistant turns are trust 3 and never ranked by vector;
+-- session indexes and legacy rows are embedded by their own writers or not
+-- at all. idx_items_pending_embedding serves the order, and its predicate
+-- repeats the eligibility clauses of this WHERE word for word so the planner
 -- proves the match and the index holds no row this function skips. The WHERE
 -- columns are unqualified to keep that text identical; none of them is an
 -- output column name.
-CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer DEFAULT 32) RETURNS TABLE(id uuid, search_text text)
-    LANGUAGE plpgsql STABLE SECURITY DEFINER
+-- Claims: an item is taken only when p_claimant already holds it, nobody
+-- does, or the holder's claim has lapsed, and every row returned is claimed
+-- for p_claimant for 120 seconds. The call takes the forget advisory key
+-- exclusively before it reads, as every function that locks item rows does,
+-- so two calls run one after the other and the second reads after the
+-- first's claims are committed: two calls never return the same item while
+-- a claim is live. A row some other writer holds locked is skipped rather
+-- than waited on.
+-- search_text comes back cut to its first 6000 characters: the worker embeds
+-- at most 6000 UTF-16 units of it (EMBED_MAX_CHARS) and a character is at
+-- least one unit, so the head holds all that is embedded and a batch of long
+-- items does not carry their whole text over the wire.
+CREATE OR REPLACE FUNCTION public.engram_items_pending_embedding(p_limit integer, p_claimant uuid) RETURNS TABLE(id uuid, search_text text)
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
 BEGIN
@@ -3551,16 +3877,85 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_items_pending_embedding: p_limit must be from 1 to 256';
   END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_pending_embedding: p_claimant must be a uuid';
+  END IF;
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
   RETURN QUERY
-  SELECT i.id, i.search_text
-    FROM public.memory_items i
-   WHERE embedding IS NULL
-     AND forgotten_at IS NULL
-     AND embedding_attempts < 5
-     AND NOT (class = 'utterance' AND speaker = 'assistant')
-     AND class NOT IN ('session_index', 'legacy')
-   ORDER BY i.created_at, i.id
-   LIMIT p_limit;
+  WITH candidate AS (
+    SELECT i.id
+      FROM public.memory_items i
+     WHERE embedding IS NULL
+       AND forgotten_at IS NULL
+       AND embedding_attempts < 5
+       AND NOT (class = 'utterance' AND speaker = 'assistant')
+       AND class NOT IN ('session_index', 'legacy')
+       AND (embedding_claimed_by = p_claimant OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())
+     ORDER BY i.created_at, i.id
+     LIMIT p_limit
+       FOR NO KEY UPDATE OF i SKIP LOCKED
+  ), claimed AS (
+    UPDATE public.memory_items m
+       SET embedding_claimed_by = p_claimant,
+           embedding_claimed_until = now() + interval '120 seconds'
+      FROM candidate c
+     WHERE m.id = c.id
+    RETURNING m.id, left(m.search_text, 6000) AS head_text, m.created_at
+  )
+  SELECT k.id, k.head_text
+    FROM claimed k
+   ORDER BY k.created_at, k.id;
+END; $$;
+
+
+--
+-- Name: engram_items_renew_embedding_claims(uuid[], uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Extends p_claimant's claims on 1 to 256 items to 120 seconds from now,
+-- for items p_claimant still holds that are still waiting for a vector (no
+-- embedding, not forgotten); a lapsed claim nobody took over is held again.
+-- Returns the claims extended. A worker calls it while its pass runs, so a
+-- pass that outlasts one lease keeps its items. It takes the forget advisory
+-- key exclusively before it locks rows, as engram_items_pending_embedding
+-- does; a row some other writer holds locked is skipped, and the next
+-- renewal reaches it well before the claim lapses.
+CREATE OR REPLACE FUNCTION public.engram_items_renew_embedding_claims(p_ids uuid[], p_claimant uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_renewed integer;
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_items_renew_embedding_claims: p_ids holds %s ids, not 1 to 256', coalesce(cardinality(p_ids), 0));
+  END IF;
+  IF array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_renew_embedding_claims: p_ids holds a null id';
+  END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_renew_embedding_claims: p_claimant must be a uuid';
+  END IF;
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  WITH held AS (
+    SELECT i.id
+      FROM public.memory_items i
+     WHERE i.id = ANY (p_ids)
+       AND i.embedding_claimed_by = p_claimant
+       AND i.embedding IS NULL
+       AND i.forgotten_at IS NULL
+       FOR NO KEY UPDATE OF i SKIP LOCKED
+  )
+  UPDATE public.memory_items m
+     SET embedding_claimed_until = now() + interval '120 seconds'
+    FROM held h
+   WHERE m.id = h.id;
+  GET DIAGNOSTICS v_renewed = ROW_COUNT;
+  RETURN v_renewed;
 END; $$;
 
 
@@ -3572,7 +3967,8 @@ END; $$;
 -- real range and a non-blank model string of at most 200 characters, every id
 -- distinct. A row is written only while it has no embedding and is not
 -- forgotten, so a repeat, or a batch that lost a race with a forget, writes
--- nothing for that row. Returns the rows written.
+-- nothing for that row. Returns the rows written. A written row's embedding
+-- claim is cleared: the item needs no further pass.
 -- It takes the forget advisory key (7308892986227385959) exclusively, then
 -- locks the rows FOR NO KEY UPDATE in id order, as engram_retire_items does:
 -- a forget locks rows in its own order, and an UPDATE taking row locks
@@ -3645,7 +4041,9 @@ BEGIN
       FOR NO KEY UPDATE;
   UPDATE public.memory_items m
      SET embedding = (r.e -> 'embedding')::text::public.vector,
-         embedding_model = r.e ->> 'model'
+         embedding_model = r.e ->> 'model',
+         embedding_claimed_by = NULL,
+         embedding_claimed_until = NULL
     FROM jsonb_array_elements(p_rows) AS r(e)
    WHERE m.id = (r.e ->> 'id')::uuid
      AND m.embedding IS NULL
@@ -3656,17 +4054,24 @@ END; $$;
 
 
 --
--- Name: engram_items_record_embedding_failures(jsonb); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_record_embedding_failures(jsonb, uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
+-- The signature without p_claimant raised an item whoever held it; dropping
+-- it leaves no way to count one refusal twice.
+DROP FUNCTION IF EXISTS public.engram_items_record_embedding_failures(jsonb);
+
 -- Records 1 to 256 input-specific embedding failures, each {id, error}: a
--- uuid and the provider's non-blank message, every id distinct. Each item
--- still pending (no embedding, not forgotten, fewer than 5 attempts) has
--- embedding_attempts raised by one and embedding_error set to the message cut
--- to 500 characters; any other row is left as it is. Returns the rows raised.
+-- uuid and the provider's non-blank message, every id distinct, found by
+-- p_claimant's embedding pass. Each item still pending (no embedding, not
+-- forgotten, fewer than 5 attempts) on which no other claimant holds a live
+-- claim has embedding_attempts raised by one and embedding_error set to the
+-- message cut to 500 characters; any other row is left as it is. Returns the
+-- rows raised. A pass whose claim lapsed and was taken over records nothing,
+-- so a refusal counts once per item per pass.
 -- It takes the forget advisory key exclusively, then locks the rows FOR NO
 -- KEY UPDATE in id order, as engram_items_set_embeddings does.
-CREATE OR REPLACE FUNCTION public.engram_items_record_embedding_failures(p_rows jsonb) RETURNS integer
+CREATE OR REPLACE FUNCTION public.engram_items_record_embedding_failures(p_rows jsonb, p_claimant uuid) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -3683,6 +4088,10 @@ BEGIN
   IF v_count < 1 OR v_count > 256 THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = format('engram_items_record_embedding_failures: p_rows holds %s objects, not 1 to 256', v_count);
+  END IF;
+  IF p_claimant IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_record_embedding_failures: p_claimant must be a uuid';
   END IF;
 
   SELECT p.reason INTO v_problem
@@ -3733,7 +4142,8 @@ BEGIN
    WHERE m.id = (r.e ->> 'id')::uuid
      AND m.embedding IS NULL
      AND m.forgotten_at IS NULL
-     AND m.embedding_attempts < 5;
+     AND m.embedding_attempts < 5
+     AND (m.embedding_claimed_by = p_claimant OR m.embedding_claimed_until IS NULL OR m.embedding_claimed_until <= now());
   GET DIAGNOSTICS v_raised = ROW_COUNT;
   RETURN v_raised;
 END; $$;
@@ -3982,6 +4392,12 @@ ALTER TABLE public.memory_item_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_capture_events ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_capture_event_counts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_capture_event_counts ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memory_secret_hits; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4092,6 +4508,14 @@ CREATE POLICY service_role_all ON public.memory_capture_events TO service_role U
 
 
 --
+-- Name: memory_capture_event_counts service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_capture_event_counts;
+CREATE POLICY service_role_all ON public.memory_capture_event_counts TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: memory_secret_hits service_role_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -4117,8 +4541,8 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM PUBLIC, service_role;
-REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM PUBLIC, service_role;
+REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -4129,8 +4553,8 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_secret_hits FROM %I', role_name);
-      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -4142,6 +4566,7 @@ GRANT SELECT ON TABLE public.memory_projects TO service_role;
 GRANT SELECT ON TABLE public.memory_items TO service_role;
 GRANT SELECT ON TABLE public.memory_item_entities TO service_role;
 GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
+GRANT SELECT ON TABLE public.memory_capture_event_counts TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 
 
@@ -4196,7 +4621,8 @@ $smoke$;
 -- re-created above lose their grants on every apply, so this section runs
 -- after the last function definition and re-applying the file restores it.
 --
--- Every function below except the memory_items_* trigger functions is an RPC
+-- Every function below except the memory_items_* and memory_capture_events_*
+-- trigger functions is an RPC
 -- endpoint and gets the service_role grant. The trigger functions are revoked
 -- from service_role as well and granted to no role, so a database whose
 -- default privileges give service_role EXECUTE on new functions ends with the
@@ -4222,9 +4648,10 @@ REVOKE EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
@@ -4249,11 +4676,13 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -4276,9 +4705,10 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_materialize(integer) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) FROM %I', role_name);
-      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
@@ -4303,6 +4733,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -4320,9 +4751,10 @@ GRANT EXECUTE ON FUNCTION public.engram_retire_items(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_supersede_item(uuid, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_ingest(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_materialize(integer) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_pending_embedding(integer, uuid) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_renew_embedding_claims(uuid[], uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_set_embeddings(jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_record_embedding_failures(jsonb, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
