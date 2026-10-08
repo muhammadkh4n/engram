@@ -39,7 +39,7 @@ import {
 } from '@engram-mem/core'
 import { degradedReason } from './capture-events/route.js'
 import { parseRfc3339 } from './capture-events/validate.js'
-import type { ProjectRegistry } from './capture-events/project-registry.js'
+import { canonicalFolderScope, type ProjectRegistry } from './capture-events/project-registry.js'
 
 /** 8 MiB holds the vault's largest note (465 KB) many times over, even with JSON escaping. */
 export const DOCUMENTS_BODY_MAX_BYTES = 8 * 1024 * 1024
@@ -318,21 +318,17 @@ function checkNote(raw: RawNote, now: Date): CheckedNote | { reason: string } {
 }
 
 /**
- * The note's scope from its top folder: the one registry project filed
- * under that folder, with its workspace; else the one workspace filed there;
- * else none, as for a note at the vault root.
+ * The note's scope from its top folder: the folder's canonical scope, the one
+ * its register is stored under (`canonicalFolderScope`), so a vault folder's
+ * notes and its rulings share one scope. None for a note at the vault root
+ * or under a folder no registry entry files under.
  */
 export function resolveNoteScope(
   registry: ProjectRegistry,
   segments: readonly string[],
 ): { projectId: string | null; workspaceId: string | null } {
   if (segments.length < 2) return { projectId: null, workspaceId: null }
-  const folder = segments[0]
-  const projects = [...registry.projects.values()].filter((p) => p.vaultFolder === folder)
-  if (projects.length === 1) return { projectId: projects[0]!.id, workspaceId: projects[0]!.workspace }
-  const workspaces = [...registry.workspaces.values()].filter((w) => w.vaultFolder === folder)
-  if (workspaces.length === 1) return { projectId: null, workspaceId: workspaces[0]!.id }
-  return { projectId: null, workspaceId: null }
+  return canonicalFolderScope(registry, segments[0]!) ?? { projectId: null, workspaceId: null }
 }
 
 /** `<Folder>/Plans/<bucket>/<slug>/…` or `<Folder>/Plans/<bucket>/<slug>.md`; null for any other note. */

@@ -234,6 +234,22 @@ describe('runDocumentsRequest: mapping', () => {
     expect(resolveNoteScope(REGISTRY, ['Unfiled', 'x.md'])).toEqual({ projectId: null, workspaceId: null })
   })
 
+  it('gives a note under a folder several projects share with no workspace the project named like the folder', () => {
+    const shared = parseProjectRegistry({
+      version: 1,
+      workspaces: {},
+      projects: {
+        'tst-zeta': { workspace: null, vault_folder: 'Sampleset', register_prefix: 'TSTS' },
+        sampleset: { workspace: null, vault_folder: 'Sampleset', register_prefix: 'TSTS' },
+        'tst-alpha': { workspace: null, vault_folder: 'Sampleset', register_prefix: 'TSTS' },
+      },
+    })
+    expect(resolveNoteScope(shared, ['Sampleset', 'Plans', 'Active', 'demo-plan', 'LEDGER.md'])).toEqual({
+      projectId: 'sampleset',
+      workspaceId: null,
+    })
+  })
+
   it('reads plan_slug from a plan folder or a single-doc plan, and nothing else', () => {
     expect(planSlugOf(['Engram', 'Plans', 'Delivered', 'demo-plan.md'])).toBe('demo-plan')
     expect(planSlugOf(['Engram', 'Plans', 'Design Records', 'demo-plan', 'README.md'])).toBe('demo-plan')
