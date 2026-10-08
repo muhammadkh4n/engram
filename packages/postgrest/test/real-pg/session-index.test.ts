@@ -13,6 +13,7 @@
  * - An extraction commit that stores an observation makes the index due
  *   again, and a build read before a change is refused as stale.
  */
+import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { buildSessionIndexItem, runSessionIndexTick, SESSION_INDEX_IDLE_MS, type StoredEvent } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '../../src/capture-store.js'
@@ -238,7 +239,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('session state and the session 
       })
       expect(await state(s)).toMatchObject({ index_item_id: index!.id, indexed_event_id: eventIds[6] })
       // The new index waits for an embedding like any other item.
-      const pending = await store.pendingEmbeddings(256)
+      const pending = await store.pendingEmbeddings(256, randomUUID())
       expect(pending.map((p) => p.id)).toContain(index!.id)
 
       expect(await tick()).toMatchObject({ due: 0 })
