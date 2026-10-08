@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { CompleteJsonRequest } from '@engram-mem/core'
+import type { CompleteJsonRequest, ExtractionCommit, ExtractionFailure } from '@engram-mem/core'
 import {
   gateSalvage,
   type LegacyRow,
@@ -9,6 +9,7 @@ import {
   SALVAGE_ROW_MAX_CHARS,
   SALVAGE_WINDOW_MAX_CHARS,
   type SalvageObservationRow,
+  type SalvageRunStore,
   salvageSession,
   salvageSessions,
   type SalvageStore,
@@ -78,17 +79,59 @@ function fakeStore(opts: {
     salvageObservations: async (projects, limit) =>
       (opts.observations ?? []).filter((o) => projects.includes(o.project_id)).slice(0, limit),
     completedWindowKeys: async (keys) => new Set(keys.filter((k) => (opts.completed ?? []).includes(k))),
+    projects: async () => [{ id: 'tst-app', kind: 'project' }],
   }
 }
 
-function fakeModel(reply: string) {
+interface FakeRun {
+  id: string
+  windowKey: string
+  model: string | null
+  status: 'running' | 'succeeded' | 'failed'
+  commits: ExtractionCommit[]
+  failure: ExtractionFailure | null
+}
+
+/** Runs as the database keeps them: a succeeded key is not opened again, and a commit is one call. */
+function fakeRuns(succeeded: string[] = []): SalvageRunStore & { runs: FakeRun[] } {
+  const runs: FakeRun[] = []
+  const byId = (id: string) => runs.find((r) => r.id === id)!
+  return {
+    runs,
+    salvageBegin: async ({ windowKey, model }) => {
+      if (succeeded.includes(windowKey) || runs.some((r) => r.windowKey === windowKey && r.status === 'succeeded')) return null
+      const id = `00000000-0000-4000-8000-00000000f${runs.length.toString(16).padStart(3, '0')}`
+      runs.push({ id, windowKey, model, status: 'running', commits: [], failure: null })
+      return id
+    },
+    extractionCommit: async (runId, commit) => {
+      const run = byId(runId)
+      run.commits.push(commit)
+      run.status = 'succeeded'
+      return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0, restatements: 0 }
+    },
+    extractionFail: async (runId, failure) => {
+      const run = byId(runId)
+      run.failure = failure
+      run.status = 'failed'
+      return true
+    },
+  }
+}
+
+function deps(store: SalvageStore, intelligence: ReturnType<typeof fakeModel>['intelligence'], runs = fakeRuns()) {
+  return { store, runs, intelligence, model: 'tst-model' }
+}
+
+/** Answers each call with the next reply, the last one repeated. */
+function fakeModel(...replies: string[]) {
   const requests: CompleteJsonRequest[] = []
   return {
     requests,
     intelligence: {
       completeJson: async (req: CompleteJsonRequest) => {
         requests.push(req)
-        return { text: reply, finishReason: 'stop', model: 'tst-model' }
+        return { text: replies[Math.min(requests.length, replies.length) - 1]!, finishReason: 'stop', model: 'tst-model' }
       },
     },
   }
@@ -97,10 +140,11 @@ function fakeModel(reply: string) {
 async function gatedRun(name: string) {
   const fixture = recorded(name)
   const model = fakeModel(fixture.reply)
-  const result = await salvageSession(OPEN, { store: fakeStore({ rows: fixture.rows }), intelligence: model.intelligence })
+  const runs = fakeRuns()
+  const result = await salvageSession(OPEN, deps(fakeStore({ rows: fixture.rows }), model.intelligence, runs))
   const window = result.windows[0]!
-  if (window.status !== 'gated') throw new Error(`window not gated: ${window.status}`)
-  return { fixture, window, model }
+  if (window.status !== 'stored') throw new Error(`window not stored: ${window.status}`)
+  return { fixture, window, model, runs }
 }
 
 describe('legacy salvage gate on recorded replies', () => {
@@ -139,7 +183,7 @@ describe('legacy salvage rows', () => {
     const model = fakeModel('{"observations":[]}')
 
     expect((await salvageSessions(store)).map((s) => s.sessionId)).toEqual([OPEN])
-    const covered = await salvageSession(COVERED, { store, intelligence: model.intelligence })
+    const covered = await salvageSession(COVERED, deps(store, model.intelligence))
     expect(covered).toMatchObject({ covered: true, windows: [] })
     expect(model.requests).toHaveLength(0)
     expect(store.rowReads).not.toContain(COVERED)
@@ -153,7 +197,7 @@ describe('legacy salvage rows', () => {
       row({ kind: 'legacy_fact', role: null, content: 'Spool: drained every 30 seconds' }),
     ]
     const model = fakeModel('{"observations":[]}')
-    const result = await salvageSession(OPEN, { store: fakeStore({ rows }), intelligence: model.intelligence })
+    const result = await salvageSession(OPEN, deps(fakeStore({ rows }), model.intelligence))
 
     expect(result.excluded).toEqual({ forgotten: 1, legacy_superseded: 1 })
     expect(model.requests).toHaveLength(1)
@@ -210,10 +254,93 @@ describe('legacy salvage rows', () => {
     expect((await salvageSessions(fakeStore({ rows: [early, late], completed: [done] }))).map((s) => s.sessionId)).toEqual([OPEN])
   })
 
-  it('returns an unreadable window instead of gating a reply that is not the reply object', async () => {
-    const model = fakeModel('I found nothing durable here.')
-    const result = await salvageSession(OPEN, { store: fakeStore({ rows: [row({})] }), intelligence: model.intelligence })
-    expect(result.windows[0]).toMatchObject({ status: 'unreadable', fault: 'parse' })
+})
+
+describe('legacy salvage runs', () => {
+  it('stores the knowledge at trust 3 with the cited row as lineage and its time', async () => {
+    const { fixture, window, runs } = await gatedRun('salvage-we-decided')
+    const assistant = fixture.rows[1]!
+
+    expect(runs.runs).toHaveLength(1)
+    const run = runs.runs[0]!
+    expect(run).toMatchObject({ windowKey: window.key, model: 'tst-model', status: 'succeeded' })
+    expect(run.commits).toHaveLength(1)
+    const commit = run.commits[0]!
+    expect(commit.subjects).toEqual([{ key: 'new-1', projectId: 'tst-app', label: 'Storage backend' }])
+    expect(commit.items).toHaveLength(1)
+    expect(commit.items[0]).toMatchObject({
+      class: 'observation',
+      kind: 'fact',
+      speaker: 'assistant',
+      trust: 3,
+      content: 'The store runs on Postgres only',
+      searchText: 'Storage backend: The store runs on Postgres only',
+      lineage: [assistant.id],
+      occurredAt: new Date('2026-03-02T09:01:30Z'),
+      sessionId: OPEN,
+      projectId: 'tst-app',
+      workspaceId: 'tst-ws',
+      subjectKey: 'new-1',
+      source: {
+        type: 'extraction',
+        extractor: 'legacy-salvage',
+        run_id: run.id,
+        window_key: window.key,
+        time_basis: 'evidence',
+      },
+    })
+    expect(commit.stats).toMatchObject({ rows_in: 2, proposed: 2, stored: 1, rejected_by_reason: { attributed: 1 }, attempts: 1 })
+    expect(window.itemIds).toEqual([commit.items[0]!.id])
+  })
+
+  it('skips a window whose key a run already completed, without a model call', async () => {
+    const rows = [row({})]
+    const key = planSession(OPEN, rows).windows[0]!.key
+    const model = fakeModel('{"observations":[]}')
+    const result = await salvageSession(OPEN, deps(fakeStore({ rows }), model.intelligence, fakeRuns([key])))
+
+    expect(result.windows).toEqual([{ key, status: 'skipped' }])
+    expect(model.requests).toHaveLength(0)
+  })
+
+  it('asks once more after an unreadable reply and stores what the second reply gives', async () => {
+    const fixture = recorded('salvage-we-decided')
+    const model = fakeModel('I found nothing durable here.', fixture.reply)
+    const runs = fakeRuns()
+    const result = await salvageSession(OPEN, deps(fakeStore({ rows: fixture.rows }), model.intelligence, runs))
+
+    expect(model.requests).toHaveLength(2)
+    expect(result.windows[0]).toMatchObject({ status: 'stored', attempts: 2 })
+    expect(runs.runs.map((r) => r.status)).toEqual(['succeeded'])
+  })
+
+  it('fails the run after a second unreadable reply and goes on to the next window', async () => {
+    const long = 'x'.repeat(SALVAGE_ROW_MAX_CHARS)
+    const rows = [0, 1, 2, 3, 4].map((i) => row({ content: long, occurred_at: `2026-03-04T10:0${i}:00Z` }))
+    expect(planSession(OPEN, rows).windows).toHaveLength(2)
+    const model = fakeModel('I found nothing durable here.', 'still not the reply object', '{"observations":[]}')
+    const runs = fakeRuns()
+    const result = await salvageSession(OPEN, deps(fakeStore({ rows }), model.intelligence, runs))
+
+    expect(model.requests).toHaveLength(3)
+    expect(result.windows.map((w) => w.status)).toEqual(['failed', 'stored'])
+    expect(result.windows[0]).toMatchObject({ fault: 'parse', attempts: 2 })
+    expect(runs.runs.map((r) => r.status)).toEqual(['failed', 'succeeded'])
+    expect(runs.runs[0]!.failure).toMatchObject({ failure: 'held', counted: true, stats: { rows_in: 3, attempts: 2, fault: 'parse' } })
+    expect(runs.runs[0]!.commits).toHaveLength(0)
+  })
+
+  it('fails the run as uncounted and stops when the model call itself fails', async () => {
+    const runs = fakeRuns()
+    const intelligence = {
+      completeJson: async (): Promise<never> => {
+        throw new Error('tst provider unreachable')
+      },
+    }
+    await expect(salvageSession(OPEN, deps(fakeStore({ rows: [row({})] }), intelligence, runs))).rejects.toThrow(
+      'tst provider unreachable',
+    )
+    expect(runs.runs[0]).toMatchObject({ status: 'failed', failure: { failure: 'transient', counted: false } })
   })
 })
 

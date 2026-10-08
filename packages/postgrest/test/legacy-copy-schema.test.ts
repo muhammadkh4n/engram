@@ -2,7 +2,8 @@
  * The old memory tables (memory_episodes, memory_digests, memory_semantic)
  * are copied into the item store by engram_legacy_pending and
  * engram_legacy_copy, with engram_legacy_work as the one definition of what a
- * step has left. These checks hold schema.sql to:
+ * step has left; engram_salvage_begin opens the run of one salvage window
+ * over the copied rows. These checks hold schema.sql to:
  * - the signatures the backfill CLI calls, each created once;
  * - SECURITY DEFINER with a fixed search_path, EXECUTE revoked from PUBLIC,
  *   anon and authenticated and granted to service_role, after the definition;
@@ -34,6 +35,12 @@ const FUNCTIONS = [
     params: 'p_step text',
     returns: 'TABLE',
     signature: 'public.engram_legacy_work(text)',
+  },
+  {
+    name: 'engram_salvage_begin',
+    params: 'p_session text, p_window_key text, p_version text, p_model text',
+    returns: 'uuid',
+    signature: 'public.engram_salvage_begin(text, text, text, text)',
   },
 ] as const
 

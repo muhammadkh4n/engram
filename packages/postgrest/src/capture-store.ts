@@ -88,6 +88,16 @@ const SUBJECT_LABEL_MATCHES_MAX = 50
 const SHA_PREFIX = /^[0-9a-f]{7,40}$/i
 const EVENT_ID = /^[0-9]{1,18}$/
 
+/** A legacy salvage run to open on one window of old rows. */
+export interface SalvageBegin {
+  sessionId: string
+  /** sha256, lowercase hex, of the salvage version and the window's item ids in order. */
+  windowKey: string
+  version: string
+  /** The model asked, or null when unknown. */
+  model: string | null
+}
+
 export interface PostgRestCaptureStoreOptions {
   url: string
   key: string
@@ -372,6 +382,24 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     if (error) throw toStoreError('extractionBegin', error)
     if (data === null) return null
     if (typeof data !== 'string' || !isUuid(data)) throw new Error('extractionBegin failed: the RPC returned no run id')
+    return data
+  }
+
+  /**
+   * Opens a legacy salvage run on one window (engram_salvage_begin); null when
+   * a run of that window key and version already succeeded. The run is closed
+   * by extractionCommit or extractionFail.
+   */
+  async salvageBegin(run: SalvageBegin): Promise<string | null> {
+    const { data, error } = await this.client.rpc('engram_salvage_begin', {
+      p_session: run.sessionId,
+      p_window_key: run.windowKey,
+      p_version: run.version,
+      p_model: run.model,
+    })
+    if (error) throw toStoreError('salvageBegin', error)
+    if (data === null) return null
+    if (typeof data !== 'string' || !isUuid(data)) throw new Error('salvageBegin failed: the RPC returned no run id')
     return data
   }
 

@@ -1235,7 +1235,9 @@ CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
     status text NOT NULL,
     stats jsonb DEFAULT '{}'::jsonb NOT NULL,
     error text,
+    window_key text,
     CONSTRAINT memory_extraction_runs_session_id_check CHECK (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256),
+    CONSTRAINT memory_extraction_runs_window_key_check CHECK (window_key IS NULL OR window_key ~ '^[0-9a-f]{64}$'),
     CONSTRAINT memory_extraction_runs_extractor_version_check CHECK (extractor_version ~ '\S' AND char_length(extractor_version) <= 64),
     CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed')),
     CONSTRAINT memory_extraction_runs_finite_check CHECK (public.engram_time_in_range(started_at)
@@ -1672,6 +1674,23 @@ ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timesta
 ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+
+
+--
+-- memory_extraction_runs.window_key: a legacy salvage run reads a window of
+-- old rows, not an anchor utterance, so it is keyed by the window instead:
+-- the sha256, in lowercase hex, of its extractor version and the window's
+-- item ids in order (engram_salvage_begin). NULL on every extraction run.
+--
+ALTER TABLE public.memory_extraction_runs ADD COLUMN IF NOT EXISTS window_key text;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_extraction_runs_window_key_check'
+                   AND conrelid = 'public.memory_extraction_runs'::regclass) THEN
+    ALTER TABLE ONLY public.memory_extraction_runs
+      ADD CONSTRAINT memory_extraction_runs_window_key_check CHECK (window_key IS NULL OR window_key ~ '^[0-9a-f]{64}$');
+  END IF;
+END $$;
 
 
 --
@@ -2170,6 +2189,12 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- CONFLICT DO NOTHING, so two workers never extract the same window twice,
 -- while failed runs stay beside it as the anchor's failure record.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_anchor_version ON public.memory_extraction_runs USING btree (anchor_item_id, extractor_version) WHERE (status IN ('running', 'succeeded'));
+
+-- idx_extraction_runs_window_version allows one succeeded legacy salvage run
+-- per window and extractor version. Two runs of one window that overlap both
+-- reach their commit, and the later commit's close to succeeded raises here,
+-- so the window's observations are stored once.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_window_version ON public.memory_extraction_runs USING btree (window_key, extractor_version) WHERE (window_key IS NOT NULL AND status = 'succeeded');
 
 -- idx_items_version_of finds the current version of an item chain (a ledger
 -- decision or register entry) when capture materializes a new version.
@@ -5691,6 +5716,64 @@ END; $$;
 
 
 --
+-- Name: engram_salvage_begin(text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Opens a legacy salvage run on one window of old rows in session p_session
+-- and returns its id, or NULL when a run of p_window_key at p_version already
+-- succeeded (idx_extraction_runs_window_version): that window is done. A
+-- salvage window has no anchor utterance, so the run has no anchor_item_id and
+-- is keyed by p_window_key, the sha256 in lowercase hex of the version and the
+-- window's item ids in order. p_model is the model asked, NULL when unknown.
+-- A run of the same window and version still open was left by a process that
+-- stopped mid-window, since the backfill runs one window at a time: it is
+-- closed as a transient failure that does not count, so each run row ends in
+-- a final status. The new run is closed by engram_extraction_commit or
+-- engram_extraction_fail, as an extraction run is.
+CREATE OR REPLACE FUNCTION public.engram_salvage_begin(p_session text, p_window_key text, p_version text, p_model text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF p_session IS NULL OR char_length(p_session) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_session must be a text of 1 to 256 characters';
+  END IF;
+  IF p_window_key IS NULL OR p_window_key !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_window_key must be a sha256 in lowercase hex';
+  END IF;
+  IF p_version IS NULL OR p_version !~ '\S' OR char_length(p_version) > 64 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_version must be a non-blank text of at most 64 characters';
+  END IF;
+  IF p_model IS NOT NULL AND (p_model !~ '\S' OR char_length(p_model) > 200) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_model must be NULL or a non-blank text of at most 200 characters';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.memory_extraction_runs r
+              WHERE r.window_key = p_window_key AND r.extractor_version = p_version AND r.status = 'succeeded') THEN
+    RETURN NULL;
+  END IF;
+
+  UPDATE public.memory_extraction_runs r
+     SET status = 'failed',
+         finished_at = now(),
+         error = 'a later run of the same window started',
+         stats = r.stats || jsonb_build_object('failure', 'transient', 'counted', false)
+   WHERE r.window_key = p_window_key AND r.extractor_version = p_version AND r.status = 'running';
+
+  INSERT INTO public.memory_extraction_runs AS r (session_id, anchor_item_id, window_key, extractor_version, model, status)
+  VALUES (p_session, NULL, p_window_key, p_version, p_model, 'running')
+  RETURNING r.id INTO v_id;
+  RETURN v_id;
+END; $$;
+
+
+--
 -- Name: engram_items_apply(uuid, public.memory_items, text, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -8028,6 +8111,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM PUBLIC;
@@ -8115,6 +8199,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM %I', role_name);
@@ -8191,6 +8276,7 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items,
 GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) TO service_role;

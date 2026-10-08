@@ -30,17 +30,28 @@
 import { createHash } from 'node:crypto'
 import {
   ATTRIBUTION_PATTERNS,
+  type CommitDraft,
   type CompleteJsonResult,
+  type ExtractionCommit,
+  type ExtractionCommitResult,
+  type ExtractionFailure,
+  type ExtractionItem,
+  type ExtractionNewSubject,
   extractionMaxTokens,
+  finishCommit,
+  generateId,
   type IntelligenceAdapter,
+  isDataRefusal,
   labelKey,
   type LinkTarget,
   normalizeLabel,
   normalizeQuote,
+  observationEntities,
   orderSubjects,
   SUBJECT_LABEL_MAX_CHARS,
   SUBJECT_LABEL_MIN_CHARS,
   SUBJECT_LISTING_LIMIT,
+  toPostgresText,
   validateLinks,
 } from '@engram-mem/core'
 import {
@@ -106,6 +117,12 @@ export interface SalvageObservationRow {
 /** Project values: a project id, or null for items without one. */
 export type ProjectValue = string | null
 
+/** A row of the project registry, which the entity extractor names repositories from. */
+export interface SalvageProject {
+  id: string
+  kind: string
+}
+
 export interface SalvageStore {
   /** Sessions holding a legacy item that is not forgotten. */
   legacySessions(): Promise<string[]>
@@ -119,6 +136,20 @@ export interface SalvageStore {
   salvageObservations(projects: readonly ProjectValue[], limit: number): Promise<SalvageObservationRow[]>
   /** The window keys whose run completed. */
   completedWindowKeys(keys: readonly string[]): Promise<Set<string>>
+  /** The project registry. */
+  projects(): Promise<SalvageProject[]>
+}
+
+/**
+ * Run bookkeeping and the window's write. A run is opened per window and
+ * closed by the commit, which stores the window's observations and the run's
+ * stats in one transaction, or by a failure.
+ */
+export interface SalvageRunStore {
+  /** The run's id, or null when a run of the window key and version already succeeded. */
+  salvageBegin(run: { sessionId: string; windowKey: string; version: string; model: string | null }): Promise<string | null>
+  extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult>
+  extractionFail(runId: string, failure: ExtractionFailure): Promise<boolean>
 }
 
 export interface WindowRow {
@@ -396,20 +427,7 @@ function supersedesRejection(
   source: { subject: SalvageGatedSubject; occurredAt: string; projectId: string | null; workspaceId: string | null },
 ): string | null {
   if (targets.length === 0) return null
-  const listed: LinkTarget[] = observations.map((o) => ({
-    id: o.id,
-    class: 'observation',
-    kind: o.kind,
-    subjectId: o.subjectId,
-    subjectLabel: o.subjectLabel,
-    occurredAt: o.occurredAt,
-    supersededBy: null,
-    retiredAt: null,
-    forgottenAt: null,
-    projectId: o.projectId,
-    workspaceId: o.workspaceId,
-    shown: false,
-  }))
+  const listed = listedTargets(observations)
   const candidates = listed.map((t) => t.id)
   const { rejected } = validateLinks(
     [
@@ -427,6 +445,107 @@ function supersedesRejection(
     listed,
   )
   return rejected[0]?.reason ?? null
+}
+
+/** The listing reads only current observations, so each is current as of its read. */
+function listedTargets(observations: readonly ListedObservation[]): LinkTarget[] {
+  return observations.map((o) => ({
+    id: o.id,
+    class: 'observation',
+    kind: o.kind,
+    subjectId: o.subjectId,
+    subjectLabel: o.subjectLabel,
+    occurredAt: o.occurredAt,
+    supersededBy: null,
+    retiredAt: null,
+    forgottenAt: null,
+    projectId: o.projectId,
+    workspaceId: o.workspaceId,
+    shown: false,
+  }))
+}
+
+// --- Persisting -------------------------------------------------------------
+
+/** The extractor name a salvage observation's source carries. */
+export const SALVAGE_EXTRACTOR = 'legacy-salvage'
+
+/**
+ * The window's gated observations as one commit, built and link-checked by
+ * extraction's persister. Each is an assistant observation at trust 3: its
+ * lineage is the legacy items its evidence names, its time the newest of
+ * theirs, its session the legacy session. A new subject label shared by
+ * several observations of one project is created once.
+ */
+export function salvageCommit(
+  window: SalvageWindow,
+  listing: SalvageListing,
+  observations: readonly GatedSalvage[],
+  runId: string,
+  projects: readonly SalvageProject[],
+): ExtractionCommit {
+  const subjects = new Map<string, ExtractionNewSubject>()
+  const subjectRef = (subject: SalvageGatedSubject): Pick<ExtractionItem, 'subjectId' | 'subjectKey'> => {
+    if (subject.kind === 'listed') return { subjectId: subject.id, subjectKey: null }
+    const identity = JSON.stringify([subject.projectId, labelKey(subject.label)])
+    let entry = subjects.get(identity)
+    if (entry === undefined) {
+      entry = { key: `new-${subjects.size + 1}`, projectId: subject.projectId, label: toPostgresText(subject.label) }
+      subjects.set(identity, entry)
+    }
+    return { subjectId: null, subjectKey: entry.key }
+  }
+  const items: ExtractionItem[] = observations.map((o) => {
+    const claim = toPostgresText(o.claim)
+    const label = toPostgresText(o.subject.label)
+    return {
+      id: generateId(),
+      class: 'observation',
+      kind: o.kind,
+      speaker: 'assistant',
+      trust: 3,
+      projectId: o.projectId,
+      workspaceId: o.workspaceId,
+      planSlug: null,
+      sessionId: window.sessionId,
+      ...subjectRef(o.subject),
+      content: claim,
+      searchText: `${label}: ${claim}`,
+      context: null,
+      occurredAt: new Date(o.occurredAt),
+      standing: null,
+      registerStatus: null,
+      source: {
+        type: 'extraction',
+        extractor: SALVAGE_EXTRACTOR,
+        run_id: runId,
+        window_key: window.key,
+        time_basis: 'evidence',
+      },
+      lineage: [...o.lineage],
+      entities: observationEntities(claim, [], projects).map((e) => ({ entity: e.entity, entityType: e.entity_type })),
+    }
+  })
+  const draft: CommitDraft = {
+    subjects: [...subjects.values()],
+    items,
+    sources: observations.map((o, index) => ({
+      index,
+      class: 'observation',
+      subjectId: items[index]!.subjectId,
+      subjectLabel: o.subject.label,
+      occurredAt: o.occurredAt,
+      projectId: o.projectId,
+      workspaceId: o.workspaceId,
+    })),
+    proposals: observations.flatMap((o, index) =>
+      o.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
+    ),
+    targets: listedTargets(listing.observations),
+    retractions: [],
+    stats: {},
+  }
+  return finishCommit(draft)
 }
 
 // --- Sessions ---------------------------------------------------------------
@@ -453,9 +572,30 @@ interface WindowOutcomeBase {
 }
 
 export type SalvageWindowOutcome =
-  | (WindowOutcomeBase & { status: 'gated'; proposed: number } & SalvageGateResult)
+  | (WindowOutcomeBase & { status: 'gated'; proposed: number; listing: SalvageListing } & SalvageGateResult)
   /** The model answered with nothing readable as the reply object. */
   | (WindowOutcomeBase & { status: 'unreadable'; fault: 'empty' | 'length' | 'parse'; reason: string })
+
+type GatedOutcome = Extract<SalvageWindowOutcome, { status: 'gated' }>
+type UnreadableOutcome = Extract<SalvageWindowOutcome, { status: 'unreadable' }>
+
+interface WindowRunBase {
+  runId: string
+  /** Model calls made: a second only when the first reply was unreadable. */
+  attempts: number
+}
+
+/** What became of one window: its run's end. */
+export type SalvageWindowRun =
+  /** A run of the window key already succeeded when this one would have opened. */
+  | { key: string; status: 'skipped' }
+  /** The run committed: `itemIds` holds one id per gated observation, as the commit returned them. */
+  | (Omit<GatedOutcome, 'status' | 'listing'> &
+      WindowRunBase & { status: 'stored'; itemIds: string[]; duplicates: number; restatements: number })
+  /** Both replies were unreadable; the run failed and the window is left for a later run. */
+  | (Omit<UnreadableOutcome, 'status'> & WindowRunBase & { status: 'failed' })
+  /** The store refused the window's commit; the run failed and nothing of the window was stored. */
+  | (Omit<GatedOutcome, 'status' | 'listing'> & WindowRunBase & { status: 'refused'; reason: string })
 
 export interface SalvageSessionResult {
   sessionId: string
@@ -465,13 +605,19 @@ export interface SalvageSessionResult {
   contextOnlyWindows: number
   /** Windows a completed run already holds. */
   completed: number
-  windows: SalvageWindowOutcome[]
+  windows: SalvageWindowRun[]
 }
 
 export interface SalvageDeps {
   store: SalvageStore
+  runs: SalvageRunStore
   intelligence: Pick<IntelligenceAdapter, 'completeJson'>
+  /** The model the adapter asks, recorded on each run; null when unknown. */
+  model: string | null
 }
+
+/** Model calls per window: an unreadable reply is asked for once more. */
+export const SALVAGE_REPLY_ATTEMPTS = 2
 
 /** Sessions with a pending window, by the time of that window's first row, then by id. */
 export async function salvageSessions(store: SalvageStore): Promise<SalvageSessionRef[]> {
@@ -505,8 +651,9 @@ export async function salvageSession(sessionId: string, deps: SalvageDeps): Prom
   if (covered.has(sessionId)) return { ...result, covered: true }
   const plan = planSession(sessionId, await deps.store.sessionRows(sessionId))
   const pending = await pendingWindows(deps.store, plan.windows)
-  const windows: SalvageWindowOutcome[] = []
-  for (const window of pending) windows.push(await runSalvageWindow(window, deps))
+  const projects = pending.length > 0 ? await deps.store.projects() : []
+  const windows: SalvageWindowRun[] = []
+  for (const window of pending) windows.push(await salvageWindow(window, projects, deps))
   return {
     ...result,
     excluded: plan.excluded,
@@ -586,10 +733,102 @@ export async function runSalvageWindow(window: SalvageWindow, deps: SalvageDeps)
   const parsed = parseSalvageReply(reply.text)
   if (!parsed.ok) return { ...base, status: 'unreadable', fault: 'parse', reason: parsed.reason }
   const gated = gateSalvage(window, listing, parsed.observations, parsed.schemaRejected.length)
-  return { ...base, status: 'gated', proposed: parsed.observations.length + parsed.schemaRejected.length, ...gated }
+  return { ...base, status: 'gated', proposed: parsed.observations.length + parsed.schemaRejected.length, listing, ...gated }
+}
+
+/**
+ * One window under its own run: opens the run, asks the model (once more
+ * after an unreadable reply), and commits the gated observations with the
+ * run's stats in one transaction. Two unreadable replies, or a commit the
+ * store refuses, fail the run and move on to the next window. A model call
+ * that fails, or a store call that fails without refusing the window's data,
+ * fails the run as a transient failure that does not count and rejects with
+ * its error: the provider or the store is down, so the windows after it
+ * would fail the same way.
+ */
+export async function salvageWindow(
+  window: SalvageWindow,
+  projects: readonly SalvageProject[],
+  deps: SalvageDeps,
+): Promise<SalvageWindowRun> {
+  const runId = await deps.runs.salvageBegin({
+    sessionId: window.sessionId,
+    windowKey: window.key,
+    version: SALVAGE_VERSION,
+    model: deps.model,
+  })
+  if (runId === null) return { key: window.key, status: 'skipped' }
+
+  let attempts = 0
+  let outcome: SalvageWindowOutcome | null = null
+  try {
+    while (attempts < SALVAGE_REPLY_ATTEMPTS && outcome?.status !== 'gated') {
+      attempts += 1
+      outcome = await runSalvageWindow(window, deps)
+    }
+  } catch (err) {
+    await deps.runs.extractionFail(runId, {
+      error: errorText(err),
+      failure: 'transient',
+      counted: false,
+      stats: { rows_in: window.rows.length, attempts },
+    })
+    throw err
+  }
+  if (outcome === null) throw new Error('legacy salvage: no model call was made')
+  if (outcome.status === 'unreadable') {
+    await deps.runs.extractionFail(runId, {
+      error: outcome.reason,
+      failure: 'held',
+      counted: true,
+      stats: { rows_in: window.rows.length, attempts, fault: outcome.fault },
+    })
+    const { status: _unreadable, ...rest } = outcome
+    return { ...rest, status: 'failed', runId, attempts }
+  }
+
+  const { status: _gated, listing, ...gated } = outcome
+  const stats = {
+    rows_in: window.rows.length,
+    proposed: gated.proposed,
+    stored: gated.observations.length,
+    rejected_by_reason: gated.rejected,
+    attempts,
+    prompt_chars: gated.call.promptChars,
+    reply_chars: gated.call.replyChars,
+    model_ms: gated.call.modelMs,
+  }
+  let stored: ExtractionCommitResult
+  try {
+    const commit = salvageCommit(window, listing, gated.observations, runId, projects)
+    stored = await deps.runs.extractionCommit(runId, { ...commit, stats: { ...commit.stats, ...stats } })
+  } catch (err) {
+    const refused = isDataRefusal(err)
+    await deps.runs.extractionFail(runId, {
+      error: errorText(err),
+      failure: refused ? 'held' : 'transient',
+      counted: refused,
+      stats,
+    })
+    if (!refused) throw err
+    return { ...gated, status: 'refused', runId, attempts, reason: errorText(err) }
+  }
+  return {
+    ...gated,
+    status: 'stored',
+    runId,
+    attempts,
+    itemIds: stored.itemIds,
+    duplicates: stored.duplicates,
+    restatements: stored.restatements,
+  }
 }
 
 // --- Helpers ----------------------------------------------------------------
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
 function compareTime(a: LegacyRow, b: LegacyRow): number {
   return Date.parse(a.occurred_at) - Date.parse(b.occurred_at) || compareStrings(a.id, b.id)
