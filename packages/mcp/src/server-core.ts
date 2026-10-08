@@ -335,6 +335,35 @@ export function parseExtractWindowsPerTickEnv(env: NodeJS.ProcessEnv = process.e
   return n
 }
 
+/**
+ * ENGRAM_CONSOLIDATION: `on` (the default) or `off`. With `off` the server
+ * schedules no light, deep, dream or decay cycle. Once the old memory rows
+ * are copied into the item store the old tables take no more writes, and
+ * these cycles write only to those tables. Any other value fails startup.
+ */
+export function consolidationEnabledFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return onOrOther(env, 'ENGRAM_CONSOLIDATION', 'off') === 'on'
+}
+
+/** `on` when unset or blank, else `on` or `other` exactly; anything else throws naming the variable. */
+function onOrOther<T extends string>(env: NodeJS.ProcessEnv, name: string, other: T): 'on' | T {
+  const raw = env[name]?.trim()
+  if (!raw || raw === 'on') return 'on'
+  if (raw === other) return other
+  throw new Error(`${name} must be "on" or "${other}", got "${raw}"`)
+}
+
+/**
+ * Parse ENGRAM_CONSOLIDATION at an entry point, before anything is served,
+ * and log one line when the cycles are off. The memory stack is built
+ * lazily, so a malformed value would otherwise surface only at first use.
+ */
+export function consolidationAtStartup(env: NodeJS.ProcessEnv = process.env): boolean {
+  const enabled = consolidationEnabledFromEnv(env)
+  if (!enabled) console.error('[engram-mcp] consolidation: off')
+  return enabled
+}
+
 /** The chat model every capture classification and digest runs on. */
 export function captureModelFromEnv(env: NodeJS.ProcessEnv = process.env): string {
   return env['ENGRAM_CHAT_MODEL']?.trim() || DEFAULT_CHAT_MODEL
@@ -436,6 +465,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   recallOutputPolicyFromEnv(process.env)
   const { timeZone } = parseTimeZoneEnv()
   const supersession = supersessionSettingsAtStartup()
+  const consolidation = consolidationEnabledFromEnv()
   const recallLog = recallLogFromEnv()
   if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
 
@@ -471,7 +501,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   const memory = createMemory({
     storage,
     intelligence,
-    autoConsolidate: true,
+    autoConsolidate: consolidation,
     supersession,
     // v0.4.3: ENGRAM_INGEST_CONTEXTUAL=true enables Anthropic-style
     // Contextual Retrieval. Memory.ingest will call
@@ -486,16 +516,19 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // The worker owns every cycle, dream included. Dream runs only when due
   // (the daily time gate and the 100-new-episode delta gate) and uses the
   // server's intelligence, as Memory.initialize() already does on every
-  // start. One scheduler, one model configuration.
-  const worker = startConsolidationWorker(storage, intelligence, graph, {
-    cycles: [...CONSOLIDATION_WORKER_CYCLES],
-    intervalMs: 60_000,
-    supersession,
-  })
-  // Best-effort graceful shutdown — stops the interval so the process can exit
-  // cleanly when systemd / docker / a test harness sends SIGTERM.
-  process.once('SIGTERM', () => worker.stop())
-  process.once('SIGINT', () => worker.stop())
+  // start. One scheduler, one model configuration. With consolidation off
+  // no worker starts at all, so nothing writes to the old tables.
+  if (consolidation) {
+    const worker = startConsolidationWorker(storage, intelligence, graph, {
+      cycles: [...CONSOLIDATION_WORKER_CYCLES],
+      intervalMs: 60_000,
+      supersession,
+    })
+    // Best-effort graceful shutdown — stops the interval so the process can exit
+    // cleanly when systemd / docker / a test harness sends SIGTERM.
+    process.once('SIGTERM', () => worker.stop())
+    process.once('SIGINT', () => worker.stop())
+  }
 
   // Same PostgREST endpoint and key as the memory's storage: typed items live
   // in the same database.

@@ -32,6 +32,8 @@ import {
   captureModelFromEnv,
   sharedInit,
   CONSOLIDATION_WORKER_CYCLES,
+  consolidationAtStartup,
+  consolidationEnabledFromEnv,
   recallOutputPolicyAtStartup,
   getMemory,
   RECALL_TOKEN_BUDGET_MIN,
@@ -708,5 +710,60 @@ describe('consolidation worker cycles', () => {
     const { readFile } = await import('node:fs/promises')
     const src = await readFile(new URL('../src/server-core.ts', import.meta.url), 'utf8')
     expect(src).toMatch(/startConsolidationWorker\([^)]*\{\s*cycles: \[\.\.\.CONSOLIDATION_WORKER_CYCLES\]/)
+  })
+
+  it('starts the worker and auto-consolidation only when the switch is on', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const src = await readFile(new URL('../src/server-core.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/const consolidation = consolidationEnabledFromEnv\(\)/)
+    expect(src).toMatch(/autoConsolidate: consolidation,/)
+    expect(src).toMatch(/if \(consolidation\) \{\s*const worker = startConsolidationWorker\(/)
+    expect(src.match(/startConsolidationWorker\(/g)).toHaveLength(1)
+  })
+})
+
+describe('consolidationEnabledFromEnv', () => {
+  it.each([[undefined], [''], ['  '], ['on'], [' on ']])('is on for %j', (raw) => {
+    expect(consolidationEnabledFromEnv(raw === undefined ? {} : { ENGRAM_CONSOLIDATION: raw })).toBe(true)
+  })
+
+  it('is off for off', () => {
+    expect(consolidationEnabledFromEnv({ ENGRAM_CONSOLIDATION: 'off' })).toBe(false)
+  })
+
+  it.each(['no', 'OFF', 'false', 'hold'])('fails startup on %s, naming the variable', (raw) => {
+    expect(() => consolidationEnabledFromEnv({ ENGRAM_CONSOLIDATION: raw })).toThrow(
+      `ENGRAM_CONSOLIDATION must be "on" or "off", got "${raw}"`,
+    )
+  })
+})
+
+describe('consolidationAtStartup', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('logs one line when the cycles are off', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(consolidationAtStartup({ ENGRAM_CONSOLIDATION: 'off' })).toBe(false)
+    expect(errorSpy.mock.calls).toEqual([['[engram-mcp] consolidation: off']])
+  })
+
+  it('logs nothing when the cycles run', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(consolidationAtStartup({})).toBe(true)
+    expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  it('fails the memory stack on a malformed value before any backend is contacted', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const saved = process.env.ENGRAM_CONSOLIDATION
+    process.env.ENGRAM_CONSOLIDATION = 'no'
+    try {
+      await expect(getMemory()).rejects.toThrow('ENGRAM_CONSOLIDATION must be "on" or "off", got "no"')
+    } finally {
+      if (saved === undefined) delete process.env.ENGRAM_CONSOLIDATION
+      else process.env.ENGRAM_CONSOLIDATION = saved
+    }
   })
 })

@@ -10,6 +10,7 @@ import {
   createEngramServer,
   getCaptureDeps,
   recallOutputPolicyAtStartup,
+  consolidationAtStartup,
   captureModelFromEnv,
   parseExtractWindowsPerTickEnv,
   chatIntelligenceOptionsFromEnv,
@@ -188,6 +189,7 @@ export async function main(): Promise<void> {
   const captureModel = captureModelFromEnv()
   const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
   recallOutputPolicyAtStartup()
+  consolidationAtStartup()
   const log = (line: string): void => {
     process.stderr.write(`[engram-mcp-http] ${line}\n`)
   }
