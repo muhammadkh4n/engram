@@ -11,6 +11,7 @@
  * - The new items wait for an embedding; the assistant turn never does.
  * - A second tick finds nothing due and makes no model call.
  */
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -207,7 +208,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction end to end on real 
       expect(await pg.psql('SELECT count(*) FROM public.memory_item_entities;')).toBe('0')
       expect(await pg.psql(`SELECT label FROM public.memory_subjects;`)).toBe('old spool')
 
-      const waiting = (await store.pendingEmbeddings(32)).map((row) => row.id)
+      const waiting = (await store.pendingEmbeddings(32, randomUUID())).map((row) => row.id)
       expect(waiting).toContain(statement['id'])
       expect(waiting).not.toContain(turnId)
 
@@ -246,7 +247,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction end to end on real 
       )
       expect(entities.split(',')).toContain('sha:c0ffee5d1e9a')
 
-      const waiting = (await store.pendingEmbeddings(32)).map((row) => row.id)
+      const waiting = (await store.pendingEmbeddings(32, randomUUID())).map((row) => row.id)
       expect(waiting).toContain(observation['id'])
       expect(waiting).not.toContain(turnId)
 
