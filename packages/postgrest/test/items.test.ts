@@ -117,8 +117,8 @@ describe('PostgRestItemStore.insertItems', () => {
     const { client, rpcCalls } = mockClient({
       rpc: {
         data: [
-          { ord: 2, id: ID_B, inserted: false },
-          { ord: 1, id: ID_A, inserted: true },
+          { ord: 2, id: ID_B, inserted: false, forgotten: true },
+          { ord: 1, id: ID_A, inserted: true, forgotten: false },
         ],
         error: null,
       },
@@ -167,8 +167,8 @@ describe('PostgRestItemStore.insertItems', () => {
       extraction_run_id: ID_B,
     })
     expect(result).toEqual([
-      { id: ID_A, eventKey: 'capture:tst-store-session:turn-1', inserted: true },
-      { id: ID_B, eventKey: 'mk_statement:tst-store-session:turn-1', inserted: false },
+      { id: ID_A, eventKey: 'capture:tst-store-session:turn-1', inserted: true, forgotten: false },
+      { id: ID_B, eventKey: 'mk_statement:tst-store-session:turn-1', inserted: false, forgotten: true },
     ])
   })
 
@@ -227,7 +227,7 @@ describe('PostgRestItemStore.insertItems', () => {
   })
 
   it('refuses a result that does not hold one row per item', async () => {
-    const { client } = mockClient({ rpc: { data: [{ ord: 1, id: ID_A, inserted: true }], error: null } })
+    const { client } = mockClient({ rpc: { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }], error: null } })
 
     await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(/insertItems failed/)
   })
@@ -245,7 +245,7 @@ describe('PostgRestItemStore.insertItems', () => {
   })
 
   it('accepts the last instant of year 9999', async () => {
-    const { client, rpcCalls } = mockClient({ rpc: { data: [{ ord: 1, id: ID_A, inserted: true }], error: null } })
+    const { client, rpcCalls } = mockClient({ rpc: { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }], error: null } })
 
     await storeWith(client).insertItems([{ ...utterance, occurredAt: new Date('9999-12-31T23:59:59.999Z') }])
 
@@ -259,7 +259,7 @@ describe('PostgRestItemStore.insertItems', () => {
     ['a non-uuid string', 'tst-not-an-id'],
   ])('insertItems throws when a result row has no id (%s)', async (_label, id) => {
     const { client } = mockClient({
-      rpc: { data: [{ ord: 1, id: ID_A, inserted: true }, { ord: 2, id, inserted: false }], error: null },
+      rpc: { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }, { ord: 2, id, inserted: false, forgotten: false }], error: null },
     })
 
     await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(
@@ -267,9 +267,23 @@ describe('PostgRestItemStore.insertItems', () => {
     )
   })
 
+  it.each([
+    ['no forgotten flag', { ord: 2, id: ID_B, inserted: false }],
+    ['a non-boolean forgotten flag', { ord: 2, id: ID_B, inserted: false, forgotten: 'f' }],
+    ['no inserted flag', { ord: 2, id: ID_B, forgotten: false }],
+  ])('insertItems throws when a result row has %s', async (_label, second) => {
+    const { client } = mockClient({
+      rpc: { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }, second], error: null },
+    })
+
+    await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(
+      /insertItems failed: result row 2 lacks inserted or forgotten/,
+    )
+  })
+
   it('refuses result rows whose positions do not run from 1 to the item count', async () => {
     const { client } = mockClient({
-      rpc: { data: [{ ord: 1, id: ID_A, inserted: true }, { ord: 3, id: ID_B, inserted: true }], error: null },
+      rpc: { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }, { ord: 3, id: ID_B, inserted: true, forgotten: false }], error: null },
     })
 
     await expect(storeWith(client).insertItems([utterance, statement])).rejects.toThrow(
@@ -579,13 +593,13 @@ describe('PostgRestItemStore retries of a rolled-back write', () => {
     const { client, rpcCalls } = mockClient({
       rpc: sequence(
         { data: null, error: pgError('40P01', 'deadlock detected') },
-        { data: [{ ord: 1, id: ID_A, inserted: true }], error: null },
+        { data: [{ ord: 1, id: ID_A, inserted: true, forgotten: false }], error: null },
       ),
     })
 
     const rows = await storeWith(client).insertItems([utterance])
 
-    expect(rows).toEqual([{ id: ID_A, eventKey: utterance.source.event_key ?? null, inserted: true }])
+    expect(rows).toEqual([{ id: ID_A, eventKey: utterance.source.event_key ?? null, inserted: true, forgotten: false }])
     expect(rpcCalls).toHaveLength(2)
     expect(rpcCalls[1]).toEqual(rpcCalls[0])
   })
@@ -704,27 +718,60 @@ describe('PostgRestItemStore error mapping', () => {
     expect(unique.message).not.toContain('Key (')
   })
 
-  it('reports any other error as a plain failure with its code and message only', async () => {
+  it('names the item function that refused an argument (22023) from its message prefix', async () => {
     const err = await refusal({
       code: '22023',
-      message: 'engram_insert_items: object 1 has the key superseded_by, which is not an insert column',
+      message: 'engram_insert_items: object 2: lineage names a forgotten item',
       details: SECRET_ROW,
-      hint: 'remove the key',
+      hint: null,
+    })
+
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint?: string }).constraint).toBe('engram_insert_items')
+    expect(err.message).toBe('engram_insert_items: object 2: lineage names a forgotten item')
+  })
+
+  it('reports a 22023 not raised by an item function as a plain failure', async () => {
+    const unprefixed = await refusal({
+      code: '22023',
+      message: 'invalid value for parameter "TimeZone": "Mars/Base"',
+      details: SECRET_ROW,
+      hint: null,
+    })
+    const otherFunction = await refusal({
+      code: '22023',
+      message: 'engram_vector_search: p_limit must be positive',
+      details: SECRET_ROW,
+      hint: null,
+    })
+
+    expect(isItemConstraintError(unprefixed)).toBe(false)
+    expect(unprefixed.message).toBe('insertItems failed (22023): invalid value for parameter "TimeZone": "Mars/Base"')
+    expect(isItemConstraintError(otherFunction)).toBe(false)
+    expect(otherFunction.message).toBe('insertItems failed (22023): engram_vector_search: p_limit must be positive')
+  })
+
+  it('reports any other error as a plain failure with its code and message only', async () => {
+    const err = await refusal({
+      code: '42883',
+      message: 'function public.engram_insert_items(p_items => jsonb) does not exist',
+      details: SECRET_ROW,
+      hint: 'apply the schema',
     })
 
     expect(isItemConstraintError(err)).toBe(false)
     expect(err.message).toBe(
-      'insertItems failed (22023): engram_insert_items: object 1 has the key superseded_by, which is not an insert column',
+      'insertItems failed (42883): function public.engram_insert_items(p_items => jsonb) does not exist',
     )
   })
 
   it('names the operation that failed', async () => {
     const { client } = mockClient({
-      rpc: { data: null, error: { code: '22023', message: 'engram_supersede_item: p_old names no item', details: SECRET_ROW, hint: null } },
+      rpc: { data: null, error: { code: '42501', message: 'permission denied for function engram_supersede_item', details: SECRET_ROW, hint: null } },
     })
 
     await expect(storeWith(client).supersedeItem(ID_A, ID_B)).rejects.toThrow(
-      /^supersedeItem failed \(22023\): engram_supersede_item: p_old names no item$/,
+      /^supersedeItem failed \(42501\): permission denied for function engram_supersede_item$/,
     )
   })
 

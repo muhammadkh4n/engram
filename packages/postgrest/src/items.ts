@@ -43,6 +43,21 @@ const GET_CHUNK_SIZE = 100
 
 /** SQLSTATEs for a refused rule: check (CHECKs, triggers, RPC rules), foreign key, unique. */
 const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
+/**
+ * invalid_parameter_value. The item functions raise it for a refused
+ * precondition (a lineage naming a forgotten item, an unknown id), which can
+ * never succeed on a retry any more than a 23514 can, so one raised by an item
+ * function is an ItemConstraintError too; any other 22023 is a plain error.
+ */
+const PRECONDITION_CODE = '22023'
+const ITEM_FUNCTIONS = new Set([
+  'engram_insert_items',
+  'engram_forget_items',
+  'engram_retire_items',
+  'engram_unretire_items',
+  'engram_supersede_item',
+  'engram_invariant_counts',
+])
 const VIOLATED_CONSTRAINT = /violates [a-z -]*constraint "([^"]+)"/
 /** Triggers and RPCs raise `<trigger or function name>: <reason>`. */
 const NAME_PREFIX = /^([a-z_][a-z0-9_]*):/
@@ -72,6 +87,7 @@ interface InsertRow {
   ord: number
   id: string
   inserted: boolean
+  forgotten: boolean
 }
 
 interface ForgetRow {
@@ -151,11 +167,15 @@ export class PostgRestItemStore implements ItemStore {
       if (typeof row.id !== 'string' || !isUuid(row.id)) {
         throw new Error(`insertItems failed: result row ${row.ord} has no id`)
       }
+      if (typeof row.inserted !== 'boolean' || typeof row.forgotten !== 'boolean') {
+        throw new Error(`insertItems failed: result row ${row.ord} lacks inserted or forgotten`)
+      }
     })
     return sorted.map((row) => ({
       id: row.id,
       eventKey: items[row.ord - 1]!.source.event_key ?? null,
       inserted: row.inserted,
+      forgotten: row.forgotten,
     }))
   }
 
@@ -340,6 +360,10 @@ function toStoreError(operation: string, error: PgError): Error {
   if (CONSTRAINT_CODES.has(code)) {
     const constraint = VIOLATED_CONSTRAINT.exec(message)?.[1] ?? NAME_PREFIX.exec(message)?.[1] ?? 'unknown'
     return new ItemConstraintError(constraint, message)
+  }
+  const raisedBy = NAME_PREFIX.exec(message)?.[1]
+  if (code === PRECONDITION_CODE && raisedBy !== undefined && ITEM_FUNCTIONS.has(raisedBy)) {
+    return new ItemConstraintError(raisedBy, message)
   }
   return new Error(`${operation} failed (${code}): ${message}`)
 }

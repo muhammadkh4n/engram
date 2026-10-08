@@ -70,7 +70,19 @@ export type MaterializeResult =
 /** The largest batch one pending-embedding read or embedding write takes. */
 export const EMBEDDING_BATCH_MAX = 256
 
-/** An item that still needs a vector: its id and the text to embed it from. */
+/**
+ * How long a pending-embedding read holds the items it returns for its
+ * claimant, and how far each renewal extends that hold. While a claim is
+ * live no other claimant reads the item, and a claim nobody renews (its
+ * worker crashed) lapses on its own. The database applies the same lease.
+ */
+export const EMBEDDING_CLAIM_LEASE_SECONDS = 120
+
+/**
+ * An item that still needs a vector: its id and the text to embed it from,
+ * its search text cut to EMBED_MAX_CHARS characters, which hold every code
+ * unit the embed text builder keeps.
+ */
 export interface PendingEmbedding {
   id: string
   searchText: string
@@ -451,12 +463,22 @@ export interface CaptureStore {
   materialize(limit: number): Promise<MaterializeResult>
 
   /**
-   * Up to `limit` (1 to EMBEDDING_BATCH_MAX) items that still need an
-   * embedding, oldest first: no embedding, not forgotten, fewer than
-   * EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant utterance, and
-   * not a legacy item.
+   * Claims and returns up to `limit` (1 to EMBEDDING_BATCH_MAX) items that
+   * still need an embedding, oldest first: no embedding, not forgotten, fewer
+   * than EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant
+   * utterance, and not a legacy item. An item another claimant holds under a
+   * live claim is left out; every item returned is claimed for `claimant` (a
+   * uuid) for EMBEDDING_CLAIM_LEASE_SECONDS, so two concurrent reads never
+   * return the same item.
    */
-  pendingEmbeddings(limit: number): Promise<PendingEmbedding[]>
+  pendingEmbeddings(limit: number, claimant: string): Promise<PendingEmbedding[]>
+
+  /**
+   * Extends `claimant`'s claims on 1 to EMBEDDING_BATCH_MAX items that are
+   * still pending to EMBEDDING_CLAIM_LEASE_SECONDS from now. Returns how many
+   * claims were extended.
+   */
+  renewEmbeddingClaims(ids: readonly string[], claimant: string): Promise<number>
 
   /**
    * Stores 1 to EMBEDDING_BATCH_MAX embeddings, each on an item that has none
@@ -466,12 +488,14 @@ export interface CaptureStore {
   setEmbeddings(rows: readonly ItemEmbedding[]): Promise<number>
 
   /**
-   * Records 1 to EMBEDDING_BATCH_MAX input-specific embedding failures, each
-   * on a distinct item: raises its attempt count and keeps the error, cut to
-   * EMBEDDING_ERROR_MAX_CHARS. An item that is no longer pending is left as
-   * it is. Returns how many items were raised.
+   * Records 1 to EMBEDDING_BATCH_MAX input-specific embedding failures that
+   * `claimant`'s pass found, each on a distinct item: raises its attempt
+   * count and keeps the error, cut to EMBEDDING_ERROR_MAX_CHARS. An item that
+   * is no longer pending, or that another claimant holds under a live claim,
+   * is left as it is, so a refusal counts once per item per pass. Returns
+   * how many items were raised.
    */
-  recordEmbeddingFailures(rows: readonly EmbeddingFailure[]): Promise<number>
+  recordEmbeddingFailures(rows: readonly EmbeddingFailure[], claimant: string): Promise<number>
 
   /**
    * How many items left the pending set after EMBEDDING_ATTEMPTS_MAX

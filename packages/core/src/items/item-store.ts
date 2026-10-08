@@ -18,7 +18,9 @@ import type {
 export interface ItemStore {
   /**
    * Idempotent on `source.event_key`: a stored key is skipped and its id
-   * returned. At most 500 items per call; more are refused before any write.
+   * returned, with whether that item is forgotten. A lineage entry naming a
+   * skipped item's id resolves to the stored id within the same call. At
+   * most 500 items per call; more are refused before any write.
    */
   insertItems(items: readonly NewItem[]): Promise<InsertedItem[]>
   /** Forgotten items are skipped unless `includeForgotten`. Any number of ids. */

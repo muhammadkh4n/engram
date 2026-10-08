@@ -24,6 +24,7 @@ const ITEM_TABLES = [
   'memory_item_entities',
   'memory_item_links',
   'memory_capture_events',
+  'memory_capture_event_counts',
   'memory_secret_hits',
   'memory_document_notes',
 ] as const
@@ -357,6 +358,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       reports.flatMap((r) => r.keys.map((k) => [`${r.index}: ${k.key}`, `${k.bytes} by ${k.checks.join(', ')}`])),
     )
     expect(bounds).toEqual({
+      'idx_capture_events_candidates: session_id': '1024 by memory_capture_events_session_id_check',
       'idx_capture_events_session: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_capture_events_session_event_key: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_document_notes_pkey: path': '2600 by memory_document_notes_path_check',

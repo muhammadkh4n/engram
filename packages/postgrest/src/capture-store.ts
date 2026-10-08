@@ -176,11 +176,14 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     return toMaterializeResult(data)
   }
 
-  async pendingEmbeddings(limit: number): Promise<PendingEmbedding[]> {
+  async pendingEmbeddings(limit: number, claimant: string): Promise<PendingEmbedding[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > EMBEDDING_BATCH_MAX) {
       throw new Error(`pendingEmbeddings: limit must be an integer from 1 to ${EMBEDDING_BATCH_MAX}`)
     }
-    const { data, error } = await this.client.rpc('engram_items_pending_embedding', { p_limit: limit })
+    const { data, error } = await this.client.rpc('engram_items_pending_embedding', {
+      p_limit: limit,
+      p_claimant: claimant,
+    })
     if (error) throw toStoreError('pendingEmbeddings', error)
     if (!Array.isArray(data)) throw new Error('pendingEmbeddings failed: the RPC returned no rows array')
     return (data as unknown as Array<Record<string, unknown>>).map((row) => {
@@ -189,6 +192,22 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
       }
       return { id: row.id, searchText: row.search_text }
     })
+  }
+
+  async renewEmbeddingClaims(ids: readonly string[], claimant: string): Promise<number> {
+    if (ids.length < 1 || ids.length > EMBEDDING_BATCH_MAX) {
+      throw new Error(`renewEmbeddingClaims: ids must hold 1 to ${EMBEDDING_BATCH_MAX} ids`)
+    }
+    const { data, error } = await this.client.rpc('engram_items_renew_embedding_claims', {
+      p_ids: [...ids],
+      p_claimant: claimant,
+    })
+    if (error) throw toStoreError('renewEmbeddingClaims', error)
+    const renewed = typeof data === 'string' ? Number(data) : data
+    if (typeof renewed !== 'number' || !Number.isInteger(renewed) || renewed < 0 || renewed > ids.length) {
+      throw new Error('renewEmbeddingClaims failed: the RPC returned no row count')
+    }
+    return renewed
   }
 
   async setEmbeddings(rows: readonly ItemEmbedding[]): Promise<number> {
@@ -205,12 +224,15 @@ export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore
     return written
   }
 
-  async recordEmbeddingFailures(rows: readonly EmbeddingFailure[]): Promise<number> {
+  async recordEmbeddingFailures(rows: readonly EmbeddingFailure[], claimant: string): Promise<number> {
     if (rows.length < 1 || rows.length > EMBEDDING_BATCH_MAX) {
       throw new Error(`recordEmbeddingFailures: rows must hold 1 to ${EMBEDDING_BATCH_MAX} failures`)
     }
     const pRows = rows.map((row) => ({ id: row.id, error: row.error }))
-    const { data, error } = await this.client.rpc('engram_items_record_embedding_failures', { p_rows: pRows })
+    const { data, error } = await this.client.rpc('engram_items_record_embedding_failures', {
+      p_rows: pRows,
+      p_claimant: claimant,
+    })
     if (error) throw toStoreError('recordEmbeddingFailures', error)
     const raised = typeof data === 'string' ? Number(data) : data
     if (typeof raised !== 'number' || !Number.isInteger(raised) || raised < 0 || raised > rows.length) {

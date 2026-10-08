@@ -79,6 +79,12 @@ export const DECISION_ID_MAX_CHARS = 64
 export const DECISION_CLASSES = ['A', 'B', 'C'] as const
 export const DECISION_BY = ['mk', 'session'] as const
 export const DECISION_QUOTE_SOURCE_MAX_CHARS = 1024
+/**
+ * How a quote of MK came to be: `words` he typed, or `choice`, the label of an
+ * option he picked in a dialog. A picked label was written by a model, so it is
+ * never rendered as his words.
+ */
+export const QUOTE_SAID_AS = ['words', 'choice'] as const
 export const RULING_PHASE_MAX_CHARS = 32
 export const RULING_TASK_MAX_CHARS = 32
 
@@ -203,6 +209,7 @@ export interface GitCommitPayload {
 
 export type LedgerDecisionClass = (typeof DECISION_CLASSES)[number]
 export type LedgerDecisionBy = (typeof DECISION_BY)[number]
+export type QuoteSaidAs = (typeof QUOTE_SAID_AS)[number]
 
 export interface LedgerDecisionPayload {
   plan: string
@@ -211,9 +218,12 @@ export interface LedgerDecisionPayload {
   trigger: string
   ruling: string
   by: LedgerDecisionBy
-  /** Required, with `source`, when `by` is `mk`. */
+  /** `quote`, `source`, `said_as` and `question` are present exactly when `by` is `mk`. */
   quote?: string
   source?: string
+  said_as?: QuoteSaidAs
+  /** The dialog question the quote answers, or null. */
+  question?: string | null
 }
 
 export interface LedgerRulingPayload {
@@ -236,6 +246,7 @@ export interface RegisterEntryPayload {
   subject: string
   said_at: string
   quote: string
+  said_as: QuoteSaidAs
   question: string | null
   verified: string
   applies_to: string[]

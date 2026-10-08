@@ -43,6 +43,7 @@ const ASK_TOOL = 'AskUserQuestion'
 /** The answer recorded when the user added a note and chose no option. */
 const NOTES_ONLY = '(notes only)'
 const PLAIN_COMMAND_RE = /^\/[A-Za-z][\w:-]*(?:\s|$)/
+const COMMAND_TAG_PREFIX = '<command-'
 const COMMAND_NAME_RE = /<command-name>([\s\S]*?)<\/command-name>/
 const COMMAND_ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/
 /** Local command output, bang-mode lines and interruption markers: written by the CLI, not typed as a prompt. */
@@ -110,7 +111,12 @@ function isTurnContent(entry: Json): boolean {
 
 // ── Prompts ──────────────────────────────────────────────────────────────
 
+/**
+ * `/name args` when the text is a tagged slash command. The CLI writes the tags
+ * first, so tags later in a prompt are text the user quoted, not a command.
+ */
 function taggedCommand(text: string): string | null {
+  if (!text.trimStart().startsWith(COMMAND_TAG_PREFIX)) return null
   const name = COMMAND_NAME_RE.exec(text)?.[1]
   if (name === undefined || isBlank(name)) return null
   const args = COMMAND_ARGS_RE.exec(text)?.[1]
@@ -291,8 +297,16 @@ function toolResultEvent(entry: Json, callOf: (id: string) => ToolCall | undefin
     if (maybeDialog && isObject(result) && Array.isArray(result.questions) && isObject(result.answers)) {
       // A dialog that timed out was resolved by the CLI, not by the user.
       if (result.afkTimeoutMs !== undefined) return null
-      const payload = answerPayload(call ? call.questions : askQuestions(result), result, line)
-      return payload && { type: 'user_answer', payload }
+      const questions = call ? call.questions : askQuestions(result)
+      const payload = answerPayload(questions, result, line)
+      if (payload) return { type: 'user_answer', payload }
+      // An answer must name a question; with none to name, the text the user
+      // typed into the dialog is kept as a prompt, as for a rejected dialog.
+      const response = result.response
+      if (questions.length === 0 && typeof response === 'string' && !isBlank(response)) {
+        return { type: 'user_prompt', payload: promptPayload(response, line) }
+      }
+      return null
     }
     const feedback = entry.userFeedback
     if (block.is_error !== true || entry.toolDenialKind !== 'user-rejected') continue
