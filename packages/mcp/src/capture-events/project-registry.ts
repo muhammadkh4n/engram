@@ -152,30 +152,79 @@ function parseProjects(value: unknown, workspaces: ReadonlyMap<string, RegistryW
   return projects
 }
 
+/** A registry entry's register: its vault folder and id prefix, each null when it has none. */
+export interface EffectiveRegister {
+  vaultFolder: string | null
+  registerPrefix: string | null
+}
+
 /**
- * A register is one vault folder's rulings file with one id prefix, so the
- * repositories that keep their rulings in one folder share its prefix: entries
- * may share a prefix only when they name the same vault folder, and a vault
- * folder carries one prefix.
+ * A project's register as the rulings tooling reads it: the project's own
+ * folder and prefix, each inheriting its workspace's when the project's own
+ * is null. A workspace's register is its own.
+ */
+export function effectiveRegister(registry: ProjectRegistry, project: RegistryProject): EffectiveRegister {
+  const workspace = project.workspace === null ? undefined : registry.workspaces.get(project.workspace)
+  return {
+    vaultFolder: project.vaultFolder ?? workspace?.vaultFolder ?? null,
+    registerPrefix: project.registerPrefix ?? workspace?.registerPrefix ?? null,
+  }
+}
+
+/** Every entry's path and effective register, workspaces first, each kind in file order. */
+function effectiveEntries(registry: ProjectRegistry): Array<[string, EffectiveRegister]> {
+  return [
+    ...[...registry.workspaces.values()].map((w): [string, EffectiveRegister] => [child('workspaces', w.id), w]),
+    ...[...registry.projects.values()].map((p): [string, EffectiveRegister] => [
+      child('projects', p.id),
+      effectiveRegister(registry, p),
+    ]),
+  ]
+}
+
+/**
+ * A register is one vault folder's rulings file with one id prefix, so every
+ * repository whose rulings live in a folder carries that folder's prefix: on
+ * the effective registers, a folder has one prefix and a prefix names one
+ * folder. An entry with no folder or no prefix pairs with nothing.
  */
 function checkPrefixFolders(registry: ProjectRegistry): void {
-  const folderOfPrefix = new Map<string, string | null>()
-  const prefixOfFolder = new Map<string, string>()
-  const scoped: Array<[string, RegistryWorkspace | RegistryProject]> = [
-    ...[...registry.workspaces.values()].map((w): [string, RegistryWorkspace] => [child('workspaces', w.id), w]),
-    ...[...registry.projects.values()].map((p): [string, RegistryProject] => [child('projects', p.id), p]),
-  ]
-  for (const [path, { vaultFolder: folder, registerPrefix: prefix }] of scoped) {
-    if (prefix === null) continue
-    if (folderOfPrefix.has(prefix) && (folder === null || folderOfPrefix.get(prefix) !== folder)) {
-      fail(child(path, 'register_prefix'), 'prefix already names another vault folder')
+  const prefixOfFolder = new Map<string, [string, string]>()
+  const folderOfPrefix = new Map<string, [string, string]>()
+  for (const [path, { vaultFolder: folder, registerPrefix: prefix }] of effectiveEntries(registry)) {
+    if (folder === null || prefix === null) continue
+    const heldPrefix = prefixOfFolder.get(folder)
+    if (heldPrefix && heldPrefix[0] !== prefix) {
+      fail(child(path, 'register_prefix'), `vault folder ${JSON.stringify(folder)} already has prefix ${heldPrefix[0]} (${heldPrefix[1]})`)
     }
-    folderOfPrefix.set(prefix, folder)
-    if (folder === null) continue
-    const other = prefixOfFolder.get(folder)
-    if (other !== undefined && other !== prefix) fail(child(path, 'register_prefix'), 'vault folder already has another prefix')
-    prefixOfFolder.set(folder, prefix)
+    const heldFolder = folderOfPrefix.get(prefix)
+    if (heldFolder && heldFolder[0] !== folder) {
+      fail(child(path, 'register_prefix'), `prefix ${prefix} already names vault folder ${JSON.stringify(heldFolder[0])} (${heldFolder[1]})`)
+    }
+    prefixOfFolder.set(folder, [prefix, path])
+    folderOfPrefix.set(prefix, [folder, path])
   }
+}
+
+/**
+ * The one scope a vault folder's register entries and notes are stored under,
+ * the rule the rulings tooling writes by: the workspace whose own folder it is,
+ * else the project named like the folder (lower-cased), else the first project
+ * id in sort order among those whose effective folder it is. Null when no
+ * entry files under the folder.
+ */
+export function canonicalFolderScope(
+  registry: ProjectRegistry,
+  folder: string,
+): { projectId: string | null; workspaceId: string | null } | null {
+  const workspace = [...registry.workspaces.keys()].sort().find((id) => registry.workspaces.get(id)!.vaultFolder === folder)
+  if (workspace !== undefined) return { projectId: null, workspaceId: workspace }
+  const members = [...registry.projects.keys()]
+    .sort()
+    .filter((id) => effectiveRegister(registry, registry.projects.get(id)!).vaultFolder === folder)
+  const chosen = members.find((id) => id === folder.toLowerCase()) ?? members[0]
+  if (chosen === undefined) return null
+  return { projectId: chosen, workspaceId: registry.projects.get(chosen)!.workspace }
 }
 
 /** Parses the registry document exactly; any deviation throws a ProjectRegistryError naming the path. */
@@ -240,26 +289,21 @@ const REGISTER_ID_PREFIX = /^R-([A-Z]{2,6})-[0-9]+$/
 function resolveRegisterScope(registry: ProjectRegistry, entryId: string, scope: string): ScopeResolution {
   const prefix = REGISTER_ID_PREFIX.exec(entryId)?.[1]
   if (prefix === undefined) return { reject: 'payload.id: must match ^R-[A-Z]{2,6}-[0-9]+$' }
+  if (scope !== 'global' && !scope.startsWith('project:') && !scope.startsWith('workspace:')) {
+    return { reject: 'payload.scope: must be global, project:<id> or workspace:<id>' }
+  }
+  const owners = effectiveEntries(registry).filter(([, e]) => e.registerPrefix === prefix)
   if (scope === 'global') {
-    const owned = [...registry.workspaces.values(), ...registry.projects.values()].some((e) => e.registerPrefix === prefix)
-    if (owned) return { reject: "payload.scope: a global entry's id prefix belongs to a registry project or workspace" }
+    if (owners.length > 0) return { reject: "payload.scope: a global entry's id prefix belongs to a registry project or workspace" }
     return { projectId: null, workspaceId: null, rejected: {} }
   }
-  if (scope.startsWith('project:')) {
-    const project = registry.projects.get(scope.slice('project:'.length))
-    if (!project || project.registerPrefix !== prefix) {
-      return { reject: "payload.scope: names no registry project with the entry id's prefix" }
-    }
-    return { projectId: project.id, workspaceId: project.workspace, rejected: {} }
-  }
-  if (scope.startsWith('workspace:')) {
-    const workspace = registry.workspaces.get(scope.slice('workspace:'.length))
-    if (!workspace || workspace.registerPrefix !== prefix) {
-      return { reject: "payload.scope: names no registry workspace with the entry id's prefix" }
-    }
-    return { projectId: null, workspaceId: workspace.id, rejected: {} }
-  }
-  return { reject: 'payload.scope: must be global, project:<id> or workspace:<id>' }
+  // The pairing rule leaves at most one folder per prefix.
+  const folder = owners.map(([, e]) => e.vaultFolder).find((f): f is string => f !== null)
+  const canonical = folder === undefined ? null : canonicalFolderScope(registry, folder)
+  if (canonical === null) return { reject: "payload.scope: no registry vault folder has the entry id's prefix" }
+  const expected = canonical.projectId !== null ? `project:${canonical.projectId}` : `workspace:${canonical.workspaceId}`
+  if (scope !== expected) return { reject: `payload.scope: the register with the entry id's prefix is stored under ${expected}` }
+  return { ...canonical, rejected: {} }
 }
 
 /**
