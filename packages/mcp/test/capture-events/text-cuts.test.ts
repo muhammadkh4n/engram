@@ -51,16 +51,6 @@ const ALLOWED: readonly Allowed[] = [
     reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
   },
   {
-    file: 'packages/mcp/src/capture-events/project-registry.ts',
-    line: ".slice('project:'.length)",
-    reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
-  },
-  {
-    file: 'packages/mcp/src/capture-events/project-registry.ts',
-    line: ".slice('workspace:'.length)",
-    reason: 'starts after an ASCII prefix it matched, so the cut sits between two whole characters',
-  },
-  {
     file: 'packages/postgrest/src/adapter.ts',
     line: 'ids.slice(i, i + GET_BY_IDS_BATCH_SIZE)',
     reason: 'cuts an array of ids, not a string',

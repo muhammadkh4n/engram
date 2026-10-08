@@ -13,6 +13,7 @@ import type { ProjectRow } from '@engram-mem/core'
 import type { CaptureEvent } from '../../src/capture-events/contract.js'
 import {
   PROJECT_SYNC_RETRY_MS,
+  canonicalFolderScope,
   loadProjectRegistry,
   parseProjectRegistry,
   registryRows,
@@ -107,14 +108,31 @@ describe('parseProjectRegistry', () => {
 
   it('refuses a prefix that names two vault folders, across projects and workspaces', () => {
     const doc = sampleDoc()
-    doc.projects['loose-repo'].register_prefix = 'TST'
-    expect(refusal(doc)).toBe('project registry: projects.loose-repo.register_prefix: prefix already names another vault folder')
-    const crossed = sampleDoc()
-    crossed.projects['loose-repo'].register_prefix = 'TSTW'
-    crossed.projects['loose-repo'].vault_folder = 'Elsewhere'
-    expect(refusal(crossed)).toBe(
-      'project registry: projects.loose-repo.register_prefix: prefix already names another vault folder',
+    doc.projects['loose-repo'] = { workspace: null, vault_folder: 'Elsewhere', register_prefix: 'TST' }
+    expect(refusal(doc)).toBe(
+      'project registry: projects.loose-repo.register_prefix: prefix TST already names vault folder "Sample Repo" (projects.sample-repo)',
     )
+    const crossed = sampleDoc()
+    crossed.projects['loose-repo'] = { workspace: null, vault_folder: 'Elsewhere', register_prefix: 'TSTW' }
+    expect(refusal(crossed)).toBe(
+      'project registry: projects.loose-repo.register_prefix: prefix TSTW already names vault folder "Sample Workspace" (workspaces.ws-test)',
+    )
+  })
+
+  it('pairs folders and prefixes on what a project inherits from its workspace', () => {
+    const inherits = sampleDoc()
+    inherits.projects['member-a'] = { workspace: 'ws-test', vault_folder: null, register_prefix: null }
+    inherits.projects['member-b'] = { workspace: 'ws-test', vault_folder: null, register_prefix: 'TSTW' }
+    inherits.projects['member-c'] = { workspace: 'ws-test', vault_folder: 'Sample Workspace', register_prefix: null }
+    expect(() => parseProjectRegistry(inherits)).not.toThrow()
+    const strays = sampleDoc()
+    strays.projects['member-a'] = { workspace: 'ws-test', vault_folder: 'Other Folder', register_prefix: null }
+    expect(refusal(strays)).toBe(
+      'project registry: projects.member-a.register_prefix: prefix TSTW already names vault folder "Sample Workspace" (workspaces.ws-test)',
+    )
+    const alone = sampleDoc()
+    alone.projects['loose-repo'].register_prefix = 'TST'
+    expect(() => parseProjectRegistry(alone)).not.toThrow()
   })
 
   it('accepts repositories that keep their rulings in one folder sharing its prefix', () => {
@@ -132,7 +150,9 @@ describe('parseProjectRegistry', () => {
     const doc = sampleDoc()
     doc.projects['loose-repo'].vault_folder = 'Sample Repo'
     doc.projects['loose-repo'].register_prefix = 'TSTX'
-    expect(refusal(doc)).toBe('project registry: projects.loose-repo.register_prefix: vault folder already has another prefix')
+    expect(refusal(doc)).toBe(
+      'project registry: projects.loose-repo.register_prefix: vault folder "Sample Repo" already has prefix TST (projects.sample-repo)',
+    )
   })
 
   it('refuses an id that is both a project and a workspace', () => {
@@ -251,10 +271,63 @@ describe('resolveEventScope', () => {
     })
     const other = parseProjectRegistry({
       ...sampleDoc(),
-      projects: { 'sample-repo': { workspace: 'ws-test', vault_folder: null, register_prefix: 'ABC' } },
+      projects: { 'sample-repo': { workspace: null, vault_folder: 'Sample Repo', register_prefix: 'ABC' } },
     })
     const result = resolveEventScope(other, registerEntry('R-TST-1', 'project:sample-repo'))
-    expect(result).toEqual({ reject: "payload.scope: names no registry project with the entry id's prefix" })
+    expect(result).toEqual({ reject: "payload.scope: no registry vault folder has the entry id's prefix" })
+  })
+
+  it("stores a shared folder's register entries under the folder's one canonical scope only", () => {
+    const doc = sampleDoc()
+    doc.projects['member-a'] = { workspace: 'ws-test', vault_folder: null, register_prefix: null }
+    const withWorkspace = parseProjectRegistry(doc)
+    expect(resolveEventScope(withWorkspace, registerEntry('R-TSTW-1', 'project:member-a'))).toEqual({
+      reject: "payload.scope: the register with the entry id's prefix is stored under workspace:ws-test",
+    })
+    expect(resolveEventScope(withWorkspace, registerEntry('R-TSTW-1', 'workspace:ws-test'))).toEqual({
+      projectId: null,
+      workspaceId: 'ws-test',
+      rejected: {},
+    })
+    const projectsOnly = parseProjectRegistry({
+      version: 1,
+      workspaces: {},
+      projects: {
+        zeta: { workspace: null, vault_folder: 'Sample', register_prefix: 'TSTS' },
+        sample: { workspace: null, vault_folder: 'Sample', register_prefix: 'TSTS' },
+        alpha: { workspace: null, vault_folder: 'Sample', register_prefix: 'TSTS' },
+      },
+    })
+    expect(resolveEventScope(projectsOnly, registerEntry('R-TSTS-2', 'project:sample'))).toEqual({
+      projectId: 'sample',
+      workspaceId: null,
+      rejected: {},
+    })
+    expect(resolveEventScope(projectsOnly, registerEntry('R-TSTS-2', 'project:alpha'))).toEqual({
+      reject: "payload.scope: the register with the entry id's prefix is stored under project:sample",
+    })
+    expect(resolveEventScope(projectsOnly, registerEntry('R-TSTS-2', 'global'))).toHaveProperty('reject')
+  })
+
+  it("canonicalFolderScope picks the workspace owning the folder, else the project named like it, else the first project id", () => {
+    const doc = sampleDoc()
+    doc.projects['member-a'] = { workspace: 'ws-test', vault_folder: null, register_prefix: null }
+    expect(canonicalFolderScope(parseProjectRegistry(doc), 'Sample Workspace')).toEqual({ projectId: null, workspaceId: 'ws-test' })
+    expect(canonicalFolderScope(parseProjectRegistry(doc), 'Sample Repo')).toEqual({ projectId: 'sample-repo', workspaceId: 'ws-test' })
+    const shared = parseProjectRegistry({
+      version: 1,
+      workspaces: {},
+      projects: {
+        beta: { workspace: null, vault_folder: 'Shared', register_prefix: 'TSTS' },
+        alpha: { workspace: null, vault_folder: 'Shared', register_prefix: 'TSTS' },
+        shared: { workspace: null, vault_folder: 'Shared', register_prefix: 'TSTS' },
+        gamma: { workspace: null, vault_folder: 'Common', register_prefix: 'TSTC' },
+        delta: { workspace: null, vault_folder: 'Common', register_prefix: 'TSTC' },
+      },
+    })
+    expect(canonicalFolderScope(shared, 'Shared')).toEqual({ projectId: 'shared', workspaceId: null })
+    expect(canonicalFolderScope(shared, 'Common')).toEqual({ projectId: 'delta', workspaceId: null })
+    expect(canonicalFolderScope(shared, 'Nowhere')).toBeNull()
   })
 
   it('resolves workspace and global register entries by prefix', () => {
