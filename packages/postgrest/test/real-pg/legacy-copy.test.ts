@@ -360,7 +360,7 @@ describe.skipIf(!realPgImage)('the legacy copy on real Postgres', () => {
   it('lists the masked item for the embedding pass, never one that kept its vector, also after a second schema apply', async () => {
     const pendingEmbedding = (): Promise<string> =>
       pg.psqlAs('service_role', `SELECT coalesce(string_agg(id::text || '|' || search_text, ',' ORDER BY id), '')
-                                   FROM public.engram_items_pending_embedding(256);`)
+                                   FROM public.engram_items_pending_embedding(256, '00000000-0000-4000-8000-00000000babe'::uuid);`)
     const indexDef = `SELECT c.oid::text || '|' || pg_catalog.pg_get_indexdef(c.oid) FROM pg_catalog.pg_class c
                        WHERE c.relname = 'idx_items_pending_embedding' AND c.relnamespace = 'public'::regnamespace`
     expect(await count("SELECT count(*) FROM public.memory_items WHERE class = 'legacy' AND embedding IS NOT NULL AND forgotten_at IS NULL")).toBe(4)
