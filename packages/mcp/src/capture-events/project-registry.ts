@@ -152,16 +152,29 @@ function parseProjects(value: unknown, workspaces: ReadonlyMap<string, RegistryW
   return projects
 }
 
-function checkUniquePrefixes(registry: ProjectRegistry): void {
-  const seen = new Set<string>()
-  const scoped: Array<[string, string | null]> = [
-    ...[...registry.workspaces.values()].map((w) => [child('workspaces', w.id), w.registerPrefix] as [string, string | null]),
-    ...[...registry.projects.values()].map((p) => [child('projects', p.id), p.registerPrefix] as [string, string | null]),
+/**
+ * A register is one vault folder's rulings file with one id prefix, so the
+ * repositories that keep their rulings in one folder share its prefix: entries
+ * may share a prefix only when they name the same vault folder, and a vault
+ * folder carries one prefix.
+ */
+function checkPrefixFolders(registry: ProjectRegistry): void {
+  const folderOfPrefix = new Map<string, string | null>()
+  const prefixOfFolder = new Map<string, string>()
+  const scoped: Array<[string, RegistryWorkspace | RegistryProject]> = [
+    ...[...registry.workspaces.values()].map((w): [string, RegistryWorkspace] => [child('workspaces', w.id), w]),
+    ...[...registry.projects.values()].map((p): [string, RegistryProject] => [child('projects', p.id), p]),
   ]
-  for (const [path, prefix] of scoped) {
+  for (const [path, { vaultFolder: folder, registerPrefix: prefix }] of scoped) {
     if (prefix === null) continue
-    if (seen.has(prefix)) fail(child(path, 'register_prefix'), 'prefix is already used by another entry')
-    seen.add(prefix)
+    if (folderOfPrefix.has(prefix) && (folder === null || folderOfPrefix.get(prefix) !== folder)) {
+      fail(child(path, 'register_prefix'), 'prefix already names another vault folder')
+    }
+    folderOfPrefix.set(prefix, folder)
+    if (folder === null) continue
+    const other = prefixOfFolder.get(folder)
+    if (other !== undefined && other !== prefix) fail(child(path, 'register_prefix'), 'vault folder already has another prefix')
+    prefixOfFolder.set(folder, prefix)
   }
 }
 
@@ -172,7 +185,7 @@ export function parseProjectRegistry(doc: unknown): ProjectRegistry {
   const workspaces = parseWorkspaces(top.workspaces)
   const projects = parseProjects(top.projects, workspaces)
   const registry: ProjectRegistry = { version: PROJECT_REGISTRY_VERSION, workspaces, projects }
-  checkUniquePrefixes(registry)
+  checkPrefixFolders(registry)
   return registry
 }
 
