@@ -502,19 +502,29 @@ describe('the server is down', () => {
     // out its own backoff. Both fail in a row and neither file is known to fail
     // alone, so the server backs off as a whole and holds every file.
     const requestsBefore = stub.received.length
+    const beforeSecond = Date.now()
     const second = await hook('session-end', input(path, { reason: 'logout' }), at(30))
+    const afterSecondAt = Date.now()
     expect(second.drain).toMatchObject({ files_sent: 0, remaining: 3, stopped: 'retry_later' })
     expect(stub.received.length).toBe(requestsBefore + 2)
     const afterSecond = await loadSpoolState(spoolRoot(env))
     expect(afterSecond.failures).toBe(1)
-    expect(Date.parse(afterSecond.next_attempt_at ?? '') - Date.parse(afterSecond.last_error_at ?? '')).toBe(DRAIN_BACKOFF_BASE_MS)
+    const serverDue = Date.parse(afterSecond.next_attempt_at ?? '')
+    expect(serverDue).toBeGreaterThanOrEqual(beforeSecond + DRAIN_BACKOFF_BASE_MS)
+    expect(serverDue).toBeLessThanOrEqual(afterSecondAt + DRAIN_BACKOFF_BASE_MS)
     expect(Object.values(afterSecond.files).map((f) => f.attempts)).toEqual([1, 1, 1])
+    // A fresh file, which never failed and has no backoff of its own, is
+    // held by the server's backoff alone.
+    appendEntries(path, SESSION, [humanPrompt(uuid(6), at(40), 'vacuum it too')])
     const heldAt = stub.received.length
-    expect((await hook('drain', {})).drain).toMatchObject({ files_sent: 0, stopped: 'backoff' })
+    const held = await hook('stop', input(path))
+    expect(held.drain).toMatchObject({ files_sent: 0, remaining: 4, stopped: 'backoff' })
     expect(stub.received.length).toBe(heldAt)
+    expect(Object.keys((await loadSpoolState(spoolRoot(env))).files)).toHaveLength(3)
 
-    // Once everything is due, the two oldest files fail in a row again: the
-    // server's backoff doubles, and the third file is never reached.
+    // Once everything is due, the fresh file goes first, having never failed,
+    // then the oldest; both fail in a row, so the server's backoff doubles and
+    // the other two files are not reached.
     vi.useFakeTimers({ toFake: ['Date'] })
     const dueAfterSecond = Object.values(afterSecond.files).map((f) => Date.parse(f.next_attempt_at))
     vi.setSystemTime(Math.max(Date.parse(afterSecond.next_attempt_at ?? ''), ...dueAfterSecond) + 1_000)
@@ -525,7 +535,7 @@ describe('the server is down', () => {
     expect(Date.parse(afterThird.next_attempt_at ?? '') - Date.now()).toBe(2 * DRAIN_BACKOFF_BASE_MS)
     // Batch file names start with their write time, so key order is age order.
     const attemptsByAge = Object.keys(afterThird.files).sort().map((k) => afterThird.files[k]!.attempts)
-    expect(attemptsByAge).toEqual([2, 2, 1])
+    expect(attemptsByAge).toEqual([2, 1, 1, 1])
     expect(stored.size).toBe(storedFirst.length)
 
     const waiting = spooledUuids()
@@ -538,7 +548,7 @@ describe('the server is down', () => {
     expect(fourth.drain?.duplicates).toBe(storedFirst.length)
     expect(fourth.drain?.accepted).toBe(waiting.length - storedFirst.length)
     expect([...stored].sort()).toEqual([...new Set(waiting)].sort())
-    expect(new Set(waiting)).toEqual(new Set([uuid(1), uuid(2), uuid(4), uuid(5), ...sent().filter((e) => e.type === 'session_end').map((e) => e.event_uuid)]))
+    expect(new Set(waiting)).toEqual(new Set([uuid(1), uuid(2), uuid(4), uuid(5), uuid(6), ...sent().filter((e) => e.type === 'session_end').map((e) => e.event_uuid)]))
     expect(batchFiles()).toEqual([])
     expect(await loadSpoolState(spoolRoot(env))).toMatchObject({ failures: 0, next_attempt_at: null, files: {} })
   })
