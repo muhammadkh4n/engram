@@ -345,6 +345,18 @@ export function consolidationEnabledFromEnv(env: NodeJS.ProcessEnv = process.env
   return onOrOther(env, 'ENGRAM_CONSOLIDATION', 'off') === 'on'
 }
 
+/**
+ * ENGRAM_EXTRACTION: `on` (the default) or `hold`. With `hold` the capture
+ * worker still materializes and embeds, but runs no extraction window and
+ * builds no session index. A backfill extracts old sessions oldest first, so
+ * an older retelling never supersedes a newer statement, while the worker
+ * takes the most recently received sessions first. Any other value fails
+ * startup.
+ */
+export function extractionHeldFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return onOrOther(env, 'ENGRAM_EXTRACTION', 'hold') === 'hold'
+}
+
 /** `on` when unset or blank, else `on` or `other` exactly; anything else throws naming the variable. */
 function onOrOther<T extends string>(env: NodeJS.ProcessEnv, name: string, other: T): 'on' | T {
   const raw = env[name]?.trim()

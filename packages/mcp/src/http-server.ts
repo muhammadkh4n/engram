@@ -11,6 +11,7 @@ import {
   getCaptureDeps,
   recallOutputPolicyAtStartup,
   consolidationAtStartup,
+  extractionHeldFromEnv,
   captureModelFromEnv,
   parseExtractWindowsPerTickEnv,
   chatIntelligenceOptionsFromEnv,
@@ -190,6 +191,7 @@ export async function main(): Promise<void> {
   const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
   recallOutputPolicyAtStartup()
   consolidationAtStartup()
+  const extractionHeld = extractionHeldFromEnv()
   const log = (line: string): void => {
     process.stderr.write(`[engram-mcp-http] ${line}\n`)
   }
@@ -226,6 +228,7 @@ export async function main(): Promise<void> {
         windowsPerTick: extractWindowsPerTick,
       },
       sessionIndex: { store },
+      extractionHeld,
       log,
     })
   }

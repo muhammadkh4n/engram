@@ -34,6 +34,7 @@ import {
   CONSOLIDATION_WORKER_CYCLES,
   consolidationAtStartup,
   consolidationEnabledFromEnv,
+  extractionHeldFromEnv,
   recallOutputPolicyAtStartup,
   getMemory,
   RECALL_TOKEN_BUDGET_MIN,
@@ -734,6 +735,22 @@ describe('consolidationEnabledFromEnv', () => {
   it.each(['no', 'OFF', 'false', 'hold'])('fails startup on %s, naming the variable', (raw) => {
     expect(() => consolidationEnabledFromEnv({ ENGRAM_CONSOLIDATION: raw })).toThrow(
       `ENGRAM_CONSOLIDATION must be "on" or "off", got "${raw}"`,
+    )
+  })
+})
+
+describe('extractionHeldFromEnv', () => {
+  it.each([[undefined], [''], ['on'], [' on ']])('is not held for %j', (raw) => {
+    expect(extractionHeldFromEnv(raw === undefined ? {} : { ENGRAM_EXTRACTION: raw })).toBe(false)
+  })
+
+  it('is held for hold', () => {
+    expect(extractionHeldFromEnv({ ENGRAM_EXTRACTION: 'hold' })).toBe(true)
+  })
+
+  it.each(['no', 'off', 'HOLD', 'paused'])('fails startup on %s, naming the variable', (raw) => {
+    expect(() => extractionHeldFromEnv({ ENGRAM_EXTRACTION: raw })).toThrow(
+      `ENGRAM_EXTRACTION must be "on" or "hold", got "${raw}"`,
     )
   })
 })

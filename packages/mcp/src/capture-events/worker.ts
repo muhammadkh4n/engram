@@ -38,6 +38,12 @@
  * that stored a session's statements lists them. A session's failure leaves
  * it due for the next tick.
  *
+ * With `extractionHeld` (ENGRAM_EXTRACTION=hold) a tick still materializes
+ * and embeds, but runs neither extraction nor the session indexes. A
+ * backfill extracts its sessions oldest first across every source, so an
+ * older retelling never supersedes a newer statement; the worker takes the
+ * most recently received sessions first and would break that order.
+ *
  * The loop is a self-scheduling timeout, so ticks never overlap, and all of
  * its state lives in the returned handle. Log lines carry counts, error codes
  * and messages only, never stored text.
@@ -86,6 +92,8 @@ export interface CaptureWorkerOptions {
   extraction?: CaptureWorkerExtraction
   /** Session indexes are built only when given. */
   sessionIndex?: { store: SessionIndexStore; now?: () => Date }
+  /** Skips extraction and the session indexes while a backfill runs; logged once at start. */
+  extractionHeld?: boolean
   intervalMs?: number
   log: (line: string) => void
 }
@@ -133,6 +141,8 @@ const NO_PASS: EmbedOutcome = { read: 0, written: 0, recorded: 0, refusedAll: nu
 export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   const { store, embedder, embeddingModel, log } = opts
   const intervalMs = opts.intervalMs ?? WORKER_INTERVAL_MS
+  const held = opts.extractionHeld === true
+  if (held) log('extraction: hold')
   let timer: ReturnType<typeof setTimeout> | null = null
   let inFlight: Promise<void> | null = null
   let stopped = false
@@ -273,7 +283,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   }
 
   const indexSessions = async (): Promise<{ full: boolean }> => {
-    if (opts.sessionIndex === undefined) return { full: false }
+    if (held || opts.sessionIndex === undefined) return { full: false }
     try {
       const indexed = await runSessionIndexTick({ ...opts.sessionIndex, log })
       if (indexed.written + indexed.stale + indexed.failed > 0) {
@@ -290,7 +300,7 @@ export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
   }
 
   const extract = async (): Promise<Pick<ExtractionTickResult, 'full'>> => {
-    if (opts.extraction === undefined) return { full: false }
+    if (held || opts.extraction === undefined) return { full: false }
     const { store: extractionStore, intelligence, model, windowsPerTick } = opts.extraction
     try {
       return await runExtractionTick({ store: extractionStore, intelligence, model, windowsPerTick, log })

@@ -601,6 +601,55 @@ describe('startCaptureWorker', () => {
     ])
     expect(commits).toEqual([['sess-worker', 7]])
   })
+
+  it('with extraction held, materializes and embeds but runs neither extraction nor the session indexes', async () => {
+    const f = fakes({ materialize: async () => counts({ processed: 2, pending: 0 }), pending: async () => PENDING })
+    const { extraction, begun } = extractionFakes(f.calls, [anchor(1)])
+    const sessionIndex: { store: SessionIndexStore } = {
+      store: {
+        async dueSessions() {
+          f.calls.push('dueSessions')
+          return [{ sessionId: 'sess-held', lastEventId: 3 }]
+        },
+        async sessionIndexSource() {
+          throw new Error('the session index ran while extraction was held')
+        },
+        async sessionIndexCommit() {
+          throw new Error('the session index ran while extraction was held')
+        },
+      },
+    }
+    const worker = startCaptureWorker({ ...f.opts, extraction, sessionIndex, extractionHeld: true })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(WORKER_INTERVAL_MS)
+    await worker.stop(1000)
+
+    expect(f.calls).toEqual([
+      'materialize(200)',
+      'pendingEmbeddings(32)',
+      'embedBatch',
+      'setEmbeddings',
+      'embeddingFailedCount',
+      'materialize(200)',
+      'pendingEmbeddings(32)',
+      'embedBatch',
+      'setEmbeddings',
+    ])
+    expect(begun).toEqual([])
+    expect(f.logs[0]).toBe('extraction: hold')
+    expect(f.logs.filter((l) => l === 'extraction: hold')).toHaveLength(1)
+  })
+
+  it('logs no hold line and extracts when extraction is not held', async () => {
+    const f = fakes()
+    const { extraction, begun } = extractionFakes(f.calls, [anchor(1)])
+    const worker = startCaptureWorker({ ...f.opts, extraction, extractionHeld: false })
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+
+    expect(begun).toHaveLength(1)
+    expect(f.logs).not.toContain('extraction: hold')
+  })
 })
 
 function fakeServer(opts: { openConnection?: boolean } = {}) {
