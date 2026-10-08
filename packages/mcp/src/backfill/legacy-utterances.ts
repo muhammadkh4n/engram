@@ -77,7 +77,14 @@ export interface LegacyUtterancesOptions {
 
 export class LegacyUtterancesRefused extends Error {}
 
-async function refuseUnsettled(store: LegacyUtteranceStore): Promise<void> {
+/**
+ * Refuses while the store is not settled: capture events neither processed
+ * nor failed, a legacy copy step with work left, or a legacy item of a
+ * forgotten old row that is not forgotten yet.
+ */
+export async function refuseUnsettled(
+  store: Pick<LegacyUtteranceStore, 'unsettledCaptureEvents' | 'legacyStepWithWork' | 'unforgottenLegacyItems'>,
+): Promise<void> {
   const unsettled = await store.unsettledCaptureEvents()
   if (unsettled > 0) {
     throw new LegacyUtterancesRefused(
