@@ -11,6 +11,8 @@
  * episodes.content IS the clean text by construction.
  */
 
+import { cutWholeChars } from '../text/cut-text.js'
+
 export interface ParsedContent {
   /** Clean human-readable text for episodes.content and embedding. */
   cleanText: string
@@ -126,7 +128,7 @@ export function parseContent(content: string | unknown[]): ParsedContent {
       // Add a capped excerpt of tool result text to searchable content so that
       // results like file reads or search outputs can be recalled later.
       if (resultText && resultText.length > 50) {
-        textParts.push(resultText.slice(0, 500))
+        textParts.push(cutWholeChars(resultText, 500))
       }
 
       parts.push({
@@ -165,7 +167,7 @@ export function parseContent(content: string | unknown[]): ParsedContent {
       parts.push({
         ordinal: i,
         partType: 'other',
-        textContent: JSON.stringify(block).slice(0, 200),
+        textContent: cutWholeChars(JSON.stringify(block), 200),
         toolName: null,
         toolInput: null,
         toolOutput: null,
