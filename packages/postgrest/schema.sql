@@ -1187,6 +1187,11 @@ CREATE TABLE IF NOT EXISTS public.sensory_snapshots (
 -- writer, the RPCs or a direct PostgREST request, can store an item the rules
 -- refuse.
 --
+-- Three words name an item's state, here and in every comment below: live
+-- means not forgotten; in force means live and not retired; current means in
+-- force and not superseded. Retiring an item takes it out of force but keeps
+-- it live, so it still stands in a supersession chain.
+--
 -- The tables are created in foreign-key order: subjects, extraction runs and
 -- projects first, then memory_items, then the tables that point at items.
 -- memory_extraction_runs.anchor_item_id points back at memory_items, so its
@@ -2178,11 +2183,12 @@ END; $$;
 --   not forgotten, has the same class and occurred strictly later (pointing
 --   at itself is left to memory_items_supersession_check).
 -- - superseded_by moves from an item X to another valid successor, or back
---   to NULL, only when X is no longer live: forgotten (the forget cascade
---   hands the supersession to the next live successor) or retired (a writer
---   that retires a successor may restore or re-point what it superseded).
---   The rule reads X's state, not who is writing: while X is live the
---   supersession stands, and only a forget or a retirement of X releases it.
+--   to NULL, only when X is no longer in force: forgotten (the forget
+--   cascade hands the supersession to the nearest successor still live) or
+--   retired (a writer that retires a successor may restore or re-point what
+--   it superseded). The rule reads X's state, not who is writing: while X is
+--   in force the supersession stands, and only a forget or a retirement of X
+--   releases it.
 -- - a forgotten item's superseded_by, retired_at and retired_reason never
 --   change again, and superseded_by does not change in the UPDATE that
 --   forgets an item.
@@ -2417,8 +2423,9 @@ END; $$;
 --     nest one level deep whatever the depth of the lineage. UNION, not
 --     UNION ALL, ends the walk on a lineage cycle.
 -- (b) every live item this one superseded is re-pointed to the nearest live
---     item further along the superseded_by chain, read now; when none remains
---     it is restored (superseded_by cleared). valid_to follows superseded_by
+--     item further along the superseded_by chain, read now, retired included:
+--     retiring an item does not bring back the item it replaced. When none
+--     remains it is restored (superseded_by cleared). valid_to follows superseded_by
 --     through memory_items_before_update. The walk stops at an id it has
 --     already seen, so a cycle not yet refused at commit cannot loop it.
 CREATE OR REPLACE FUNCTION public.memory_items_forget_cascade() RETURNS trigger
@@ -2586,6 +2593,12 @@ END $$;
 -- Name: engram_insert_items(jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
+
+-- CREATE OR REPLACE cannot change the result columns, so a database holding an
+-- earlier result shape of this function would refuse the re-apply. Its grants
+-- are re-issued below.
+DROP FUNCTION IF EXISTS public.engram_insert_items(jsonb);
+
 -- Inserts 1 to 500 items given as JSON objects keyed by column name. Every
 -- column may be sent except the ones the database or a later write owns:
 -- superseded_by, valid_to, restated_at, retired_at, retired_reason,
@@ -2602,16 +2615,23 @@ END $$;
 -- now(), the clock skew a capture client is allowed; a later time is a wrong
 -- clock, not an event. The four-digit year and that limit keep it below year
 -- 10000; a year-1 time with a positive offset is still 1 BC in UTC, which
--- engram_time_in_range refuses, so that is reported by position too. source.event_key holds at most 512 characters, the
--- bound that keeps it inside a unique btree index row; a longer key is
--- refused here by position instead of failing the index. An object whose
--- source.event_key is already stored, or
--- appears earlier in the same call, is skipped and reported with the stored id
--- and inserted = false, so a retried delivery is a no-op. One row per object
--- comes back, in input order. The deferred lineage and supersession checks run at
--- the caller's commit, so a statement may come before the utterance it quotes
--- and one failing object fails them all.
-CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean)
+-- engram_time_in_range refuses, so that is reported by position too. source.event_key is absent or a
+-- non-blank string of at most 512 characters, the bound that keeps it inside
+-- a unique btree index row; any other key (a JSON null, a number, a blank
+-- string, a longer string) is refused here by position instead of failing
+-- memory_items_source_check or the index with no position. An object whose
+-- source.event_key is already stored, or appears earlier in the same call, is
+-- skipped and reported with the stored id and inserted = false, so a retried
+-- delivery is a no-op; forgotten says whether that stored item is forgotten
+-- (an inserted item never is). A lineage entry naming a skipped object's id
+-- names the stored item instead, so a replay of an utterance and a new item
+-- derived from it can arrive in one call. An inserted object whose lineage
+-- names a forgotten item, directly or through a skipped object, is refused by
+-- position. One row per object comes back, in input order. The deferred
+-- lineage and supersession checks run at the caller's commit, so a statement
+-- may come before the utterance it quotes and one failing object fails them
+-- all.
+CREATE OR REPLACE FUNCTION public.engram_insert_items(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean, forgotten boolean)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -2619,6 +2639,10 @@ DECLARE
   v_count integer;
   v_problem text;
   v_ids uuid[];
+  v_resolved uuid[];
+  v_skipped boolean[];
+  v_lineage jsonb;
+  v_raced integer;
   v_inserted uuid[];
   v_result_ids uuid[];
   v_result_added boolean[];
@@ -2687,6 +2711,10 @@ BEGIN
                     AND jsonb_typeof(f.value -> 'event_key') = 'string'
                     AND char_length(f.value ->> 'event_key') > 512 THEN
                  format('object %s: source.event_key is longer than 512 characters', f.n)
+               WHEN f.col = 'source'
+                    AND (f.value ? 'event_key')
+                    AND NOT (jsonb_typeof(f.value -> 'event_key') = 'string' AND (f.value ->> 'event_key') ~ '\S') THEN
+                 format('object %s: source.event_key must be absent or a non-blank string of at most 512 characters', f.n)
              END AS reason
         FROM field f
     )
@@ -2739,6 +2767,58 @@ BEGIN
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
      ORDER BY t.n);
 
+  -- Every object is resolved before a row is written: an object whose event
+  -- key is stored, or held by an earlier object of the call, is skipped and
+  -- stands for that item. Another object may name a skipped object's id in
+  -- its lineage, as the caller's handle for the item it was derived from, so
+  -- lineage is rewritten through this map; the stored id is then what the
+  -- lineage check reads, instead of an id that is never written.
+  WITH obj AS (
+    SELECT t.n, t.e -> 'source' ->> 'event_key' AS event_key
+      FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+  ), firsts AS (
+    SELECT o.n, o.event_key,
+           CASE WHEN o.event_key IS NULL THEN o.n
+                ELSE first_value(o.n) OVER (PARTITION BY o.event_key ORDER BY o.n) END AS first_n
+      FROM obj o
+  )
+  SELECT array_agg(coalesce(s.stored_id, v_ids[f.first_n::integer]) ORDER BY f.n),
+         array_agg(s.stored_id IS NOT NULL OR f.first_n < f.n ORDER BY f.n)
+    INTO v_resolved, v_skipped
+    FROM firsts f
+    LEFT JOIN LATERAL (
+      SELECT x.id AS stored_id
+        FROM public.memory_items x
+       WHERE (x.source ? 'event_key') AND (x.source ->> 'event_key') = f.event_key
+    ) s ON true;
+
+  SELECT jsonb_agg(
+           CASE WHEN jsonb_typeof(t.e -> 'lineage') = 'array' THEN
+             (SELECT coalesce(jsonb_agg(to_jsonb(coalesce(v_resolved[array_position(v_ids, l.value::uuid)], l.value::uuid)) ORDER BY l.k), '[]'::jsonb)
+                FROM jsonb_array_elements_text(t.e -> 'lineage') WITH ORDINALITY AS l(value, k))
+           ELSE '[]'::jsonb END
+           ORDER BY t.n)
+    INTO v_lineage
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n);
+
+  -- A lineage naming a forgotten item fails memory_items_lineage at commit
+  -- with no position; it is named here, by the stored id or through a
+  -- skipped object. The forget lock held shared above keeps a forget from
+  -- changing what this reads before the call commits.
+  SELECT format('object %s: lineage names a forgotten item', t.n) INTO v_problem
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+   WHERE NOT v_skipped[t.n::integer]
+     AND EXISTS (SELECT 1
+                   FROM jsonb_array_elements_text(v_lineage -> (t.n::integer - 1)) AS l(value)
+                   JOIN public.memory_items x ON x.id = l.value::uuid
+                  WHERE x.forgotten_at IS NOT NULL)
+   ORDER BY t.n
+   LIMIT 1;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_insert_items: ' || v_problem;
+  END IF;
+
   WITH added AS (
     INSERT INTO public.memory_items AS m (
       id, class, kind, speaker, trust, project_id, workspace_id, plan_slug, session_id, subject_id,
@@ -2764,16 +2844,37 @@ BEGIN
            t.e ->> 'register_status',
            t.e ->> 'register_ref',
            t.e -> 'source',
-           CASE WHEN jsonb_typeof(t.e -> 'lineage') = 'array'
-                THEN ARRAY(SELECT l.value::uuid FROM jsonb_array_elements_text(t.e -> 'lineage') WITH ORDINALITY AS l(value, k) ORDER BY l.k)
-                ELSE '{}'::uuid[] END,
+           ARRAY(SELECT l.value::uuid
+                   FROM jsonb_array_elements_text(v_lineage -> (t.n::integer - 1)) WITH ORDINALITY AS l(value, k)
+                  ORDER BY l.k),
            (t.e ->> 'extraction_run_id')::uuid
       FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+     WHERE NOT v_skipped[t.n::integer]
      ORDER BY t.n
     ON CONFLICT ((source ->> 'event_key')) WHERE (source ? 'event_key') DO NOTHING
     RETURNING m.id
   )
   SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+
+  -- An object resolved for insert that ON CONFLICT skipped had its event key
+  -- committed by a concurrent call after the lookup above. When an object of
+  -- this call names it in lineage, that lineage now names an id that is never
+  -- written; a serialization failure rolls the call back, and its retry
+  -- resolves the key to the stored item.
+  SELECT t.n::integer INTO v_raced
+    FROM jsonb_array_elements(p_items) WITH ORDINALITY AS t(e, n)
+   WHERE NOT v_skipped[t.n::integer]
+     AND NOT v_ids[t.n::integer] = ANY (v_inserted)
+     AND EXISTS (SELECT 1
+                   FROM jsonb_array_elements(p_items) WITH ORDINALITY AS o(e, m)
+                  CROSS JOIN LATERAL jsonb_array_elements_text(v_lineage -> (o.m::integer - 1)) AS l(value)
+                  WHERE NOT v_skipped[o.m::integer] AND l.value::uuid = v_ids[t.n::integer])
+   ORDER BY t.n
+   LIMIT 1;
+  IF v_raced IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'serialization_failure',
+      MESSAGE = format('engram_insert_items: object %s was stored by a concurrent call, retry the call', v_raced);
+  END IF;
 
   -- v_ids holds no id twice, so an id in v_inserted names its position
   -- exactly. Every other object was skipped on its event key, whose stored
@@ -2797,8 +2898,9 @@ BEGIN
   END IF;
 
   RETURN QUERY
-  SELECT r.n::integer, r.item_id, r.added
+  SELECT r.n::integer, r.item_id, r.added, x.forgotten_at IS NOT NULL
     FROM unnest(v_result_ids, v_result_added) WITH ORDINALITY AS r(item_id, added, n)
+    JOIN public.memory_items x ON x.id = r.item_id
    ORDER BY r.n;
 END; $$;
 

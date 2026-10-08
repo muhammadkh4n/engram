@@ -133,8 +133,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     const result = await store.insertItems([said, quoted])
 
     expect(result).toEqual([
-      { id: said.id, eventKey: said.source.event_key, inserted: true },
-      { id: expect.stringMatching(UUID_V7), eventKey: quoted.source.event_key, inserted: true },
+      { id: said.id, eventKey: said.source.event_key, inserted: true, forgotten: false },
+      { id: expect.stringMatching(UUID_V7), eventKey: quoted.source.event_key, inserted: true, forgotten: false },
     ])
     expect(said.id).toMatch(UUID_V7)
 
@@ -170,6 +170,21 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     expect(result.map((r) => [r.id, r.inserted])).toEqual([[quoted.id, true], [said.id, true]])
   }, TEST_TIMEOUT_MS)
 
+  it('reports a replayed key with the stored id and whether that item is forgotten', async () => {
+    const said = utterance('Rebuild the search index weekly.', { id: newId() })
+    await store.insertItems([said])
+    const replay = { ...said, id: newId() }
+
+    expect(await store.insertItems([replay])).toEqual([
+      { id: said.id, eventKey: said.source.event_key, inserted: false, forgotten: false },
+    ])
+    await store.forgetItems([said.id!], 'said in the wrong session')
+    expect(await store.insertItems([replay])).toEqual([
+      { id: said.id, eventKey: said.source.event_key, inserted: false, forgotten: true },
+    ])
+    expect(await storedCount([replay.id!])).toBe(0)
+  }, TEST_TIMEOUT_MS)
+
   it('refuses a quote that is not in its utterance and stores nothing from the call', async () => {
     const said = utterance('Deploy after the tests pass.', { id: newId() })
     const misquoted = statement('deploy on Sunday', [said.id!], { id: newId() })
@@ -183,6 +198,24 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     expect((err as { constraint: string }).constraint).toBe('memory_items_lineage')
     expect((err as Error).message).not.toContain('deploy on Sunday')
     expect(await storedCount([said.id!, misquoted.id!])).toBe(0)
+  }, TEST_TIMEOUT_MS)
+
+  it('refuses a lineage naming a forgotten item through a replay as a rule of the insert function', async () => {
+    const said = utterance('Retire the legacy webhook.', { id: newId() })
+    await store.insertItems([said])
+    await store.forgetItems([said.id!], 'said in the wrong session')
+    const replay = { ...said, id: newId() }
+    const derived = statement('Retire the legacy webhook', [replay.id!], { id: newId() })
+
+    const err = await store.insertItems([replay, derived]).then(
+      () => { throw new Error('expected a refusal') },
+      (e: unknown) => e,
+    )
+
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint: string }).constraint).toBe('engram_insert_items')
+    expect((err as Error).message).toBe('engram_insert_items: object 2: lineage names a forgotten item')
+    expect(await storedCount([replay.id!, derived.id!])).toBe(0)
   }, TEST_TIMEOUT_MS)
 
   it('reads embeddings back as numbers', async () => {
@@ -253,11 +286,12 @@ describe.skipIf(!realPgImage || !postgrestImage)('PostgRestItemStore through Pos
     expect(restored).toMatchObject({ supersededBy: null, validTo: null })
   }, TEST_TIMEOUT_MS)
 
-  it('reports an argument error as a plain failure', async () => {
+  it('names the item function that refused an argument', async () => {
     const err = (await store.supersedeItem(newId(), newId()).catch((e: unknown) => e)) as Error
 
-    expect(isItemConstraintError(err)).toBe(false)
-    expect(err.message).toMatch(/^supersedeItem failed \(22023\): engram_supersede_item: /)
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint: string }).constraint).toBe('engram_supersede_item')
+    expect(err.message).toBe('engram_supersede_item: p_old names no item')
   }, TEST_TIMEOUT_MS)
 
   it('reads every invariant count as zero on a store that keeps the rules', async () => {

@@ -371,7 +371,7 @@ describe('turbo passes the real-Postgres image variables to tests', () => {
 })
 
 const ITEM_RPCS = [
-  ['engram_insert_items', '(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean) LANGUAGE plpgsql'],
+  ['engram_insert_items', '(p_items jsonb) RETURNS TABLE(ord integer, id uuid, inserted boolean, forgotten boolean) LANGUAGE plpgsql'],
   ['engram_forget_items', '(p_ids uuid[], p_reason text) RETURNS TABLE(item_id uuid, effect text, via uuid) LANGUAGE plpgsql'],
   ['engram_retire_items', '(p_ids uuid[], p_reason text) RETURNS SETOF uuid LANGUAGE plpgsql'],
   ['engram_unretire_items', '(p_ids uuid[]) RETURNS SETOF uuid LANGUAGE plpgsql'],
@@ -410,8 +410,11 @@ describe('item store RPCs', () => {
 
   // engram_insert_items may also raise internal_error, for a guard on a state
   // its own statements cannot produce; the format argument is a position.
-  it.each(ITEM_RPC_NAMES)('%s raises only 22023, 23514 or its guard error, its own name first, never a value', (name) => {
-    const codes = name === 'engram_insert_items' ? 'invalid_parameter_value|check_violation|internal_error' : 'invalid_parameter_value|check_violation'
+  it.each(ITEM_RPC_NAMES)('%s raises only 22023, 23514 or its retry and guard errors, its own name first, never a value', (name) => {
+    const codes =
+      name === 'engram_insert_items'
+        ? 'invalid_parameter_value|check_violation|serialization_failure|internal_error'
+        : 'invalid_parameter_value|check_violation'
     const raises = [...functionDefinition(name).matchAll(/RAISE EXCEPTION([\s\S]*?);/g)].map((m) => squash(m[1]!))
     if (name === 'engram_invariant_counts') {
       expect(raises).toEqual([])
@@ -421,7 +424,7 @@ describe('item store RPCs', () => {
     for (const raise of raises) {
       expect(raise).toMatch(
         new RegExp(
-          `^USING ERRCODE = '(${codes})', MESSAGE = (format\\()?'${name}: [^']*'( \\|\\| v_problem|, v_(count|missing)\\))?$`,
+          `^USING ERRCODE = '(${codes})', MESSAGE = (format\\()?'${name}: [^']*'( \\|\\| v_problem|, v_(count|missing|raced)\\))?$`,
         ),
       )
     }
