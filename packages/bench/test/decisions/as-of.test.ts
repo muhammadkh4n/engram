@@ -235,29 +235,34 @@ describe('registersFor', () => {
 describe('planDecisionsAt', () => {
   const ledger = {
     decisions: [
-      { id: 'TST-D-1', class: 'A', trigger: 'storage', ruling: 'One  store\nfor all items.', decided: '2026-09-30' },
-      { id: 'TST-D-2', class: 'a', trigger: 'capture', ruling: 'Raw events only.', decided: '2026-10-05', by: 'mk', quote: 'raw events, nothing else' },
-      { id: 'TST-D-3', class: 'B', trigger: 'naming', ruling: 'Not shown.', decided: '2026-09-01' },
-      { id: 'TST-D-4', class: 'A', trigger: 'undated', ruling: 'No date.', decided: null },
-      { id: 'TST-D-5', class: 'A', trigger: 'old rule', ruling: 'Replaced later.', date: '2026-09-02', superseded_by: 'TST-D-6' },
-      { id: 'TST-D-6', class: 'A', trigger: 'new rule', ruling: 'The replacement.', decided: '2026-10-03T15:00:00Z' },
+      { id: 'tst-dec-storage', class: 'A', trigger: 'storage', ruling: 'One  store\nfor all items.', decided: '2026-09-30' },
+      { id: 'tst-dec-capture', class: 'a', trigger: 'capture', ruling: 'Raw events only.', decided: '2026-10-05', by: 'mk', quote: 'raw events, nothing else' },
+      { id: 'tst-dec-naming', class: 'B', trigger: 'naming', ruling: 'Not shown.', decided: '2026-09-01' },
+      { id: 'tst-dec-undated', class: 'A', trigger: 'undated', ruling: 'No date.', decided: null },
+      { id: 'tst-dec-old-rule', class: 'A', trigger: 'old rule', ruling: 'Replaced later.', date: '2026-09-02', superseded_by: 'tst-dec-new-rule' },
+      { id: 'tst-dec-new-rule', class: 'A', trigger: 'new rule', ruling: 'The replacement.', decided: '2026-10-03T15:00:00Z' },
     ],
   }
 
   it('renders the decisions dated at or before the time, one line each', () => {
     const r = planDecisionsAt(ledger, '2026-10-01T12:00:00Z')
     expect(r.decisions.map((d) => d.line)).toEqual([
-      '- TST-D-1 (2026-09-30) storage: One store for all items.',
-      '- TST-D-5 (2026-09-02) old rule: Replaced later.',
+      '- tst-dec-storage (2026-09-30) storage: One store for all items.',
+      '- tst-dec-old-rule (2026-09-02) old rule: Replaced later.',
     ])
-    expect(r.undated).toEqual(['TST-D-4'])
+    expect(r.undated).toEqual(['tst-dec-undated'])
   })
 
   it('leaves out a decision dated after the time and drops a superseded one once its successor is dated', () => {
     const r = planDecisionsAt(ledger, '2026-10-05T00:00:00Z')
-    expect(r.decisions.map((d) => d.id)).toEqual(['TST-D-1', 'TST-D-2', 'TST-D-6'])
-    expect(r.decisions[1]!.line).toBe('- TST-D-2 (2026-10-05, by mk) capture: Raw events only. — MK: "raw events, nothing else"')
-    expect(planDecisionsAt(ledger, '2026-10-03T14:59:59Z').decisions.map((d) => d.id)).toEqual(['TST-D-1', 'TST-D-5'])
+    expect(r.decisions.map((d) => d.id)).toEqual(['tst-dec-storage', 'tst-dec-capture', 'tst-dec-new-rule'])
+    expect(r.decisions[1]!.line).toBe('- tst-dec-capture (2026-10-05, by mk) capture: Raw events only. — MK: "raw events, nothing else"')
+    expect(planDecisionsAt(ledger, '2026-10-03T14:59:59Z').decisions.map((d) => d.id)).toEqual(['tst-dec-storage', 'tst-dec-old-rule'])
+  })
+
+  it('refuses a decision time without an offset', () => {
+    const local = { decisions: [{ id: 'tst-dec-local', class: 'A', trigger: 'x', ruling: 'y', decided: '2026-10-03 15:00' }] }
+    expect(() => planDecisionsAt(local, '2026-10-05T00:00:00Z')).toThrow(/neither a day nor a time with an offset/)
   })
 
   it('reads a ledger without decisions as empty', () => {

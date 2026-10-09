@@ -335,10 +335,14 @@ const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
 /**
  * True when a ledger date is at or before `t`. A ledger records most decisions
  * by calendar day only, so a day-only date counts from the start of that UTC
- * day: a decision recorded on the day of the decision is in scope.
+ * day (`Date.parse` reads a date-only ISO string as UTC midnight): a decision
+ * recorded on the day of the decision is in scope.
  */
 function datedBy(value: string, t: number): boolean {
-  const ms = Date.parse(DATE_ONLY_RE.test(value) ? `${value}T00:00:00Z` : value)
+  if (!DATE_ONLY_RE.test(value) && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) {
+    throw new Error(`plan decision date ${value} is neither a day nor a time with an offset`)
+  }
+  const ms = Date.parse(value)
   if (Number.isNaN(ms)) throw new Error(`plan decision date ${value} is not a valid date`)
   return ms <= t
 }
