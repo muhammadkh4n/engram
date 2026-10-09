@@ -7,6 +7,7 @@
  * characters and counts, never text, headers or tokens.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -331,10 +332,12 @@ async function main(): Promise<void> {
 if (isEntryPoint(import.meta.url)) {
   const watchdog = setTimeout(() => {
     appendCaptureLog(process.env, `worker watchdog fired after ${WORKER_WATCHDOG_MS} ms`)
+    // Exits at once: the watchdog bounds the worker's lifetime, so it must not
+    // wait on a stdout/stderr reader, and it writes nothing to either first.
     process.exit(0)
   }, WORKER_WATCHDOG_MS)
   watchdog.unref()
   main()
     .catch((err: unknown) => appendCaptureLog(process.env, `worker failed: ${errorLabel(err)}`))
-    .finally(() => process.exit(0))
+    .finally(() => exitWhenFlushed(0))
 }

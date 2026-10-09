@@ -31,6 +31,7 @@
  * regex heuristic extractor in @engram-mem/graph.
  */
 
+import { CliExit, exitOnError } from './cli-exit.js'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { NeuralGraph } from '@engram-mem/graph'
 import { openaiIntelligence } from '@engram-mem/openai'
@@ -273,8 +274,7 @@ async function main(): Promise<void> {
 function requireEnv(name: string): string {
   const val = process.env[name]
   if (!val) {
-    process.stderr.write(`[backfill] Missing required environment variable: ${name}\n`)
-    process.exit(1)
+    throw new CliExit(1, `[backfill] Missing required environment variable: ${name}`)
   }
   return val
 }
@@ -284,7 +284,8 @@ function log(msg: string): void {
   process.stderr.write(`[backfill] ${msg}\n`)
 }
 
-main().catch((err) => {
-  process.stderr.write(`[backfill] FATAL: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`)
-  process.exit(1)
-})
+main().catch((err) =>
+  exitOnError(err, (e) => {
+    process.stderr.write(`[backfill] FATAL: ${e instanceof Error ? e.stack ?? e.message : String(e)}\n`)
+  }),
+)

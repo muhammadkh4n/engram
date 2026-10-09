@@ -43,6 +43,7 @@
  * and host.
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { openaiIntelligence } from '@engram-mem/openai'
@@ -90,8 +91,7 @@ type DryRunOptions = Extract<CliOptions, { mode: 'dry-run' }>
 type ApplyOptions = Extract<CliOptions, { mode: 'apply' }>
 
 function fail(message: string): never {
-  console.error(`${TAG} ${message}`)
-  process.exit(1)
+  throw new CliExit(1, `${TAG} ${message}`)
 }
 
 /** Creates the file with its header now, so a bad path fails before any write. */
@@ -207,7 +207,4 @@ async function main(): Promise<void> {
   else await dryRun(opts, supabaseUrl, supabaseKey)
 }
 
-main().catch((err) => {
-  console.error(`${TAG} FATAL:`, err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error(`${TAG} FATAL:`, e)))

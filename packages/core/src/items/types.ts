@@ -84,6 +84,7 @@ export const ITEM_INVARIANTS = [
   'lineage_to_forgotten',
   'utterance_time_mismatch',
   'unregistered_project',
+  'salvage_quote_not_in_lineage',
 ] as const
 export type ItemInvariant = (typeof ITEM_INVARIANTS)[number]
 

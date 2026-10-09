@@ -37,6 +37,7 @@
  * Required env: SUPABASE_URL, SUPABASE_KEY
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { readFileSync } from 'node:fs'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { buildKeysetFilter } from './embed-backfill-lib.js'
@@ -368,6 +369,6 @@ if (isEntryPoint(import.meta.url)) {
   main().catch((err: unknown) => {
     const prefix = err instanceof UsageError ? TAG : `${TAG} FATAL:`
     console.error(prefix, err instanceof Error ? err.message : err)
-    process.exit(1)
+    return exitWhenFlushed(1)
   })
 }

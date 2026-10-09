@@ -8,12 +8,14 @@
  * For the shared HTTP deployment see index-http.ts.
  */
 
+import { exitWhenFlushed } from './cli-exit.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { createEngramServer, recallOutputPolicyAtStartup } from './server-core.js'
+import { consolidationAtStartup, createEngramServer, recallOutputPolicyAtStartup } from './server-core.js'
 
 async function main(): Promise<void> {
   // Logs to stderr, so the JSON-RPC stream on stdout stays clean.
   recallOutputPolicyAtStartup()
+  consolidationAtStartup()
   const server = createEngramServer()
   const transport = new StdioServerTransport()
   await server.connect(transport)
@@ -22,5 +24,5 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   process.stderr.write(`[engram-mcp] Fatal: ${err instanceof Error ? err.message : String(err)}\n`)
-  process.exit(1)
+  return exitWhenFlushed(1)
 })

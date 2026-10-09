@@ -539,6 +539,7 @@ describe('PostgRestItemStore write RPCs', () => {
       lineage_to_forgotten: 2,
       utterance_time_mismatch: 3,
       unregistered_project: 4,
+      salvage_quote_not_in_lineage: 5,
     })
   })
 

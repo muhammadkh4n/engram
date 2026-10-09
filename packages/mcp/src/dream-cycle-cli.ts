@@ -26,6 +26,7 @@
  * to stderr.
  */
 
+import { CliExit, exitOnError, exitWhenFlushed } from './cli-exit.js'
 import { createMemory, dreamCycle } from '@engram-mem/core'
 import type { StorageAdapter } from '@engram-mem/core'
 import { PostgRestStorageAdapter } from '@engram-mem/postgrest'
@@ -35,8 +36,7 @@ import { tryCreateGraph } from './graph-helper.js'
 function requireEnv(name: string): string {
   const val = process.env[name]
   if (!val) {
-    console.error(`[engram-dream-cycle] Missing required environment variable: ${name}`)
-    process.exit(1)
+    throw new CliExit(1, `[engram-dream-cycle] Missing required environment variable: ${name}`)
   }
   return val
 }
@@ -69,8 +69,7 @@ async function main(): Promise<void> {
 
   const graph = await tryCreateGraph('[engram-dream-cycle]')
   if (!graph) {
-    console.error('[engram-dream-cycle] Neo4j unavailable — dream cycle requires graph backing. Set NEO4J_URI/USER/PASSWORD.')
-    process.exit(1)
+    throw new CliExit(1, '[engram-dream-cycle] Neo4j unavailable — dream cycle requires graph backing. Set NEO4J_URI/USER/PASSWORD.')
   }
 
   // Initialize a Memory just to run storage.initialize() — dreamCycle()
@@ -130,10 +129,9 @@ async function main(): Promise<void> {
   process.stdout.write(JSON.stringify({ ...result, durationMs }, null, 2) + '\n')
 
   await memory.dispose()
-  process.exit(result.cappedAt ? 0 : 0) // capping is non-fatal — exit 0 either way
+  await exitWhenFlushed(0) // capping is non-fatal — exit 0 either way
 }
 
-main().catch((err: unknown) => {
-  console.error('[engram-dream-cycle] fatal:', err instanceof Error ? err.stack : String(err))
-  process.exit(1)
-})
+main().catch((err: unknown) =>
+  exitOnError(err, (e) => console.error('[engram-dream-cycle] fatal:', e instanceof Error ? e.stack : String(e))),
+)

@@ -4,12 +4,15 @@
  * never starts anything on import, so tests can load it.
  */
 
+import { exitWhenFlushed } from './cli-exit.js'
 import http from 'node:http'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import {
   createEngramServer,
   getCaptureDeps,
   recallOutputPolicyAtStartup,
+  consolidationAtStartup,
+  extractionHeldFromEnv,
   captureModelFromEnv,
   parseExtractWindowsPerTickEnv,
   chatIntelligenceOptionsFromEnv,
@@ -188,6 +191,8 @@ export async function main(): Promise<void> {
   const captureModel = captureModelFromEnv()
   const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
   recallOutputPolicyAtStartup()
+  consolidationAtStartup()
+  const extractionHeld = extractionHeldFromEnv()
   const log = (line: string): void => {
     process.stderr.write(`[engram-mcp-http] ${line}\n`)
   }
@@ -224,6 +229,7 @@ export async function main(): Promise<void> {
         windowsPerTick: extractWindowsPerTick,
       },
       sessionIndex: { store },
+      extractionHeld,
       log,
     })
   }
@@ -266,7 +272,7 @@ export async function main(): Promise<void> {
     if (shuttingDown) return
     shuttingDown = true
     process.stdout.write(`[engram-mcp-http] ${signal} — shutting down\n`)
-    void shutdown({ worker, sync: projectSync, httpServer, log }).then((code) => process.exit(code))
+    void shutdown({ worker, sync: projectSync, httpServer, log }).then((code) => exitWhenFlushed(code))
   }
   process.on('SIGINT', () => onSignal('SIGINT'))
   process.on('SIGTERM', () => onSignal('SIGTERM'))

@@ -1,8 +1,9 @@
 /**
  * The embedding RPCs through a real PostgREST in front of real Postgres, with
  * the service-role JWT:
- * - an MK utterance and an artifact are pending; an assistant utterance, a
- *   forgotten item and a legacy item are not;
+ * - an MK utterance, an artifact and a legacy item with no vector (one whose
+ *   masked text could not keep the old vector) are pending; an assistant
+ *   utterance and a forgotten item are not, nor a legacy item once it has one;
  * - the pending read returns the head of each search text, never more than
  *   the embed text builder keeps;
  * - engram_items_set_embeddings writes a row once, and a repeat writes 0;
@@ -83,7 +84,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
   }
 
   it(
-    'lists an MK utterance and an artifact as pending, and no assistant utterance, forgotten item or legacy item',
+    'lists an MK utterance, an artifact and a vectorless legacy item as pending, and no assistant utterance or forgotten item',
     async () => {
       const [mk, commit, assistant, forgotten, legacy] = (await insertItems([
         item({ content: 'Keep the sample service on port 7070.' }),
@@ -110,13 +111,15 @@ describe.skipIf(!realPgImage || !postgrestImage)('the embedding RPCs through Pos
 
       const pending = await store.pendingEmbeddings(256, CLAIMANT)
       const ids = pending.map((p) => p.id)
-      expect(ids).toEqual(expect.arrayContaining([mk, commit]))
+      expect(ids).toEqual(expect.arrayContaining([mk, commit, legacy]))
       expect(ids).not.toContain(assistant)
       expect(ids).not.toContain(forgotten)
-      expect(ids).not.toContain(legacy)
       expect(pending.find((p) => p.id === commit)?.searchText).toBe(
         'sample-repo 0123456789ab\nfix: sample service listens on 7070',
       )
+
+      await expect(store.setEmbeddings([{ id: legacy, embedding: vector(0.5), model: MODEL }])).resolves.toBe(1)
+      expect((await store.pendingEmbeddings(256, CLAIMANT)).map((p) => p.id)).not.toContain(legacy)
     },
     TEST_TIMEOUT_MS,
   )

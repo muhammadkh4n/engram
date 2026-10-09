@@ -1,0 +1,33 @@
+{
+  "rows": [
+    {
+      "id": "00000000-0000-4000-8000-000000000c11",
+      "kind": "legacy_episode",
+      "session_id": "tst-salvage-open",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "Asked to move the capture spool under the state directory.",
+      "occurred_at": "2026-03-03T14:00:00Z",
+      "forgotten_at": null,
+      "retired_at": null,
+      "role": "user",
+      "producer": "none",
+      "legacy_superseded_by": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000c12",
+      "kind": "legacy_episode",
+      "session_id": "tst-salvage-open",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "The capture spool now lives under the state directory, one folder per session.",
+      "occurred_at": "2026-03-03T14:02:00Z",
+      "forgotten_at": null,
+      "retired_at": null,
+      "role": "assistant",
+      "producer": "claude-code",
+      "legacy_superseded_by": null
+    }
+  ],
+  "reply": "```json\n{\"observations\":[{\"claim\":\"The capture spool should move under the state directory\",\"quote\":\"move the capture spool under the state directory\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture spool\"},\"evidence\":[1],\"supersedes\":[]},{\"claim\":\"The capture spool keeps one folder per session\",\"quote\":\"one folder per session\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture spool\"},\"evidence\":[2,7],\"supersedes\":[]},{\"claim\":\"The capture spool lives under the state directory, one folder per session\",\"quote\":\"The capture spool now lives under the state directory, one folder per session.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture spool\"},\"evidence\":[1,2],\"supersedes\":[]},{\"claim\":\"The spool has no evidence\",\"quote\":\"The capture spool\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture spool\"},\"evidence\":[],\"supersedes\":[]}]}\n```"
+}

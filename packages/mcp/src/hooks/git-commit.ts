@@ -7,6 +7,7 @@
  * exits 0 on every path, within GIT_COMMIT_WATCHDOG_MS.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { readyForRoute } from '../capture/route-fit.js'
 import {
   appendCaptureLog,
@@ -105,10 +106,12 @@ async function main(): Promise<void> {
 if (isEntryPoint(import.meta.url)) {
   const watchdog = setTimeout(() => {
     appendCaptureLog(process.env, `git-commit watchdog fired after ${GIT_COMMIT_WATCHDOG_MS} ms`)
+    // Exits at once: the watchdog bounds git's post-commit wait, so it must
+    // not wait on a stdout/stderr reader, and it writes nothing to either first.
     process.exit(0)
   }, GIT_COMMIT_WATCHDOG_MS)
   watchdog.unref()
   main()
     .catch((err: unknown) => appendCaptureLog(process.env, `git-commit failed: ${errorLabel(err)}`))
-    .finally(() => process.exit(0))
+    .finally(() => exitWhenFlushed(0))
 }

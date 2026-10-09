@@ -156,6 +156,24 @@ describe.skipIf(!realPgImage)('re-applying schema.sql over an earlier memory_ite
       const index = (await shape()).split('\n').find((l) => l.startsWith('index '))
       expect(index).toMatch(/\(embedding_attempts < 5\)/)
       expect(index).not.toContain('session_index')
+      expect(index).not.toContain('legacy')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'rebuilds an index that still leaves legacy items out',
+    async () => {
+      await pg.psql(`
+        DROP INDEX public.idx_items_pending_embedding;
+        CREATE INDEX idx_items_pending_embedding ON public.memory_items USING btree (created_at, id)
+          WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5
+                 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class <> 'legacy');`)
+      expect(await shape()).toContain('legacy')
+      await pg.applySchema()
+      const index = (await shape()).split('\n').find((l) => l.startsWith('index '))
+      expect(index).toMatch(/\(embedding_attempts < 5\)/)
+      expect(index).not.toContain('legacy')
     },
     TEST_TIMEOUT_MS,
   )

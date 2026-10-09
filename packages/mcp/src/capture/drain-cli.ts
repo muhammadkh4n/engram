@@ -6,6 +6,7 @@
  * `lock_lost`), a backoff still running, or the deadline are not errors.
  */
 
+import { exitWhenFlushed } from '../cli-exit.js'
 import { isEntryPoint } from '../ingest/entry-point.js'
 import { type DrainResult, type DrainStop, drainSpool } from './index.js'
 
@@ -39,7 +40,7 @@ export async function runDrainCli(env: Env, write: (line: string) => void): Prom
 
 if (isEntryPoint(import.meta.url)) {
   runDrainCli(process.env, (line) => process.stdout.write(line)).then(
-    (code) => process.exit(code),
-    () => process.exit(1),
+    (code) => exitWhenFlushed(code),
+    () => exitWhenFlushed(1),
   )
 }

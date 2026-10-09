@@ -1240,7 +1240,9 @@ CREATE TABLE IF NOT EXISTS public.memory_extraction_runs (
     status text NOT NULL,
     stats jsonb DEFAULT '{}'::jsonb NOT NULL,
     error text,
+    window_key text,
     CONSTRAINT memory_extraction_runs_session_id_check CHECK (session_id IS NULL OR char_length(session_id) BETWEEN 1 AND 256),
+    CONSTRAINT memory_extraction_runs_window_key_check CHECK (window_key IS NULL OR window_key ~ '^[0-9a-f]{64}$'),
     CONSTRAINT memory_extraction_runs_extractor_version_check CHECK (extractor_version ~ '\S' AND char_length(extractor_version) <= 64),
     CONSTRAINT memory_extraction_runs_status_check CHECK (status IN ('running', 'succeeded', 'failed')),
     CONSTRAINT memory_extraction_runs_finite_check CHECK (public.engram_time_in_range(started_at)
@@ -1724,6 +1726,23 @@ ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timesta
 ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+
+
+--
+-- memory_extraction_runs.window_key: a legacy salvage run reads a window of
+-- old rows, not an anchor utterance, so it is keyed by the window instead:
+-- the sha256, in lowercase hex, of its extractor version and the window's
+-- item ids in order (engram_salvage_begin). NULL on every extraction run.
+--
+ALTER TABLE public.memory_extraction_runs ADD COLUMN IF NOT EXISTS window_key text;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_extraction_runs_window_key_check'
+                   AND conrelid = 'public.memory_extraction_runs'::regclass) THEN
+    ALTER TABLE ONLY public.memory_extraction_runs
+      ADD CONSTRAINT memory_extraction_runs_window_key_check CHECK (window_key IS NULL OR window_key ~ '^[0-9a-f]{64}$');
+  END IF;
+END $$;
 
 
 --
@@ -2227,6 +2246,12 @@ CREATE INDEX IF NOT EXISTS idx_extraction_runs_session ON public.memory_extracti
 -- while failed runs stay beside it as the anchor's failure record.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_anchor_version ON public.memory_extraction_runs USING btree (anchor_item_id, extractor_version) WHERE (status IN ('running', 'succeeded'));
 
+-- idx_extraction_runs_window_version allows one succeeded legacy salvage run
+-- per window and extractor version. Two runs of one window that overlap both
+-- reach their commit, and the later commit's close to succeeded raises here,
+-- so the window's observations are stored once.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_window_version ON public.memory_extraction_runs USING btree (window_key, extractor_version) WHERE (window_key IS NOT NULL AND status = 'succeeded');
+
 -- idx_items_version_of finds the current version of an item chain (a ledger
 -- decision or register entry) when capture materializes a new version.
 -- memory_items_version_of_check bounds source.version_of at 512 characters,
@@ -2303,13 +2328,15 @@ END $$;
 -- eligibility clauses of that function's WHERE, word for word, so it holds
 -- only the backlog embedding drains; the claim clause is checked on the rows
 -- the index returns, so only items under another worker's live claim (at
--- most a few batches) are read and passed over. Assistant utterances and
--- legacy rows are never embedded by the worker, and an index that held them
--- would be walked whole on every idle call. CREATE INDEX IF NOT EXISTS keeps
--- an existing index whatever its predicate, so an index built before the
--- embedding_attempts clause, or one that still left session indexes out, is
--- dropped first and rebuilt; otherwise the planner could no longer match it
--- to the function and every call would scan the table.
+-- most a few batches) are read and passed over. Assistant utterances are
+-- never embedded by the worker, and an index that held them would be walked
+-- whole on every idle call. A legacy item copied with its old vector is not
+-- NULL and so never enters it; one whose text was masked has no vector and
+-- waits here like any other item. CREATE INDEX IF NOT EXISTS keeps an
+-- existing index whatever its predicate, so an index built before the
+-- embedding_attempts clause, or one that still left session indexes or legacy
+-- items out, is dropped first and rebuilt; otherwise the planner could no
+-- longer match it to the function and every call would scan the table.
 DO $$ BEGIN
   IF EXISTS (SELECT 1
                FROM pg_catalog.pg_index x
@@ -2317,11 +2344,12 @@ DO $$ BEGIN
               WHERE c.relname = 'idx_items_pending_embedding'
                 AND c.relnamespace = 'public'::regnamespace
                 AND (pg_catalog.pg_get_expr(x.indpred, x.indrelid) NOT LIKE '%(embedding_attempts < 5)%'
-                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%session_index%')) THEN
+                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%session_index%'
+                     OR pg_catalog.pg_get_expr(x.indpred, x.indrelid) LIKE '%legacy%')) THEN
     DROP INDEX public.idx_items_pending_embedding;
   END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant') AND class <> 'legacy');
+CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public.memory_items USING btree (created_at, id) WHERE (embedding IS NULL AND forgotten_at IS NULL AND embedding_attempts < 5 AND NOT (class = 'utterance' AND speaker = 'assistant'));
 
 
 --
@@ -4876,9 +4904,11 @@ DROP FUNCTION IF EXISTS public.engram_items_pending_embedding(integer);
 
 -- Claims and returns up to p_limit (1 to 256) items that still need an
 -- embedding, oldest first: no embedding, not forgotten, fewer than 5 refused
--- embedding attempts, not an assistant utterance, and not a legacy item.
--- Assistant turns are trust 3 and never ranked by vector; legacy rows are
--- embedded by their own writer or not at all. A session index is written
+-- embedding attempts, and not an assistant utterance. Assistant turns are
+-- trust 3 and never ranked by vector. A legacy item keeps its old row's
+-- vector when its text was copied unchanged, so it is never listed; one whose
+-- text was masked has no vector, since the old one embeds the secret, and is
+-- listed here to get one of the masked text. A session index is written
 -- without a vector and waits here like any other item.
 -- idx_items_pending_embedding serves the order, and its predicate repeats the
 -- eligibility clauses of this WHERE word for word so the planner
@@ -4919,7 +4949,6 @@ BEGIN
        AND forgotten_at IS NULL
        AND embedding_attempts < 5
        AND NOT (class = 'utterance' AND speaker = 'assistant')
-       AND class <> 'legacy'
        AND (embedding_claimed_by = p_claimant OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())
      ORDER BY i.created_at, i.id
      LIMIT p_limit
@@ -6098,6 +6127,64 @@ BEGIN
          stats = coalesce(p_stats, '{}'::jsonb) || jsonb_build_object('failure', p_failure, 'counted', p_counted)
    WHERE r.id = p_run AND r.status = 'running';
   RETURN FOUND;
+END; $$;
+
+
+--
+-- Name: engram_salvage_begin(text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Opens a legacy salvage run on one window of old rows in session p_session
+-- and returns its id, or NULL when a run of p_window_key at p_version already
+-- succeeded (idx_extraction_runs_window_version): that window is done. A
+-- salvage window has no anchor utterance, so the run has no anchor_item_id and
+-- is keyed by p_window_key, the sha256 in lowercase hex of the version and the
+-- window's item ids in order. p_model is the model asked, NULL when unknown.
+-- A run of the same window and version still open was left by a process that
+-- stopped mid-window, since the backfill runs one window at a time: it is
+-- closed as a transient failure that does not count, so each run row ends in
+-- a final status. The new run is closed by engram_extraction_commit or
+-- engram_extraction_fail, as an extraction run is.
+CREATE OR REPLACE FUNCTION public.engram_salvage_begin(p_session text, p_window_key text, p_version text, p_model text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF p_session IS NULL OR char_length(p_session) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_session must be a text of 1 to 256 characters';
+  END IF;
+  IF p_window_key IS NULL OR p_window_key !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_window_key must be a sha256 in lowercase hex';
+  END IF;
+  IF p_version IS NULL OR p_version !~ '\S' OR char_length(p_version) > 64 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_version must be a non-blank text of at most 64 characters';
+  END IF;
+  IF p_model IS NOT NULL AND (p_model !~ '\S' OR char_length(p_model) > 200) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_salvage_begin: p_model must be NULL or a non-blank text of at most 200 characters';
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM public.memory_extraction_runs r
+              WHERE r.window_key = p_window_key AND r.extractor_version = p_version AND r.status = 'succeeded') THEN
+    RETURN NULL;
+  END IF;
+
+  UPDATE public.memory_extraction_runs r
+     SET status = 'failed',
+         finished_at = now(),
+         error = 'a later run of the same window started',
+         stats = r.stats || jsonb_build_object('failure', 'transient', 'counted', false)
+   WHERE r.window_key = p_window_key AND r.extractor_version = p_version AND r.status = 'running';
+
+  INSERT INTO public.memory_extraction_runs AS r (session_id, anchor_item_id, window_key, extractor_version, model, status)
+  VALUES (p_session, NULL, p_window_key, p_version, p_model, 'running')
+  RETURNING r.id INTO v_id;
+  RETURN v_id;
 END; $$;
 
 
@@ -7433,6 +7520,525 @@ END; $$;
 
 
 --
+-- Name: engram_legacy_work(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The old memory tables reach the item store as class legacy in five steps,
+-- run in this order:
+-- - episodes, digests and facts copy the rows of memory_episodes,
+--   memory_digests and memory_semantic, one item per row under the row's own
+--   id, so lineage and a forget by id name one id for one memory;
+-- - fact_supersession links the supersessions memory_semantic recorded;
+-- - forgets forgets the items whose old row was forgotten.
+-- A digest's lineage names its episodes' items and a fact's its digest's
+-- item. An insert may not name a forgotten item in its lineage, so every
+-- row is copied live and the forgets come last, when the forget cascade can
+-- reach everything built on a forgotten row. engram_legacy_pending and
+-- engram_legacy_copy therefore refuse a step while an earlier step has work
+-- left. memory_procedural is not copied, and no old table is written.
+-- engram_legacy_work lists a step's work, one row each, with state 'pending'
+-- for what is still to do:
+-- - the copy steps: old rows without an item, with the text their item
+--   would hold (an episode's content, a digest's summary, a fact's topic,
+--   ': ' and content) and the row's created_at;
+-- - fact_supersession: every legacy fact whose old row named a superseder,
+--   with that id and one state: 'linked' (already superseded by it),
+--   'not_later' (the superseder's item did not occur strictly later, as
+--   when both facts come from one digest and share its time), 'pending'
+--   (both live, the fact neither retired nor superseded), else 'skipped'
+--   (no item for the superseder, or one side forgotten or retired);
+-- - forgets: live legacy items whose old row has forgotten_at.
+CREATE OR REPLACE FUNCTION public.engram_legacy_work(p_step text) RETURNS TABLE(id uuid, body text, ordered_at timestamp with time zone, superseded_by uuid, state text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT o.id, o.content, o.created_at, NULL::uuid, 'pending'
+    FROM public.memory_episodes o
+   WHERE p_step = 'episodes'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+  UNION ALL
+  SELECT o.id, o.summary, o.created_at, NULL::uuid, 'pending'
+    FROM public.memory_digests o
+   WHERE p_step = 'digests'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+  UNION ALL
+  SELECT o.id, o.topic || ': ' || o.content, o.created_at, NULL::uuid, 'pending'
+    FROM public.memory_semantic o
+   WHERE p_step = 'facts'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+  UNION ALL
+  SELECT f.id, NULL::text, f.occurred_at, (f.source ->> 'legacy_superseded_by')::uuid,
+         CASE WHEN s.id IS NULL THEN 'skipped'
+              WHEN f.superseded_by = s.id THEN 'linked'
+              WHEN s.occurred_at <= f.occurred_at THEN 'not_later'
+              WHEN f.forgotten_at IS NULL AND f.retired_at IS NULL AND f.superseded_by IS NULL
+                   AND s.forgotten_at IS NULL THEN 'pending'
+              ELSE 'skipped' END
+    FROM public.memory_items f
+    LEFT JOIN public.memory_items s
+      ON s.id = (f.source ->> 'legacy_superseded_by')::uuid AND s.class = 'legacy' AND s.kind = 'legacy_fact'
+   WHERE p_step = 'fact_supersession'
+     AND f.class = 'legacy' AND f.kind = 'legacy_fact'
+     AND (f.source ->> 'legacy_superseded_by') IS NOT NULL
+  UNION ALL
+  SELECT i.id, NULL::text, i.occurred_at, NULL::uuid, 'pending'
+    FROM public.memory_items i
+   WHERE p_step = 'forgets'
+     AND i.class = 'legacy' AND i.forgotten_at IS NULL
+     AND CASE i.kind
+           WHEN 'legacy_episode' THEN EXISTS (SELECT 1 FROM public.memory_episodes o WHERE o.id = i.id AND o.forgotten_at IS NOT NULL)
+           WHEN 'legacy_digest' THEN EXISTS (SELECT 1 FROM public.memory_digests o WHERE o.id = i.id AND o.forgotten_at IS NOT NULL)
+           WHEN 'legacy_fact' THEN EXISTS (SELECT 1 FROM public.memory_semantic o WHERE o.id = i.id AND o.forgotten_at IS NOT NULL)
+           ELSE false END
+$$;
+
+
+--
+-- Name: engram_legacy_pending(text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Up to p_limit (1 to 1000) of a step's pending work, oldest first: by the
+-- old row's (created_at, id) for the copy steps, by the item's
+-- (occurred_at, id) after them. [{id, text}] for episodes, digests and facts,
+-- the text the caller scrubs before it hands the row to engram_legacy_copy;
+-- [{id, superseded_by}] for fact_supersession; [{id}] for forgets. Read only.
+-- A step is refused (23514) while an earlier step has work left, as
+-- engram_legacy_copy refuses it.
+CREATE OR REPLACE FUNCTION public.engram_legacy_pending(p_step text, p_limit integer DEFAULT 500) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_steps CONSTANT text[] := ARRAY['episodes', 'digests', 'facts', 'fact_supersession', 'forgets'];
+  v_pos integer := array_position(v_steps, p_step);
+  v_blocked text;
+  v_result jsonb;
+BEGIN
+  IF v_pos IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_pending: p_step must be one of episodes, digests, facts, fact_supersession, forgets';
+  END IF;
+  IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 1000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_pending: p_limit must be from 1 to 1000';
+  END IF;
+
+  SELECT s.step INTO v_blocked
+    FROM unnest(v_steps[1:v_pos - 1]) WITH ORDINALITY AS s(step, k)
+   WHERE EXISTS (SELECT 1 FROM public.engram_legacy_work(s.step) w WHERE w.state = 'pending')
+   ORDER BY s.k
+   LIMIT 1;
+  IF v_blocked IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('engram_legacy_pending: step %s waits for step %s, which has work left', p_step, v_blocked);
+  END IF;
+
+  SELECT coalesce(jsonb_agg(CASE WHEN v_pos <= 3 THEN jsonb_build_object('id', w.id, 'text', w.body)
+                                 WHEN v_pos = 4 THEN jsonb_build_object('id', w.id, 'superseded_by', w.superseded_by)
+                                 ELSE jsonb_build_object('id', w.id) END
+                            ORDER BY w.ordered_at, w.id), '[]'::jsonb)
+    INTO v_result
+    FROM (SELECT x.id, x.body, x.superseded_by, x.ordered_at
+            FROM public.engram_legacy_work(p_step) x
+           WHERE x.state = 'pending'
+           ORDER BY x.ordered_at, x.id
+           LIMIT p_limit) w;
+  RETURN v_result;
+END; $$;
+
+
+--
+-- Name: engram_legacy_copy(text, jsonb, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Runs one step of the legacy copy and returns {step, copied, remaining}:
+-- what this call did, and the step's pending work after it.
+-- episodes, digests and facts take p_rows, 0 to 1000 objects {id, content,
+-- masks: [{detector, secret_name}], entities?: [{entity, entity_type}]},
+-- each naming a row of the step's old table: content is that row's text
+-- after the caller's scrub, masks lists what the scrub replaced, and
+-- entities lists what the deterministic entity extractor found in content.
+-- Entities are checked as engram_items_apply checks them and written in this
+-- call for the rows it inserts, so no legacy item exists without them. A row
+-- that already has an item is skipped, with its entities, so a repeated
+-- batch copies nothing. Each other row becomes one live item of
+-- class legacy, trust 3, under the old row's id, with content and
+-- search_text the given text. The old embedding is copied, as model
+-- text-embedding-3-small, only when that text is the old row's exactly: a
+-- vector computed from a secret the scrub removed is not kept. A changed text
+-- that lists no mask is refused, so every change leaves a hit, and each mask
+-- writes a memory_secret_hits row (names only, never the value).
+-- - episode: kind legacy_episode, speaker assistant for role assistant and
+--   system otherwise, never mk: the old content of a captured prompt is a
+--   model rewrite, not MK's words. occurred_at is created_at; session_id is
+--   kept, except that a session summary, stored under one shared session,
+--   takes the session uuid its metadata.transcriptPath ends in.
+-- - digest: kind legacy_digest, speaker system, its summary. Lineage is its
+--   episode_ids that have a live legacy episode item, and occurred_at the
+--   latest time among its episodes' items, else its created_at: a digest is
+--   written after the session it condenses, so its created_at would date
+--   old knowledge as new.
+-- - fact: kind legacy_fact, speaker system, topic || ': ' || content.
+--   Lineage is its digest's live item; session_id and occurred_at are that
+--   item's (the latest when it cites several), else its own created_at and
+--   no session.
+-- A session_id outside 1 to 256 characters is stored as NULL; source keeps it.
+-- p_project_map maps each raw project_id of the old tables to {project_id,
+-- workspace_id}, each a registered project or workspace id, or null. Before
+-- anything is written, a map value naming an unregistered project or
+-- workspace is refused, and so is a row whose project_id is not a key of the
+-- map (an unmapped project value). A NULL project_id stays NULL.
+-- source keeps what the old row said: {type 'legacy', table, id, role,
+-- producer (metadata.source, else 'none'), legacy_type (metadata.type),
+-- legacy_project, legacy_session_id, embed_text_version
+-- (metadata.embedTextVersion), dangling_lineage (cited ids with no item),
+-- time_basis ('created_at', 'input_episodes' or 'digest'),
+-- legacy_forgotten_at, legacy_superseded_by}.
+-- fact_supersession and forgets take p_rows NULL and do all their work in
+-- one call. fact_supersession calls engram_supersede_item on every pending
+-- pair, and adds not_later and skipped to the result: its pairs in those
+-- states. A fact is dated by its digest, so two facts of one digest share a
+-- time and stay unlinked, their old superseder still in source. forgets
+-- calls engram_forget_items, 50 ids a call, on every live legacy item whose
+-- old row is forgotten, and copied counts those items; the forget cascade
+-- forgets the items built on them.
+-- Every step first takes the forget advisory key (7308892986227385959)
+-- exclusively, as every function that inserts items and calls a row-locking
+-- RPC does: holding it shared for the inserts, two calls would each wait for
+-- the other's shared hold once engram_supersede_item or engram_forget_items
+-- asks for it exclusively. Copy calls therefore run one at a time, and each
+-- reads the work its predecessor committed.
+CREATE OR REPLACE FUNCTION public.engram_legacy_copy(p_step text, p_project_map jsonb, p_rows jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_steps CONSTANT text[] := ARRAY['episodes', 'digests', 'facts', 'fact_supersession', 'forgets'];
+  v_pos integer := array_position(v_steps, p_step);
+  v_table text := (ARRAY['memory_episodes', 'memory_digests', 'memory_semantic'])[array_position(v_steps, p_step)];
+  v_blocked text;
+  v_problem text;
+  v_inserted uuid[] := '{}'::uuid[];
+  v_targets uuid[];
+  v_pair record;
+  v_linked integer := 0;
+  v_next integer := 1;
+  v_result jsonb;
+BEGIN
+  IF v_pos IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_copy: p_step must be one of episodes, digests, facts, fact_supersession, forgets';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+
+  SELECT s.step INTO v_blocked
+    FROM unnest(v_steps[1:v_pos - 1]) WITH ORDINALITY AS s(step, k)
+   WHERE EXISTS (SELECT 1 FROM public.engram_legacy_work(s.step) w WHERE w.state = 'pending')
+   ORDER BY s.k
+   LIMIT 1;
+  IF v_blocked IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation',
+      MESSAGE = format('engram_legacy_copy: step %s waits for step %s, which has work left', p_step, v_blocked);
+  END IF;
+
+  IF v_pos > 3 THEN
+    IF p_rows IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = format('engram_legacy_copy: p_rows must be NULL for step %s', p_step);
+    END IF;
+
+    IF p_step = 'fact_supersession' THEN
+      FOR v_pair IN
+        SELECT w.id, w.superseded_by
+          FROM public.engram_legacy_work('fact_supersession') w
+         WHERE w.state = 'pending'
+         ORDER BY w.id
+      LOOP
+        IF public.engram_supersede_item(v_pair.id, v_pair.superseded_by) THEN
+          v_linked := v_linked + 1;
+        END IF;
+      END LOOP;
+      SELECT jsonb_build_object('step', p_step, 'copied', v_linked,
+                                'remaining', count(*) FILTER (WHERE w.state = 'pending'),
+                                'not_later', count(*) FILTER (WHERE w.state = 'not_later'),
+                                'skipped', count(*) FILTER (WHERE w.state = 'skipped'))
+        INTO v_result
+        FROM public.engram_legacy_work('fact_supersession') w;
+      RETURN v_result;
+    END IF;
+
+    v_targets := ARRAY(SELECT w.id
+                         FROM public.engram_legacy_work('forgets') w
+                        WHERE w.state = 'pending'
+                        ORDER BY w.ordered_at, w.id);
+    WHILE v_next <= cardinality(v_targets) LOOP
+      PERFORM 1 FROM public.engram_forget_items(v_targets[v_next:v_next + 49], 'the old memory row was forgotten');
+      v_next := v_next + 50;
+    END LOOP;
+    RETURN jsonb_build_object(
+      'step', p_step,
+      'copied', (SELECT count(*) FROM public.memory_items i WHERE i.id = ANY (v_targets) AND i.forgotten_at IS NOT NULL),
+      'remaining', (SELECT count(*) FROM public.engram_legacy_work('forgets') w WHERE w.state = 'pending'));
+  END IF;
+
+  IF p_project_map IS NULL OR jsonb_typeof(p_project_map) <> 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_copy: p_project_map must be a JSON object';
+  END IF;
+  IF p_rows IS NULL OR jsonb_typeof(p_rows) <> 'array' OR jsonb_array_length(p_rows) > 1000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_copy: p_rows must be a JSON array of at most 1000 rows';
+  END IF;
+
+  SELECT format('p_project_map key %s %s', quote_literal(left(r.key, 100)), r.reason) INTO v_problem
+    FROM (SELECT m.key,
+                 CASE
+                   WHEN jsonb_typeof(m.value) <> 'object' THEN 'must map to {project_id, workspace_id}'
+                   WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(m.value) AS k(key) WHERE k.key NOT IN ('project_id', 'workspace_id'))
+                     THEN 'must map to {project_id, workspace_id}'
+                   WHEN coalesce(jsonb_typeof(m.value -> 'project_id'), 'null') NOT IN ('string', 'null')
+                        OR coalesce(jsonb_typeof(m.value -> 'workspace_id'), 'null') NOT IN ('string', 'null')
+                     THEN 'must map project_id and workspace_id to strings or null'
+                   WHEN jsonb_typeof(m.value -> 'project_id') = 'string'
+                        AND NOT EXISTS (SELECT 1 FROM public.memory_projects p
+                                         WHERE p.id = m.value ->> 'project_id' AND p.kind = 'project')
+                     THEN 'names a project that is not registered'
+                   WHEN jsonb_typeof(m.value -> 'workspace_id') = 'string'
+                        AND NOT EXISTS (SELECT 1 FROM public.memory_projects w
+                                         WHERE w.id = m.value ->> 'workspace_id' AND w.kind = 'workspace')
+                     THEN 'names a workspace that is not registered'
+                 END AS reason
+            FROM jsonb_each(p_project_map) AS m(key, value)) r
+   WHERE r.reason IS NOT NULL
+   ORDER BY r.key
+   LIMIT 1;
+
+  IF v_problem IS NULL THEN
+    SELECT format('row %s %s', r.n, r.reason) INTO v_problem
+      FROM (SELECT t.n,
+                   CASE
+                     WHEN jsonb_typeof(t.e) <> 'object' THEN 'is not a JSON object'
+                     WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(t.e) AS k(key) WHERE k.key NOT IN ('id', 'content', 'masks', 'entities'))
+                       THEN 'has a key other than id, content, masks and entities'
+                     WHEN jsonb_typeof(t.e -> 'id') IS DISTINCT FROM 'string' OR NOT pg_input_is_valid(t.e ->> 'id', 'uuid')
+                       THEN 'needs id, a uuid string'
+                     WHEN jsonb_typeof(t.e -> 'content') IS DISTINCT FROM 'string' OR (t.e ->> 'content') !~ '\S'
+                       THEN 'needs content, a non-blank string'
+                     WHEN jsonb_typeof(t.e -> 'masks') IS DISTINCT FROM 'array' THEN 'needs masks, an array'
+                     WHEN EXISTS (SELECT 1
+                                    FROM jsonb_array_elements(t.e -> 'masks') AS x(m)
+                                   WHERE CASE
+                                           WHEN jsonb_typeof(x.m) <> 'object' THEN true
+                                           WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(x.m) AS k(key)
+                                                         WHERE k.key NOT IN ('detector', 'secret_name')) THEN true
+                                           WHEN jsonb_typeof(x.m -> 'detector') IS DISTINCT FROM 'string'
+                                                OR (x.m ->> 'detector') !~ '\S' THEN true
+                                           WHEN coalesce(jsonb_typeof(x.m -> 'secret_name'), 'null') = 'null' THEN false
+                                           ELSE jsonb_typeof(x.m -> 'secret_name') <> 'string' OR (x.m ->> 'secret_name') !~ '\S'
+                                         END)
+                       THEN 'has a mask other than {detector, secret_name}: a non-blank detector, a non-blank or null secret_name'
+                     WHEN coalesce(jsonb_typeof(t.e -> 'entities'), 'null') NOT IN ('array', 'null')
+                       THEN 'needs entities, an array, when it gives them'
+                     WHEN EXISTS (SELECT 1
+                                    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.e -> 'entities') = 'array'
+                                                                   THEN t.e -> 'entities' ELSE '[]'::jsonb END) AS x(v)
+                                   WHERE CASE WHEN jsonb_typeof(x.v) <> 'object' THEN true
+                                              ELSE EXISTS (SELECT 1 FROM jsonb_object_keys(x.v) AS k(key) WHERE k.key NOT IN ('entity', 'entity_type'))
+                                                   OR jsonb_typeof(x.v -> 'entity') IS DISTINCT FROM 'string'
+                                                   OR jsonb_typeof(x.v -> 'entity_type') IS DISTINCT FROM 'string' END)
+                       THEN 'has an entity other than {entity, entity_type} with string values'
+                   END AS reason
+              FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)) r
+     WHERE r.reason IS NOT NULL
+     ORDER BY r.n
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NULL THEN
+    SELECT format('rows %s and %s share an id', f.first_n, f.n) INTO v_problem
+      FROM (SELECT t.n, first_value(t.n) OVER (PARTITION BY (t.e ->> 'id')::uuid ORDER BY t.n) AS first_n
+              FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)) f
+     WHERE f.n > f.first_n
+     ORDER BY f.n
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NULL THEN
+    SELECT format('row %s: %s', r.n, r.reason) INTO v_problem
+      FROM (SELECT g.n,
+                   CASE
+                     WHEN o.id IS NULL THEN format('id names no row of %s', v_table)
+                     WHEN EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = g.id) THEN NULL
+                     WHEN o.created_at IS NULL THEN 'the old row has no created_at'
+                     WHEN o.project_id IS NOT NULL AND NOT (p_project_map ? o.project_id) THEN 'unmapped project value'
+                     WHEN g.content <> o.body AND jsonb_array_length(g.masks) = 0
+                       THEN 'content differs from the old text but lists no mask'
+                   END AS reason
+              FROM (SELECT t.n, (t.e ->> 'id')::uuid AS id, t.e ->> 'content' AS content, t.e -> 'masks' AS masks
+                      FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)) g
+              LEFT JOIN (SELECT e.id, e.content AS body, e.created_at, e.project_id
+                           FROM public.memory_episodes e WHERE p_step = 'episodes'
+                         UNION ALL
+                         SELECT d.id, d.summary, d.created_at, d.project_id
+                           FROM public.memory_digests d WHERE p_step = 'digests'
+                         UNION ALL
+                         SELECT s.id, s.topic || ': ' || s.content, s.created_at, s.project_id
+                           FROM public.memory_semantic s WHERE p_step = 'facts') o
+                ON o.id = g.id) r
+     WHERE r.reason IS NOT NULL
+     ORDER BY r.n
+     LIMIT 1;
+  END IF;
+
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_legacy_copy: ' || v_problem;
+  END IF;
+
+  IF p_step = 'episodes' THEN
+    WITH added AS (
+      INSERT INTO public.memory_items AS m (
+        id, class, kind, speaker, trust, project_id, workspace_id, session_id,
+        content, search_text, embedding, embedding_model, occurred_at, source)
+      SELECT o.id, 'legacy', 'legacy_episode',
+             CASE WHEN o.role = 'assistant' THEN 'assistant' ELSE 'system' END, 3,
+             p_project_map -> o.project_id ->> 'project_id',
+             p_project_map -> o.project_id ->> 'workspace_id',
+             CASE WHEN char_length(x.session_id) BETWEEN 1 AND 256 THEN x.session_id END,
+             g.content, g.content,
+             CASE WHEN g.content = o.content THEN o.embedding END,
+             CASE WHEN g.content = o.content AND o.embedding IS NOT NULL THEN 'text-embedding-3-small' END,
+             o.created_at,
+             jsonb_build_object('type', 'legacy', 'table', 'memory_episodes', 'id', o.id, 'role', o.role,
+                                'producer', coalesce(o.metadata ->> 'source', 'none'),
+                                'legacy_type', o.metadata -> 'type', 'legacy_project', o.project_id,
+                                'legacy_session_id', o.session_id,
+                                'embed_text_version', o.metadata -> 'embedTextVersion', 'dangling_lineage', 0,
+                                'time_basis', 'created_at', 'legacy_forgotten_at', o.forgotten_at,
+                                'legacy_superseded_by', NULL::uuid)
+        FROM (SELECT (t.e ->> 'id')::uuid AS id, t.e ->> 'content' AS content
+                FROM jsonb_array_elements(p_rows) AS t(e)) g
+        JOIN public.memory_episodes o ON o.id = g.id
+       CROSS JOIN LATERAL (
+         SELECT coalesce(CASE WHEN o.session_id = 'claude-code-summaries' OR (o.metadata ->> 'type') = 'session-summary'
+                              THEN lower(substring(o.metadata ->> 'transcriptPath'
+                                                   FROM '([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\.jsonl$'))
+                         END, o.session_id) AS session_id) x
+       WHERE NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+       ORDER BY o.created_at, o.id
+      ON CONFLICT (id) DO NOTHING
+      RETURNING m.id
+    )
+    SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+  ELSIF p_step = 'digests' THEN
+    WITH added AS (
+      INSERT INTO public.memory_items AS m (
+        id, class, kind, speaker, trust, project_id, workspace_id, session_id,
+        content, search_text, embedding, embedding_model, occurred_at, source, lineage)
+      SELECT o.id, 'legacy', 'legacy_digest', 'system', 3,
+             p_project_map -> o.project_id ->> 'project_id',
+             p_project_map -> o.project_id ->> 'workspace_id',
+             CASE WHEN char_length(o.session_id) BETWEEN 1 AND 256 THEN o.session_id END,
+             g.content, g.content,
+             CASE WHEN g.content = o.summary THEN o.embedding END,
+             CASE WHEN g.content = o.summary AND o.embedding IS NOT NULL THEN 'text-embedding-3-small' END,
+             coalesce(c.latest, o.created_at),
+             jsonb_build_object('type', 'legacy', 'table', 'memory_digests', 'id', o.id, 'role', NULL::text,
+                                'producer', coalesce(o.metadata ->> 'source', 'none'),
+                                'legacy_type', o.metadata -> 'type', 'legacy_project', o.project_id,
+                                'legacy_session_id', o.session_id,
+                                'embed_text_version', o.metadata -> 'embedTextVersion', 'dangling_lineage', c.dangling,
+                                'time_basis', CASE WHEN c.latest IS NULL THEN 'created_at' ELSE 'input_episodes' END,
+                                'legacy_forgotten_at', o.forgotten_at, 'legacy_superseded_by', NULL::uuid),
+             c.live
+        FROM (SELECT (t.e ->> 'id')::uuid AS id, t.e ->> 'content' AS content
+                FROM jsonb_array_elements(p_rows) AS t(e)) g
+        JOIN public.memory_digests o ON o.id = g.id
+       CROSS JOIN LATERAL (
+         SELECT max(i.occurred_at) AS latest,
+                coalesce(array_agg(u.cited ORDER BY u.k) FILTER (WHERE i.id IS NOT NULL AND i.forgotten_at IS NULL),
+                         '{}'::uuid[]) AS live,
+                count(*) FILTER (WHERE i.id IS NULL) AS dangling
+           FROM (SELECT DISTINCT ON (e.cited) e.cited, e.k
+                   FROM unnest(o.episode_ids) WITH ORDINALITY AS e(cited, k)
+                  WHERE e.cited IS NOT NULL AND e.cited <> o.id
+                  ORDER BY e.cited, e.k) u
+           LEFT JOIN public.memory_items i
+             ON i.id = u.cited AND i.class = 'legacy' AND i.kind = 'legacy_episode') c
+       WHERE NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+       ORDER BY o.created_at, o.id
+      ON CONFLICT (id) DO NOTHING
+      RETURNING m.id
+    )
+    SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+  ELSE
+    WITH added AS (
+      INSERT INTO public.memory_items AS m (
+        id, class, kind, speaker, trust, project_id, workspace_id, session_id,
+        content, search_text, embedding, embedding_model, occurred_at, source, lineage)
+      SELECT o.id, 'legacy', 'legacy_fact', 'system', 3,
+             p_project_map -> o.project_id ->> 'project_id',
+             p_project_map -> o.project_id ->> 'workspace_id',
+             c.session_id,
+             g.content, g.content,
+             CASE WHEN g.content = o.topic || ': ' || o.content THEN o.embedding END,
+             CASE WHEN g.content = o.topic || ': ' || o.content AND o.embedding IS NOT NULL THEN 'text-embedding-3-small' END,
+             coalesce(c.latest, o.created_at),
+             jsonb_build_object('type', 'legacy', 'table', 'memory_semantic', 'id', o.id, 'role', NULL::text,
+                                'producer', coalesce(o.metadata ->> 'source', 'none'),
+                                'legacy_type', o.metadata -> 'type', 'legacy_project', o.project_id,
+                                'legacy_session_id', NULL::text,
+                                'embed_text_version', o.metadata -> 'embedTextVersion', 'dangling_lineage', c.dangling,
+                                'time_basis', CASE WHEN c.latest IS NULL THEN 'created_at' ELSE 'digest' END,
+                                'legacy_forgotten_at', o.forgotten_at, 'legacy_superseded_by', o.superseded_by),
+             c.live
+        FROM (SELECT (t.e ->> 'id')::uuid AS id, t.e ->> 'content' AS content
+                FROM jsonb_array_elements(p_rows) AS t(e)) g
+        JOIN public.memory_semantic o ON o.id = g.id
+       CROSS JOIN LATERAL (
+         SELECT (array_agg(i.occurred_at ORDER BY i.occurred_at DESC, i.id DESC) FILTER (WHERE i.id IS NOT NULL))[1] AS latest,
+                (array_agg(i.session_id ORDER BY i.occurred_at DESC, i.id DESC) FILTER (WHERE i.id IS NOT NULL))[1] AS session_id,
+                coalesce(array_agg(u.cited ORDER BY u.k) FILTER (WHERE i.id IS NOT NULL AND i.forgotten_at IS NULL),
+                         '{}'::uuid[]) AS live,
+                count(*) FILTER (WHERE i.id IS NULL) AS dangling
+           FROM (SELECT DISTINCT ON (e.cited) e.cited, e.k
+                   FROM unnest(o.source_digest_ids) WITH ORDINALITY AS e(cited, k)
+                  WHERE e.cited IS NOT NULL AND e.cited <> o.id
+                  ORDER BY e.cited, e.k) u
+           LEFT JOIN public.memory_items i
+             ON i.id = u.cited AND i.class = 'legacy' AND i.kind = 'legacy_digest') c
+       WHERE NOT EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = o.id)
+       ORDER BY o.created_at, o.id
+      ON CONFLICT (id) DO NOTHING
+      RETURNING m.id
+    )
+    SELECT coalesce(array_agg(a.id), '{}'::uuid[]) INTO v_inserted FROM added a;
+  END IF;
+
+  INSERT INTO public.memory_secret_hits (target_table, target_id, field, detector, secret_name)
+  SELECT 'memory_items', g.id::text, 'content', x.m ->> 'detector', x.m ->> 'secret_name'
+    FROM (SELECT t.n, (t.e ->> 'id')::uuid AS id, t.e -> 'masks' AS masks
+            FROM jsonb_array_elements(p_rows) WITH ORDINALITY AS t(e, n)) g
+   CROSS JOIN LATERAL jsonb_array_elements(g.masks) WITH ORDINALITY AS x(m, k)
+   WHERE g.id = ANY (v_inserted)
+   ORDER BY g.n, x.k;
+
+  INSERT INTO public.memory_item_entities (item_id, entity, entity_type)
+  SELECT g.id, x.v ->> 'entity', x.v ->> 'entity_type'
+    FROM (SELECT (t.e ->> 'id')::uuid AS id, t.e -> 'entities' AS entities
+            FROM jsonb_array_elements(p_rows) AS t(e)) g
+   CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(g.entities) = 'array'
+                                                THEN g.entities ELSE '[]'::jsonb END) AS x(v)
+   WHERE g.id = ANY (v_inserted)
+  ON CONFLICT (item_id, entity) DO NOTHING;
+
+  RETURN jsonb_build_object('step', p_step, 'copied', cardinality(v_inserted),
+                            'remaining', (SELECT count(*) FROM public.engram_legacy_work(p_step) w WHERE w.state = 'pending'));
+END; $$;
+
+
+--
 -- Name: engram_invariant_counts(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7453,6 +8059,12 @@ END; $$;
 --   failing the count.
 -- - unregistered_project: items whose project_id is not a registered project,
 --   or whose workspace_id is not a registered workspace.
+-- - salvage_quote_not_in_lineage: live observations of the legacy salvage
+--   (source.extractor 'legacy-salvage') whose source.quote is missing, not a
+--   string, or does not occur, under the quote rule, in the content of any
+--   item in their lineage. The salvage gate refuses such an observation
+--   before it is written; no trigger checks it, so a non-zero count means a
+--   writer bypassed the gate.
 -- Forgotten items are counted too, except where the invariant is about live
 -- items: forgetting hides an item, it does not make a broken row valid.
 CREATE OR REPLACE FUNCTION public.engram_invariant_counts() RETURNS TABLE(name text, violations bigint)
@@ -7501,7 +8113,20 @@ CREATE OR REPLACE FUNCTION public.engram_invariant_counts() RETURNS TABLE(name t
          WHERE (i.project_id IS NOT NULL AND NOT EXISTS (
                   SELECT 1 FROM public.memory_projects p WHERE p.id = i.project_id AND p.kind = 'project'))
             OR (i.workspace_id IS NOT NULL AND NOT EXISTS (
-                  SELECT 1 FROM public.memory_projects w WHERE w.id = i.workspace_id AND w.kind = 'workspace'))))
+                  SELECT 1 FROM public.memory_projects w WHERE w.id = i.workspace_id AND w.kind = 'workspace')))),
+      (6, 'salvage_quote_not_in_lineage', (
+        SELECT count(*)
+          FROM public.memory_items o
+         WHERE o.class = 'observation'
+           AND (o.source ->> 'extractor') = 'legacy-salvage'
+           AND o.forgotten_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+               FROM public.memory_items l
+              WHERE l.id = ANY (o.lineage)
+                AND jsonb_typeof(o.source -> 'quote') = 'string'
+                AND public.engram_norm_quote(o.source ->> 'quote') <> ''
+                AND strpos(public.engram_norm_quote(l.content), public.engram_norm_quote(o.source ->> 'quote')) > 0)))
     ) AS v(ord, name, violations)
    ORDER BY v.ord
 $$;
@@ -7936,6 +8561,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM PUBLIC;
@@ -7946,6 +8572,9 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text, 
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_legacy_work(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_legacy_pending(text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_legacy_copy(text, jsonb, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM PUBLIC;
@@ -8023,6 +8652,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM %I', role_name);
@@ -8033,6 +8663,9 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_source(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_legacy_work(text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_legacy_pending(text, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_legacy_copy(text, jsonb, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) FROM %I', role_name);
@@ -8098,6 +8731,7 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_in_scope(public.memory_items,
 GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory_items, text, uuid, text, text, boolean, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_salvage_begin(text, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) TO service_role;
@@ -8108,6 +8742,9 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_session_anchors(text, text, b
 GRANT EXECUTE ON FUNCTION public.engram_extraction_replace(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_session_index_source(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_session_index_commit(text, jsonb, bigint) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_legacy_work(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_legacy_pending(text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_legacy_copy(text, jsonb, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_hybrid_recall(text, public.vector, integer, double precision, double precision, integer, text, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall(public.vector, text, integer, double precision, boolean, boolean, boolean, boolean, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_record_access(uuid, text, double precision) TO service_role;

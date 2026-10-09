@@ -29,11 +29,12 @@
  *                           SUPABASE_URL and SUPABASE_KEY are required too.
  */
 
+import { exitWhenFlushed } from './cli-exit.js'
 import { main } from './http-server.js'
 
 // Runs on import as well as when started as the script, so a launcher that
 // imports this module (pm2, a wrapper) starts the server or fails loudly.
 main().catch((err) => {
   process.stderr.write(`[engram-mcp-http] Fatal: ${err instanceof Error ? err.message : String(err)}\n`)
-  process.exit(1)
+  return exitWhenFlushed(1)
 })

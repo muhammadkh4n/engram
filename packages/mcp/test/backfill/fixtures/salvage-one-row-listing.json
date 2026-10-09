@@ -1,0 +1,71 @@
+{
+  "rows": [
+    {
+      "id": "00000000-0000-4000-8000-000000000e41",
+      "kind": "legacy_episode",
+      "session_id": "tst-salvage-open",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "scrub-check ok",
+      "occurred_at": "2026-03-05T08:00:00Z",
+      "forgotten_at": null,
+      "retired_at": null,
+      "role": "system",
+      "producer": "none",
+      "legacy_superseded_by": null
+    }
+  ],
+  "observations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000e51",
+      "kind": "fact",
+      "subject_id": "00000000-0000-4000-8000-000000000d51",
+      "subject_label": "Capture spool",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "The capture spool lives under the state directory, one folder per session.",
+      "occurred_at": "2026-03-04T15:00:00Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000e52",
+      "kind": "fact",
+      "subject_id": "00000000-0000-4000-8000-000000000d52",
+      "subject_label": "Capture route",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "The capture route answers on port 3850 and refuses a request without a token.",
+      "occurred_at": "2026-03-04T14:00:00Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000e53",
+      "kind": "fact",
+      "subject_id": "00000000-0000-4000-8000-000000000d53",
+      "subject_label": "Storage backend",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "The store runs on Postgres only; the SQLite adapter was removed from tst-app.",
+      "occurred_at": "2026-03-04T13:00:00Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000e54",
+      "kind": "fact",
+      "subject_id": "00000000-0000-4000-8000-000000000d54",
+      "subject_label": "Extraction worker",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "The extraction worker takes live sessions before backfilled ones.",
+      "occurred_at": "2026-03-04T12:00:00Z"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000e55",
+      "kind": "fact",
+      "subject_id": "00000000-0000-4000-8000-000000000d55",
+      "subject_label": "Release flow",
+      "project_id": "tst-app",
+      "workspace_id": "tst-ws",
+      "content": "A release of tst-app is cut from main after the local CI passes.",
+      "occurred_at": "2026-03-04T11:00:00Z"
+    }
+  ],
+  "reply": "{\"observations\":[{\"claim\":\"The capture spool lives under the state directory, one folder per session.\",\"quote\":\"The capture spool lives under the state directory, one folder per session.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture spool\"},\"evidence\":[1],\"supersedes\":[]},{\"claim\":\"The capture route answers on port 3850 and refuses a request without a token.\",\"quote\":\"The capture route answers on port 3850 and refuses a request without a token.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Capture route\"},\"evidence\":[1],\"supersedes\":[]},{\"claim\":\"The store runs on Postgres only; the SQLite adapter was removed from tst-app.\",\"quote\":\"The store runs on Postgres only; the SQLite adapter was removed from tst-app.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Storage backend\"},\"evidence\":[1],\"supersedes\":[]},{\"claim\":\"The extraction worker takes live sessions before backfilled ones.\",\"quote\":\"The extraction worker takes live sessions before backfilled ones.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Extraction worker\"},\"evidence\":[1],\"supersedes\":[]},{\"claim\":\"A release of tst-app is cut from main after the local CI passes.\",\"quote\":\"A release of tst-app is cut from main after the local CI passes.\",\"kind\":\"fact\",\"subject\":{\"new\":\"Release flow\"},\"evidence\":[1],\"supersedes\":[]}]}"
+}

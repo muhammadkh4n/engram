@@ -465,11 +465,13 @@ export interface CaptureStore {
   /**
    * Claims and returns up to `limit` (1 to EMBEDDING_BATCH_MAX) items that
    * still need an embedding, oldest first: no embedding, not forgotten, fewer
-   * than EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant
-   * utterance, and not a legacy item. An item another claimant holds under a
-   * live claim is left out; every item returned is claimed for `claimant` (a
-   * uuid) for EMBEDDING_CLAIM_LEASE_SECONDS, so two concurrent reads never
-   * return the same item.
+   * than EMBEDDING_ATTEMPTS_MAX recorded failures, and not an assistant
+   * utterance. A legacy item is listed only when it has no vector, which means
+   * its text was masked and the old row's vector could not be kept. An item
+   * another claimant holds under a live claim is left out; every item
+   * returned is claimed for `claimant` (a uuid) for
+   * EMBEDDING_CLAIM_LEASE_SECONDS, so two concurrent reads never return the
+   * same item.
    */
   pendingEmbeddings(limit: number, claimant: string): Promise<PendingEmbedding[]>
 

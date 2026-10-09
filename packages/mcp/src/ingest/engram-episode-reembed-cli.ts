@@ -24,6 +24,7 @@
  * Env: SUPABASE_URL, SUPABASE_KEY; OPENAI_API_KEY for --apply.
  */
 
+import { CliExit, exitOnError } from '../cli-exit.js'
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { openaiIntelligence } from '@engram-mem/openai'
 import { estimateCostUsd, estimateTokens } from './embed-backfill-lib.js'
@@ -49,8 +50,7 @@ const HELP =
   '  --page-size N      rows per DB page (default 200)\n'
 
 function fail(message: string): never {
-  console.error(`${TAG} ${message}`)
-  process.exit(1)
+  throw new CliExit(1, `${TAG} ${message}`)
 }
 
 function parsePositiveInt(raw: string | undefined, flag: string): number {
@@ -83,7 +83,7 @@ function parseArgs(argv: readonly string[]): ReembedOptions {
     else if (a === '--page-size') pageSize = parsePositiveInt(argv[++i], 'page-size')
     else if (a === '--help' || a === '-h') {
       console.log(HELP)
-      process.exit(0)
+      throw new CliExit(0)
     } else fail(`unknown argument "${a}"\n${HELP}`)
   }
   return {
@@ -156,13 +156,10 @@ async function main(): Promise<void> {
         `${TAG} last cursor: ${c ? `pass=${c.pass} created_at=${c.createdAt} id=${c.id}` : '(nothing written)'}` +
           ' — re-run to resume; re-embedded rows are skipped',
       )
-      process.exit(1)
+      throw new CliExit(1)
     }
     throw err
   }
 }
 
-main().catch((err) => {
-  console.error(`${TAG} FATAL:`, err)
-  process.exit(1)
-})
+main().catch((err) => exitOnError(err, (e) => console.error(`${TAG} FATAL:`, e)))

@@ -532,9 +532,10 @@ describe('the pending-embedding index', () => {
       'forgotten_at IS NULL',
       'embedding_attempts < 5',
       "NOT (class = 'utterance' AND speaker = 'assistant')",
-      "class <> 'legacy'",
     ]) {
       expect(predicate).toContain(clause)
     }
+    // A legacy item without a vector is one whose text was masked; it needs an embedding like any other.
+    expect(predicate).not.toContain('legacy')
   })
 })
