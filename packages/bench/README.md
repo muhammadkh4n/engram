@@ -287,8 +287,11 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
   change results.
 - **Env:** before the build loads, every inherited `ENGRAM_*`, `OPENAI_*`, `SUPABASE_*` and `NEO4J_*` variable is
   removed, then the env file is applied, so a switch exported in the shell cannot change the measured recall. The
-  meta's `engram_env` lists every `ENGRAM_*` variable in effect with its value; a name containing KEY, SECRET,
-  TOKEN or PASSWORD is listed with `null`.
+  meta's `engram_env` lists every `ENGRAM_*` variable in effect with its value; a secret-shaped name is listed
+  with `null`. A name is secret-shaped when, after a trailing `_FILE` is dropped, its last word ends in `KEY`,
+  `SECRET`, `PASSWORD`, `PASSPHRASE`, `TOKEN`, `JWT` or `CREDENTIALS`, or when it contains `SECRET` or `PASSWORD`
+  anywhere. Budget settings such as `ENGRAM_RECALL_TOKEN_BUDGET` and `ENGRAM_RECALL_ITEM_MAX_TOKENS` keep their
+  values, so a budget arm records its own budget.
 - **Recall engine:** with `ENGRAM_RECALL_ENGINE=true`, the server falls back to bare storage when the engine fails
   to import. The eval instead stops (exit 4) when storage is left unwrapped, the engine module cannot be loaded,
   or the engine does not warm to `ready` (the stack awaits the warm-up). The meta records `recall_engine: on|off`.
@@ -326,7 +329,7 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
   `formatted` text differs between runs is marked `stable: false`; every run's scores are kept.
 - **Outputs:** `<out>/<label>.json` (`meta`, `queries`, per-run `aggregates`, `unstable`) and `<out>/<label>.md`.
   The meta records the dist git sha, the env's model ids (only names containing `MODEL`, plus
-  `ENGRAM_RERANK_LOCAL`; never a name containing KEY, SECRET, TOKEN or PASSWORD), the gold and pins sha256, the
+  `ENGRAM_RERANK_LOCAL`; never a secret-shaped name), the gold and pins sha256, the
   label, the reference date, the guard counters and pin stats, and the run count. Existing output files are refused.
 - **Compare:** pairs A and B by gold id over queries stable in both; unstable ones are listed apart, and a gold id
   whose query differs between the files is refused. Per query: better / worse / tie on the first gold rank (no
