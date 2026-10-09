@@ -26,6 +26,7 @@ const ITEM_TABLES = [
   'memory_capture_events',
   'memory_capture_event_counts',
   'memory_secret_hits',
+  'memory_document_notes',
 ] as const
 
 /** BTMaxItemSize for 8 KB pages, btree version 4. */
@@ -360,6 +361,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       'idx_capture_events_candidates: session_id': '1024 by memory_capture_events_session_id_check',
       'idx_capture_events_session: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_capture_events_session_event_key: session_id': '1024 by memory_capture_events_session_id_check',
+      'memory_document_notes_pkey: path': '2600 by memory_document_notes_path_check',
       'memory_capture_events_session_event_key: event_uuid': '512 by memory_capture_events_event_uuid_check',
       'idx_extraction_runs_session: session_id': '1024 by memory_extraction_runs_session_id_check',
       'idx_extraction_runs_anchor_version: extractor_version': '256 by memory_extraction_runs_extractor_version_check',

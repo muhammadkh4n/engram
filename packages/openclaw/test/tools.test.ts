@@ -197,13 +197,12 @@ describe('createEngramTools — engram_forget', () => {
       forgotten: Array<{ id: string; type: string }>
       notFound: string[]
       outOfScope: string[]
-      notForgettable: string[]
     }
 
     expect(parsed.forgotten).toEqual([{ id: target.id, type: target.type }])
     expect(parsed.notFound).toEqual(['no-such-id'])
     expect(parsed.outOfScope).toEqual([])
-    expect(parsed.notForgettable).toEqual([])
+    expect(parsed).not.toHaveProperty('notForgettable')
 
     const after = (await preview('TypeScript generics')).candidates.map((c) => c.id)
     expect(after).not.toContain(target.id)

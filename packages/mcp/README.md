@@ -98,7 +98,7 @@ Claude Code now has access to Engram's memory tools. The server auto-includes in
 
 A project tag **ranks** memories; it never hides one. Tags come from the working directory at write time, so a memory written from a worktree, a sibling repo of the same product, or outside any repo would otherwise vanish exactly where it is needed. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
 
-- `memory_recall` and `memory_ingest` accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
+- `memory_recall` and a `memory_ingest` observation accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
 - A recall for project X returns every matching memory. X's memories get `+ENGRAM_PROJECT_BOOST` (default `0.10`), memories of another project in X's product group get `+ENGRAM_PROJECT_GROUP_BOOST` (default `0.05`), shared and unrelated memories get nothing. The boost is applied before the candidate cut the reranker sees and again after reranking.
 - Product groups come from the JSON file named by `ENGRAM_PROJECT_GROUPS_FILE`: `{ "groups": { "aithentic": ["aithentic-*", "*-mfe"], "engram": ["engram*"] } }`. Patterns are project names or `*`/`?` globs, matched case-insensitively against the whole name; a project belongs to the first group that matches. Unset, missing or malformed means no groups; each distinct failure is reported once on stderr. The file is re-checked at most every 60 s and re-read when its modification time or existence changes, so an edit takes effect without a restart.
 - Ingest with `project_id` tags the stored memory; without it the memory is shared.
@@ -149,22 +149,41 @@ With `ENGRAM_RECALL_LOG=<file path>` (unset = off) the server also appends one J
 
 ### memory_ingest
 
-Store a message into memory.
+Store one typed item and get its id. The answer is JSON: `{"id": "<uuid>", "outcome": "stored" | "restated" | "duplicate"}`.
 
-**Input:**
+**An observation** is the agent's own claim with evidence:
 ```json
 {
-  "content": "User prefers TypeScript with strict mode enabled",
-  "role": "user",
+  "class": "observation",
+  "kind": "finding",
+  "subject": "storage engine",
+  "content": "The item store runs on Postgres 17.",
+  "evidence": [{ "type": "file", "ref": "packages/postgrest/schema.sql" }],
+  "project_id": "my-repo",
   "session_id": "optional-session-id"
 }
 ```
+`kind` is `fact`, `procedure` or `finding`; evidence `type` is `item`, `commit`, `pr`, `file` or `url`. The claim is
+trust 2 when every `item` ref names a stored item and every `commit` ref prefixes a captured commit's SHA, else trust 3.
+A claim that puts a decision or wish in MK's or the user's mouth ("we decided", "MK wants") is refused.
 
-**Role must be:** `"user"`, `"assistant"`, or `"system"`
+**MK's words** are an exact quote of what MK wrote in an earlier turn of the session, as capture stored it:
+```json
+{
+  "class": "mk_statement",
+  "kind": "ruling",
+  "subject": "storage engine",
+  "quote": "Postgres only",
+  "question": "keep SQLite as a fallback?",
+  "standing": false,
+  "session_id": "the-session-id"
+}
+```
+`kind` is `ruling`, `fact` or `correction`. The quote is matched ignoring whitespace runs and curly quotes; `question`
+must come from the assistant turn just before MK's words or from the dialog he answered. Both forms take `supersedes`
+(item ids); a correction takes `corrects`. A `content` + `role` call is refused with a message naming these forms.
 
-**When Claude uses it:** After important user statements, decisions, preferences, or assistant responses worth remembering.
-
-Agents call `memory_ingest` as shown; its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
+Its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
 
 ## Capture route (HTTP server)
 
@@ -255,7 +274,7 @@ Agents call `memory_ingest` as shown; its schema has no capture options. Hook an
 
 Forget in two steps. Pass exactly one of `query` or `ids`.
 
-1. **Preview** with a query. Nothing is deleted; each candidate is listed on one line with its id:
+1. **Preview** with a query. Nothing is forgotten; each candidate, digests included, is listed on one line with its id. A query takes no `reason`:
 
    ```json
    { "query": "deprecated API endpoint" }
@@ -263,18 +282,32 @@ Forget in two steps. Pass exactly one of `query` or `ids`.
 
    ```
    - [semantic · 2026-03-14] 3f2c… · relevance 0.71 · The v1 /export endpoint is deprecated …
-   To forget, call memory_forget again with ids set to the ones to remove.
+   To forget, call memory_forget again with ids set to the ones to remove and a reason.
    ```
 
-2. **Forget** the ids you approved. Exactly those memories are tombstoned (at most 50 per call):
+2. **Forget** the ids you approved, with a reason (1 to 2,000 characters, at most 50 ids per call). An id may name a typed item or a row of the old memory tables:
 
    ```json
-   { "ids": ["3f2c…"] }
+   { "ids": ["3f2c…"], "reason": "the v1 endpoint notes were imported from the wrong project" }
    ```
 
-   The reply lists the ids per outcome: forgotten, not found, out of scope (tagged with another project), not forgettable (digests).
+   A forget cascades, in one transaction:
+   - an item takes every item whose lineage holds it (an utterance its statements and session index);
+   - an episode takes the digests built from it and the facts and procedures citing it; a digest takes the facts, procedures and digests built from it. A digest is one text, so it goes when any of its episodes goes;
+   - an old row and its `legacy` item take each other.
 
-A tombstone hides a memory from every recall path. The row stays in storage, so a forget is reversible there. The `confirm` flag no longer exists: a query never deletes.
+   The reply lists the requested ids, each cascaded id with the id that pulled it in (`via`), the items restored or re-pointed because their successor was forgotten, and the ids not found. A requested id that was already forgotten is listed again. Forgotten old rows are also stamped in Neo4j when it is configured; a graph failure never fails the forget. Every call that finds something writes one `memory_item_actions` row: the ids, what happened to each, the reason and the channel.
+
+A forgotten memory is hidden from every recall path. The row stays in storage as a tombstone.
+
+### memory_retire and memory_unretire
+
+Retire typed items that are no longer current but were true when stored; unretire returns them. Both take `{ "ids": [...], "reason": "..." }` (1 to 50 ids, a reason of 1 to 2,000 characters) and act on items only:
+
+- an id of the old memory tables is answered `not an item: forget it, or retire its legacy item`;
+- retiring a statement MK recorded in a register adds `recorded as <register_ref>: change it there too`.
+
+Unretire clears the retire reason; its own reason is kept in the audit row.
 
 ### memory_timeline
 

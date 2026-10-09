@@ -73,11 +73,12 @@ $$;
 -- =============================================================================
 -- forget() tombstone — within-file ordering note
 -- -----------------------------------------------------------------------------
--- Phase 1 adds a `forgotten_at timestamptz` tombstone to memory_episodes /
--- memory_semantic / memory_procedural. forget() stamps it; every recall RPC
--- below gates on `forgotten_at IS NULL` (a 1:1 clone of the proven
--- `superseded_by IS NULL` gate). It is intentionally NOT added to
--- memory_digests (consolidation artifacts are not directly forgettable).
+-- memory_episodes, memory_digests, memory_semantic and memory_procedural
+-- each carry a `forgotten_at timestamptz` tombstone. forget() stamps it; every
+-- recall RPC below gates on `forgotten_at IS NULL` (a 1:1 clone of the proven
+-- `superseded_by IS NULL` gate). Digests carry it too, so a forget reaches
+-- what a digest absorbed: a digest's summary cannot be split by episode, so
+-- forgetting any episode it was built from forgets the whole digest.
 --
 -- This file is a pg_dump: functions are emitted ABOVE the tables they read,
 -- which is only valid because `SET check_function_bodies = false` (above)
@@ -325,12 +326,12 @@ CREATE OR REPLACE FUNCTION public.engram_hybrid_recall(p_query_text text, p_quer
   SELECT * FROM (
     WITH ft AS (
       SELECT md.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(md.fts, websearch_to_tsquery('english', p_query_text)) DESC) AS rank_ix
-      FROM memory_digests md WHERE p_include_digests AND md.fts @@ websearch_to_tsquery('english', p_query_text)
+      FROM memory_digests md WHERE p_include_digests AND md.fts @@ websearch_to_tsquery('english', p_query_text) AND md.forgotten_at IS NULL
         LIMIT p_match_count * 2
     ),
     vs AS (
       SELECT md.id, ROW_NUMBER() OVER (ORDER BY md.embedding <=> p_query_embedding) AS rank_ix
-      FROM memory_digests md WHERE p_include_digests AND md.embedding IS NOT NULL
+      FROM memory_digests md WHERE p_include_digests AND md.embedding IS NOT NULL AND md.forgotten_at IS NULL
       ORDER BY md.embedding <=> p_query_embedding LIMIT p_match_count * 2
     )
     SELECT md.id, 'digest'::text, md.summary, 0.5::float, 0, md.created_at,
@@ -426,6 +427,7 @@ CREATE OR REPLACE FUNCTION public.engram_recall(p_query_embedding public.vector,
            (1-(embedding<=>p_query_embedding))::float AS similarity, key_topics, project_id, session_id
     FROM memory_digests
     WHERE p_include_digests AND embedding IS NOT NULL
+      AND forgotten_at IS NULL
     ORDER BY embedding<=>p_query_embedding LIMIT p_match_count
   ) dg
   WHERE dg.similarity >= p_min_similarity
@@ -542,6 +544,9 @@ DECLARE v_count integer;
 BEGIN
   IF p_memory_type = 'episode' THEN
     UPDATE memory_episodes SET forgotten_at = now()
+      WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
+  ELSIF p_memory_type = 'digest' THEN
+    UPDATE memory_digests SET forgotten_at = now()
       WHERE id = ANY(p_ids) AND forgotten_at IS NULL;
   ELSIF p_memory_type = 'semantic' THEN
     UPDATE memory_semantic SET forgotten_at = now()
@@ -666,6 +671,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_boost(p_query_terms text, p_match_
       ts_rank_cd(md.fts, to_tsquery('english', p_query_terms))::float
     FROM memory_digests md
     WHERE md.fts @@ to_tsquery('english', p_query_terms)
+      AND md.forgotten_at IS NULL
 
     UNION ALL
 
@@ -754,6 +760,7 @@ CREATE OR REPLACE FUNCTION public.engram_text_match(p_terms text[], p_match_coun
       ts_rank_cd(md.fts, mq.q)::float
     FROM memory_digests md, match_query mq
     WHERE md.fts @@ mq.q
+      AND md.forgotten_at IS NULL
       AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
       AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
 
@@ -821,7 +828,8 @@ DROP FUNCTION IF EXISTS public.engram_vector_search(public.vector, integer, text
 -- On the index path only the partial index predicate (`forgotten_at IS NULL`
 -- on episodes, semantic and procedural; none on digests) is part of the
 -- index. Every other condition (`p_session_id`, `p_kinds`,
--- `p_exclude_session_id`, semantic `superseded_by IS NULL`) is a post-filter
+-- `p_exclude_session_id`, semantic `superseded_by IS NULL`, digest
+-- `forgotten_at IS NULL`) is a post-filter
 -- applied to the candidates the scan returns. A
 -- plain HNSW scan returns at most `hnsw.ef_search` candidates (default 40),
 -- so a selective post-filter can leave far fewer rows than the LIMIT asked
@@ -908,6 +916,7 @@ CREATE OR REPLACE FUNCTION public.engram_vector_search(p_query_embedding public.
         md.key_topics, md.metadata, md.project_id, md.session_id
       FROM memory_digests md
       WHERE md.embedding IS NOT NULL
+        AND md.forgotten_at IS NULL
         AND (p_kinds IS NULL OR 'digest' = ANY(p_kinds))
         AND (p_exclude_session_id IS NULL OR md.session_id IS DISTINCT FROM p_exclude_session_id)
       ORDER BY md.embedding <=> p_query_embedding
@@ -966,7 +975,8 @@ BEGIN
     d.id, d.session_id, d.summary, d.key_topics, d.episode_ids, d.metadata, d.created_at,
     (1 - (d.embedding <=> query_embedding::vector))::FLOAT AS similarity
   FROM memory_digests d
-  WHERE (1 - (d.embedding <=> query_embedding::vector)) >= min_similarity
+  WHERE d.forgotten_at IS NULL
+    AND (1 - (d.embedding <=> query_embedding::vector)) >= min_similarity
   ORDER BY d.embedding <=> query_embedding::vector
   LIMIT match_count;
 END;
@@ -987,7 +997,8 @@ BEGIN
     (1 - (e.embedding <=> query_embedding::vector))::FLOAT AS similarity
   FROM memory_episodes e
   WHERE
-    (filter_session_id IS NULL OR e.session_id = filter_session_id)
+    e.forgotten_at IS NULL
+    AND (filter_session_id IS NULL OR e.session_id = filter_session_id)
     AND (1 - (e.embedding <=> query_embedding::vector)) >= min_similarity
   ORDER BY e.embedding <=> query_embedding::vector
   LIMIT match_count;
@@ -1065,7 +1076,8 @@ CREATE TABLE IF NOT EXISTS public.memory_digests (
     source_digest_ids uuid[] DEFAULT '{}'::uuid[],
     level integer DEFAULT 0,
     fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, summary)) STORED,
-    project_id text
+    project_id text,
+    forgotten_at timestamp with time zone
 );
 
 
@@ -1273,8 +1285,11 @@ CREATE TABLE IF NOT EXISTS public.memory_projects (
 --   trust 0; assistant turns are trust 3.
 -- - mk_statement: an exact quote of MK, trust 0. It needs a subject and a
 --   non-empty lineage (the utterances it was quoted from).
--- - observation: written by the assistant; trust 2 when source.evidence is a
---   non-empty array of pointers, else 3. It needs a subject.
+-- - observation: written by the assistant; trust 2 when the writer verified
+--   every pointer in source.evidence, else 3. Trust 2 needs a non-empty
+--   source.evidence array; trust 3 keeps whatever evidence was cited, since a
+--   pointer the writer could not check is still the claim's provenance. It
+--   needs a subject.
 -- - artifact, document_section, session_index: produced by tools, trust 1.
 -- - legacy: rows copied from the memory_* tiers, trust 3 whoever spoke.
 -- Only utterances, observations and legacy rows may have the assistant as
@@ -1338,7 +1353,7 @@ CREATE TABLE IF NOT EXISTS public.memory_items (
     CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
         WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
         WHEN 'mk_statement' THEN 0
-        WHEN 'observation' THEN (CASE WHEN jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+        WHEN 'observation' THEN (CASE WHEN trust = 2 AND jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
         WHEN 'artifact' THEN 1
         WHEN 'document_section' THEN 1
         WHEN 'session_index' THEN 1
@@ -1517,6 +1532,72 @@ CREATE TABLE IF NOT EXISTS public.memory_secret_hits (
 
 
 --
+-- Name: memory_item_actions; Type: TABLE; Schema: public; Owner: -
+--
+-- One row per forget, retire or unretire call that found an item or an old
+-- row: the ids asked for, what happened to each id it reached, the reason and
+-- the channel the call came from. engram_forget_memories,
+-- engram_retire_memories and engram_unretire_memories write it in the
+-- transaction that made the change, so the audit and the change commit or
+-- roll back together.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_item_actions (
+    id bigserial PRIMARY KEY,
+    action text NOT NULL,
+    requested uuid[] NOT NULL,
+    affected jsonb NOT NULL,
+    reason text NOT NULL,
+    channel text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_item_actions_action_check CHECK (action IN ('forget', 'retire', 'unretire')),
+    CONSTRAINT memory_item_actions_requested_check CHECK (cardinality(requested) BETWEEN 1 AND 50 AND array_position(requested, NULL) IS NULL),
+    CONSTRAINT memory_item_actions_affected_check CHECK (jsonb_typeof(affected) = 'array'),
+    CONSTRAINT memory_item_actions_reason_check CHECK (reason ~ '\S' AND char_length(reason) <= 2000),
+    CONSTRAINT memory_item_actions_channel_check CHECK (channel ~ '^[a-z][a-z0-9_-]{0,31}$'),
+    CONSTRAINT memory_item_actions_finite_check CHECK (public.engram_time_in_range(created_at))
+);
+
+
+--
+-- Name: memory_document_notes; Type: TABLE; Schema: public; Owner: -
+--
+-- One row per vault note engram_sync_document_note has applied: the version
+-- it applied last, seen_at (the producer's clock when it saw that version,
+-- the only order between a path's versions), mtime (the device's time, which
+-- dates a version and orders nothing), the scrubbed frontmatter, the scope
+-- the note's sections were filed under, and deleted_at while the note is
+-- deleted. path is the primary key, so its UTF-8 length is bounded to fit a
+-- btree index row (2,704 bytes).
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_document_notes (
+    path text PRIMARY KEY,
+    source text NOT NULL,
+    note_version text NOT NULL,
+    seen_at timestamp with time zone NOT NULL,
+    mtime timestamp with time zone NOT NULL,
+    frontmatter jsonb,
+    project_id text,
+    workspace_id text,
+    plan_slug text,
+    deleted_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT memory_document_notes_path_check CHECK (char_length(path) <= 1024 AND octet_length(path) <= 2600 AND path ~ '\S'),
+    CONSTRAINT memory_document_notes_source_check CHECK (source = 'vault'),
+    CONSTRAINT memory_document_notes_note_version_check CHECK (char_length(note_version) <= 128 AND note_version <> ''),
+    CONSTRAINT memory_document_notes_frontmatter_check CHECK (frontmatter IS NULL OR jsonb_typeof(frontmatter) = 'object'),
+    CONSTRAINT memory_document_notes_ids_check CHECK ((project_id IS NULL OR project_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (workspace_id IS NULL OR workspace_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$')
+        AND (plan_slug IS NULL OR plan_slug ~ '^[a-z0-9][a-z0-9-]{0,127}$')),
+    CONSTRAINT memory_document_notes_finite_check CHECK (public.engram_time_in_range(seen_at)
+        AND public.engram_time_in_range(mtime)
+        AND public.engram_time_in_range(deleted_at)
+        AND public.engram_time_in_range(updated_at))
+);
+
+
+--
 -- Name: memory_extraction_runs memory_extraction_runs_anchor_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1593,6 +1674,31 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+--
+-- memory_items_trust_check once gave trust 2 to every observation with
+-- evidence, so an observation citing a pointer its writer could not verify
+-- was refused at trust 3. A database created under that rule gets the
+-- current one here; the same expression is in CREATE TABLE above. The new
+-- rule accepts every row the old one did, and the swap is one ALTER TABLE.
+--
+
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'memory_items_trust_check' AND conrelid = 'public.memory_items'::regclass
+             AND position('WHEN ((trust = 2) AND' IN pg_get_constraintdef(oid)) = 0) THEN
+    ALTER TABLE ONLY public.memory_items
+      DROP CONSTRAINT memory_items_trust_check,
+      ADD CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
+        WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
+        WHEN 'mk_statement' THEN 0
+        WHEN 'observation' THEN (CASE WHEN trust = 2 AND jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+        WHEN 'artifact' THEN 1
+        WHEN 'document_section' THEN 1
+        WHEN 'session_index' THEN 1
+        WHEN 'legacy' THEN 3
+        ELSE -1 END);
+  END IF;
+END $$;
+
 
 --
 -- Columns memory_capture_events gained after it was first provisioned, added
@@ -1612,9 +1718,10 @@ ALTER TABLE public.memory_capture_events ADD COLUMN IF NOT EXISTS backfill boole
 -- DBs (CREATE TABLE IF NOT EXISTS above is a no-op there, so the column in the
 -- table body never lands on an existing DB). Placed after the CREATE TABLEs and
 -- before the partial indexes / post-apply smoke that read it. See the ordering
--- note at the top of this file. NOT added to memory_digests by design.
+-- note at the top of this file.
 --
 ALTER TABLE public.memory_episodes ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
+ALTER TABLE public.memory_digests ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_semantic ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 ALTER TABLE public.memory_procedural ADD COLUMN IF NOT EXISTS forgotten_at timestamp with time zone;
 
@@ -2077,6 +2184,7 @@ CREATE INDEX IF NOT EXISTS idx_semantic_project ON public.memory_semantic USING 
 --
 
 CREATE INDEX IF NOT EXISTS idx_episodes_forgotten ON public.memory_episodes USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_digests_forgotten ON public.memory_digests USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_semantic_forgotten ON public.memory_semantic USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_procedural_forgotten ON public.memory_procedural USING btree (forgotten_at) WHERE (forgotten_at IS NOT NULL);
 
@@ -2125,6 +2233,70 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_extraction_runs_anchor_version ON public.m
 -- as memory_items_source_check bounds source.event_key, so every key fits a
 -- btree index row.
 CREATE INDEX IF NOT EXISTS idx_items_version_of ON public.memory_items USING btree ((source ->> 'version_of')) WHERE (source ? 'version_of');
+
+-- The old row a legacy item copies: its source.id read as a uuid in any
+-- letter case, or NULL when source.id is not one. Operators are
+-- pg_catalog-qualified, so no search_path changes what they resolve to.
+CREATE OR REPLACE FUNCTION public.engram_legacy_row_id(p_source jsonb) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN (p_source OPERATOR(pg_catalog.->>) 'id') OPERATOR(pg_catalog.~*) '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              THEN (p_source OPERATOR(pg_catalog.->>) 'id')::pg_catalog.uuid END
+$$;
+
+-- idx_items_legacy_source finds the legacy copy of an old row: a forget that
+-- tombstones an episode, digest or fact forgets its legacy item too. The key
+-- is the uuid engram_legacy_row_id reads from source.id, fixed-length, so it
+-- fits a btree row whatever text source.id holds.
+CREATE INDEX IF NOT EXISTS idx_items_legacy_source ON public.memory_items USING btree (public.engram_legacy_row_id(source)) WHERE (class = 'legacy');
+
+-- The note of a document section (source.path) and the section's key
+-- (source.path, source.heading_path, source.ordinal), each as the uuid formed
+-- by the first 16 bytes of a SHA-256, or NULL when source.path is not a
+-- string. A path may hold 1,024 characters and a heading path six of 500,
+-- more than a btree index row holds; a uuid key is fixed-length. The key
+-- hashes the JSON array [path, heading_path, ordinal], so no two keys share
+-- an input. convert_to is STABLE because it looks an encoding name up; with a
+-- fixed name it returns the same bytes for the same text, so both functions
+-- are IMMUTABLE, as an index expression must be.
+CREATE OR REPLACE FUNCTION public.engram_document_note_key(p_source jsonb) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN pg_catalog.jsonb_typeof(p_source OPERATOR(pg_catalog.->) 'path') OPERATOR(pg_catalog.=) 'string'
+              THEN pg_catalog.encode(pg_catalog.substring(pg_catalog.sha256(pg_catalog.convert_to(
+                     p_source OPERATOR(pg_catalog.->>) 'path', 'UTF8')), 1, 16), 'hex')::pg_catalog.uuid END
+$$;
+
+CREATE OR REPLACE FUNCTION public.engram_document_section_key(p_source jsonb) RETURNS uuid
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE WHEN pg_catalog.jsonb_typeof(p_source OPERATOR(pg_catalog.->) 'path') OPERATOR(pg_catalog.=) 'string'
+              THEN pg_catalog.encode(pg_catalog.substring(pg_catalog.sha256(pg_catalog.convert_to(
+                     pg_catalog.jsonb_build_array(p_source OPERATOR(pg_catalog.->) 'path',
+                                                  p_source OPERATOR(pg_catalog.->) 'heading_path',
+                                                  p_source OPERATOR(pg_catalog.->) 'ordinal')::pg_catalog.text,
+                     'UTF8')), 1, 16), 'hex')::pg_catalog.uuid END
+$$;
+
+-- idx_items_document_note finds every version of a note's sections, current,
+-- superseded or forgotten. memory_items_document_head_excl keeps one head per
+-- section key: the version neither superseded nor forgotten, retired or not.
+-- It is an exclusion constraint on equality, which is a unique index that can
+-- be deferred: a changed section's new version is inserted before the old
+-- head can name it in superseded_by (a foreign key), so for that moment the
+-- key has two heads. engram_sync_document_note defers it for the note and
+-- sets it IMMEDIATE again before it returns. A constraint has no IF NOT
+-- EXISTS, so it is added only when absent.
+CREATE INDEX IF NOT EXISTS idx_items_document_note ON public.memory_items USING btree (public.engram_document_note_key(source)) WHERE (class = 'document_section');
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+                  WHERE conname = 'memory_items_document_head_excl' AND conrelid = 'public.memory_items'::regclass) THEN
+    ALTER TABLE public.memory_items ADD CONSTRAINT memory_items_document_head_excl
+      EXCLUDE USING btree (public.engram_document_section_key(source) WITH =)
+      WHERE (class = 'document_section' AND superseded_by IS NULL AND forgotten_at IS NULL)
+      DEFERRABLE INITIALLY IMMEDIATE;
+  END IF;
+END $$;
 
 -- idx_items_pending_embedding serves engram_items_pending_embedding's oldest
 -- first read of items still waiting for a vector. Its predicate is the
@@ -3314,6 +3486,723 @@ BEGIN
      SET superseded_by = p_new
    WHERE m.id = p_old;
   RETURN true;
+END; $$;
+
+
+--
+-- Name: engram_forget_memories(uuid[], text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Forgets 1 to 50 distinct ids, each an item or a row of the old tables, and
+-- everything derived from them, in one transaction with one audit row.
+-- - Items go through engram_forget_items, which forgets their lineage closure
+--   and re-points or restores what a forgotten successor superseded.
+-- - A forgotten legacy item takes the old row it copies (source.id; kind
+--   legacy_episode, legacy_digest or legacy_fact), and an old row takes its
+--   live legacy item, so neither copy outlives the other.
+-- - An old row takes the old rows built from it: an episode its digests
+--   (episode_ids) and the semantic and procedural rows citing it
+--   (source_episode_ids); a digest the digests, semantic rows
+--   (source_digest_ids) and procedural rows (metadata.sourceDigestIds) built
+--   from it. A digest is one text, so it goes when any of its sources goes.
+-- The walk alternates between items and old rows until no new id appears,
+-- and it walks through rows already forgotten, so a row forgotten before
+-- this cascade existed still reaches what was built from it. Requested ids
+-- that were already forgotten are reported again; requested ids found
+-- nowhere are left out. Rows: (id, store, kind, requested, via, effect),
+-- the requested ids first in p_ids order, then the rest in the order the
+-- walk reached them. kind is class/kind for an item, the old tier otherwise;
+-- via is NULL for a requested id, else the id that pulled the row in (for a
+-- re-pointed or restored item, its forgotten successor). The advisory key
+-- is taken before the first read, as engram_forget_items does.
+CREATE OR REPLACE FUNCTION public.engram_forget_memories(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, store text, kind text, requested boolean, via uuid, effect text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_ids uuid[];
+  v_rows jsonb := '[]'::jsonb;
+  v_walked text[] := '{}'::text[];
+  v_item_ids uuid[] := '{}'::uuid[];
+  v_item_vias uuid[] := '{}'::uuid[];
+  v_old_stores text[] := '{}'::text[];
+  v_old_ids uuid[] := '{}'::uuid[];
+  v_old_vias uuid[] := '{}'::uuid[];
+  v_batch uuid[];
+  v_batch_vias uuid[];
+  v_forgotten uuid[];
+  v_stamped uuid[];
+  v_final jsonb;
+  r record;
+BEGIN
+  IF p_ids IS NULL OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  v_ids := ARRAY(SELECT u.x FROM unnest(p_ids) WITH ORDINALITY AS u(x, k) GROUP BY u.x ORDER BY min(u.k));
+  IF cardinality(v_ids) NOT BETWEEN 1 AND 50 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  IF p_reason IS NULL OR p_reason !~ '\S' OR char_length(p_reason) > 2000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_memories: p_reason must be non-blank and at most 2000 characters';
+  END IF;
+  IF p_channel IS NULL OR p_channel !~ '^[a-z][a-z0-9_-]{0,31}$' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_forget_memories: p_channel must be a lowercase name of at most 32 characters';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+
+  -- Requested items: live ones are forgotten below; one already forgotten is
+  -- reported again, and a legacy one still reaches its old row.
+  FOR r IN
+    SELECT i.id AS item, i.forgotten_at IS NOT NULL AS gone
+      FROM public.memory_items i
+     WHERE i.id = ANY (v_ids)
+     ORDER BY array_position(v_ids, i.id)
+  LOOP
+    IF r.gone THEN
+      v_rows := v_rows || jsonb_build_object('id', r.item, 'store', 'memory_items', 'via', NULL, 'effect', 'forgotten');
+      v_walked := v_walked || ('memory_items:' || r.item);
+    ELSE
+      v_item_ids := v_item_ids || r.item;
+      v_item_vias := v_item_vias || NULL::uuid;
+    END IF;
+  END LOOP;
+  SELECT v_old_stores || coalesce(array_agg(l.st ORDER BY l.k), '{}'::text[]),
+         v_old_ids || coalesce(array_agg(l.node ORDER BY l.k), '{}'::uuid[]),
+         v_old_vias || coalesce(array_agg(l.item ORDER BY l.k), '{}'::uuid[])
+    INTO v_old_stores, v_old_ids, v_old_vias
+    FROM (SELECT CASE i.kind WHEN 'legacy_episode' THEN 'memory_episodes'
+                             WHEN 'legacy_digest' THEN 'memory_digests'
+                             ELSE 'memory_semantic' END AS st,
+                 public.engram_legacy_row_id(i.source) AS node, i.id AS item, array_position(v_ids, i.id) AS k
+            FROM public.memory_items i
+           WHERE i.id = ANY (v_ids) AND i.forgotten_at IS NOT NULL AND i.class = 'legacy'
+             AND public.engram_legacy_row_id(i.source) IS NOT NULL) l;
+
+  -- Requested old rows, in any state.
+  SELECT v_old_stores || coalesce(array_agg(o.st ORDER BY array_position(v_ids, o.node), o.st), '{}'::text[]),
+         v_old_ids || coalesce(array_agg(o.node ORDER BY array_position(v_ids, o.node), o.st), '{}'::uuid[]),
+         v_old_vias || coalesce(array_agg(NULL::uuid ORDER BY array_position(v_ids, o.node), o.st), '{}'::uuid[])
+    INTO v_old_stores, v_old_ids, v_old_vias
+    FROM (SELECT 'memory_episodes' AS st, e.id AS node FROM public.memory_episodes e WHERE e.id = ANY (v_ids)
+          UNION ALL SELECT 'memory_digests', d.id FROM public.memory_digests d WHERE d.id = ANY (v_ids)
+          UNION ALL SELECT 'memory_semantic', s.id FROM public.memory_semantic s WHERE s.id = ANY (v_ids)
+          UNION ALL SELECT 'memory_procedural', p.id FROM public.memory_procedural p WHERE p.id = ANY (v_ids)) o;
+
+  LOOP
+    -- Items, 50 per engram_forget_items call.
+    WHILE cardinality(v_item_ids) > 0 LOOP
+      v_batch := v_item_ids[1:50];
+      v_batch_vias := v_item_vias[1:50];
+      v_item_ids := v_item_ids[51:cardinality(v_item_ids)];
+      v_item_vias := v_item_vias[51:cardinality(v_item_vias)];
+      v_forgotten := '{}'::uuid[];
+      FOR r IN SELECT f.item_id AS item, f.effect AS fx, f.via AS from_id
+                 FROM public.engram_forget_items(v_batch, p_reason) AS f
+      LOOP
+        IF r.fx = 'forgotten' THEN
+          v_forgotten := v_forgotten || r.item;
+          v_walked := v_walked || ('memory_items:' || r.item);
+        END IF;
+        v_rows := v_rows || jsonb_build_object(
+          'id', r.item, 'store', 'memory_items',
+          'via', CASE WHEN r.fx = 'forgotten' AND r.from_id IS NULL
+                      THEN v_batch_vias[array_position(v_batch, r.item)] ELSE r.from_id END,
+          'effect', r.fx);
+      END LOOP;
+      SELECT v_old_stores || coalesce(array_agg(l.st ORDER BY l.k), '{}'::text[]),
+             v_old_ids || coalesce(array_agg(l.node ORDER BY l.k), '{}'::uuid[]),
+             v_old_vias || coalesce(array_agg(l.item ORDER BY l.k), '{}'::uuid[])
+        INTO v_old_stores, v_old_ids, v_old_vias
+        FROM (SELECT CASE i.kind WHEN 'legacy_episode' THEN 'memory_episodes'
+                                 WHEN 'legacy_digest' THEN 'memory_digests'
+                                 ELSE 'memory_semantic' END AS st,
+                     public.engram_legacy_row_id(i.source) AS node, i.id AS item, array_position(v_forgotten, i.id) AS k
+                FROM public.memory_items i
+               WHERE i.id = ANY (v_forgotten) AND i.class = 'legacy'
+                 AND public.engram_legacy_row_id(i.source) IS NOT NULL) l;
+    END LOOP;
+
+    -- One level of old rows: each row once, the first id that reached it as via.
+    SELECT array_agg(o.st ORDER BY o.k), array_agg(o.node ORDER BY o.k), array_agg(o.from_id ORDER BY o.k)
+      INTO v_old_stores, v_old_ids, v_old_vias
+      FROM (SELECT DISTINCT ON (s.st, s.node) s.st, s.node, s.from_id, s.k
+              FROM unnest(v_old_stores, v_old_ids, v_old_vias) WITH ORDINALITY AS s(st, node, from_id, k)
+             WHERE NOT ((s.st || ':' || s.node) = ANY (v_walked))
+             ORDER BY s.st, s.node, s.k) o;
+    EXIT WHEN v_old_ids IS NULL;
+    v_walked := v_walked || ARRAY(SELECT s.st || ':' || s.node FROM unnest(v_old_stores, v_old_ids) AS s(st, node));
+
+    WITH e AS (
+      UPDATE public.memory_episodes m SET forgotten_at = now()
+       WHERE m.id = ANY (ARRAY(SELECT s.node FROM unnest(v_old_stores, v_old_ids) AS s(st, node) WHERE s.st = 'memory_episodes'))
+         AND m.forgotten_at IS NULL
+      RETURNING m.id
+    ), d AS (
+      UPDATE public.memory_digests m SET forgotten_at = now()
+       WHERE m.id = ANY (ARRAY(SELECT s.node FROM unnest(v_old_stores, v_old_ids) AS s(st, node) WHERE s.st = 'memory_digests'))
+         AND m.forgotten_at IS NULL
+      RETURNING m.id
+    ), f AS (
+      UPDATE public.memory_semantic m SET forgotten_at = now()
+       WHERE m.id = ANY (ARRAY(SELECT s.node FROM unnest(v_old_stores, v_old_ids) AS s(st, node) WHERE s.st = 'memory_semantic'))
+         AND m.forgotten_at IS NULL
+      RETURNING m.id
+    ), p AS (
+      UPDATE public.memory_procedural m SET forgotten_at = now()
+       WHERE m.id = ANY (ARRAY(SELECT s.node FROM unnest(v_old_stores, v_old_ids) AS s(st, node) WHERE s.st = 'memory_procedural'))
+         AND m.forgotten_at IS NULL
+      RETURNING m.id
+    )
+    SELECT ARRAY(SELECT e.id FROM e UNION ALL SELECT d.id FROM d UNION ALL SELECT f.id FROM f UNION ALL SELECT p.id FROM p)
+      INTO v_stamped;
+
+    -- A row walked through but already forgotten is reported only when requested.
+    SELECT v_rows || coalesce(jsonb_agg(jsonb_build_object('id', s.node, 'store', s.st, 'via', s.from_id, 'effect', 'forgotten') ORDER BY s.k), '[]'::jsonb)
+      INTO v_rows
+      FROM unnest(v_old_stores, v_old_ids, v_old_vias) WITH ORDINALITY AS s(st, node, from_id, k)
+     WHERE s.node = ANY (v_stamped) OR s.node = ANY (v_ids);
+
+    -- Back to items: the live legacy copies of these rows.
+    SELECT coalesce(array_agg(l.item ORDER BY l.k, l.item), '{}'::uuid[]),
+           coalesce(array_agg(l.node ORDER BY l.k, l.item), '{}'::uuid[])
+      INTO v_item_ids, v_item_vias
+      FROM (SELECT DISTINCT ON (i.id) i.id AS item, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_items i
+                ON i.class = 'legacy'
+               AND public.engram_legacy_row_id(i.source) = s.node
+               AND i.kind = CASE s.st WHEN 'memory_episodes' THEN 'legacy_episode'
+                                      WHEN 'memory_digests' THEN 'legacy_digest'
+                                      WHEN 'memory_semantic' THEN 'legacy_fact' END
+             WHERE i.forgotten_at IS NULL
+             ORDER BY i.id, s.k) l;
+
+    -- The next level: what was built from these rows.
+    SELECT coalesce(array_agg(c.st ORDER BY c.k, c.st, c.node), '{}'::text[]),
+           coalesce(array_agg(c.node ORDER BY c.k, c.st, c.node), '{}'::uuid[]),
+           coalesce(array_agg(c.from_id ORDER BY c.k, c.st, c.node), '{}'::uuid[])
+      INTO v_old_stores, v_old_ids, v_old_vias
+      FROM (SELECT 'memory_digests' AS st, x.id AS node, s.node AS from_id, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_digests x ON s.st = 'memory_episodes' AND x.episode_ids @> ARRAY[s.node]
+            UNION ALL
+            SELECT 'memory_semantic', x.id, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_semantic x ON s.st = 'memory_episodes' AND x.source_episode_ids @> ARRAY[s.node]
+            UNION ALL
+            SELECT 'memory_procedural', x.id, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_procedural x ON s.st = 'memory_episodes' AND x.source_episode_ids @> ARRAY[s.node]
+            UNION ALL
+            SELECT 'memory_digests', x.id, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_digests x ON s.st = 'memory_digests' AND x.source_digest_ids @> ARRAY[s.node]
+            UNION ALL
+            SELECT 'memory_semantic', x.id, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_semantic x ON s.st = 'memory_digests' AND x.source_digest_ids @> ARRAY[s.node]
+            UNION ALL
+            SELECT 'memory_procedural', x.id, s.node, s.k
+              FROM unnest(v_old_stores, v_old_ids) WITH ORDINALITY AS s(st, node, k)
+              JOIN public.memory_procedural x
+                ON s.st = 'memory_digests'
+               AND jsonb_typeof(x.metadata -> 'sourceDigestIds') = 'array'
+               AND (x.metadata -> 'sourceDigestIds') ? s.node::text) c;
+  END LOOP;
+
+  -- One row per id: an item forgotten after it was re-pointed or restored
+  -- reports the forget.
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+           'id', o.node, 'store', o.st,
+           'kind', CASE o.st WHEN 'memory_items' THEN (SELECT i.class || '/' || i.kind FROM public.memory_items i WHERE i.id = o.node)
+                             WHEN 'memory_episodes' THEN 'episode'
+                             WHEN 'memory_digests' THEN 'digest'
+                             WHEN 'memory_semantic' THEN 'semantic'
+                             ELSE 'procedural' END,
+           'requested', o.node = ANY (v_ids),
+           'via', CASE WHEN o.node = ANY (v_ids) THEN NULL ELSE o.from_id END, 'effect', o.fx)
+           ORDER BY array_position(v_ids, o.node) NULLS LAST, o.k), '[]'::jsonb)
+    INTO v_final
+    FROM (SELECT DISTINCT ON (t.r ->> 'store', t.r ->> 'id')
+                 (t.r ->> 'id')::uuid AS node, t.r ->> 'store' AS st, (t.r ->> 'via')::uuid AS from_id,
+                 t.r ->> 'effect' AS fx, t.k
+            FROM jsonb_array_elements(v_rows) WITH ORDINALITY AS t(r, k)
+           ORDER BY t.r ->> 'store', t.r ->> 'id', (t.r ->> 'effect') = 'forgotten' DESC, t.k) o;
+
+  IF v_final <> '[]'::jsonb THEN
+    INSERT INTO public.memory_item_actions (action, requested, affected, reason, channel)
+    VALUES ('forget', v_ids, v_final, p_reason, p_channel);
+  END IF;
+
+  RETURN QUERY
+  SELECT (t.r ->> 'id')::uuid, t.r ->> 'store', t.r ->> 'kind', (t.r ->> 'requested')::boolean,
+         (t.r ->> 'via')::uuid, t.r ->> 'effect'
+    FROM jsonb_array_elements(v_final) WITH ORDINALITY AS t(r, k)
+   ORDER BY t.k;
+END; $$;
+
+
+--
+-- Name: engram_item_action_outcomes(uuid[], uuid[], text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The per-id rows of a retire or unretire, in p_ids order: an id in p_done
+-- (the ids the call changed) is p_done_outcome, an item is forgotten or
+-- unchanged, an id of the old tables is old_row, any other id not_found.
+-- register_ref is set only for a retired item: the register entry or plan
+-- ledger decision a recorded statement is filed as.
+CREATE OR REPLACE FUNCTION public.engram_item_action_outcomes(p_ids uuid[], p_done uuid[], p_done_outcome text) RETURNS jsonb
+    LANGUAGE sql STABLE
+    SET search_path TO 'public'
+    AS $$
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+           'id', q.qid,
+           'outcome', CASE WHEN q.qid = ANY (p_done) THEN p_done_outcome
+                           WHEN i.id IS NOT NULL AND i.forgotten_at IS NOT NULL THEN 'forgotten'
+                           WHEN i.id IS NOT NULL THEN 'unchanged'
+                           WHEN EXISTS (SELECT 1 FROM public.memory_episodes e WHERE e.id = q.qid)
+                             OR EXISTS (SELECT 1 FROM public.memory_digests d WHERE d.id = q.qid)
+                             OR EXISTS (SELECT 1 FROM public.memory_semantic s WHERE s.id = q.qid)
+                             OR EXISTS (SELECT 1 FROM public.memory_procedural p WHERE p.id = q.qid) THEN 'old_row'
+                           ELSE 'not_found' END,
+           'register_ref', CASE WHEN p_done_outcome = 'retired' AND q.qid = ANY (p_done) THEN i.register_ref END)
+           ORDER BY q.k), '[]'::jsonb)
+    FROM unnest(p_ids) WITH ORDINALITY AS q(qid, k)
+    LEFT JOIN public.memory_items i ON i.id = q.qid
+$$;
+
+
+--
+-- Name: engram_retire_memories(uuid[], text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Retires 1 to 50 distinct item ids through engram_retire_items and writes
+-- the audit row in the same transaction. One row per distinct id, in p_ids
+-- order: outcome retired, unchanged (already retired), forgotten, old_row
+-- (an id of the old tables, which have no retire: forget it, or retire its
+-- legacy item) or not_found. register_ref is the register entry or plan
+-- ledger decision a retired statement is recorded as, else NULL. The audit
+-- row is written when any id names an item. The advisory key is taken
+-- before the first read, as engram_retire_items does.
+CREATE OR REPLACE FUNCTION public.engram_retire_memories(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, outcome text, register_ref text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_ids uuid[];
+  v_done uuid[];
+  v_rows jsonb;
+BEGIN
+  IF p_ids IS NULL OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  v_ids := ARRAY(SELECT u.x FROM unnest(p_ids) WITH ORDINALITY AS u(x, k) GROUP BY u.x ORDER BY min(u.k));
+  IF cardinality(v_ids) NOT BETWEEN 1 AND 50 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  IF p_reason IS NULL OR p_reason !~ '\S' OR char_length(p_reason) > 2000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_memories: p_reason must be non-blank and at most 2000 characters';
+  END IF;
+  IF p_channel IS NULL OR p_channel !~ '^[a-z][a-z0-9_-]{0,31}$' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_retire_memories: p_channel must be a lowercase name of at most 32 characters';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  v_done := ARRAY(SELECT r.x FROM public.engram_retire_items(v_ids, p_reason) AS r(x));
+  v_rows := public.engram_item_action_outcomes(v_ids, v_done, 'retired');
+
+  IF EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = ANY (v_ids)) THEN
+    INSERT INTO public.memory_item_actions (action, requested, affected, reason, channel)
+    VALUES ('retire', v_ids, v_rows, p_reason, p_channel);
+  END IF;
+
+  RETURN QUERY
+  SELECT (t.r ->> 'id')::uuid, t.r ->> 'outcome', t.r ->> 'register_ref'
+    FROM jsonb_array_elements(v_rows) WITH ORDINALITY AS t(r, k)
+   ORDER BY t.k;
+END; $$;
+
+
+--
+-- Name: engram_unretire_memories(uuid[], text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Unretires 1 to 50 distinct item ids through engram_unretire_items, which
+-- clears both retire columns, and writes the audit row with p_reason in the
+-- same transaction. Rows as engram_retire_memories returns them, with
+-- outcome unretired, unchanged (not retired), forgotten, old_row or
+-- not_found, and register_ref NULL.
+CREATE OR REPLACE FUNCTION public.engram_unretire_memories(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, outcome text, register_ref text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_ids uuid[];
+  v_done uuid[];
+  v_rows jsonb;
+BEGIN
+  IF p_ids IS NULL OR array_position(p_ids, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_unretire_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  v_ids := ARRAY(SELECT u.x FROM unnest(p_ids) WITH ORDINALITY AS u(x, k) GROUP BY u.x ORDER BY min(u.k));
+  IF cardinality(v_ids) NOT BETWEEN 1 AND 50 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_unretire_memories: p_ids must hold 1 to 50 distinct ids and no NULL';
+  END IF;
+  IF p_reason IS NULL OR p_reason !~ '\S' OR char_length(p_reason) > 2000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_unretire_memories: p_reason must be non-blank and at most 2000 characters';
+  END IF;
+  IF p_channel IS NULL OR p_channel !~ '^[a-z][a-z0-9_-]{0,31}$' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_unretire_memories: p_channel must be a lowercase name of at most 32 characters';
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  v_done := ARRAY(SELECT r.x FROM public.engram_unretire_items(v_ids) AS r(x));
+  v_rows := public.engram_item_action_outcomes(v_ids, v_done, 'unretired');
+
+  IF EXISTS (SELECT 1 FROM public.memory_items i WHERE i.id = ANY (v_ids)) THEN
+    INSERT INTO public.memory_item_actions (action, requested, affected, reason, channel)
+    VALUES ('unretire', v_ids, v_rows, p_reason, p_channel);
+  END IF;
+
+  RETURN QUERY
+  SELECT (t.r ->> 'id')::uuid, t.r ->> 'outcome', t.r ->> 'register_ref'
+    FROM jsonb_array_elements(v_rows) WITH ORDINALITY AS t(r, k)
+   ORDER BY t.k;
+END; $$;
+
+
+--
+-- Name: engram_sync_document_note(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Applies one vault note in one transaction. p_note is an object with exactly
+-- the keys path, note_version, seen_at, mtime, deleted, frontmatter,
+-- project_id, workspace_id, plan_slug and sections, and each section exactly
+-- heading_path, ordinal, index, text, kind, search_text and hits: text and
+-- frontmatter already scrubbed, hits one {field, detector, secret_name} per
+-- value the scrub masked. A section's key is (path, heading_path, ordinal);
+-- its head is the key's item that is neither superseded nor forgotten.
+-- 1. The stored row's note_version and deleted state: unchanged. Otherwise a
+--    seen_at older than the stored one: stale. Neither writes anything.
+-- 2. Each section in index order, its text hashed as content_hash is:
+--    - blank after trim: skipped_empty, and its key counts as absent;
+--    - no head: kept_forgotten when a forgotten version of the key has the
+--      hash (forgotten words do not come back), else a new item: created;
+--    - a head with the hash: unretired when it was retired as 'removed from
+--      note' (restored), kept_retired when retired for another reason, else
+--      unchanged;
+--    - a head with another hash: kept_forgotten as above, else a new item that
+--      supersedes the head: superseded. A retired head keeps its retirement
+--      and is superseded in place; engram_supersede_item leaves a retired
+--      item alone, but a key keeps one head.
+-- 3. Heads of the note whose key is absent (every head, when deleted) that are
+--    not retired are retired as 'removed from note': retired.
+-- 4. The note row is upserted, with deleted_at the delete's mtime until the
+--    note returns. Each new item gets its hits as memory_secret_hits rows.
+-- A new item is class document_section, kind the section's, speaker artifact,
+-- trust 1, in the note's project, workspace and plan, with occurred_at the
+-- note's mtime. A successor must occur strictly later and device clocks order
+-- nothing, so a version whose mtime is not after its head's occurred_at takes
+-- the head's time plus one microsecond. source is {type 'vault', path,
+-- heading_path, ordinal, index, note_version, event_key}, the event key
+-- 'vault:<sha256 of path>:<sha256 of the heading_path JSON>:<ordinal>:<hash>'.
+-- A text that returns to a version its key had before finds that key taken
+-- by the earlier item, so ':<id of the head it supersedes>' is appended.
+-- Returns {status, sections, item_ids}: the counts (null unless applied) and
+-- the new items' ids. The forget advisory key (7308892986227385959) is taken
+-- exclusively before any row lock, as every function that locks existing
+-- items does, so two syncs of one note also run one after the other. A
+-- malformed argument raises 22023, a refused rule 23514 or 23P01.
+CREATE OR REPLACE FUNCTION public.engram_sync_document_note(p_note jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  c_removed CONSTANT text := 'removed from note';
+  c_time CONSTANT text := '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$';
+  c_note_keys CONSTANT text[] := ARRAY['deleted', 'frontmatter', 'mtime', 'note_version', 'path', 'plan_slug', 'project_id',
+                                       'sections', 'seen_at', 'workspace_id'];
+  c_section_keys CONSTANT text[] := ARRAY['heading_path', 'hits', 'index', 'kind', 'ordinal', 'search_text', 'text'];
+  c_kinds CONSTANT text[] := ARRAY['note', 'plan_readme', 'plan_phase', 'plan_ledger', 'plan_ledger_log', 'finding', 'audit', 'research'];
+  v_problem text;
+  v_field text;
+  v_path text;
+  v_path_hash text;
+  v_note_key uuid;
+  v_deleted boolean;
+  v_seen timestamp with time zone;
+  v_mtime timestamp with time zone;
+  v_stored public.memory_document_notes%ROWTYPE;
+  v_section jsonb;
+  v_key uuid;
+  v_hash text;
+  v_head record;
+  v_was_forgotten boolean;
+  v_event_key text;
+  v_new uuid;
+  v_present uuid[] := '{}'::uuid[];
+  v_new_ids uuid[] := '{}'::uuid[];
+  v_gone uuid[];
+  v_count integer;
+  v_created integer := 0;
+  v_superseded integer := 0;
+  v_unchanged integer := 0;
+  v_retired integer := 0;
+  v_restored integer := 0;
+  v_kept_forgotten integer := 0;
+  v_kept_retired integer := 0;
+  v_skipped integer := 0;
+BEGIN
+  IF p_note IS NULL OR jsonb_typeof(p_note) <> 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_document_note: p_note must be a JSON object';
+  END IF;
+  SELECT format('p_note has the key %s, which is not a note field', quote_ident(left(k.key, 63))) INTO v_problem
+    FROM jsonb_object_keys(p_note) AS k(key)
+   WHERE NOT k.key = ANY (c_note_keys)
+   ORDER BY k.key
+   LIMIT 1;
+  IF v_problem IS NULL AND NOT p_note ?& c_note_keys THEN
+    v_problem := 'p_note must hold every note field';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'path') <> 'string'
+                            OR char_length(p_note ->> 'path') NOT BETWEEN 1 AND 1024
+                            OR octet_length(p_note ->> 'path') > 2600) THEN
+    v_problem := 'path must be a string of 1 to 1024 characters and at most 2600 UTF-8 bytes';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'note_version') <> 'string'
+                            OR char_length(p_note ->> 'note_version') NOT BETWEEN 1 AND 128) THEN
+    v_problem := 'note_version must be a string of 1 to 128 characters';
+  END IF;
+  IF v_problem IS NULL THEN
+    FOREACH v_field IN ARRAY ARRAY['seen_at', 'mtime'] LOOP
+      IF jsonb_typeof(p_note -> v_field) <> 'string' OR (p_note ->> v_field) !~ c_time
+         OR NOT pg_input_is_valid(p_note ->> v_field, 'timestamptz') THEN
+        v_problem := format('%s must be ISO-8601 with Z or an offset', v_field);
+      ELSIF (p_note ->> v_field)::timestamptz > now() + interval '10 minutes' THEN
+        v_problem := format('%s is more than 10 minutes ahead of now', v_field);
+      ELSIF NOT public.engram_time_in_range((p_note ->> v_field)::timestamptz) THEN
+        v_problem := format('%s is before year 1 in UTC', v_field);
+      END IF;
+      EXIT WHEN v_problem IS NOT NULL;
+    END LOOP;
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'deleted') <> 'boolean' THEN
+    v_problem := 'deleted must be a boolean';
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'frontmatter') NOT IN ('object', 'null') THEN
+    v_problem := 'frontmatter must be an object or null';
+  END IF;
+  IF v_problem IS NULL THEN
+    SELECT format('%s must be a string or null', f.key) INTO v_problem
+      FROM unnest(ARRAY['project_id', 'workspace_id', 'plan_slug']) AS f(key)
+     WHERE jsonb_typeof(p_note -> f.key) NOT IN ('string', 'null')
+     LIMIT 1;
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'project_id') = 'string'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_projects p WHERE p.id = p_note ->> 'project_id' AND p.kind = 'project') THEN
+    v_problem := 'project_id names no registered project';
+  END IF;
+  IF v_problem IS NULL AND jsonb_typeof(p_note -> 'workspace_id') = 'string'
+     AND NOT EXISTS (SELECT 1 FROM public.memory_projects w WHERE w.id = p_note ->> 'workspace_id' AND w.kind = 'workspace') THEN
+    v_problem := 'workspace_id names no registered workspace';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(p_note -> 'sections') <> 'array' OR jsonb_array_length(p_note -> 'sections') > 2000) THEN
+    v_problem := 'sections must be an array of at most 2000 sections';
+  END IF;
+  IF v_problem IS NULL AND (p_note -> 'deleted') = 'true'::jsonb
+     AND (jsonb_array_length(p_note -> 'sections') > 0 OR jsonb_typeof(p_note -> 'frontmatter') <> 'null') THEN
+    v_problem := 'a deleted note has no sections and a null frontmatter';
+  END IF;
+  IF v_problem IS NULL THEN
+    SELECT format('section %s %s', s.n, r.reason) INTO v_problem
+      FROM jsonb_array_elements(p_note -> 'sections') WITH ORDINALITY AS s(e, n)
+     CROSS JOIN LATERAL (
+       SELECT CASE
+         WHEN jsonb_typeof(s.e) <> 'object' THEN 'is not a JSON object'
+         WHEN EXISTS (SELECT 1 FROM jsonb_object_keys(s.e) AS k(key) WHERE NOT k.key = ANY (c_section_keys))
+              OR NOT s.e ?& c_section_keys THEN
+           'must hold exactly heading_path, ordinal, index, text, kind, search_text and hits'
+         WHEN jsonb_typeof(s.e -> 'heading_path') <> 'array' OR jsonb_array_length(s.e -> 'heading_path') > 6
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements(s.e -> 'heading_path') AS h(v)
+                          WHERE jsonb_typeof(h.v) <> 'string' OR char_length(h.v #>> '{}') NOT BETWEEN 1 AND 500) THEN
+           'heading_path must hold 0 to 6 strings of 1 to 500 characters'
+         WHEN jsonb_typeof(s.e -> 'ordinal') <> 'number' OR (s.e ->> 'ordinal') !~ '^[0-9]{1,4}$' THEN
+           'ordinal must be an integer from 0 to 9999'
+         WHEN jsonb_typeof(s.e -> 'index') <> 'number' OR (s.e ->> 'index') !~ '^[0-9]{1,9}$' THEN
+           'index must be a non-negative integer'
+         WHEN jsonb_typeof(s.e -> 'text') <> 'string' OR jsonb_typeof(s.e -> 'search_text') <> 'string' THEN
+           'text and search_text must be strings'
+         WHEN jsonb_typeof(s.e -> 'kind') <> 'string' OR NOT (s.e ->> 'kind') = ANY (c_kinds) THEN
+           'kind must be a document section kind'
+         WHEN jsonb_typeof(s.e -> 'hits') <> 'array'
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements(s.e -> 'hits') AS h(v)
+                          WHERE jsonb_typeof(h.v) <> 'object'
+                             OR EXISTS (SELECT 1 FROM jsonb_object_keys(h.v) AS k(key)
+                                         WHERE k.key NOT IN ('field', 'detector', 'secret_name'))
+                             OR jsonb_typeof(h.v -> 'field') IS DISTINCT FROM 'string'
+                             OR jsonb_typeof(h.v -> 'detector') IS DISTINCT FROM 'string'
+                             OR jsonb_typeof(h.v -> 'secret_name') IS NULL
+                             OR jsonb_typeof(h.v -> 'secret_name') NOT IN ('string', 'null')) THEN
+           'hits must hold objects of exactly field, detector and secret_name'
+       END AS reason) AS r
+     WHERE r.reason IS NOT NULL
+     ORDER BY s.n
+     LIMIT 1;
+  END IF;
+  IF v_problem IS NULL AND EXISTS (
+    SELECT 1
+      FROM jsonb_array_elements(p_note -> 'sections') AS s(e)
+     GROUP BY s.e -> 'heading_path', s.e -> 'ordinal'
+    HAVING count(*) > 1) THEN
+    v_problem := 'two sections have the same heading_path and ordinal';
+  END IF;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_sync_document_note: ' || v_problem;
+  END IF;
+
+  v_path := p_note ->> 'path';
+  v_path_hash := encode(sha256(convert_to(v_path, 'UTF8')), 'hex');
+  v_note_key := public.engram_document_note_key(jsonb_build_object('path', v_path));
+  v_deleted := (p_note -> 'deleted') = 'true'::jsonb;
+  v_seen := (p_note ->> 'seen_at')::timestamptz;
+  v_mtime := (p_note ->> 'mtime')::timestamptz;
+
+  PERFORM pg_advisory_xact_lock(7308892986227385959);
+  SELECT d.* INTO v_stored FROM public.memory_document_notes d WHERE d.path = v_path FOR UPDATE;
+  IF FOUND THEN
+    IF v_stored.note_version = p_note ->> 'note_version' AND (v_stored.deleted_at IS NOT NULL) = v_deleted THEN
+      RETURN jsonb_build_object('status', 'unchanged', 'sections', NULL::jsonb, 'item_ids', '[]'::jsonb);
+    END IF;
+    IF v_seen < v_stored.seen_at THEN
+      RETURN jsonb_build_object('status', 'stale', 'sections', NULL::jsonb, 'item_ids', '[]'::jsonb);
+    END IF;
+  END IF;
+
+  SET CONSTRAINTS public.memory_items_document_head_excl DEFERRED;
+
+  FOR v_section IN
+    SELECT s.e
+      FROM jsonb_array_elements(p_note -> 'sections') WITH ORDINALITY AS s(e, n)
+     ORDER BY (s.e ->> 'index')::bigint, s.n
+  LOOP
+    IF (v_section ->> 'text') !~ '\S' THEN
+      v_skipped := v_skipped + 1;
+      CONTINUE;
+    END IF;
+    v_key := public.engram_document_section_key(jsonb_build_object(
+               'path', v_path, 'heading_path', v_section -> 'heading_path', 'ordinal', v_section -> 'ordinal'));
+    v_present := v_present || v_key;
+    v_hash := encode(sha256(convert_to(v_section ->> 'text', 'UTF8')), 'hex');
+
+    SELECT i.id, i.content_hash, i.occurred_at, i.retired_at, i.retired_reason INTO v_head
+      FROM public.memory_items i
+     WHERE i.class = 'document_section' AND public.engram_document_section_key(i.source) = v_key
+       AND i.superseded_by IS NULL AND i.forgotten_at IS NULL;
+    IF FOUND AND v_head.content_hash = v_hash THEN
+      IF v_head.retired_at IS NULL THEN
+        v_unchanged := v_unchanged + 1;
+      ELSIF v_head.retired_reason = c_removed THEN
+        PERFORM public.engram_unretire_items(ARRAY[v_head.id]);
+        v_restored := v_restored + 1;
+      ELSE
+        v_kept_retired := v_kept_retired + 1;
+      END IF;
+      CONTINUE;
+    END IF;
+
+    SELECT EXISTS (
+      SELECT 1
+        FROM public.memory_items i
+       WHERE i.class = 'document_section' AND public.engram_document_note_key(i.source) = v_note_key
+         AND public.engram_document_section_key(i.source) = v_key
+         AND i.forgotten_at IS NOT NULL AND i.content_hash = v_hash) INTO v_was_forgotten;
+    IF v_was_forgotten THEN
+      v_kept_forgotten := v_kept_forgotten + 1;
+      CONTINUE;
+    END IF;
+
+    v_event_key := format('vault:%s:%s:%s:%s', v_path_hash,
+                          encode(sha256(convert_to((v_section -> 'heading_path')::text, 'UTF8')), 'hex'),
+                          v_section ->> 'ordinal', v_hash);
+    IF v_head.id IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.memory_items i WHERE (i.source ? 'event_key') AND (i.source ->> 'event_key') = v_event_key) THEN
+      v_event_key := v_event_key || ':' || v_head.id::text;
+    END IF;
+    INSERT INTO public.memory_items AS m (
+      class, kind, speaker, trust, project_id, workspace_id, plan_slug, content, search_text, occurred_at, source)
+    VALUES ('document_section', v_section ->> 'kind', 'artifact', 1,
+            p_note ->> 'project_id', p_note ->> 'workspace_id', p_note ->> 'plan_slug',
+            v_section ->> 'text', v_section ->> 'search_text',
+            CASE WHEN v_head.id IS NULL OR v_mtime > v_head.occurred_at THEN v_mtime
+                 ELSE v_head.occurred_at + interval '1 microsecond' END,
+            jsonb_build_object('type', 'vault', 'path', v_path, 'heading_path', v_section -> 'heading_path',
+                               'ordinal', v_section -> 'ordinal', 'index', v_section -> 'index',
+                               'note_version', p_note -> 'note_version', 'event_key', v_event_key))
+    RETURNING m.id INTO v_new;
+    v_new_ids := v_new_ids || v_new;
+    INSERT INTO public.memory_secret_hits (target_table, target_id, field, detector, secret_name)
+    SELECT 'memory_items', v_new::text, h.v ->> 'field', h.v ->> 'detector', h.v ->> 'secret_name'
+      FROM jsonb_array_elements(v_section -> 'hits') WITH ORDINALITY AS h(v, n)
+     ORDER BY h.n;
+
+    IF v_head.id IS NULL THEN
+      v_created := v_created + 1;
+    ELSE
+      IF v_head.retired_at IS NULL THEN
+        PERFORM public.engram_supersede_item(v_head.id, v_new);
+      ELSE
+        UPDATE public.memory_items m SET superseded_by = v_new WHERE m.id = v_head.id;
+      END IF;
+      v_superseded := v_superseded + 1;
+    END IF;
+  END LOOP;
+
+  SELECT coalesce(array_agg(i.id ORDER BY i.id), '{}'::uuid[]) INTO v_gone
+    FROM public.memory_items i
+   WHERE i.class = 'document_section' AND public.engram_document_note_key(i.source) = v_note_key
+     AND (i.source ->> 'path') = v_path
+     AND i.superseded_by IS NULL AND i.forgotten_at IS NULL AND i.retired_at IS NULL
+     AND NOT public.engram_document_section_key(i.source) = ANY (v_present);
+  FOR v_count IN 0 .. (cardinality(v_gone) + 49) / 50 - 1 LOOP
+    v_retired := v_retired + (SELECT count(*)::integer
+                                FROM public.engram_retire_items(v_gone[v_count * 50 + 1 : v_count * 50 + 50], c_removed));
+  END LOOP;
+
+  INSERT INTO public.memory_document_notes AS d (
+    path, source, note_version, seen_at, mtime, frontmatter, project_id, workspace_id, plan_slug, deleted_at, updated_at)
+  VALUES (v_path, 'vault', p_note ->> 'note_version', v_seen, v_mtime,
+          CASE WHEN jsonb_typeof(p_note -> 'frontmatter') = 'object' THEN p_note -> 'frontmatter' END,
+          p_note ->> 'project_id', p_note ->> 'workspace_id', p_note ->> 'plan_slug',
+          CASE WHEN v_deleted THEN v_mtime END, now())
+  ON CONFLICT (path) DO UPDATE
+     SET note_version = EXCLUDED.note_version, seen_at = EXCLUDED.seen_at, mtime = EXCLUDED.mtime,
+         frontmatter = EXCLUDED.frontmatter, project_id = EXCLUDED.project_id,
+         workspace_id = EXCLUDED.workspace_id, plan_slug = EXCLUDED.plan_slug,
+         deleted_at = CASE WHEN v_deleted THEN coalesce(d.deleted_at, EXCLUDED.deleted_at) END,
+         updated_at = EXCLUDED.updated_at;
+
+  SET CONSTRAINTS public.memory_items_document_head_excl IMMEDIATE;
+  RETURN jsonb_build_object(
+    'status', 'applied',
+    'sections', jsonb_build_object('created', v_created, 'superseded', v_superseded, 'unchanged', v_unchanged,
+                                   'retired', v_retired, 'restored', v_restored, 'kept_forgotten', v_kept_forgotten,
+                                   'kept_retired', v_kept_retired, 'skipped_empty', v_skipped),
+    'item_ids', to_jsonb(v_new_ids));
 END; $$;
 
 
@@ -5213,13 +6102,22 @@ END; $$;
 
 
 --
--- Name: engram_extraction_apply(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: engram_items_apply(uuid, public.memory_items, text, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
 --
 
--- The body of engram_extraction_commit, which calls it with p_reindex empty.
--- Stores what one run extracted, in one transaction, and closes the run as
--- succeeded. p_payload is {subjects, items, retractions, stats}, each key
--- optional:
+-- The shared write of engram_extraction_apply and engram_ingest_item.
+-- Stores mk_statement and observation items with their subjects, entities and
+-- links in one transaction. With a run (p_run), as engram_extraction_apply
+-- calls it, it stores what that run extracted and closes the run as
+-- succeeded; the run's anchor utterance is the scope repeats and races are
+-- judged from, and p_scope is ignored. With no run, as engram_ingest_item
+-- calls it, p_scope is that scope (a row of memory_items' shape whose id,
+-- project, workspace, session and source the scope rules read), no run row is
+-- read or touched, extraction_run_id and link run_id stay NULL, and a link
+-- the call cannot apply raises instead of being recorded, since there is no
+-- run whose stats could record it. p_caller names the public function in
+-- every error message. p_payload is {subjects, items, retractions, stats},
+-- each key optional:
 -- - subjects: [{key, label, project_id}], the new subjects the items name by
 --   key. Each is upserted on idx_subjects_project_label, so a label already
 --   stored under that project (in any case) is reused, and its key resolves
@@ -5234,7 +6132,7 @@ END; $$;
 --   the current items on its subject it was weighed against (with those its
 --   links name), as engram_extraction_candidates read them; on a new subject
 --   (subject_key) only a standing statement has them, read by the label. Every item gets
---   extraction_run_id = p_run. An item whose source.event_key is already
+--   extraction_run_id = p_run (NULL with no run). An item whose source.event_key is already
 --   stored is not inserted and counts as a duplicate; its entities and links
 --   are not written again, since they were written with it.
 -- - retractions: null or an array of {from, targets, rejected}, one per
@@ -5268,7 +6166,7 @@ END; $$;
 -- restatement time earlier than its target, or a supersession the item rules
 -- refuse raises, so the window's items and links are stored together or not
 -- at all.
--- The run row is locked first and must be running. The deferred item checks
+-- With a run, the run row is locked first and must be running. The deferred item checks
 -- (an mk_statement's quote must occur in an MK utterance of its lineage) are
 -- forced right after the insert, so a refused item raises from this call,
 -- nothing is written and the run stays running for the caller to fail.
@@ -5285,7 +6183,7 @@ END; $$;
 -- sessions of this call's own items, all their rows locked in one
 -- session_id order: two separate ordered passes could each hold a row the
 -- other waits for, as could an ingest.
-CREATE OR REPLACE FUNCTION public.engram_extraction_apply(p_run uuid, p_payload jsonb, p_reindex text[]) RETURNS jsonb
+CREATE OR REPLACE FUNCTION public.engram_items_apply(p_run uuid, p_scope public.memory_items, p_caller text, p_payload jsonb, p_reindex text[]) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
@@ -5330,7 +6228,7 @@ DECLARE
 BEGIN
   IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: p_payload must be a JSON object';
+      MESSAGE = p_caller || ': p_payload must be a JSON object';
   END IF;
   SELECT format('p_payload has the key %s, which is not subjects, items, retractions or stats', quote_ident(left(k.key, 63)))
     INTO v_problem
@@ -5475,20 +6373,25 @@ BEGIN
 
   IF v_problem IS NOT NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: ' || v_problem;
+      MESSAGE = p_caller || ': ' || v_problem;
   END IF;
 
-  SELECT r.status INTO v_status
-    FROM public.memory_extraction_runs r
-   WHERE r.id = p_run
-     FOR UPDATE;
-  IF NOT FOUND THEN
+  IF p_run IS NOT NULL THEN
+    SELECT r.status INTO v_status
+      FROM public.memory_extraction_runs r
+     WHERE r.id = p_run
+       FOR UPDATE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = p_caller || ': p_run names no run';
+    END IF;
+    IF v_status <> 'running' THEN
+      RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
+        MESSAGE = format('%s: the run is %s, not running', p_caller, v_status);
+    END IF;
+  ELSIF (p_scope).id IS NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-      MESSAGE = 'engram_extraction_commit: p_run names no run';
-  END IF;
-  IF v_status <> 'running' THEN
-    RAISE EXCEPTION USING ERRCODE = 'object_not_in_prerequisite_state',
-      MESSAGE = format('engram_extraction_commit: the run is %s, not running', v_status);
+      MESSAGE = p_caller || ': a write with no run needs a scope';
   END IF;
 
   IF jsonb_array_length(v_subjects) > 0 THEN
@@ -5522,15 +6425,19 @@ BEGIN
      LIMIT 1;
     IF v_problem IS NOT NULL THEN
       RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-        MESSAGE = 'engram_extraction_commit: ' || v_problem;
+        MESSAGE = p_caller || ': ' || v_problem;
     END IF;
 
     -- Before any item of this call is written, so only items another writer
     -- made current since the read can appear here.
-    SELECT r.* INTO v_anchor
-      FROM public.memory_extraction_runs x
-      JOIN public.memory_items r ON r.id = x.anchor_item_id
-     WHERE x.id = p_run;
+    IF p_run IS NOT NULL THEN
+      SELECT r.* INTO v_anchor
+        FROM public.memory_extraction_runs x
+        JOIN public.memory_items r ON r.id = x.anchor_item_id
+       WHERE x.id = p_run;
+    ELSE
+      v_anchor := p_scope;
+    END IF;
     SELECT public.engram_extraction_plan_slug(e.plan_dirs) INTO v_plan
       FROM public.memory_capture_events e
      WHERE e.id = CASE WHEN (v_anchor.source ->> 'event_id') ~ '^[0-9]{1,18}$' THEN (v_anchor.source ->> 'event_id')::bigint END;
@@ -5579,7 +6486,7 @@ BEGIN
           v_refused := v_refused || jsonb_build_object('n', v_n, 'target', v_target, 'reason', 'not_current');
         ELSIF v_target_at > v_at THEN
           RAISE EXCEPTION USING ERRCODE = 'check_violation',
-            MESSAGE = format('engram_extraction_commit: item %s restates an item that occurred later', v_n);
+            MESSAGE = format('%s: item %s restates an item that occurred later', p_caller, v_n);
         ELSIF NOT v_target = ANY (v_targets) THEN
           v_targets := v_targets || v_target;
         END IF;
@@ -5675,7 +6582,7 @@ BEGIN
     PERFORM 1 FROM public.memory_items i WHERE i.id = v_from AND i.class = 'utterance' AND i.kind = 'assistant_turn';
     IF NOT FOUND THEN
       RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-        MESSAGE = 'engram_extraction_commit: retractions.from names no assistant turn';
+        MESSAGE = p_caller || ': retractions.from names no assistant turn';
     END IF;
     FOR v_link IN SELECT x.v FROM jsonb_array_elements(v_retraction -> 'targets') WITH ORDINALITY AS x(v, k) ORDER BY x.k LOOP
       v_target := (v_link #>> '{}')::uuid;
@@ -5683,7 +6590,7 @@ BEGIN
         FROM public.memory_items i WHERE i.id = v_target;
       IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-          MESSAGE = format('engram_extraction_commit: retraction target %s names no item', v_target);
+          MESSAGE = format('%s: retraction target %s names no item', p_caller, v_target);
       END IF;
       IF v_target = v_from THEN
         v_refused := v_refused || jsonb_build_object('item', v_from, 'target', v_target, 'reason', 'link_conflict');
@@ -5725,6 +6632,19 @@ BEGIN
    WHERE st.indexed_event_id <> 0
      AND st.session_id = ANY (v_sessions);
 
+  IF p_run IS NULL THEN
+    SELECT format('%s: item %s: the link to %s was refused: %s', p_caller, f.v ->> 'n', f.v ->> 'target', f.v ->> 'reason')
+      INTO v_problem
+      FROM jsonb_array_elements(v_refused) WITH ORDINALITY AS f(v, k)
+     ORDER BY f.k
+     LIMIT 1;
+    IF v_problem IS NOT NULL THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE = v_problem;
+    END IF;
+    RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
+                              'restatements', v_restatements, 'links_applied', v_applied);
+  END IF;
+
   UPDATE public.memory_extraction_runs r
      SET status = 'succeeded',
          finished_at = now(),
@@ -5744,6 +6664,96 @@ BEGIN
 
   RETURN jsonb_build_object('item_ids', to_jsonb(v_ids), 'subjects_created', v_created, 'duplicates', v_duplicates,
                             'restatements', v_restatements, 'links_applied', v_applied);
+END; $$;
+
+
+--
+-- Name: engram_extraction_apply(uuid, jsonb, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The body of engram_extraction_commit, which calls it with p_reindex empty:
+-- engram_items_apply with the run, where the payload, the link and
+-- restatement rules, p_reindex and the result are described. It stores what
+-- one run extracted, in one transaction, and closes the run as succeeded.
+CREATE OR REPLACE FUNCTION public.engram_extraction_apply(p_run uuid, p_payload jsonb, p_reindex text[]) RETURNS jsonb
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT public.engram_items_apply(p_run, NULL::public.memory_items, 'engram_extraction_commit', p_payload, p_reindex)
+$$;
+
+
+--
+-- Name: engram_ingest_item(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores one item a caller wrote outside extraction (the memory_ingest tool),
+-- through engram_items_apply with no run. p_payload is {subjects, items}:
+-- subjects as engram_items_apply takes them, and items exactly one
+-- mk_statement or observation in its form, whose source.type is ingest_tool
+-- and which names no extraction run. The scope its repeats are judged from is
+-- its own: an mk_statement's is the utterance its lineage starts with, which
+-- must be a stored utterance; an observation's is the item itself (its id,
+-- project, workspace, session and plan). Returns engram_items_apply's result.
+CREATE OR REPLACE FUNCTION public.engram_ingest_item(p_payload jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_item jsonb;
+  v_scope public.memory_items%ROWTYPE;
+  v_problem text;
+  c_uuid CONSTANT text := '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$';
+BEGIN
+  IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_ingest_item: p_payload must be a JSON object';
+  END IF;
+  SELECT format('p_payload has the key %s, which is not subjects or items', quote_ident(left(k.key, 63)))
+    INTO v_problem
+    FROM jsonb_object_keys(p_payload) AS k(key)
+   WHERE k.key NOT IN ('subjects', 'items')
+   ORDER BY k.key
+   LIMIT 1;
+  IF v_problem IS NULL AND (jsonb_typeof(p_payload -> 'items') IS DISTINCT FROM 'array'
+                            OR jsonb_array_length(p_payload -> 'items') <> 1) THEN
+    v_problem := 'items must be an array of exactly one item';
+  END IF;
+  v_item := CASE WHEN v_problem IS NULL THEN p_payload -> 'items' -> 0 END;
+  IF v_problem IS NULL AND jsonb_typeof(v_item) <> 'object' THEN
+    v_problem := 'item 1 is not a JSON object';
+  END IF;
+  IF v_problem IS NULL AND (v_item -> 'source' ->> 'type') IS DISTINCT FROM 'ingest_tool' THEN
+    v_problem := 'item 1: source.type must be ingest_tool';
+  END IF;
+  IF v_problem IS NULL AND coalesce(v_item -> 'extraction_run_id', 'null'::jsonb) <> 'null'::jsonb THEN
+    v_problem := 'item 1 names an extraction run';
+  END IF;
+  IF v_problem IS NULL AND (jsonb_typeof(v_item -> 'id') IS DISTINCT FROM 'string' OR (v_item ->> 'id') !~* c_uuid) THEN
+    v_problem := 'item 1: id must be a UUID';
+  END IF;
+  IF v_problem IS NULL AND (v_item ->> 'class') = 'mk_statement' THEN
+    SELECT i.* INTO v_scope
+      FROM public.memory_items i
+     WHERE i.id = CASE WHEN (v_item -> 'lineage' ->> 0) ~* c_uuid THEN (v_item -> 'lineage' ->> 0)::uuid END
+       AND i.class = 'utterance';
+    IF NOT FOUND THEN
+      v_problem := 'item 1: an mk_statement''s lineage must start with a stored utterance';
+    END IF;
+  ELSIF v_problem IS NULL THEN
+    v_scope.id := (v_item ->> 'id')::uuid;
+    v_scope.class := v_item ->> 'class';
+    v_scope.project_id := v_item ->> 'project_id';
+    v_scope.workspace_id := v_item ->> 'workspace_id';
+    v_scope.plan_slug := v_item ->> 'plan_slug';
+    v_scope.session_id := v_item ->> 'session_id';
+    v_scope.source := v_item -> 'source';
+  END IF;
+  IF v_problem IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_ingest_item: ' || v_problem;
+  END IF;
+  RETURN public.engram_items_apply(NULL, v_scope, 'engram_ingest_item', p_payload, '{}'::text[]);
 END; $$;
 
 
@@ -6606,6 +7616,18 @@ ALTER TABLE public.memory_capture_event_counts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.memory_secret_hits ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: memory_item_actions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_item_actions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: memory_document_notes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_document_notes ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -6741,6 +7763,22 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 
 
 --
+-- Name: memory_item_actions service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_item_actions;
+CREATE POLICY service_role_all ON public.memory_item_actions TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: memory_document_notes service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_document_notes;
+CREATE POLICY service_role_all ON public.memory_document_notes TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Item store table privileges, identical on every database.
 --
 -- A fresh database grants a new table to no role but its owner, while the
@@ -6748,7 +7786,7 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- privilege, DELETE and TRUNCATE included, and UPDATE on sequences. So all
 -- privileges are revoked from PUBLIC, service_role, anon and authenticated
 -- first, then service_role gets back SELECT and nothing else: no INSERT,
--- UPDATE, DELETE or TRUNCATE on the tables and nothing on the three id
+-- UPDATE, DELETE or TRUNCATE on the tables and nothing on the four id
 -- sequences. Every write goes through the engram_* RPCs, which run as the
 -- owner, so the rules each RPC applies (idempotent inserts, forgets that
 -- cascade under one lock order, supersession only to a later live item) hold
@@ -6758,8 +7796,8 @@ CREATE POLICY service_role_all ON public.memory_secret_hits TO service_role USIN
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM PUBLIC, service_role;
-REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM PUBLIC, service_role;
+REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -6770,8 +7808,8 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits FROM %I', role_name);
-      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -6787,6 +7825,8 @@ GRANT SELECT ON TABLE public.memory_capture_events TO service_role;
 GRANT SELECT ON TABLE public.memory_capture_event_counts TO service_role;
 GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 GRANT SELECT ON TABLE public.memory_session_state TO service_role;
+GRANT SELECT ON TABLE public.memory_item_actions TO service_role;
+GRANT SELECT ON TABLE public.memory_document_notes TO service_role;
 
 
 --
@@ -6795,8 +7835,8 @@ GRANT SELECT ON TABLE public.memory_session_state TO service_role;
 -- applied schema so a missing forgotten_at column or a broken gate fails HERE: it
 -- aborts the apply under `psql -v ON_ERROR_STOP=1`, and otherwise surfaces as a
 -- loud ERROR line in the apply log. Read-only except engram_mark_forgotten and the
--- item forget, retire and unretire RPCs on the nil UUID (match nothing, write
--- nothing). Idempotent and safe to re-run. All
+-- item forget, retire and unretire RPCs and their audited forms on the nil UUID
+-- (match nothing, write nothing). Idempotent and safe to re-run. All
 -- names schema-qualified because the dump sets search_path = ''.
 --
 
@@ -6813,13 +7853,17 @@ BEGIN
   PERFORM public.engram_text_match(ARRAY['smoke'], 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
   PERFORM public.engram_vector_search(v_unit, 1, NULL, NULL, ARRAY['note', 'digest', 'fact', 'procedure'], 'smoke');
   v_n := public.engram_mark_forgotten('episode', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  v_n := public.engram_mark_forgotten('digest', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('semantic', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   v_n := public.engram_mark_forgotten('procedural', ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM * FROM public.engram_invariant_counts();
   PERFORM * FROM public.engram_forget_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke');
   PERFORM * FROM public.engram_retire_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke');
   PERFORM * FROM public.engram_unretire_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
-  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire and invariant counts callable';
+  PERFORM * FROM public.engram_forget_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
+  PERFORM * FROM public.engram_retire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
+  PERFORM * FROM public.engram_unretire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
+  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire, their audited forms and invariant counts callable';
 END;
 $smoke$;
 
@@ -6875,6 +7919,13 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() FROM PUB
 REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_forget_memories(uuid[], text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM PUBLIC;
@@ -6886,6 +7937,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memor
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM PUBLIC;
@@ -6900,6 +7953,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_legacy_row_id(jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM PUBLIC;
@@ -6952,6 +8006,13 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_forget_memories(uuid[], text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) FROM %I', role_name);
@@ -6963,6 +8024,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) FROM %I', role_name);
@@ -6977,6 +8040,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_norm_quote(text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_legacy_row_id(jsonb) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) FROM %I', role_name);
@@ -7017,6 +8081,13 @@ GRANT EXECUTE ON FUNCTION public.engram_items_embedding_failed_count() TO servic
 GRANT EXECUTE ON FUNCTION public.engram_items_reset_embedding_failures(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_sync_projects(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_unretire_items(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_forget_memories(uuid[], text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_retire_memories(uuid[], text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_unretire_memories(uuid[], text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_action_outcomes(uuid[], uuid[], text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_sync_document_note(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_document_note_key(jsonb) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_document_section_key(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_run_state(text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_turn_groups(text, text, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_pending(text, integer, integer, timestamp with time zone) TO service_role;
@@ -7028,6 +8099,8 @@ GRANT EXECUTE ON FUNCTION public.engram_extraction_subject_current(public.memory
 GRANT EXECUTE ON FUNCTION public.engram_extraction_begin(uuid, text, text, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_fail(uuid, text, text, boolean, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_apply(uuid, jsonb, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_apply(uuid, public.memory_items, text, jsonb, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_ingest_item(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_commit(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_due_sessions(integer, integer, timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_extraction_sessions(text, timestamp with time zone, integer, timestamp with time zone) TO service_role;
@@ -7042,6 +8115,7 @@ GRANT EXECUTE ON FUNCTION public.engram_record_shown(uuid[], text) TO service_ro
 GRANT EXECUTE ON FUNCTION public.engram_access_count_quantile(text, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_mark_forgotten(text, uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_norm_quote(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_legacy_row_id(jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_time_in_range(timestamp with time zone) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_times_in_range(timestamp with time zone[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_text_boost(text, integer, text, text) TO service_role;

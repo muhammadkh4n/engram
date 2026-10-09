@@ -425,7 +425,8 @@ describe('PostgRestItemStore write RPCs', () => {
     const store = storeWith(client)
 
     await expect(store.forgetItems([ID_A], 'asked\u0000')).rejects.toThrow(/forgetItems failed: reason holds/)
-    await expect(store.retireItems([ID_A], 'stale\udc00')).rejects.toThrow(/retireItems failed: reason holds/)
+    await expect(store.retireItems([ID_A], 'stale\udc00', 'mcp')).rejects.toThrow(/retireItems failed: reason holds/)
+    await expect(store.forgetMemories([ID_A], 'asked\u0000', 'mcp')).rejects.toThrow(/forgetMemories failed: reason holds/)
     expect(rpc).not.toHaveBeenCalled()
   })
 
@@ -449,16 +450,40 @@ describe('PostgRestItemStore write RPCs', () => {
     ])
   })
 
-  it('retires and unretires through their RPCs and returns the ids acted on', async () => {
-    const { client, rpcCalls } = mockClient({ rpc: { data: [ID_B], error: null } })
-    const store = storeWith(client)
+  it('forgets items and old rows through engram_forget_memories, sending distinct uuids, and maps each row', async () => {
+    const row = { id: ID_A, store: 'memory_digests', kind: 'digest', requested: false, via: ID_B, effect: 'forgotten' }
+    const { client, rpcCalls } = mockClient({ rpc: { data: [row], error: null } })
 
-    await expect(store.retireItems([ID_A, ID_B], 'out of date')).resolves.toEqual([ID_B])
-    await expect(store.unretireItems([ID_B])).resolves.toEqual([ID_B])
+    const rows = await storeWith(client).forgetMemories([ID_B, ID_B.toUpperCase(), 'bad-id'], 'imported twice', 'mcp')
 
     expect(rpcCalls).toEqual([
-      { fn: 'engram_retire_items', args: { p_ids: [ID_A, ID_B], p_reason: 'out of date' } },
-      { fn: 'engram_unretire_items', args: { p_ids: [ID_B] } },
+      { fn: 'engram_forget_memories', args: { p_ids: [ID_B], p_reason: 'imported twice', p_channel: 'mcp' } },
+    ])
+    expect(rows).toEqual([row])
+  })
+
+  it('retires and unretires through their audited RPCs, one result per distinct id, a malformed id not found', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: {
+        data: [
+          { id: ID_A, outcome: 'old_row', register_ref: null },
+          { id: ID_B, outcome: 'retired', register_ref: 'R-TST-3' },
+        ],
+        error: null,
+      },
+    })
+    const store = storeWith(client)
+
+    await expect(store.retireItems([ID_A, ID_B, 'x', ID_B], 'out of date', 'mcp')).resolves.toEqual([
+      { id: ID_A, outcome: 'old_row', registerRef: null },
+      { id: ID_B, outcome: 'retired', registerRef: 'R-TST-3' },
+      { id: 'x', outcome: 'not_found', registerRef: null },
+    ])
+    await store.unretireItems([ID_B], 'back in use', 'mcp')
+
+    expect(rpcCalls).toEqual([
+      { fn: 'engram_retire_memories', args: { p_ids: [ID_A, ID_B], p_reason: 'out of date', p_channel: 'mcp' } },
+      { fn: 'engram_unretire_memories', args: { p_ids: [ID_B], p_reason: 'back in use', p_channel: 'mcp' } },
     ])
   })
 
@@ -467,8 +492,9 @@ describe('PostgRestItemStore write RPCs', () => {
     const store = storeWith(client)
 
     await expect(store.forgetItems([], 'nothing')).resolves.toEqual([])
-    await expect(store.retireItems(['x'], 'nothing')).resolves.toEqual([])
-    await expect(store.unretireItems([])).resolves.toEqual([])
+    await expect(store.forgetMemories(['x'], 'nothing', 'mcp')).resolves.toEqual([])
+    await expect(store.retireItems(['x'], 'nothing', 'mcp')).resolves.toEqual([{ id: 'x', outcome: 'not_found', registerRef: null }])
+    await expect(store.unretireItems([], 'nothing', 'mcp')).resolves.toEqual([])
     expect(rpc).not.toHaveBeenCalled()
   })
 
@@ -478,8 +504,9 @@ describe('PostgRestItemStore write RPCs', () => {
     const ids = Array.from({ length: 51 }, (_, i) => `01940000-0000-7000-8000-${String(i + 1).padStart(12, '0')}`)
 
     await expect(store.forgetItems(ids, 'too many')).rejects.toThrow('forgetItems failed: 51 ids, at most 50 per call')
-    await expect(store.retireItems(ids, 'too many')).rejects.toThrow('retireItems failed: 51 ids, at most 50 per call')
-    await expect(store.unretireItems(ids)).rejects.toThrow('unretireItems failed: 51 ids, at most 50 per call')
+    await expect(store.forgetMemories(ids, 'too many', 'mcp')).rejects.toThrow('forgetMemories failed: 51 ids, at most 50 per call')
+    await expect(store.retireItems(ids, 'too many', 'mcp')).rejects.toThrow('retireItems failed: 51 ids, at most 50 per call')
+    await expect(store.unretireItems(ids, 'too many', 'mcp')).rejects.toThrow('unretireItems failed: 51 ids, at most 50 per call')
     expect(rpc).not.toHaveBeenCalled()
   })
 
@@ -487,8 +514,8 @@ describe('PostgRestItemStore write RPCs', () => {
     const { client, rpcCalls } = mockClient({ rpc: { data: [], error: null } })
     const ids = Array.from({ length: 50 }, (_, i) => `01940000-0000-7000-8000-${String(i + 1).padStart(12, '0')}`)
 
-    await expect(storeWith(client).retireItems(ids, 'stale')).resolves.toEqual([])
-    expect(rpcCalls).toEqual([{ fn: 'engram_retire_items', args: { p_ids: ids, p_reason: 'stale' } }])
+    await expect(storeWith(client).forgetMemories([...ids, ...ids], 'stale', 'mcp')).resolves.toEqual([])
+    expect(rpcCalls).toEqual([{ fn: 'engram_forget_memories', args: { p_ids: ids, p_reason: 'stale', p_channel: 'mcp' } }])
   })
 
   it('supersedes through engram_supersede_item', async () => {
@@ -593,23 +620,28 @@ describe('PostgRestItemStore retries of a rolled-back write', () => {
     expect(rpcCalls).toHaveLength(3)
   })
 
-  it('retries a retire and an unretire that were rolled back and returns their ids', async () => {
+  it('retries a retire and an unretire that were rolled back and returns their outcomes', async () => {
+    const retired = [{ id: ID_A, outcome: 'retired', register_ref: null }]
     const retire = mockClient({
-      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: [ID_A], error: null }),
+      rpc: sequence({ data: null, error: pgError('40P01', 'deadlock detected') }, { data: retired, error: null }),
     })
-    await expect(storeWith(retire.client).retireItems([ID_A], 'stale')).resolves.toEqual([ID_A])
+    await expect(storeWith(retire.client).retireItems([ID_A], 'stale', 'mcp')).resolves.toEqual([
+      { id: ID_A, outcome: 'retired', registerRef: null },
+    ])
     expect(retire.rpcCalls).toEqual([
-      { fn: 'engram_retire_items', args: { p_ids: [ID_A], p_reason: 'stale' } },
-      { fn: 'engram_retire_items', args: { p_ids: [ID_A], p_reason: 'stale' } },
+      { fn: 'engram_retire_memories', args: { p_ids: [ID_A], p_reason: 'stale', p_channel: 'mcp' } },
+      { fn: 'engram_retire_memories', args: { p_ids: [ID_A], p_reason: 'stale', p_channel: 'mcp' } },
     ])
 
     const unretire = mockClient({
       rpc: sequence(
         { data: null, error: pgError('40001', 'could not serialize access due to concurrent update') },
-        { data: [ID_A], error: null },
+        { data: [{ id: ID_A, outcome: 'unretired', register_ref: null }], error: null },
       ),
     })
-    await expect(storeWith(unretire.client).unretireItems([ID_A])).resolves.toEqual([ID_A])
+    await expect(storeWith(unretire.client).unretireItems([ID_A], 'back', 'mcp')).resolves.toEqual([
+      { id: ID_A, outcome: 'unretired', registerRef: null },
+    ])
     expect(unretire.rpcCalls).toHaveLength(2)
   })
 
@@ -765,7 +797,7 @@ describe('PostgRestItemStore request time zone', () => {
     try {
       const store = new PostgRestItemStore({ url: 'http://127.0.0.1:3000', key: 'test-key' })
       await store.getItems([ID_A])
-      await store.retireItems([ID_A], 'stale')
+      await store.retireItems([ID_A], 'stale', 'mcp')
     } finally {
       vi.unstubAllGlobals()
     }
@@ -774,5 +806,90 @@ describe('PostgRestItemStore request time zone', () => {
     for (const value of prefer) {
       expect(value?.split(',').map((part) => part.trim())).toContain('timezone=UTC')
     }
+  })
+})
+
+describe('PostgRestItemStore.syncDocumentNote', () => {
+  const docNote = {
+    path: 'Tstdocs/Notes/tst-unit.md',
+    noteVersion: 'v1',
+    seenAt: new Date('2026-03-04T05:06:07.000Z'),
+    mtime: new Date('2026-03-04T05:00:00.000Z'),
+    deleted: false,
+    frontmatter: null,
+    projectId: 'tst-project',
+    workspaceId: null,
+    planSlug: null,
+    sections: [
+      {
+        headingPath: ['Goal'],
+        ordinal: 0,
+        index: 1,
+        text: 'ship it',
+        kind: 'note' as const,
+        searchText: 'tst-unit.md > Goal: ship it',
+        hits: [{ field: 'content', detector: 'registered', secretName: 'TST_KEY' }],
+      },
+    ],
+  }
+
+  it('sends the note as snake_case to engram_sync_document_note and maps the counts back', async () => {
+    const { client, rpcCalls } = mockClient({
+      rpc: {
+        data: {
+          status: 'applied',
+          sections: { created: 1, superseded: 0, unchanged: 0, retired: 0, restored: 0, kept_forgotten: 0, kept_retired: 0, skipped_empty: 0 },
+          item_ids: [ID_A],
+        },
+        error: null,
+      },
+    })
+    const result = await storeWith(client).syncDocumentNote(docNote)
+    expect(rpcCalls).toEqual([
+      {
+        fn: 'engram_sync_document_note',
+        args: {
+          p_note: {
+            path: 'Tstdocs/Notes/tst-unit.md',
+            note_version: 'v1',
+            seen_at: '2026-03-04T05:06:07.000Z',
+            mtime: '2026-03-04T05:00:00.000Z',
+            deleted: false,
+            frontmatter: null,
+            project_id: 'tst-project',
+            workspace_id: null,
+            plan_slug: null,
+            sections: [
+              {
+                heading_path: ['Goal'],
+                ordinal: 0,
+                index: 1,
+                text: 'ship it',
+                kind: 'note',
+                search_text: 'tst-unit.md > Goal: ship it',
+                hits: [{ field: 'content', detector: 'registered', secret_name: 'TST_KEY' }],
+              },
+            ],
+          },
+        },
+      },
+    ])
+    expect(result).toEqual({
+      status: 'applied',
+      sections: { created: 1, superseded: 0, unchanged: 0, retired: 0, restored: 0, keptForgotten: 0, keptRetired: 0, skippedEmpty: 0 },
+      itemIds: [ID_A],
+    })
+  })
+
+  it('refuses text PostgreSQL cannot hold before any request, naming the path and not the text', async () => {
+    const { client, rpcCalls } = mockClient()
+    const bad = { ...docNote, sections: [{ ...docNote.sections[0]!, text: 'bad \u0000 byte' }] }
+    await expect(storeWith(client).syncDocumentNote(bad)).rejects.toThrow(/note\.sections\[0\]\.text/)
+    expect(rpcCalls).toEqual([])
+  })
+
+  it('fails on an answer without a status instead of guessing one', async () => {
+    const { client } = mockClient({ rpc: { data: { sections: null }, error: null } })
+    await expect(storeWith(client).syncDocumentNote(docNote)).rejects.toThrow(/without a status/)
   })
 })

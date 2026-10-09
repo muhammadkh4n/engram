@@ -36,6 +36,7 @@ const ITEM_TABLES = [
   'memory_capture_events',
   'memory_capture_event_counts',
   'memory_secret_hits',
+  'memory_item_actions',
 ] as const
 
 function squash(sql: string): string {
@@ -193,12 +194,12 @@ describe('item store tables are reachable only through their own grants', () => 
     for (const stmt of grants) expect(stmt).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALL)\b/)
   })
 
-  it('revokes all on the four id sequences and grants nothing back', () => {
+  it('revokes all on the five id sequences and grants nothing back', () => {
     const section = privilegeSection()
     expect(section).toContain(
-      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;',
+      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM PUBLIC, service_role;',
     )
-    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|capture_event_counts|secret_hits|item_links)_id_seq/)
+    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|capture_event_counts|secret_hits|item_links|item_actions)_id_seq/)
   })
 })
 
@@ -382,6 +383,12 @@ const ITEM_RPCS = [
   ['engram_unretire_items', '(p_ids uuid[]) RETURNS SETOF uuid LANGUAGE plpgsql'],
   ['engram_supersede_item', '(p_old uuid, p_new uuid) RETURNS boolean LANGUAGE plpgsql'],
   ['engram_invariant_counts', '() RETURNS TABLE(name text, violations bigint) LANGUAGE sql STABLE'],
+  [
+    'engram_forget_memories',
+    '(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, store text, kind text, requested boolean, via uuid, effect text) LANGUAGE plpgsql',
+  ],
+  ['engram_retire_memories', '(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, outcome text, register_ref text) LANGUAGE plpgsql'],
+  ['engram_unretire_memories', '(p_ids uuid[], p_reason text, p_channel text) RETURNS TABLE(id uuid, outcome text, register_ref text) LANGUAGE plpgsql'],
 ] as const
 
 const ITEM_RPC_NAMES = ITEM_RPCS.map(([name]) => name)
@@ -466,6 +473,9 @@ describe('item store RPCs', () => {
     expect(smoke).toContain(`PERFORM * FROM public.engram_forget_items(${nil}, 'smoke');`)
     expect(smoke).toContain(`PERFORM * FROM public.engram_retire_items(${nil}, 'smoke');`)
     expect(smoke).toContain(`PERFORM * FROM public.engram_unretire_items(${nil});`)
+    for (const name of ['engram_forget_memories', 'engram_retire_memories', 'engram_unretire_memories']) {
+      expect(smoke).toContain(`PERFORM * FROM public.${name}(${nil}, 'smoke', 'smoke');`)
+    }
   })
 })
 

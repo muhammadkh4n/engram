@@ -13,6 +13,9 @@
  *   rebuild the index with the attempts clause, drop the signatures without a
  *   claimant, keep the item pending, and the second apply changes nothing in
  *   the schema dump.
+ * - memory_items_trust_check under its earlier rule (every evidenced
+ *   observation at trust 2) is replaced by the current one, which keeps an
+ *   unverified evidenced observation at trust 3, and a second apply keeps it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { realPgImage, startRealPg, type RealPg } from './harness.js'
@@ -173,6 +176,45 @@ describe.skipIf(!realPgImage)('re-applying schema.sql over an earlier memory_ite
           (err: unknown) => String(err),
         )
       expect(out).toContain('memory_items_version_of_check')
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'replaces the earlier observation trust rule, so an evidenced observation can be stored at trust 3',
+    async () => {
+      await pg.psql(`
+        ALTER TABLE public.memory_items DROP CONSTRAINT memory_items_trust_check,
+          ADD CONSTRAINT memory_items_trust_check CHECK (trust = CASE class
+            WHEN 'utterance' THEN (CASE WHEN speaker = 'mk' THEN 0 ELSE 3 END)
+            WHEN 'mk_statement' THEN 0
+            WHEN 'observation' THEN (CASE WHEN jsonb_typeof(source -> 'evidence') = 'array' AND source -> 'evidence' <> '[]'::jsonb THEN 2 ELSE 3 END)
+            WHEN 'artifact' THEN 1 WHEN 'document_section' THEN 1 WHEN 'session_index' THEN 1 WHEN 'legacy' THEN 3
+            ELSE -1 END);
+        INSERT INTO public.memory_subjects (id, label) VALUES ('01930000-0000-7000-8000-00000000a001', 'tst upgrade subject');`)
+      const observationAt = (trust: number, key: string): string => `
+        INSERT INTO public.memory_items (class, kind, speaker, trust, subject_id, content, search_text, occurred_at, source)
+        VALUES ('observation', 'fact', 'assistant', ${trust}, '01930000-0000-7000-8000-00000000a001',
+                'The worker parks a failing event.', 'The worker parks a failing event.', '2026-01-05T09:00:00Z',
+                jsonb_build_object('type', 'extraction', 'event_key', '${key}',
+                                   'evidence', jsonb_build_array(jsonb_build_object('type', 'commit', 'ref', 'c0ffee5d1e9a'))));`
+      await pg.psql(observationAt(2, 'schema-upgrade:trust-2'))
+      const before = await pg.psql(observationAt(3, 'schema-upgrade:trust-3-before')).then(
+        () => 'accepted',
+        (err: unknown) => String(err),
+      )
+      expect(before).toContain('memory_items_trust_check')
+
+      await pg.applySchema()
+      await pg.psql(observationAt(3, 'schema-upgrade:trust-3-after'))
+      const dumpOnce = await pg.dumpSchema()
+      await pg.applySchema()
+      expect(await pg.dumpSchema()).toBe(dumpOnce)
+      expect(
+        await pg.psql(
+          `SELECT string_agg(trust::text, ',' ORDER BY trust) FROM public.memory_items WHERE class = 'observation';`,
+        ),
+      ).toBe('2,3')
     },
     TEST_TIMEOUT_MS,
   )

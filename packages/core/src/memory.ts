@@ -1,4 +1,4 @@
-import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, SynthesizeOpts, MemoryType, TypedMemory, ForgettableType, ForgetCandidate, ForgetPreview, ForgetByIdsResult } from './types.js'
+import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, SynthesizeOpts, TypedMemory, ForgettableType, ForgetCandidate, ForgetPreview, ForgetByIdsResult } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -126,11 +126,7 @@ const DEFAULT_SESSION_ID = 'default'
 /** Upper bound on ids per forgetByIds call: a forget approves a reviewed
  *  handful of memories, never a bulk purge. */
 export const MAX_FORGET_IDS = 50
-const FORGET_LOOKUP_TYPES: readonly MemoryType[] = ['episode', 'semantic', 'procedural', 'digest']
-
-function isForgettableType(type: MemoryType): type is ForgettableType {
-  return type === 'episode' || type === 'semantic' || type === 'procedural'
-}
+const FORGET_LOOKUP_TYPES: readonly ForgettableType[] = ['episode', 'semantic', 'procedural', 'digest']
 
 function forgetCandidateDate(metadata: Record<string, unknown> | undefined): string | null {
   const d = resolveEventDate(metadata)
@@ -1044,7 +1040,6 @@ export class Memory {
     const seen = new Set<string>()
     const candidates: ForgetCandidate[] = []
     for (const memory of [...result.memories, ...result.associations]) {
-      if (!isForgettableType(memory.type)) continue
       if (opts?.tier && memory.type !== opts.tier) continue
       const key = `${memory.type}:${memory.id}`
       if (seen.has(key)) continue
@@ -1091,26 +1086,21 @@ export class Memory {
       rowsById.set(rowId, matches)
     }
 
-    const result: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [], notForgettable: [] }
-    const idsByType: Record<ForgettableType, string[]> = { episode: [], semantic: [], procedural: [] }
+    const result: ForgetByIdsResult = { forgotten: [], notFound: [], outOfScope: [] }
+    const idsByType: Record<ForgettableType, string[]> = { episode: [], digest: [], semantic: [], procedural: [] }
     for (const id of requested) {
       const matches = rowsById.get(id) ?? []
-      const forgettable = matches.filter((m) => isForgettableType(m.type))
       if (matches.length === 0) {
         result.notFound.push(id)
         continue
       }
-      if (forgettable.length === 0) {
-        result.notForgettable.push(id)
-        continue
-      }
-      const inScope = forgettable.filter((m) => this.isInForgetScope(m.data.projectId))
+      const inScope = matches.filter((m) => this.isInForgetScope(m.data.projectId))
       if (inScope.length === 0) {
         result.outOfScope.push(id)
         continue
       }
       for (const match of inScope) {
-        const type = match.type as ForgettableType
+        const type = match.type
         idsByType[type].push(id)
         result.forgotten.push({ id, type })
       }
@@ -1118,6 +1108,9 @@ export class Memory {
 
     // Tombstone only; access_count and confidence stay untouched. Bumping
     // access_count (as recordAccess does) raises a memory's recall rank.
+    // Digests go first: a store that cannot tombstone them (SQLite) throws
+    // before any other tier is changed.
+    if (idsByType.digest.length > 0) await this.storage.digests.markForgotten(idsByType.digest)
     if (idsByType.semantic.length > 0) await this.storage.semantic.markForgotten(idsByType.semantic)
     if (idsByType.procedural.length > 0) await this.storage.procedural.markForgotten(idsByType.procedural)
     if (idsByType.episode.length > 0) await this.storage.episodes.markForgotten(idsByType.episode)
@@ -1127,7 +1120,7 @@ export class Memory {
     // coalesce(forgottenAt, deletedAt) IS NULL. SQL stays the source of truth:
     // a graph failure (or absent Neo4j) must never fail the forget.
     const graph = this._graph
-    const forgottenIds = [...idsByType.episode, ...idsByType.semantic, ...idsByType.procedural]
+    const forgottenIds = [...idsByType.episode, ...idsByType.digest, ...idsByType.semantic, ...idsByType.procedural]
     if (graph && typeof graph.forgetMemories === 'function' && forgottenIds.length > 0) {
       try {
         await graph.forgetMemories(forgottenIds)

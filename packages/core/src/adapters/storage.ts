@@ -134,6 +134,13 @@ export interface DigestStorage {
   recordFactExtractionFailure(id: string, failure: FactExtractionFailure): Promise<number>
   /** Stamp one digest's `factsExtractedAt`, removing it from the pending set. */
   markFactsExtracted(id: string, at: Date): Promise<void>
+  /**
+   * Tombstone the given digests (sets forgotten_at), as the episode store's
+   * markForgotten does. A digest's summary cannot be split by source episode,
+   * so a forget of any episode it absorbed forgets the whole digest. Returns
+   * the number of rows newly tombstoned. Idempotent.
+   */
+  markForgotten(ids: string[]): Promise<number>
 }
 
 export interface SemanticStorage {
@@ -383,8 +390,7 @@ export interface StorageAdapter {
    * Return every memory forgotten or (for `semantic`) superseded at or
    * after `since`. Feeds the recall engine's reconcile pass so its
    * in-memory tier caches drop rows the backing store no longer serves.
-   * `digests` never appear here — that tier has no forgotten_at column and
-   * is never superseded.
+   * Digests appear when forgotten; they are never superseded.
    */
   listTombstonesSince?(since: Date): Promise<Array<{ id: string; type: MemoryType }>>
 

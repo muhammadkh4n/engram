@@ -23,6 +23,10 @@
  *                           required too, or startup fails naming the variable.
  *                           The capture worker then materializes stored events
  *                           and embeds the new items.
+ *   ENGRAM_DOCUMENTS_TOKEN — enables POST /documents/sync (at least 32 chars, equal to
+ *                           neither BEARER_TOKEN nor ENGRAM_CAPTURE_TOKEN). When set,
+ *                           ENGRAM_PROJECT_REGISTRY_FILE, ENGRAM_SECRET_SOURCES_FILE,
+ *                           SUPABASE_URL and SUPABASE_KEY are required too.
  */
 
 import { main } from './http-server.js'

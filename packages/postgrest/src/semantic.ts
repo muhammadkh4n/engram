@@ -306,10 +306,12 @@ export class PostgRestSemanticStorage implements SemanticStorage {
     topic: string,
     opts?: { fromDate?: Date; toDate?: Date },
   ): Promise<SemanticMemory[]> {
+    // Superseded rows stay: the timeline shows them as the topic's history.
     let query = this.client
       .from('memory_semantic')
       .select('*')
       .or(`topic.eq.${orOperand(topic)},topic.ilike.${orIlikeOperand(topic)}`)
+      .is('forgotten_at', null)
       .order('created_at', { ascending: true })
 
     if (opts?.fromDate) {

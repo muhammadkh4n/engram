@@ -251,6 +251,22 @@ describe('withRecallEngine: write-through', () => {
     expect(after).not.toContain(`episode:${target.id}`)
   })
 
+  it('digests.markForgotten removes the row from subsequent vectorSearch results', async () => {
+    const fake = freshFake()
+    const { decorated } = await readyDecorated(fake)
+    const target = CORPUS.rows.find(r => r.type === 'digest')
+    if (!target) throw new Error('fixture corpus has no digest row')
+    const q = perturb(emb(target), CORPUS.rng, 0.05)
+
+    const before = keysOf(await decorated.vectorSearch(q, { limit: 20 }))
+    expect(before).toContain(`digest:${target.id}`)
+
+    await decorated.digests.markForgotten([target.id])
+
+    const after = keysOf(await decorated.vectorSearch(q, { limit: 20 }))
+    expect(after).not.toContain(`digest:${target.id}`)
+  })
+
   it('semantic.markSuperseded removes the row from subsequent vectorSearch results', async () => {
     const fake = freshFake()
     const { decorated } = await readyDecorated(fake)

@@ -21,13 +21,13 @@ export type Tier = 'semantic' | 'digests' | 'procedural'
 export interface TierConfig {
   tier: Tier
   table: string
-  /** memory_digests has no forgotten_at column — digests are never tombstoned. */
+  /** Whether the table carries a forgotten_at tombstone to skip. */
   hasForgottenAt: boolean
 }
 
 export const TIER_CONFIGS: Record<Tier, TierConfig> = {
   semantic: { tier: 'semantic', table: 'memory_semantic', hasForgottenAt: true },
-  digests: { tier: 'digests', table: 'memory_digests', hasForgottenAt: false },
+  digests: { tier: 'digests', table: 'memory_digests', hasForgottenAt: true },
   procedural: { tier: 'procedural', table: 'memory_procedural', hasForgottenAt: true },
 }
 

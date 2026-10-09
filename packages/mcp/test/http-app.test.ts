@@ -8,12 +8,15 @@ import type { CaptureDeps } from '../src/ingest/capture.js'
 import type { IngestedEvent, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
 import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-events/project-registry.js'
 import type { CaptureEventsRouteDeps } from '../src/capture-events/route.js'
+import type { DocumentsRouteDeps } from '../src/documents-route.js'
 import { RECEIVED_AT, envelope, validEvent } from './capture-events/fixtures.js'
 
 const TOKEN = 'test-bearer-token'
 const CAPTURE_TOKEN = 'test-capture-token-0123456789abcdef'
+const DOCUMENTS_TOKEN = 'test-documents-token-0123456789abcdef'
 const BODY_CAP = 2048
 const EVENTS_BODY_CAP = 4096
+const DOCUMENTS_BODY_CAP = 4096
 
 const REGISTRY: ProjectRegistry = parseProjectRegistry({
   version: 1,
@@ -26,6 +29,7 @@ interface Harness {
   mcp: ReturnType<typeof vi.fn>
   captureDeps: ReturnType<typeof vi.fn>
   ingestEvents: ReturnType<typeof vi.fn>
+  syncDocumentNote: ReturnType<typeof vi.fn>
   logError: ReturnType<typeof vi.fn>
   port: number
   close: () => Promise<void>
@@ -33,13 +37,17 @@ interface Harness {
 
 interface ServerOptions {
   captureToken?: string | null
+  documentsToken?: string | null
   ready?: () => ProjectRegistry | null
   status?: () => SecretRegistryStatus
 }
 
 async function startServer(opts: ServerOptions = {}): Promise<Harness> {
   const captureToken = opts.captureToken === undefined ? CAPTURE_TOKEN : opts.captureToken
-  const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken, allowedHosts: null }
+  const documentsToken = opts.documentsToken === undefined ? DOCUMENTS_TOKEN : opts.documentsToken
+  const config: HttpConfig = {
+    port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken, documentsToken, allowedHosts: null,
+  }
   const mcp = vi.fn(async (_req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end('{"mcp":true}')
@@ -66,6 +74,14 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     log: () => {},
     now: () => RECEIVED_AT,
   }
+  const syncDocumentNote = vi.fn(async () => ({ status: 'unchanged' as const, sections: null, itemIds: [] }))
+  const documents: DocumentsRouteDeps = {
+    store: { syncDocumentNote },
+    ready: opts.ready ?? (() => REGISTRY),
+    status: opts.status ?? (() => ({ configured: true, unreadable: [], values: 1 })),
+    log: () => {},
+    now: () => RECEIVED_AT,
+  }
   const logError = vi.fn()
   const server = http.createServer(
     createRequestListener(config, {
@@ -74,6 +90,8 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
       captureBodyMaxBytes: BODY_CAP,
       captureEvents,
       captureEventsBodyMaxBytes: EVENTS_BODY_CAP,
+      documents,
+      documentsBodyMaxBytes: DOCUMENTS_BODY_CAP,
       logError,
     }),
   )
@@ -84,6 +102,7 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     mcp,
     captureDeps,
     ingestEvents,
+    syncDocumentNote,
     logError,
     port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
@@ -175,7 +194,8 @@ describe('POST /capture', () => {
   })
 
   it('answers a failed body read with a retryable capture outcome, not a JSON-RPC body', async () => {
-    const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken: null, allowedHosts: null }
+    const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken: null, documentsToken: null,
+      allowedHosts: null }
     const capture: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: vi.fn() }
     const logError = vi.fn()
     const listener = createRequestListener(config, { mcp: vi.fn(), capture, logError })
@@ -261,6 +281,90 @@ describe('other routes', () => {
     expect((await post(`${h.url}/capture`, '{}', auth)).status).toBe(401)
     expect(h.mcp).not.toHaveBeenCalled()
     expect(h.captureDeps).not.toHaveBeenCalled()
+  })
+
+  it('refuses the documents token on /mcp, /capture and /capture/events', async () => {
+    const auth = { authorization: `Bearer ${DOCUMENTS_TOKEN}` }
+    expect((await post(`${h.url}/mcp`, '{}', auth)).status).toBe(401)
+    expect((await post(`${h.url}/capture`, '{}', auth)).status).toBe(401)
+    expect((await post(`${h.url}/capture/events`, '{}', auth)).status).toBe(401)
+    expect(h.mcp).not.toHaveBeenCalled()
+    expect(h.captureDeps).not.toHaveBeenCalled()
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /documents/sync', () => {
+  const docsUrl = (): string => `${h.url}/documents/sync`
+  const postDocs = (body: string, token = DOCUMENTS_TOKEN): Promise<Response> =>
+    post(docsUrl(), body, { authorization: `Bearer ${token}` })
+  const request = (): string => JSON.stringify({
+    source: 'vault',
+    notes: [{
+      path: 'Notes/inbox.md',
+      note_version: 'v-1',
+      seen_at: '2026-10-05T11:00:00Z',
+      mtime: '2026-10-05T11:00:00Z',
+      deleted: false,
+      frontmatter: null,
+      sections: [{ heading_path: [], index: 0, text: 'Buy milk.', kind_hint: 'note' }],
+    }],
+  })
+
+  it('refuses no token, BEARER_TOKEN and the capture token', async () => {
+    const bare = await fetch(docsUrl(), { method: 'POST', body: request() })
+    expect(bare.status).toBe(401)
+    expect(bare.headers.get('www-authenticate')).toContain('Bearer')
+    expect((await postDocs(request(), TOKEN)).status).toBe(401)
+    expect((await postDocs(request(), CAPTURE_TOKEN)).status).toBe(401)
+    expect(h.syncDocumentNote).not.toHaveBeenCalled()
+  })
+
+  it('answers 405 to anything but POST', async () => {
+    const res = await fetch(docsUrl(), { headers: { authorization: `Bearer ${DOCUMENTS_TOKEN}` } })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('POST')
+  })
+
+  it('answers 413 above the body cap', async () => {
+    const res = await postDocs(JSON.stringify({ source: 'vault', notes: [], pad: 'z'.repeat(DOCUMENTS_BODY_CAP) }))
+    expect(res.status).toBe(413)
+    expect(await res.json()).toEqual({ error: `body exceeds ${DOCUMENTS_BODY_CAP} bytes`, retryable: false })
+    expect(h.syncDocumentNote).not.toHaveBeenCalled()
+  })
+
+  it('answers 400, not retryable, to a body that is not JSON', async () => {
+    const res = await postDocs('{"source":')
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ error: 'the body is not valid JSON', retryable: false })
+  })
+
+  it('syncs a valid request through the server scrubber and answers results and totals', async () => {
+    const res = await postDocs(request())
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    const json = await res.json() as { results: unknown[]; totals: Record<string, number> }
+    expect(json.results).toEqual([{ path: 'Notes/inbox.md', status: 'unchanged' }])
+    expect(json.totals).toMatchObject({ notes: 1, unchanged: 1 })
+    expect(h.syncDocumentNote).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers 503 with the documents token unset, draining the body', async () => {
+    await h.close()
+    h = await startServer({ documentsToken: null })
+    const res = await postDocs(request())
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ retryable: true })
+    expect(h.syncDocumentNote).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 while the secret registry is degraded', async () => {
+    await h.close()
+    h = await startServer({ status: () => ({ configured: false, unreadable: [], values: 0 }) })
+    const res = await postDocs(request())
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ retryable: true })
+    expect(h.syncDocumentNote).not.toHaveBeenCalled()
   })
 })
 
@@ -358,6 +462,28 @@ describe('loadHttpConfig', () => {
     const shared = 's'.repeat(40)
     expect(() => loadHttpConfig({ BEARER_TOKEN: shared, ENGRAM_CAPTURE_TOKEN: shared })).toThrow(
       /ENGRAM_CAPTURE_TOKEN must differ from BEARER_TOKEN/,
+    )
+  })
+
+  it('leaves the documents token null when ENGRAM_DOCUMENTS_TOKEN is unset', () => {
+    expect(loadHttpConfig({ BEARER_TOKEN: 't' }).documentsToken).toBeNull()
+  })
+
+  it('reads a documents token of 32 or more characters', () => {
+    const token = 'd'.repeat(32)
+    expect(loadHttpConfig({ BEARER_TOKEN: 't', ENGRAM_DOCUMENTS_TOKEN: token }).documentsToken).toBe(token)
+  })
+
+  it('refuses a 31-char documents token and one equal to BEARER_TOKEN or the capture token', () => {
+    expect(() => loadHttpConfig({ BEARER_TOKEN: 't', ENGRAM_DOCUMENTS_TOKEN: 'd'.repeat(31) })).toThrow(
+      /ENGRAM_DOCUMENTS_TOKEN must be at least 32 characters/,
+    )
+    const shared = 's'.repeat(40)
+    expect(() => loadHttpConfig({ BEARER_TOKEN: shared, ENGRAM_DOCUMENTS_TOKEN: shared })).toThrow(
+      /ENGRAM_DOCUMENTS_TOKEN must differ/,
+    )
+    expect(() => loadHttpConfig({ BEARER_TOKEN: 't', ENGRAM_CAPTURE_TOKEN: shared, ENGRAM_DOCUMENTS_TOKEN: shared })).toThrow(
+      /ENGRAM_DOCUMENTS_TOKEN must differ/,
     )
   })
 

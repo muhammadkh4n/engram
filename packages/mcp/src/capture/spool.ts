@@ -20,7 +20,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { scrubSecrets } from '@engram-mem/core'
+import { scrubSecrets, scrubStructured } from '@engram-mem/core'
 import { CAPTURE_EVENTS_MAX } from '../capture-events/contract.js'
 import { scrubEvent } from '../capture-events/scrub.js'
 import { appendPrivateFile, ensurePrivateDir, openPrivateHandle } from '../ingest/private-files.js'
@@ -257,14 +257,34 @@ interface Prepared {
 }
 
 /**
+ * The line with its secrets masked. A line that parses passes every scrub view
+ * (scrubStructured) and is serialized again: scrubbing only the serialized
+ * text would read each string escaped (a newline as `\n`, hiding a token at a
+ * line start) and miss an env or JSON block held inside a value. Only an
+ * unparsable line is scrubbed as text. A refusal throws, like a scrub that
+ * fails, so the dead letter keeps the line's length and sha256 alone.
+ */
+async function maskedLine(line: string): Promise<string> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return (await scrubSecrets(line)).text
+  }
+  const walked = await scrubStructured(parsed)
+  if (!walked.ok) throw new Error(`spool line not masked: ${walked.reason}`)
+  return JSON.stringify(walked.value)
+}
+
+/**
  * A spool line that can never be sent, as its dead letter. The line was
  * written by a producer that may not have scrubbed it, so the dead letter
- * holds the line with every registered value masked; a line that cannot be
- * masked is recorded by its length and sha256 alone.
+ * holds the line masked; a line that cannot be masked is recorded by its
+ * length and sha256 alone.
  */
 async function unsendableLine(line: string, reason: string, at: string): Promise<DeadLetter> {
   try {
-    return { at, reason, event: (await scrubSecrets(line)).text }
+    return { at, reason, event: await maskedLine(line) }
   } catch {
     return { at, reason, length: line.length, sha256: createHash('sha256').update(line, 'utf8').digest('hex') }
   }

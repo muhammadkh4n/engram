@@ -9,10 +9,12 @@
  *   POST /capture          — the capture pipeline (hooks and CLIs), BEARER_TOKEN auth
  *   POST /capture/events   — raw capture events, ENGRAM_CAPTURE_TOKEN auth; 503
  *                            while that token is unset
+ *   POST /documents/sync   — vault notes, ENGRAM_DOCUMENTS_TOKEN auth; 503 while
+ *                            that token is unset
  *
- * Tokens are per route: BEARER_TOKEN is refused on /capture/events and the
- * capture token on /mcp and /capture, so a leaked capture client token
- * cannot read memory.
+ * Tokens are per route: each route accepts its own token and refuses the
+ * other two, so a leaked capture or documents client token cannot read
+ * memory, and no client token writes through another client's route.
  */
 
 import type http from 'node:http'
@@ -34,6 +36,16 @@ import {
   type CaptureEventsResponse,
   type CaptureEventsRouteDeps,
 } from './capture-events/route.js'
+import {
+  DOCUMENTS_BODY_MAX_BYTES,
+  DOCUMENTS_DISABLED_MESSAGE,
+  failedDocumentsResponse,
+  invalidDocumentsResponse,
+  runDocumentsRequest,
+  unavailableDocumentsResponse,
+  type DocumentsResponse,
+  type DocumentsRouteDeps,
+} from './documents-route.js'
 
 /**
  * A capture carries at most 100,000 content chars plus small metadata. JSON
@@ -45,12 +57,17 @@ export const CAPTURE_BODY_MAX_BYTES = 1024 * 1024
 /** The shortest ENGRAM_CAPTURE_TOKEN accepted. */
 export const CAPTURE_TOKEN_MIN_CHARS = 32
 
+/** The shortest ENGRAM_DOCUMENTS_TOKEN accepted. */
+export const DOCUMENTS_TOKEN_MIN_CHARS = 32
+
 export interface HttpConfig {
   port: number
   host: string
   bearerToken: string
   /** ENGRAM_CAPTURE_TOKEN; null leaves /capture/events answering 503. */
   captureToken: string | null
+  /** ENGRAM_DOCUMENTS_TOKEN; null leaves /documents/sync answering 503. */
+  documentsToken: string | null
   allowedHosts: ReadonlySet<string> | null
 }
 
@@ -61,6 +78,9 @@ export interface HttpHandlers {
   /** Wired when the capture token is set; absent, /capture/events answers 503. */
   captureEvents?: CaptureEventsRouteDeps
   captureEventsBodyMaxBytes?: number
+  /** Wired when the documents token is set; absent, /documents/sync answers 503. */
+  documents?: DocumentsRouteDeps
+  documentsBodyMaxBytes?: number
   logError?: (line: string) => void
 }
 
@@ -85,7 +105,14 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   if (captureToken !== null && captureToken === bearerToken) {
     throw new Error('ENGRAM_CAPTURE_TOKEN must differ from BEARER_TOKEN')
   }
-  return { port, host, bearerToken, captureToken, allowedHosts }
+  const documentsToken = env['ENGRAM_DOCUMENTS_TOKEN'] || null
+  if (documentsToken !== null && documentsToken.length < DOCUMENTS_TOKEN_MIN_CHARS) {
+    throw new Error(`ENGRAM_DOCUMENTS_TOKEN must be at least ${DOCUMENTS_TOKEN_MIN_CHARS} characters`)
+  }
+  if (documentsToken !== null && (documentsToken === bearerToken || documentsToken === captureToken)) {
+    throw new Error('ENGRAM_DOCUMENTS_TOKEN must differ from BEARER_TOKEN and ENGRAM_CAPTURE_TOKEN')
+  }
+  return { port, host, bearerToken, captureToken, documentsToken, allowedHosts }
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -246,6 +273,65 @@ async function handleCaptureEvents(
   sendCaptureEvents(res, await runCaptureEventsRequest(handlers.captureEvents, parsed))
 }
 
+function sendDocuments(res: http.ServerResponse, response: DocumentsResponse): void {
+  res.writeHead(response.status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(response.body))
+}
+
+async function handleDocuments(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: HttpConfig,
+  handlers: HttpHandlers,
+  logError: (line: string) => void,
+): Promise<void> {
+  if (config.documentsToken === null) {
+    req.resume()
+    sendDocuments(res, unavailableDocumentsResponse(DOCUMENTS_DISABLED_MESSAGE))
+    return
+  }
+  if (!checkAuth(req, config.documentsToken)) {
+    req.resume()
+    res.writeHead(401, {
+      'content-type': 'application/json',
+      'www-authenticate': 'Bearer realm="engram-documents"',
+    })
+    res.end(JSON.stringify({ error: 'unauthorized' }))
+    return
+  }
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+  const maxBytes = handlers.documentsBodyMaxBytes ?? DOCUMENTS_BODY_MAX_BYTES
+  let read: BodyRead
+  try {
+    read = await readBody(req, maxBytes)
+  } catch (err) {
+    logError(`[engram-mcp-http] documents body read failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (!res.headersSent && !res.destroyed) sendDocuments(res, failedDocumentsResponse())
+    return
+  }
+  if ('tooLarge' in read) {
+    sendDocuments(res, invalidDocumentsResponse(`body exceeds ${maxBytes} bytes`, 413))
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(read.body.toString('utf8'))
+  } catch {
+    sendDocuments(res, invalidDocumentsResponse('the body is not valid JSON'))
+    return
+  }
+  if (!handlers.documents) {
+    sendDocuments(res, unavailableDocumentsResponse())
+    return
+  }
+  sendDocuments(res, await runDocumentsRequest(handlers.documents, parsed))
+}
+
 async function route(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -270,6 +356,10 @@ async function route(
   const path = url.split('?')[0]
   if (path === '/capture/events') {
     await handleCaptureEvents(req, res, config, handlers, logError)
+    return
+  }
+  if (path === '/documents/sync') {
+    await handleDocuments(req, res, config, handlers, logError)
     return
   }
 

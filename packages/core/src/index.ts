@@ -10,6 +10,8 @@ export {
   ENTITY_TYPES,
   CAPTURE_EVENT_TYPES,
   ITEM_INVARIANTS,
+  FORGET_STORES,
+  ITEM_ACTION_OUTCOMES,
 } from './items/types.js'
 export type {
   ItemClass,
@@ -26,9 +28,27 @@ export type {
   NewItem,
   InsertedItem,
   ForgetEffect,
+  ForgetStore,
+  ForgottenMemory,
+  ItemActionOutcome,
+  ItemActionResult,
   InvariantCounts,
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
+export {
+  DOCUMENT_SECTION_KINDS,
+  DOCUMENT_SECTIONS_MAX,
+  DOCUMENT_REMOVED_REASON,
+  DOCUMENT_NOTE_STATUSES,
+} from './items/documents.js'
+export type {
+  DocumentSectionKind,
+  DocumentSectionWrite,
+  DocumentNoteWrite,
+  DocumentNoteStatus,
+  DocumentSectionCounts,
+  DocumentNoteSyncResult,
+} from './items/documents.js'
 export type { ItemStore } from './items/item-store.js'
 export {
   EMBEDDING_ATTEMPTS_MAX,
@@ -87,6 +107,8 @@ export type {
   SessionIndexSource,
   SessionIndexUtterance,
 } from './items/capture-store.js'
+export { INGEST_TARGETS_MAX, INGEST_COMMIT_MATCHES_MAX } from './items/ingest-store.js'
+export type { IngestItemWrite, IngestProject, ItemIngestStore } from './items/ingest-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
 export { cutWholeChars, tailWholeChars } from './text/cut-text.js'
@@ -151,6 +173,8 @@ export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export { PLACEHOLDER_PREFIX } from './ingest/placeholder.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
+export { scrubStructured } from './ingest/scrub-structured.js'
+export type { ScrubStructuredResult, StructuredPath, StructuredRedaction } from './ingest/scrub-structured.js'
 export { findSecretCandidates } from './ingest/secret-candidates.js'
 export {
   createSecretRegistry,
@@ -335,7 +359,17 @@ export type {
   WindowShownItem,
   WindowTurnRef,
 } from './extraction/window.js'
-export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
+export {
+  gateWindow,
+  MAX_ITEMS_PER_SIDE,
+  ATTRIBUTION_PATTERNS,
+  SUBJECT_LABEL_MIN_CHARS,
+  SUBJECT_LABEL_MAX_CHARS,
+  MIN_SHARED_SHA_CHARS,
+} from './extraction/gate.js'
+// The root already exports the older ingestion extractEntities; these two
+// names are free, and typed writes extract entities the way extraction does.
+export { statementEntities, observationEntities } from './extraction/entities.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
 export { buildCommitPayload, draftCommit, draftLinks, finishCommit } from './extraction/persist.js'
 export type { ExtractionItemClass, CommitDraft, CommitDecisions } from './extraction/persist.js'

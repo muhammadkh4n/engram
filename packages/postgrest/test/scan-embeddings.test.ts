@@ -112,7 +112,7 @@ describe('PostgRestStorageAdapter.scanEmbeddings', () => {
     expect(rows.map(r => r.id)).toEqual(['ep-a', 'ep-b', 'ep-c'])
   })
 
-  it('digest tier: never gates forgotten_at (memory_digests has no such column)', async () => {
+  it('digest tier: gates forgotten_at, never superseded_by', async () => {
     const { adapter, fromFn } = buildAdapter()
     const chain = createChainable({
       data: [{ id: 'dg-1', created_at: '2026-01-01T00:00:00.000Z', project_id: null, session_id: 's1', embedding: [0.1] }],
@@ -123,7 +123,8 @@ describe('PostgRestStorageAdapter.scanEmbeddings', () => {
     await collectAll(adapter, 'digest', { batchSize: 10 })
 
     expect(fromFn).toHaveBeenCalledWith('memory_digests')
-    expect(chain.is).not.toHaveBeenCalled()
+    expect(chain.is).toHaveBeenCalledTimes(1)
+    expect(chain.is).toHaveBeenCalledWith('forgotten_at', null)
   })
 
   it('semantic tier: gates BOTH forgotten_at and superseded_by, sessionId always null', async () => {
@@ -201,11 +202,12 @@ describe('PostgRestStorageAdapter.scanEmbeddings', () => {
 })
 
 describe('PostgRestStorageAdapter.listTombstonesSince', () => {
-  it('unions forgotten episode/semantic/procedural rows with semantic supersession, deduping overlaps', async () => {
+  it('unions forgotten rows of every tier with semantic supersession, deduping overlaps', async () => {
     const { adapter, fromFn } = buildAdapter()
     const since = new Date('2026-01-01T00:00:00.000Z')
 
     const epChain = createChainable({ data: [{ id: 'ep-1' }], error: null })
+    const dgChain = createChainable({ data: [{ id: 'dg-1' }], error: null })
     const smForgottenChain = createChainable({ data: [{ id: 'sm-1' }], error: null })
     const prChain = createChainable({ data: [{ id: 'pr-1' }], error: null })
     // sm-1 reappears here (forgotten AND superseded since `since`) — must dedupe to one entry.
@@ -215,6 +217,8 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
 
     fromFn
       .mockReturnValueOnce(epChain)
+      .mockReturnValueOnce(empty())
+      .mockReturnValueOnce(dgChain)
       .mockReturnValueOnce(empty())
       .mockReturnValueOnce(smForgottenChain)
       .mockReturnValueOnce(empty())
@@ -227,13 +231,14 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
 
     expect(fromFn.mock.calls.map((c) => c[0])).toEqual([
       'memory_episodes', 'memory_episodes',
+      'memory_digests', 'memory_digests',
       'memory_semantic', 'memory_semantic',
       'memory_procedural', 'memory_procedural',
       'memory_semantic', 'memory_semantic',
     ])
-    expect(fromFn).not.toHaveBeenCalledWith('memory_digests')
 
     expect(epChain.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
+    expect(dgChain.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
     expect(smForgottenChain.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
     expect(prChain.gte).toHaveBeenCalledWith('forgotten_at', since.toISOString())
     expect(smSupersededChain.gte).toHaveBeenCalledWith('updated_at', since.toISOString())
@@ -241,6 +246,7 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
 
     expect(results).toEqual([
       { id: 'ep-1', type: 'episode' },
+      { id: 'dg-1', type: 'digest' },
       { id: 'sm-1', type: 'semantic' },
       { id: 'pr-1', type: 'procedural' },
       { id: 'sm-2', type: 'semantic' },
@@ -266,6 +272,7 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
       .mockReturnValueOnce(page4)
       .mockReturnValueOnce(createChainable({ data: [], error: null }))
       .mockReturnValueOnce(createChainable({ data: [], error: null }))
+      .mockReturnValueOnce(createChainable({ data: [], error: null }))
       .mockReturnValueOnce(supersededPage1)
       .mockReturnValueOnce(supersededPage2)
 
@@ -283,7 +290,7 @@ describe('PostgRestStorageAdapter.listTombstonesSince', () => {
     expect(page4.gt).toHaveBeenCalledWith('id', 'ep-5')
     expect(supersededPage2.gt).toHaveBeenCalledWith('id', 'sm-9')
     expect(supersededPage2.not).toHaveBeenCalledWith('superseded_by', 'is', null)
-    expect(fromFn).toHaveBeenCalledTimes(8)
+    expect(fromFn).toHaveBeenCalledTimes(9)
   })
 
   it('propagates a query error', async () => {

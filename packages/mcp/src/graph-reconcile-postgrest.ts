@@ -13,7 +13,7 @@ export const ID_LOOKUP_SLICE = 200
 
 const TABLES: Record<SqlTier, { table: string; columns: string }> = {
   episode: { table: 'memory_episodes', columns: 'id, project_id, created_at, forgotten_at' },
-  digest: { table: 'memory_digests', columns: 'id, project_id, created_at' },
+  digest: { table: 'memory_digests', columns: 'id, project_id, created_at, forgotten_at' },
   semantic: { table: 'memory_semantic', columns: 'id, project_id, created_at, forgotten_at, superseded_by' },
   procedural: { table: 'memory_procedural', columns: 'id, project_id, created_at, forgotten_at' },
 }
@@ -34,8 +34,8 @@ const TEXT_TABLES: Record<TextTier, { table: string; columns: string; text(row: 
     columns: 'id, topic, content, forgotten_at, superseded_by',
     text: (row) => `${row.topic ?? ''} ${row.content ?? ''}`,
   },
-  // Digests have no forgotten_at and are never superseded.
-  digest: { table: 'memory_digests', columns: 'id, summary', text: (row) => row.summary ?? '' },
+  // Digests are never superseded.
+  digest: { table: 'memory_digests', columns: 'id, summary, forgotten_at', text: (row) => row.summary ?? '' },
 }
 
 /**

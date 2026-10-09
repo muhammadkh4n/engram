@@ -212,7 +212,7 @@ const PARITY: Record<string, Parity> = {
     ],
     unreachable: 'a register entry content always holds its id; a blank trigger or question becomes a NULL context',
   },
-  'memory_items.memory_items_trust_check': { def: 'b090227de9ae', unreachable: 'trust is a literal per event type' },
+  'memory_items.memory_items_trust_check': { def: '5d6d073a03b1', unreachable: 'trust is a literal per event type' },
 }
 
 function rejectionReason(e: FixtureEvent): string | null {

@@ -291,9 +291,8 @@ export interface RecallResult {
   payload?: RecallPayload
 }
 
-/** Memory tiers a forget can tombstone. Digests are derived summaries with no
- *  tombstone column, so they are never forgettable. */
-export type ForgettableType = 'episode' | 'semantic' | 'procedural'
+/** Memory tiers a forget can tombstone: every tier. */
+export type ForgettableType = 'episode' | 'digest' | 'semantic' | 'procedural'
 
 /** One memory a forget query matched. A preview never writes; the caller
  *  approves ids from this list and passes them to forgetByIds. */
@@ -320,8 +319,6 @@ export interface ForgetByIdsResult {
   notFound: string[]
   /** Rows tagged with another project than the scoped instance's; untouched. */
   outOfScope: string[]
-  /** Digest ids: they have no tombstone and cannot be forgotten. */
-  notForgettable: string[]
 }
 
 export interface RetrievedMemory {

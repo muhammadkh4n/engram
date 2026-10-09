@@ -77,8 +77,8 @@ const CLUSTER_HISTOGRAM_EDGES = [1, 5, 20, 100] as const
 /** Mirrors scanEmbeddings' own per-tier table/tombstone assumptions
  * (packages/postgrest/src/adapter.ts) so the "total live rows" denominator
  * below counts exactly the rows scanEmbeddings would consider eligible —
- * memory_digests has no forgotten_at column (digests are never tombstoned)
- * and only memory_semantic carries superseded_by. */
+ * every tier carries forgotten_at and only memory_semantic carries
+ * superseded_by. */
 interface TierRowConfig {
   table: string
   hasForgottenAt: boolean
@@ -86,7 +86,7 @@ interface TierRowConfig {
 }
 const TIER_ROW_CONFIG: Record<MemoryType, TierRowConfig> = {
   episode: { table: 'memory_episodes', hasForgottenAt: true, hasSupersededBy: false },
-  digest: { table: 'memory_digests', hasForgottenAt: false, hasSupersededBy: false },
+  digest: { table: 'memory_digests', hasForgottenAt: true, hasSupersededBy: false },
   semantic: { table: 'memory_semantic', hasForgottenAt: true, hasSupersededBy: true },
   procedural: { table: 'memory_procedural', hasForgottenAt: true, hasSupersededBy: false },
 }

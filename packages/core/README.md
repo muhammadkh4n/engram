@@ -329,10 +329,9 @@ interface ForgetPreview {
 }
 
 interface ForgetByIdsResult {
-  forgotten: Array<{ id: string; type: 'episode' | 'semantic' | 'procedural' }>
+  forgotten: Array<{ id: string; type: 'episode' | 'digest' | 'semantic' | 'procedural' }>
   notFound: string[]
   outOfScope: string[]      // tagged with another project than a scoped instance's
-  notForgettable: string[]  // digests have no tombstone
 }
 
 // 1. Preview (optional tier filter)

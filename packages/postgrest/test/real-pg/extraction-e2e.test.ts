@@ -46,6 +46,18 @@ function recorded(name: string): RecordedScenario {
 const DIALOG = recorded('04-dialog-two-char-answer')
 const FINDING = recorded('07-evidenced-observation')
 
+/** The finding's window with the commit the reply cites dropped from the turn's tool refs. */
+function withoutCommitTool(scenario: RecordedScenario): RecordedScenario {
+  const window = structuredClone(scenario.window)
+  for (const turn of window.turns ?? []) {
+    const tools = turn.source?.tools
+    if (tools) turn.source!.tools = tools.filter((t) => t.name !== 'Bash')
+  }
+  return { window, reply: scenario.reply }
+}
+
+const UNBACKED_FINDING = withoutCommitTool(FINDING)
+
 let uuidCounter = 0
 function event(sessionId: string, type: string, payload: Record<string, unknown>, occurredAt: string): StoredEvent {
   uuidCounter += 1
@@ -253,6 +265,32 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction end to end on real 
 
       expect(await tick()).toEqual({ windows: 0, succeeded: 0, held: 0, transient: 0, full: false })
       expect(requests).toHaveLength(1)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'stores a finding whose cited commit the turn never ran at trust 3 with its evidence kept',
+    async () => {
+      const [turnId] = await seed('tst-session-unbacked', UNBACKED_FINDING)
+      const { tick, requests, message } = ticker(UNBACKED_FINDING)
+
+      expect(await tick()).toEqual({ windows: 1, succeeded: 1, held: 0, transient: 0, full: false })
+      expect(requests.map((r) => r.user)).toEqual([message])
+
+      const observation = await json<Record<string, unknown>>(
+        `SELECT row_to_json(o) FROM (
+           SELECT kind, speaker, trust, lineage, source -> 'evidence' AS evidence
+             FROM public.memory_items WHERE class = 'observation') o;`,
+      )
+      expect(observation).toEqual({
+        kind: 'finding',
+        speaker: 'assistant',
+        trust: 3,
+        lineage: [turnId],
+        evidence: [{ type: 'commit', ref: 'c0ffee5d1e9a' }],
+      })
+      expect(await pg.psql(`SELECT count(*) FROM public.engram_invariant_counts() WHERE violations <> 0;`)).toBe('0')
     },
     TEST_TIMEOUT_MS,
   )

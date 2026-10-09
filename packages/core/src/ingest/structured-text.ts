@@ -35,6 +35,16 @@ export function isSecretUnderKey(name: string, value: string, isLiteralQuoted = 
   return isLiteralQuoted || !isShellReference(trimmed)
 }
 
+/**
+ * Whether an object member is a credential by its key: a string, or a number
+ * (a JSON number token reads as the same literal), under a key that
+ * isSecretUnderKey accepts. Every reader of structured data asks this one rule.
+ */
+export function isSecretMember(key: string, value: unknown): boolean {
+  if (typeof value === 'string') return isSecretUnderKey(key, value)
+  return typeof value === 'number' && isSecretUnderKey(key, String(value))
+}
+
 function span(start: number, end: number, name: string): DetectedSpan {
   return { start, end, kind: 'named-secret', name, rank: STRUCTURED_RANK }
 }
@@ -52,10 +62,9 @@ interface Frame {
 function jsonValueSpan(frame: Frame | undefined, token: string, start: number): DetectedSpan | null {
   if (!frame?.isObject) return null
   if (token.startsWith('"')) {
-    const value = JSON.parse(token) as string
-    return isSecretUnderKey(frame.key, value) ? span(start + 1, start + token.length - 1, frame.key) : null
+    return isSecretMember(frame.key, JSON.parse(token)) ? span(start + 1, start + token.length - 1, frame.key) : null
   }
-  return JSON_NUMBER_RE.test(token) && isSecretUnderKey(frame.key, token) ? span(start, start + token.length, frame.key) : null
+  return JSON_NUMBER_RE.test(token) && isSecretMember(frame.key, Number(token)) ? span(start, start + token.length, frame.key) : null
 }
 
 function jsonSpans(text: string): DetectedSpan[] {

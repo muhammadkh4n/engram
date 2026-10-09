@@ -106,6 +106,15 @@ describe('PostgREST text search paths without a query vector', () => {
     expect(orFilters(calls)).toEqual([])
   })
 
+  it('digests.search filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestDigestStorage(client).search('billing worker tax column', { limit: 3 })
+
+    expect(calls[0]).toEqual(['from', 'memory_digests'])
+    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
+  })
+
   it('digests.search keeps the project and untagged rows when projectId is set', async () => {
     const { client, calls } = recordingClient()
 
@@ -138,5 +147,58 @@ describe('PostgREST text search paths without a query vector', () => {
     await new PostgRestEpisodeStorage(client).search('billing', { limit: 3, projectId: 'a,b)' })
 
     expect(orFilters(calls)).toEqual(['project_id.eq."a,b)",project_id.is.null'])
+  })
+})
+
+describe('PostgREST session and recent reads exclude forgotten rows', () => {
+  it('digests.getBySession filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestDigestStorage(client).getBySession('sess-digest')
+
+    expect(calls[0]).toEqual(['from', 'memory_digests'])
+    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
+  })
+
+  it('digests.getRecent filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestDigestStorage(client).getRecent(7)
+
+    expect(calls[0]).toEqual(['from', 'memory_digests'])
+    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
+  })
+
+  it('episodes.getBySession filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client).getBySession('sess-episode')
+
+    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
+  })
+
+  it('episodes.getBySession on the legacy schema adds no column it lacks', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client, true).getBySession('sess-episode')
+
+    expect(isNullFilters(calls)).toEqual([])
+  })
+
+  it('episodes.getUnconsolidated filters forgotten_at', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestEpisodeStorage(client).getUnconsolidated('sess-episode')
+
+    expect(isNullFilters(calls)).toEqual(['consolidated_at', 'forgotten_at'])
+  })
+
+  it('semantic.getTopicTimeline filters forgotten_at and keeps superseded rows', async () => {
+    const { client, calls } = recordingClient()
+
+    await new PostgRestSemanticStorage(client).getTopicTimeline('deploys')
+
+    expect(calls[0]).toEqual(['from', 'memory_semantic'])
+    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
   })
 })

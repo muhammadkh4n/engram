@@ -148,6 +148,14 @@ export class SqliteDigestStorage implements DigestStorage {
     return rows.map((r) => this.rowToDigest(r))
   }
 
+  /**
+   * The SQLite digests table has no tombstone column. Throwing here, before
+   * forgetByIds writes any other tier, keeps a forget from half-applying.
+   */
+  async markForgotten(_ids: string[]): Promise<number> {
+    throw new Error('digest forgetting needs the Postgres store')
+  }
+
   async markFactsExtracted(id: string, at: Date): Promise<void> {
     this.db
       .prepare('UPDATE digests SET facts_extracted_at = julianday(?) WHERE id = ?')
