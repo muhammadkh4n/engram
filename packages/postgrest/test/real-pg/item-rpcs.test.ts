@@ -1221,7 +1221,11 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
       return { utteranceId: u.id, eventId }
     }
 
-    /** Inserts as postgres with triggers disabled; the CHECKs still apply. */
+    /**
+     * Inserts as postgres with triggers disabled; the CHECKs still apply. The
+     * column list names only the object's keys: memory_items has a generated
+     * column, which refuses any value but DEFAULT.
+     */
     async function insertPastTriggers(item: ItemObject): Promise<void> {
       const full = {
         lineage: [],
@@ -1231,8 +1235,10 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
         ...item,
         content_hash: sha256Hex(item.content as string),
       }
+      const columns = Object.keys(full).join(', ')
       await pg.psql(`SET session_replication_role = replica;
-        INSERT INTO public.memory_items SELECT * FROM jsonb_populate_record(NULL::public.memory_items, ${jsonb(full)});`)
+        INSERT INTO public.memory_items (${columns})
+        SELECT ${columns} FROM jsonb_populate_record(NULL::public.memory_items, ${jsonb(full)});`)
     }
 
     it('reads zero for every invariant, in order, on an empty store', async () => {

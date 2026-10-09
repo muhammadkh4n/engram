@@ -1,18 +1,22 @@
 -- =============================================================================
--- Engram — optional BM25 lexical ranking (pg_textsearch)
+-- Engram — BM25 lexical ranking and the item candidate statement (pg_textsearch)
 -- =============================================================================
 --
 -- Apply via:   psql -U postgres -d engram -v ON_ERROR_STOP=1 -1 -f bm25.sql
 --
--- Optional. Requires the pg_textsearch extension (>= 1.0) on PostgreSQL 17 or
--- 18, loaded at server start with shared_preload_libraries = 'pg_textsearch'.
--- On a server without the library CREATE EXTENSION fails and nothing else in
--- this file is applied.
+-- Requires the pg_textsearch extension (>= 1.0) on PostgreSQL 17 or 18,
+-- loaded at server start with shared_preload_libraries = 'pg_textsearch'. On
+-- a server without the library CREATE EXTENSION fails and nothing else in
+-- this file is applied. The tier tables' BM25 ranking is optional, since the
+-- adapter falls back to engram_text_match without it, but recall over the
+-- item store needs this file: engram_item_candidates, the statement it reads
+-- candidates through, ranks its lexical leg with BM25 and lives here.
 --
--- Apply after schema.sql: the indexes and the function read the memory tables
--- it creates. Then run NOTIFY pgrst, 'reload schema' so PostgREST exposes
--- engram_bm25_match, and restart the engram service: the adapter checks for
--- the function once at startup and keeps that lexical mode until restarted.
+-- Apply after schema.sql: the indexes and the functions read the memory
+-- tables it creates. Then run NOTIFY pgrst, 'reload schema' so PostgREST
+-- exposes engram_bm25_match and engram_item_candidates, and restart the
+-- engram service: the adapter checks for engram_bm25_match once at startup
+-- and keeps that lexical mode until restarted.
 --
 -- Idempotent and safe to re-apply: CREATE EXTENSION IF NOT EXISTS,
 -- CREATE INDEX IF NOT EXISTS, CREATE OR REPLACE FUNCTION, and a revoke of
@@ -37,9 +41,11 @@
 --   DROP EXTENSION pg_textsearch;
 --
 -- The last statement fails if anything else still uses the extension, and
--- that error is the signal to look, not to force the drop. After a service
--- restart the adapter falls back to engram_text_match (ts_rank_cd) from
--- schema.sql. Remove BM25 before moving to an image without the library:
+-- that error is the signal to look, not to force the drop. It also removes
+-- engram_item_candidates and its two helpers, which are declared dependent
+-- on the extension, and with them candidate reads over the item store. After
+-- a service restart the adapter falls back to engram_text_match (ts_rank_cd)
+-- from schema.sql. Remove BM25 before moving to an image without the library:
 -- inserts into a table that carries a BM25 index fail once the library is
 -- missing.
 --
@@ -403,3 +409,383 @@ GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, 
 -- and the service falls back to engram_text_match instead of finding a
 -- function whose every call fails. Re-applying adds no second dependency.
 ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) DEPENDS ON EXTENSION pg_textsearch;
+
+
+--
+-- Name: engram_item_candidates and its helpers; Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- engram_item_candidates is the statement recall reads item candidates
+-- through. It returns them from up to four legs, in this order: vector
+-- (p_embedding), hyde (p_hyde_embedding), bm25 (p_terms) and subject
+-- (p_query); a leg runs only when its input is set. Each row is an item id,
+-- its leg, a 1-based rank within the leg, the leg's raw score and, on the
+-- vector legs, the access path taken. No text and no embedding: the caller
+-- fuses the legs and reads the items it keeps by id.
+--
+-- Visibility applies inside every leg's statement, before its LIMIT, so each
+-- cap is filled with rows the caller may receive:
+-- - a forgotten item never shows;
+-- - a retired item shows only with p_include_history; with p_as_of, an item
+--   retired after p_as_of counts as not retired;
+-- - assistant turns, commits, PRs, plan ledger log sections and session
+--   index rows show only with p_include_history;
+-- - legacy rows show only when p_classes names legacy;
+-- - an observation above p_max_observation_trust is left out;
+-- - with p_as_of, an item that occurred after it is left out;
+-- - p_exclude_session leaves out that session's items and every item whose
+--   lineage names one of them, so a statement derived from the session's
+--   turns goes with them;
+-- - a superseded item stays, for the caller to show next to its successor;
+-- - p_project_id filters nothing: a project only orders the subject leg.
+--
+-- Why EXECUTE. Every leg runs through EXECUTE <text> USING <values>.
+-- PL/pgSQL plans an EXECUTE each time it runs and caches nothing, and the
+-- USING values reach that one-shot plan as constants: LIMIT $13 is costed at
+-- its value and each filter at its real selectivity. A static RETURN QUERY is
+-- prepared once per connection and, under plan_cache_mode = auto, may switch
+-- to a generic plan after five calls, where a parameter LIMIT is costed at a
+-- tenth of the rows. The text holds only the predicates the request needs,
+-- never an "$n IS NULL OR" arm, so estimates and partial indexes see the real
+-- filter set. engram_item_candidates_leg_sql assembles it from fixed
+-- fragments chosen by flags and values travel only through USING, so no
+-- caller string ever becomes SQL in this SECURITY DEFINER function.
+--
+-- Ties. Every leg's ORDER BY ends in the item id, so rows with equal scores
+-- come back in one order on every call, whatever order the heap holds them in.
+
+-- engram_item_candidates_validate checks a request and resolves its class
+-- filter. c_vocabulary is every class:kind pair memory_items_kind_check
+-- admits, and c_history the pairs only a call with p_include_history sees.
+-- Each history kind belongs to one class, so leaving those kinds out by name
+-- leaves out exactly those pairs; session_index, all of whose kinds are
+-- history, is a history-only class. It returns the classes to read (those
+-- named, or every class but legacy and the history-only ones, which join
+-- with p_include_history) and the kinds to leave out: the history kinds,
+-- unless the call includes history or names its kinds, since a named history
+-- kind without p_include_history is refused. Every refusal is
+-- invalid_parameter_value and names the argument. The vector dimension is
+-- checked here because a function argument keeps no vector(1536) typmod.
+CREATE OR REPLACE FUNCTION public.engram_item_candidates_validate(p_embedding public.vector, p_query text, p_hyde_embedding public.vector, p_entities text[], p_classes text[], p_kinds text[], p_include_history boolean, p_max_observation_trust smallint, p_k integer, p_force_path text) RETURNS TABLE(classes text[], hidden_kinds text[])
+    LANGUAGE plpgsql IMMUTABLE
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  c_vocabulary CONSTANT text[] := ARRAY[
+    'utterance:user_prompt', 'utterance:user_answer', 'utterance:assistant_turn',
+    'mk_statement:ruling', 'mk_statement:fact', 'mk_statement:correction',
+    'observation:fact', 'observation:procedure', 'observation:finding',
+    'artifact:commit', 'artifact:pr', 'artifact:ledger_decision', 'artifact:ledger_ruling', 'artifact:ruling_entry',
+    'document_section:note', 'document_section:plan_readme', 'document_section:plan_phase',
+    'document_section:plan_ledger', 'document_section:plan_ledger_log', 'document_section:finding',
+    'document_section:audit', 'document_section:research',
+    'session_index:session',
+    'legacy:legacy_episode', 'legacy:legacy_digest', 'legacy:legacy_fact'
+  ];
+  c_history CONSTANT text[] := ARRAY[
+    'utterance:assistant_turn', 'artifact:commit', 'artifact:pr', 'document_section:plan_ledger_log',
+    'session_index:session'
+  ];
+  c_dimensions CONSTANT integer := 1536;
+  v_history boolean := coalesce(p_include_history, false);
+  v_known_classes text[];
+  v_known_kinds text[];
+  v_history_kinds text[];
+  v_history_classes text[];
+  v_legacy_kinds text[];
+  v_bad text[];
+BEGIN
+  v_known_classes := ARRAY(SELECT DISTINCT split_part(t.pair, ':', 1) FROM unnest(c_vocabulary) AS t(pair) ORDER BY 1);
+  v_known_kinds := ARRAY(SELECT DISTINCT split_part(t.pair, ':', 2) FROM unnest(c_vocabulary) AS t(pair) ORDER BY 1);
+  v_history_kinds := ARRAY(SELECT split_part(t.pair, ':', 2) FROM unnest(c_history) AS t(pair) ORDER BY 1);
+  v_history_classes := ARRAY(
+    SELECT k.cls FROM unnest(v_known_classes) AS k(cls)
+     WHERE NOT EXISTS (SELECT 1 FROM unnest(c_vocabulary) AS t(pair)
+                        WHERE split_part(t.pair, ':', 1) = k.cls AND t.pair <> ALL (c_history)));
+  v_legacy_kinds := ARRAY(SELECT split_part(t.pair, ':', 2) FROM unnest(c_vocabulary) AS t(pair)
+                           WHERE split_part(t.pair, ':', 1) = 'legacy');
+
+  IF p_k IS NULL OR p_k NOT BETWEEN 1 AND 200 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_k must be between 1 and 200';
+  END IF;
+  IF p_classes IS NOT NULL THEN
+    IF cardinality(p_classes) = 0 THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_classes must name at least one class';
+    END IF;
+    v_bad := ARRAY(SELECT u.v FROM unnest(p_classes) AS u(v) WHERE u.v IS NULL OR u.v <> ALL (v_known_classes));
+    IF cardinality(v_bad) > 0 THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_classes holds an unknown class: ' || array_to_string(v_bad, ', ', 'NULL');
+    END IF;
+    IF NOT v_history AND p_classes && v_history_classes THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_classes names a history-only class without p_include_history';
+    END IF;
+  END IF;
+  IF p_kinds IS NOT NULL THEN
+    IF cardinality(p_kinds) = 0 THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_kinds must name at least one kind';
+    END IF;
+    v_bad := ARRAY(SELECT u.v FROM unnest(p_kinds) AS u(v) WHERE u.v IS NULL OR u.v <> ALL (v_known_kinds));
+    IF cardinality(v_bad) > 0 THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_kinds holds an unknown kind: ' || array_to_string(v_bad, ', ', 'NULL');
+    END IF;
+    IF NOT v_history AND p_kinds && v_history_kinds THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_kinds names a history kind without p_include_history';
+    END IF;
+    IF p_kinds && v_legacy_kinds AND NOT coalesce('legacy' = ANY (p_classes), false) THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates: p_kinds names a legacy kind without legacy in p_classes';
+    END IF;
+  END IF;
+  IF p_force_path IS NOT NULL AND p_force_path NOT IN ('exact', 'hnsw') THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_force_path must be exact or hnsw';
+  END IF;
+  IF char_length(p_query) > 4000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_query must be at most 4000 characters';
+  END IF;
+  IF p_max_observation_trust NOT BETWEEN 0 AND 3 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_max_observation_trust must be between 0 and 3';
+  END IF;
+  IF vector_dims(p_embedding) <> c_dimensions THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_embedding must have 1536 dimensions';
+  END IF;
+  IF vector_dims(p_hyde_embedding) <> c_dimensions THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_hyde_embedding must have 1536 dimensions';
+  END IF;
+  IF cardinality(p_entities) > 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'feature_not_supported',
+      MESSAGE = 'engram_item_candidates: p_entities has no leg to run';
+  END IF;
+
+  classes := coalesce(p_classes, ARRAY(
+    SELECT k.cls FROM unnest(v_known_classes) AS k(cls)
+     WHERE k.cls <> 'legacy' AND (v_history OR k.cls <> ALL (v_history_classes))));
+  hidden_kinds := CASE WHEN v_history OR p_kinds IS NOT NULL THEN NULL ELSE v_history_kinds END;
+  RETURN NEXT;
+END; $$;
+
+-- engram_item_candidates_leg_sql returns the text of one leg's statement,
+-- built from fixed fragments chosen by flags. It never sees a value, so no
+-- value can reach the text. Every statement returns (id, score) rows, best
+-- first, and reads its values from one positional USING list that every
+-- caller passes in this order:
+--   $1  p_embedding               $8  the kinds left out
+--   $2  p_query                   $9  p_project_id
+--   $3  p_terms                   $10 p_exclude_session
+--   $4  p_hyde_embedding          $11 p_as_of
+--   $5  p_entities                $12 p_max_observation_trust
+--   $6  the classes to read       $13 p_k
+--   $7  p_kinds
+-- A statement ignores the positions it does not reference.
+--
+-- vector and hyde, exact branch: the distance of every visible row with an
+-- embedding is computed once, in a MATERIALIZED CTE with no ORDER BY, and the
+-- sort above it reads (id, distance) pairs that no index holds, so this text
+-- plans an exact scan whatever the costs. The score is 1 minus the cosine
+-- distance.
+--
+-- bm25: each term becomes its own phraseto_tsquery('english', t), matched on
+-- fts through idx_items_fts, as engram_bm25_match matches a tier. The
+-- 'english' parser splits 'xyz-123' into 'xyz' and '-123', and the phrase
+-- query requires the two adjacent, so a row holding only 'xyz' never
+-- matches. Scoring with <@> outside a BM25 index scan tokenises the row
+-- again, so at most 500 rows are scored: each term ranks its visible matches
+-- by ts_rank_cd(fts, q, 2), which divides by the row's length as BM25 length
+-- normalisation does, and candidates are taken round-robin across terms, so
+-- a rare term keeps its rows while common terms share the rest. A row is
+-- scored on the terms it matches only, with idx_items_bm25's term
+-- statistics, and the score is negated so higher is better. The LIMIT sits
+-- below the score > 0 filter, which keeps that filter out of the scan, where
+-- it would score every row a second time.
+--
+-- subject: up to 5 subjects whose label's lexemes all occur among the
+-- query's (plainto_tsquery of the label against to_tsvector of p_query; a
+-- label with no lexeme never matches) and that hold a visible item, so a
+-- subject with nothing to show takes no place. p_project_id's subjects come
+-- first when it is set, then labels with more lexemes. Their visible items
+-- follow in subject order, current before superseded (as of p_as_of when it
+-- is set), newer first. The score is the label's lexeme count.
+CREATE OR REPLACE FUNCTION public.engram_item_candidates_leg_sql(p_leg text, p_branch text, p_has_kinds boolean, p_hide_kinds boolean, p_include_history boolean, p_has_as_of boolean, p_has_exclude_session boolean, p_has_trust_cap boolean, p_has_project boolean) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_visible text := 'i.forgotten_at IS NULL AND i.class = ANY ($6)';
+  v_current text := 'i.valid_to IS NULL';
+  v_subject_order text := 's.lexemes DESC, s.id';
+  v_vector text;
+BEGIN
+  IF p_has_kinds THEN
+    v_visible := v_visible || ' AND i.kind = ANY ($7)';
+  END IF;
+  IF p_hide_kinds THEN
+    v_visible := v_visible || ' AND i.kind <> ALL ($8)';
+  END IF;
+  IF p_has_as_of THEN
+    v_visible := v_visible || ' AND i.occurred_at <= $11';
+    v_current := '(i.valid_to IS NULL OR i.valid_to > $11)';
+  END IF;
+  IF NOT p_include_history AND p_has_as_of THEN
+    v_visible := v_visible || ' AND (i.retired_at IS NULL OR i.retired_at > $11)';
+  ELSIF NOT p_include_history THEN
+    v_visible := v_visible || ' AND i.retired_at IS NULL';
+  END IF;
+  IF p_has_exclude_session THEN
+    v_visible := v_visible || ' AND i.session_id IS DISTINCT FROM $10'
+      || ' AND NOT coalesce(i.lineage && ARRAY(SELECT x.id FROM public.memory_items x WHERE x.session_id = $10), false)';
+  END IF;
+  IF p_has_trust_cap THEN
+    v_visible := v_visible || ' AND (i.class <> ''observation'' OR i.trust <= $12)';
+  END IF;
+  IF p_has_project THEN
+    v_subject_order := '(s.project_id IS NOT DISTINCT FROM $9) DESC, ' || v_subject_order;
+  END IF;
+
+  IF p_leg IN ('vector', 'hyde') THEN
+    IF p_branch IS DISTINCT FROM 'exact' THEN
+      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+        MESSAGE = 'engram_item_candidates_leg_sql: a vector leg runs the exact branch';
+    END IF;
+    v_vector := CASE WHEN p_leg = 'vector' THEN '$1' ELSE '$4' END;
+    RETURN 'WITH filtered AS MATERIALIZED ('
+      || ' SELECT i.id, i.embedding <=> ' || v_vector || ' AS d FROM public.memory_items i'
+      || ' WHERE i.embedding IS NOT NULL AND ' || v_visible || ')'
+      || ' SELECT f.id, 1 - f.d AS score FROM filtered f ORDER BY f.d, f.id LIMIT $13';
+  END IF;
+
+  IF p_leg = 'bm25' THEN
+    RETURN 'WITH match_terms AS MATERIALIZED ('
+      || ' SELECT u.t, u.q FROM (SELECT t, phraseto_tsquery(''english'', t) AS q FROM unnest($3) AS t) u'
+      || ' WHERE numnode(u.q) > 0),'
+      || ' picked AS ('
+      || ' SELECT c.id FROM match_terms mt CROSS JOIN LATERAL ('
+      || ' SELECT i.id, row_number() OVER (ORDER BY ts_rank_cd(i.fts, mt.q, 2) DESC, i.id) AS term_rank'
+      || ' FROM public.memory_items i WHERE i.fts @@ mt.q AND ' || v_visible
+      || ' ORDER BY ts_rank_cd(i.fts, mt.q, 2) DESC, i.id LIMIT 500) c'
+      || ' GROUP BY c.id ORDER BY min(c.term_rank), c.id LIMIT 500)'
+      || ' SELECT s.id, s.score FROM ('
+      || ' SELECT i.id, -(i.search_text <@> to_bm25query(array_to_string(ARRAY('
+      || ' SELECT mt.t FROM match_terms mt WHERE i.fts @@ mt.q), '' ''), ''idx_items_bm25''))::double precision AS score'
+      || ' FROM public.memory_items i WHERE i.id IN (SELECT p.id FROM picked p)'
+      || ' ORDER BY score DESC, i.id LIMIT $13) s'
+      || ' WHERE s.score > 0 ORDER BY s.score DESC, s.id';
+  END IF;
+
+  IF p_leg = 'subject' THEN
+    RETURN 'WITH query_lexemes AS MATERIALIZED (SELECT to_tsvector(''english'', $2) AS v),'
+      || ' matched AS MATERIALIZED ('
+      || ' SELECT s.id, s.lexemes, row_number() OVER (ORDER BY ' || v_subject_order || ') AS subject_rank FROM ('
+      || ' SELECT sj.id, sj.project_id, cardinality(tsvector_to_array(to_tsvector(''english'', sj.label))) AS lexemes'
+      || ' FROM public.memory_subjects sj CROSS JOIN query_lexemes ql'
+      || ' WHERE numnode(plainto_tsquery(''english'', sj.label)) > 0'
+      || ' AND ql.v @@ plainto_tsquery(''english'', sj.label)'
+      || ' AND EXISTS (SELECT 1 FROM public.memory_items i WHERE i.subject_id = sj.id AND ' || v_visible || ')'
+      || ') s ORDER BY ' || v_subject_order || ' LIMIT 5)'
+      || ' SELECT i.id, m.lexemes::double precision AS score'
+      || ' FROM matched m JOIN public.memory_items i ON i.subject_id = m.id'
+      || ' WHERE ' || v_visible
+      || ' ORDER BY m.subject_rank, (' || v_current || ') DESC, i.occurred_at DESC, i.id LIMIT $13';
+  END IF;
+
+  RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+    MESSAGE = 'engram_item_candidates_leg_sql: p_leg must be vector, hyde, bm25 or subject';
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.engram_item_candidates(p_embedding public.vector DEFAULT NULL::public.vector, p_query text DEFAULT NULL::text, p_terms text[] DEFAULT NULL::text[], p_hyde_embedding public.vector DEFAULT NULL::public.vector, p_entities text[] DEFAULT NULL::text[], p_classes text[] DEFAULT NULL::text[], p_kinds text[] DEFAULT NULL::text[], p_project_id text DEFAULT NULL::text, p_exclude_session text DEFAULT NULL::text, p_as_of timestamp with time zone DEFAULT NULL::timestamp with time zone, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL::smallint, p_k integer DEFAULT 50, p_force_path text DEFAULT NULL::text) RETURNS TABLE(item_id uuid, leg text, rank integer, raw_score double precision, path text)
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  v_classes text[];
+  v_hidden_kinds text[];
+  v_history boolean := coalesce(p_include_history, false);
+  v_legs text[] := ARRAY[]::text[];
+  v_leg text;
+  v_path text;
+  v_sql text;
+  v_row record;
+  v_rank integer;
+BEGIN
+  SELECT a.classes, a.hidden_kinds INTO v_classes, v_hidden_kinds
+    FROM public.engram_item_candidates_validate(p_embedding, p_query, p_hyde_embedding, p_entities, p_classes, p_kinds,
+                                                p_include_history, p_max_observation_trust, p_k, p_force_path) AS a;
+
+  IF p_embedding IS NOT NULL THEN
+    v_legs := v_legs || 'vector'::text;
+  END IF;
+  IF p_hyde_embedding IS NOT NULL THEN
+    v_legs := v_legs || 'hyde'::text;
+  END IF;
+  IF cardinality(p_terms) > 0 THEN
+    v_legs := v_legs || 'bm25'::text;
+  END IF;
+  IF p_query ~ '\S' THEN
+    v_legs := v_legs || 'subject'::text;
+  END IF;
+
+  FOREACH v_leg IN ARRAY v_legs LOOP
+    v_path := CASE WHEN v_leg IN ('vector', 'hyde') THEN 'exact' END;
+    v_sql := public.engram_item_candidates_leg_sql(v_leg, v_path, p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
+                                                   v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
+                                                   p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
+    v_rank := 0;
+    FOR v_row IN EXECUTE v_sql
+      USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
+            p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k
+    LOOP
+      v_rank := v_rank + 1;
+      item_id := v_row.id;
+      leg := v_leg;
+      rank := v_rank;
+      raw_score := v_row.score;
+      path := v_path;
+      RETURN NEXT;
+    END LOOP;
+  END LOOP;
+END; $$;
+
+-- The candidate functions are SECURITY DEFINER or serve one, and PostgREST
+-- serves public to the anon role: EXECUTE is revoked from PUBLIC, anon and
+-- authenticated and granted to service_role, as for engram_bm25_match.
+REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) FROM PUBLIC;
+
+DO $$
+DECLARE
+  role_name name;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) FROM %I', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
+
+GRANT EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) TO service_role;
+
+-- The statement text names to_bm25query and <@> only inside strings, so no
+-- dependency is recorded for them. Declaring one on each of the three
+-- functions makes DROP EXTENSION pg_textsearch remove them together, instead
+-- of leaving a function whose every lexical call fails. Re-applying adds no
+-- second dependency.
+ALTER FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) DEPENDS ON EXTENSION pg_textsearch;
+ALTER FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) DEPENDS ON EXTENSION pg_textsearch;
+ALTER FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) DEPENDS ON EXTENSION pg_textsearch;
