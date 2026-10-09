@@ -104,17 +104,17 @@ describe('cursor files', () => {
     expect(await loadCursor(root, SESSION)).toBeNull()
   })
 
-  it('carries the last prompt id, and loads a cursor written before it was kept', async () => {
-    expect(emptyCursor('/tmp/session.jsonl').last_prompt_id).toBeNull()
-    const cursor: TranscriptCursor = { ...emptyCursor('/tmp/session.jsonl'), last_prompt_id: 'prompt-compact' }
+  it('carries the last compact boundary, and loads a cursor written before it was kept', async () => {
+    expect(emptyCursor('/tmp/session.jsonl').compact_boundary_at).toBeNull()
+    const cursor: TranscriptCursor = { ...emptyCursor('/tmp/session.jsonl'), compact_boundary_at: '2026-10-05T10:03:20.000Z' }
     await saveCursor(root, SESSION, cursor)
     expect(await loadCursor(root, SESSION)).toEqual(cursor)
 
-    const { last_prompt_id: _none, ...withoutPromptId } = emptyCursor('/tmp/session.jsonl')
-    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(withoutPromptId))
+    const { compact_boundary_at: _none, ...withoutBoundary } = emptyCursor('/tmp/session.jsonl')
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(withoutBoundary))
     expect(await loadCursor(root, SESSION)).toEqual(emptyCursor('/tmp/session.jsonl'))
 
-    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify({ ...emptyCursor('/tmp/session.jsonl'), last_prompt_id: 7 }))
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify({ ...emptyCursor('/tmp/session.jsonl'), compact_boundary_at: 7 }))
     expect(await loadCursor(root, SESSION)).toBeNull()
   })
 

@@ -46,11 +46,11 @@ export interface TranscriptCursor {
    */
   pending_calls: PendingCall[]
   /**
-   * The promptId of the last line before `offset` that yielded a prompt. Compaction writes
-   * `/compact` again after its summary, under the same promptId; a replay read after this
-   * cursor was saved is known to be the same prompt by this id.
+   * The timestamp of the last compact boundary before `offset`. A manual compaction writes the
+   * command that ran it again after the boundary, stamped with the command's original time, so
+   * a prompt line read after this cursor and stamped before this time is that replay.
    */
-  last_prompt_id: string | null
+  compact_boundary_at: string | null
 }
 
 export const READER_LOCK_STALE_MS = 60_000
@@ -83,7 +83,7 @@ export function emptyCursor(transcriptPath: string): TranscriptCursor {
     open_turn_emitted: [],
     plan_dirs: [],
     pending_calls: [],
-    last_prompt_id: null,
+    compact_boundary_at: null,
   }
 }
 
@@ -132,8 +132,8 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     isStringArray(c.plan_dirs) &&
     // A cursor written before calls were carried has none waiting.
     (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall))) &&
-    // A cursor written before the last prompt id was kept knows of none.
-    (c.last_prompt_id === undefined || c.last_prompt_id === null || typeof c.last_prompt_id === 'string')
+    // A cursor written before boundaries were kept knows of none.
+    (c.compact_boundary_at === undefined || c.compact_boundary_at === null || typeof c.compact_boundary_at === 'string')
   if (!valid) return null
   return {
     v: 1,
@@ -145,7 +145,7 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     open_turn_emitted: [...(c.open_turn_emitted as string[])],
     plan_dirs: [...(c.plan_dirs as string[])],
     pending_calls: [...((c.pending_calls as PendingCall[] | undefined) ?? [])],
-    last_prompt_id: (c.last_prompt_id as string | null | undefined) ?? null,
+    compact_boundary_at: (c.compact_boundary_at as string | null | undefined) ?? null,
   }
 }
 

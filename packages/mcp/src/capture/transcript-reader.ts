@@ -468,12 +468,36 @@ interface Mark {
   lastUuid: string | null
   lastLineStart: number | null
   planDirs: string[]
-  /** The promptId of the last line that yielded a prompt. */
-  lastPromptId: string | null
+  /** The timestamp of the last compact boundary. */
+  compactBoundaryAt: string | null
 }
 
-function promptIdOf(entry: Json): string | null {
-  return typeof entry.promptId === 'string' && entry.promptId.length > 0 ? entry.promptId : null
+function isCompactBoundary(entry: Json): boolean {
+  return entry.type === 'system' && entry.subtype === 'compact_boundary'
+}
+
+/** The instant of a timestamp, or null when it does not parse. */
+function instant(timestamp: unknown): number | null {
+  const ms = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN
+  return Number.isNaN(ms) ? null : ms
+}
+
+/**
+ * A user line stamped before the last compact boundary. A manual compaction writes the command
+ * that ran it twice: the line the user typed, before compacting, and, after the boundary and
+ * summary, a replay (a caveat, the command as tags, its output) stamped with the command's
+ * original time. Both read as prompts. A prompt typed after the boundary is stamped after it,
+ * so a prompt line stamped before it is the replay; that holds too for a continued session's
+ * file that opens with a boundary and the replay of a command typed in the parent file. The
+ * promptId cannot tell the replay apart: some compactions give its two lines different ids,
+ * and prompts typed during or after one can carry the replay's id. A timestamp that does not
+ * parse marks no replay.
+ */
+function isCommandReplay(entry: Json, boundaryAt: string | null): boolean {
+  if (entry.type !== 'user') return false
+  const boundary = instant(boundaryAt)
+  const stamped = instant(entry.timestamp)
+  return boundary !== null && stamped !== null && stamped < boundary
 }
 
 class TranscriptRead {
@@ -500,7 +524,7 @@ class TranscriptRead {
       lastUuid: cursor.last_uuid,
       lastLineStart: cursor.last_line_start,
       planDirs: [...cursor.plan_dirs],
-      lastPromptId: cursor.last_prompt_id,
+      compactBoundaryAt: cursor.compact_boundary_at,
     }
     this.here = { ...this.mark }
     this.carried = new Map(cursor.pending_calls.map((p) => [p.id, carriedCall(p)]))
@@ -519,24 +543,22 @@ class TranscriptRead {
     const uuid = typeof entry?.uuid === 'string' ? entry.uuid : null
     const inScope = entry !== null && !isOutOfScope(entry)
     const planDirs = inScope ? planDirsAfter(entry, before.planDirs) : before.planDirs
-    const prompt = inScope ? humanPromptText(entry) : null
-    const promptId = entry !== null && prompt !== null ? promptIdOf(entry) : null
+    const boundary = inScope && isCompactBoundary(entry)
     this.here = {
       offset: raw.end,
       line: lineNo,
       lastUuid: uuid ?? before.lastUuid,
       lastLineStart: uuid !== null ? raw.start : before.lastLineStart,
       planDirs,
-      lastPromptId: promptId ?? before.lastPromptId,
+      // Kept in the mark, so a turn re-read from the mark sees the boundary it saw the first
+      // time, and a replay read after the boundary's read still finds it in the cursor.
+      compactBoundaryAt: boundary ? (typeof entry.timestamp === 'string' ? entry.timestamp : null) : before.compactBoundaryAt,
     }
-    // One promptId is one prompt. Compaction writes the `/compact` the user typed a second
-    // time after its summary (a caveat, the command as tags, its output) under the original
-    // promptId, and no other prompt line comes between the two; so a prompt line with the
-    // previous prompt line's id is that same prompt and yields none. The id rides in the mark,
-    // so a re-read from the mark sees the same previous id, and a replay read later than the
-    // plain line still finds it in the cursor. A line without a promptId is a prompt of its own.
-    const repeated = promptId !== null && promptId === before.lastPromptId
-    if (inScope) await this.entry(entry, lineNo, planDirs, before, repeated ? null : prompt)
+    if (inScope) {
+      const prompt = humanPromptText(entry)
+      const replayed = prompt !== null && isCommandReplay(entry, before.compactBoundaryAt)
+      await this.entry(entry, lineNo, planDirs, before, replayed ? null : prompt)
+    }
     if (this.turn === null) this.setMark(this.here)
   }
 
@@ -614,7 +636,7 @@ class TranscriptRead {
         open_turn_emitted: this.tracked.filter((t) => t.line > m.line).map((t) => t.uuid),
         plan_dirs: m.planDirs,
         pending_calls: boundedPending(this.markCarried),
-        last_prompt_id: m.lastPromptId,
+        compact_boundary_at: m.compactBoundaryAt,
       },
     }
   }
