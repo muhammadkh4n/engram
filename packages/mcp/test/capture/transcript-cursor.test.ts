@@ -104,6 +104,20 @@ describe('cursor files', () => {
     expect(await loadCursor(root, SESSION)).toBeNull()
   })
 
+  it('carries the last compact boundary, and loads a cursor written before it was kept', async () => {
+    expect(emptyCursor('/tmp/session.jsonl').compact_boundary_at).toBeNull()
+    const cursor: TranscriptCursor = { ...emptyCursor('/tmp/session.jsonl'), compact_boundary_at: '2026-10-05T10:03:20.000Z' }
+    await saveCursor(root, SESSION, cursor)
+    expect(await loadCursor(root, SESSION)).toEqual(cursor)
+
+    const { compact_boundary_at: _none, ...withoutBoundary } = emptyCursor('/tmp/session.jsonl')
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(withoutBoundary))
+    expect(await loadCursor(root, SESSION)).toEqual(emptyCursor('/tmp/session.jsonl'))
+
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify({ ...emptyCursor('/tmp/session.jsonl'), compact_boundary_at: 7 }))
+    expect(await loadCursor(root, SESSION)).toBeNull()
+  })
+
   it('names a session file so it never starts with a dot', () => {
     expect(sessionFileName('.hidden')).toBe('%2Ehidden')
     expect(sessionFileName('a/b c')).toBe('a%2Fb%20c')

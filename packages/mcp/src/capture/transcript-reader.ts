@@ -468,6 +468,40 @@ interface Mark {
   lastUuid: string | null
   lastLineStart: number | null
   planDirs: string[]
+  /** The timestamp of the last compact boundary, until a prompt line is stamped at or after it. */
+  compactBoundaryAt: string | null
+}
+
+function isCompactBoundary(entry: Json): boolean {
+  return entry.type === 'system' && entry.subtype === 'compact_boundary'
+}
+
+/** The instant of a timestamp, or null when it does not parse. */
+function instant(timestamp: unknown): number | null {
+  const ms = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN
+  return Number.isNaN(ms) ? null : ms
+}
+
+/**
+ * Where a user prompt line is stamped against the last compact boundary. A manual compaction
+ * writes the command that ran it twice: the line the user typed, before compacting, and, after
+ * the boundary and summary, a replay (a caveat, the command as tags, its output) stamped with
+ * the command's original time. Both read as prompts. A prompt typed after the boundary is
+ * stamped after it, so a prompt line stamped before it is the replay; that holds too for a
+ * continued session's file that opens with a boundary and the replay of a command typed in the
+ * parent file. The promptId cannot tell the replay apart: some compactions give its two lines
+ * different ids, and prompts typed during or after one can carry the replay's id.
+ *
+ * The replay comes before any prompt stamped after the boundary, so the first such prompt ends
+ * the boundary: a clock stepped back later in the session cannot make a typed prompt look like
+ * a replay. A timestamp that does not parse, on either side, says neither.
+ */
+function sideOfBoundary(entry: Json, boundaryAt: string | null): 'before' | 'after' | null {
+  if (entry.type !== 'user') return null
+  const boundary = instant(boundaryAt)
+  const stamped = instant(entry.timestamp)
+  if (boundary === null || stamped === null) return null
+  return stamped < boundary ? 'before' : 'after'
 }
 
 class TranscriptRead {
@@ -494,6 +528,7 @@ class TranscriptRead {
       lastUuid: cursor.last_uuid,
       lastLineStart: cursor.last_line_start,
       planDirs: [...cursor.plan_dirs],
+      compactBoundaryAt: cursor.compact_boundary_at,
     }
     this.here = { ...this.mark }
     this.carried = new Map(cursor.pending_calls.map((p) => [p.id, carriedCall(p)]))
@@ -512,18 +547,30 @@ class TranscriptRead {
     const uuid = typeof entry?.uuid === 'string' ? entry.uuid : null
     const inScope = entry !== null && !isOutOfScope(entry)
     const planDirs = inScope ? planDirsAfter(entry, before.planDirs) : before.planDirs
+    const boundary = inScope && isCompactBoundary(entry)
+    const prompt = inScope ? humanPromptText(entry) : null
+    const side = entry !== null && prompt !== null ? sideOfBoundary(entry, before.compactBoundaryAt) : null
     this.here = {
       offset: raw.end,
       line: lineNo,
       lastUuid: uuid ?? before.lastUuid,
       lastLineStart: uuid !== null ? raw.start : before.lastLineStart,
       planDirs,
+      // Kept in the mark, so a turn re-read from the mark sees the boundary it saw the first
+      // time, and a replay read after the boundary's read still finds it in the cursor.
+      compactBoundaryAt: boundary
+        ? typeof entry.timestamp === 'string'
+          ? entry.timestamp
+          : null
+        : side === 'after'
+          ? null
+          : before.compactBoundaryAt,
     }
-    if (inScope) await this.entry(entry, lineNo, planDirs, before)
+    if (inScope) await this.entry(entry, lineNo, planDirs, before, side === 'before' ? null : prompt)
     if (this.turn === null) this.setMark(this.here)
   }
 
-  private async entry(entry: Json, lineNo: number, planDirs: string[], before: Mark): Promise<void> {
+  private async entry(entry: Json, lineNo: number, planDirs: string[], before: Mark, prompt: string | null): Promise<void> {
     if (isTurnStart(entry)) {
       if (this.turn) await this.closeTurn()
       // The new turn's lines are read again until it closes.
@@ -532,7 +579,6 @@ class TranscriptRead {
     } else if (this.turn === null && isTurnContent(entry)) {
       this.turn = newTurn()
     }
-    const prompt = humanPromptText(entry)
     if (prompt !== null) {
       await this.emit(entry, lineNo, planDirs, { type: 'user_prompt', payload: promptPayload(prompt, lineNo) })
     } else {
@@ -598,6 +644,7 @@ class TranscriptRead {
         open_turn_emitted: this.tracked.filter((t) => t.line > m.line).map((t) => t.uuid),
         plan_dirs: m.planDirs,
         pending_calls: boundedPending(this.markCarried),
+        compact_boundary_at: m.compactBoundaryAt,
       },
     }
   }

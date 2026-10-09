@@ -45,6 +45,13 @@ export interface TranscriptCursor {
    * result written after an idle sweep (a dialog answered later) still finds its call.
    */
   pending_calls: PendingCall[]
+  /**
+   * The timestamp of the last compact boundary before `offset`, until a prompt line stamped at
+   * or after it. A manual compaction writes the command that ran it again after the boundary,
+   * stamped with the command's original time, so a prompt line read after this cursor and
+   * stamped before this time is that replay.
+   */
+  compact_boundary_at: string | null
 }
 
 export const READER_LOCK_STALE_MS = 60_000
@@ -77,6 +84,7 @@ export function emptyCursor(transcriptPath: string): TranscriptCursor {
     open_turn_emitted: [],
     plan_dirs: [],
     pending_calls: [],
+    compact_boundary_at: null,
   }
 }
 
@@ -124,7 +132,9 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     isStringArray(c.open_turn_emitted) &&
     isStringArray(c.plan_dirs) &&
     // A cursor written before calls were carried has none waiting.
-    (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall)))
+    (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall))) &&
+    // A cursor written before boundaries were kept knows of none.
+    (c.compact_boundary_at === undefined || c.compact_boundary_at === null || typeof c.compact_boundary_at === 'string')
   if (!valid) return null
   return {
     v: 1,
@@ -136,6 +146,7 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     open_turn_emitted: [...(c.open_turn_emitted as string[])],
     plan_dirs: [...(c.plan_dirs as string[])],
     pending_calls: [...((c.pending_calls as PendingCall[] | undefined) ?? [])],
+    compact_boundary_at: (c.compact_boundary_at as string | null | undefined) ?? null,
   }
 }
 
