@@ -287,9 +287,12 @@ describe("bm25.sql revokes EXECUTE on pg_textsearch's own functions", () => {
     const grants = bm25.match(/^.*\bGRANT\b.*$/gm) ?? []
     expect(grants).toEqual([
       'GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_access_settings() TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_access_path(bigint) TO service_role;',
       'GRANT EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) TO service_role;',
       'GRANT EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) TO service_role;',
       'GRANT EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_candidates_explain(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text, boolean) TO service_role;',
     ])
   })
 

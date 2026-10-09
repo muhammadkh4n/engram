@@ -42,8 +42,9 @@
 --
 -- The last statement fails if anything else still uses the extension, and
 -- that error is the signal to look, not to force the drop. It also removes
--- engram_item_candidates and its two helpers, which are declared dependent
--- on the extension, and with them candidate reads over the item store. After
+-- engram_item_candidates, engram_item_candidates_explain and their helpers,
+-- which are declared dependent on the extension, and with them candidate
+-- reads over the item store. After
 -- a service restart the adapter falls back to engram_text_match (ts_rank_cd)
 -- from schema.sql. Remove BM25 before moving to an image without the library:
 -- inserts into a table that carries a BM25 index fail once the library is
@@ -453,6 +454,83 @@ ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], tex
 --
 -- Ties. Every leg's ORDER BY ends in the item id, so rows with equal scores
 -- come back in one order on every call, whatever order the heap holds them in.
+--
+-- The access path of the vector legs. A filtered nearest-neighbour query can
+-- run as an exact scan, which computes the distance of every visible row and
+-- sorts, or as an HNSW index scan, which walks the graph from the query vector
+-- and returns approximate neighbours. Left to the planner, the choice moves
+-- with table size and statistics: a custom plan of one static statement
+-- switched between the two as the table grew, and its HNSW plans returned
+-- approximate rows by default. So the function picks the path itself, and
+-- each branch's text admits only its own plan.
+--
+-- Count probe. Before the first vector leg, the function counts the visible
+-- rows that have an embedding, stopping at the first row past
+-- greatest(exact_max_rows, p_k): the count is exact up to that cap and the
+-- probe never counts further. Planner estimates are never used, because they
+-- move with ANALYZE and would send the same request over the same rows down
+-- different paths. Both vector legs share their filters, so one count serves
+-- them both.
+--
+-- Path. engram_item_access_path(count): exact at or below exact_max_rows,
+-- hnsw above it. p_force_path replaces the path, never the probe.
+--
+-- HNSW branch. Right before its statement, set_config(..., true) turns
+-- enable_seqscan, enable_bitmapscan and enable_sort off and sets
+-- hnsw.iterative_scan to relaxed_order, and hnsw.ef_search and
+-- hnsw.max_scan_tuples to engram_item_access_settings' values; right after
+-- it, each setting goes back to the value it held. With sequential scans,
+-- bitmap scans and sorts priced out, the HNSW index scan is the only plan
+-- left for ORDER BY distance LIMIT n, whatever the statistics say. The
+-- iterative scan checks the filters as it walks the graph and keeps walking
+-- until the LIMIT's rows have passed them or max_scan_tuples tuples were
+-- visited, so the filters apply before the cap. relaxed_order recalls more
+-- than strict_order but may return rows slightly out of order, so the
+-- statement fetches p_k * overfetch rows into a MATERIALIZED CTE and re-sorts
+-- them by exact distance. The settings go back at once so that the exact
+-- fallback and the lexical and subject legs plan with sorts and sequential
+-- scans allowed.
+--
+-- Fallback. A leg's rows are collected before any is returned. When the
+-- HNSW branch yields fewer than min(p_k, count) rows, because the iterative
+-- scan reached max_scan_tuples first, the leg runs the exact branch instead
+-- and reports the path exact_fallback.
+--
+-- Restore rule. engram_item_candidates and engram_item_candidates_explain
+-- name every setting they change in a SET clause. PostgreSQL restores each
+-- setting named in a function's SET clause when the function exits,
+-- including changes made inside it with set_config(..., true), and an error
+-- rolls them back with the transaction, so no setting of the policy reaches
+-- the caller's transaction, even when a statement fails between the set and
+-- the reset.
+
+-- engram_item_access_settings is the one place the policy's four numbers
+-- live:
+-- - exact_max_rows, the largest filtered size scanned exactly. 20000 equals
+--   max_scan_tuples: an exact scan of at most 20000 rows does no more
+--   distance work than an iterative scan that reaches its tuple cap;
+-- - ef_search, the HNSW candidate list. 400 covers the over-fetch of the
+--   largest p_k (200 rows, twice over);
+-- - overfetch, how many rows per requested row the HNSW branch fetches
+--   before the exact re-sort: 2;
+-- - max_scan_tuples, the tuples an iterative scan may visit: 20000,
+--   pgvector's default, pinned so a server-level change cannot move it.
+CREATE OR REPLACE FUNCTION public.engram_item_access_settings() RETURNS TABLE(exact_max_rows integer, ef_search integer, overfetch integer, max_scan_tuples integer)
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO 'public'
+    AS $$
+  SELECT 20000, 400, 2, 20000;
+$$;
+
+-- engram_item_access_path names the path for a filtered size: exact at or
+-- below exact_max_rows, hnsw above it.
+CREATE OR REPLACE FUNCTION public.engram_item_access_path(p_filtered_rows bigint) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    SET search_path TO 'public'
+    AS $$
+  SELECT CASE WHEN p_filtered_rows <= s.exact_max_rows THEN 'exact' ELSE 'hnsw' END
+    FROM public.engram_item_access_settings() AS s;
+$$;
 
 -- engram_item_candidates_validate checks a request and resolves its class
 -- filter. c_vocabulary is every class:kind pair memory_items_kind_check
@@ -580,20 +658,35 @@ END; $$;
 -- value can reach the text. Every statement returns (id, score) rows, best
 -- first, and reads its values from one positional USING list that every
 -- caller passes in this order:
---   $1  p_embedding               $8  the kinds left out
---   $2  p_query                   $9  p_project_id
---   $3  p_terms                   $10 p_exclude_session
---   $4  p_hyde_embedding          $11 p_as_of
---   $5  p_entities                $12 p_max_observation_trust
---   $6  the classes to read       $13 p_k
---   $7  p_kinds
+--   $1  p_embedding               $9  p_project_id
+--   $2  p_query                   $10 p_exclude_session
+--   $3  p_terms                   $11 p_as_of
+--   $4  p_hyde_embedding          $12 p_max_observation_trust
+--   $5  p_entities                $13 p_k
+--   $6  the classes to read       $14 the count probe's row cap (NULL: no cap)
+--   $7  p_kinds                   $15 the HNSW branch's fetch, p_k * overfetch
+--   $8  the kinds left out
 -- A statement ignores the positions it does not reference.
+--
+-- vector and hyde, count probe (p_branch count): the number of visible rows
+-- with an embedding, up to $14 of them.
 --
 -- vector and hyde, exact branch: the distance of every visible row with an
 -- embedding is computed once, in a MATERIALIZED CTE with no ORDER BY, and the
 -- sort above it reads (id, distance) pairs that no index holds, so this text
--- plans an exact scan whatever the costs. The score is 1 minus the cosine
--- distance.
+-- plans an exact scan whatever the costs: the HNSW index can only serve an
+-- ORDER BY on the distance expression over memory_items itself. The score is
+-- 1 minus the cosine distance.
+--
+-- vector and hyde, HNSW branch: the CTE orders memory_items by the distance
+-- expression and fetches $15 rows, the shape an HNSW index scan serves; the
+-- caller prices every other plan out before running it. The rows an
+-- iterative scan returns may be slightly out of order, so the outer
+-- statement re-sorts the materialized (id, distance) pairs and keeps $13.
+-- It sorts on d + 0, not d: PostgreSQL 17 carries the CTE's index order up
+-- to the outer query, and ORDER BY d, id would plan an Incremental Sort that
+-- takes the rows as already ordered by d and only orders equal distances by
+-- id. No pathkey covers d + 0, so the outer sort is a full sort.
 --
 -- bm25: each term becomes its own phraseto_tsquery('english', t), matched on
 -- fts through idx_items_fts, as engram_bm25_match matches a tier. The
@@ -653,15 +746,27 @@ BEGIN
   END IF;
 
   IF p_leg IN ('vector', 'hyde') THEN
-    IF p_branch IS DISTINCT FROM 'exact' THEN
-      RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-        MESSAGE = 'engram_item_candidates_leg_sql: a vector leg runs the exact branch';
-    END IF;
     v_vector := CASE WHEN p_leg = 'vector' THEN '$1' ELSE '$4' END;
-    RETURN 'WITH filtered AS MATERIALIZED ('
-      || ' SELECT i.id, i.embedding <=> ' || v_vector || ' AS d FROM public.memory_items i'
-      || ' WHERE i.embedding IS NOT NULL AND ' || v_visible || ')'
-      || ' SELECT f.id, 1 - f.d AS score FROM filtered f ORDER BY f.d, f.id LIMIT $13';
+    IF p_branch = 'count' THEN
+      RETURN 'SELECT count(*) FROM ('
+        || ' SELECT 1 FROM public.memory_items i'
+        || ' WHERE i.embedding IS NOT NULL AND ' || v_visible || ' LIMIT $14) s';
+    END IF;
+    IF p_branch = 'exact' THEN
+      RETURN 'WITH filtered AS MATERIALIZED ('
+        || ' SELECT i.id, i.embedding <=> ' || v_vector || ' AS d FROM public.memory_items i'
+        || ' WHERE i.embedding IS NOT NULL AND ' || v_visible || ')'
+        || ' SELECT f.id, 1 - f.d AS score FROM filtered f ORDER BY f.d, f.id LIMIT $13';
+    END IF;
+    IF p_branch = 'hnsw' THEN
+      RETURN 'WITH relaxed AS MATERIALIZED ('
+        || ' SELECT i.id, i.embedding <=> ' || v_vector || ' AS d FROM public.memory_items i'
+        || ' WHERE i.embedding IS NOT NULL AND ' || v_visible
+        || ' ORDER BY i.embedding <=> ' || v_vector || ' LIMIT $15)'
+        || ' SELECT r.id, 1 - r.d AS score FROM relaxed r ORDER BY r.d + 0, r.id LIMIT $13';
+    END IF;
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates_leg_sql: a vector leg runs the count, exact or hnsw branch';
   END IF;
 
   IF p_leg = 'bm25' THEN
@@ -705,21 +810,40 @@ END; $$;
 CREATE OR REPLACE FUNCTION public.engram_item_candidates(p_embedding public.vector DEFAULT NULL::public.vector, p_query text DEFAULT NULL::text, p_terms text[] DEFAULT NULL::text[], p_hyde_embedding public.vector DEFAULT NULL::public.vector, p_entities text[] DEFAULT NULL::text[], p_classes text[] DEFAULT NULL::text[], p_kinds text[] DEFAULT NULL::text[], p_project_id text DEFAULT NULL::text, p_exclude_session text DEFAULT NULL::text, p_as_of timestamp with time zone DEFAULT NULL::timestamp with time zone, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL::smallint, p_k integer DEFAULT 50, p_force_path text DEFAULT NULL::text) RETURNS TABLE(item_id uuid, leg text, rank integer, raw_score double precision, path text)
     LANGUAGE plpgsql VOLATILE SECURITY DEFINER
     SET search_path TO 'public'
+    SET enable_seqscan TO 'on'
+    SET enable_bitmapscan TO 'on'
+    SET enable_sort TO 'on'
+    SET hnsw.iterative_scan TO 'off'
+    SET hnsw.ef_search TO '40'
+    SET hnsw.max_scan_tuples TO '20000'
     AS $$
 DECLARE
   v_classes text[];
   v_hidden_kinds text[];
   v_history boolean := coalesce(p_include_history, false);
+  v_settings record;
+  v_probe_cap bigint;
+  v_fetch integer;
+  v_count bigint;
   v_legs text[] := ARRAY[]::text[];
   v_leg text;
   v_path text;
   v_sql text;
+  v_saved text[];
   v_row record;
+  v_ids uuid[];
+  v_scores double precision[];
   v_rank integer;
 BEGIN
   SELECT a.classes, a.hidden_kinds INTO v_classes, v_hidden_kinds
     FROM public.engram_item_candidates_validate(p_embedding, p_query, p_hyde_embedding, p_entities, p_classes, p_kinds,
                                                 p_include_history, p_max_observation_trust, p_k, p_force_path) AS a;
+  SELECT s.exact_max_rows, s.ef_search, s.overfetch, s.max_scan_tuples INTO v_settings
+    FROM public.engram_item_access_settings() AS s;
+  -- One row past the larger of the threshold and p_k: the path test and
+  -- min(p_k, count) for the fallback both read an exact count.
+  v_probe_cap := greatest(v_settings.exact_max_rows::bigint, p_k) + 1;
+  v_fetch := p_k * v_settings.overfetch;
 
   IF p_embedding IS NOT NULL THEN
     v_legs := v_legs || 'vector'::text;
@@ -735,22 +859,172 @@ BEGIN
   END IF;
 
   FOREACH v_leg IN ARRAY v_legs LOOP
-    v_path := CASE WHEN v_leg IN ('vector', 'hyde') THEN 'exact' END;
-    v_sql := public.engram_item_candidates_leg_sql(v_leg, v_path, p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
-                                                   v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
-                                                   p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
-    v_rank := 0;
-    FOR v_row IN EXECUTE v_sql
-      USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
-            p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k
+    v_path := NULL;
+    IF v_leg IN ('vector', 'hyde') THEN
+      IF v_count IS NULL THEN
+        v_sql := public.engram_item_candidates_leg_sql(v_leg, 'count', p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
+                                                       v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
+                                                       p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
+        EXECUTE v_sql INTO v_count
+          USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
+                p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k, v_probe_cap, v_fetch;
+      END IF;
+      v_path := coalesce(p_force_path, public.engram_item_access_path(v_count));
+    END IF;
+
+    -- Collect the leg's rows before returning any, so a short HNSW result
+    -- can be replaced by the exact branch's.
     LOOP
-      v_rank := v_rank + 1;
-      item_id := v_row.id;
+      v_sql := public.engram_item_candidates_leg_sql(v_leg, CASE WHEN v_path = 'exact_fallback' THEN 'exact' ELSE v_path END,
+                                                     p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
+                                                     v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
+                                                     p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
+      IF v_path = 'hnsw' THEN
+        v_saved := ARRAY[current_setting('enable_seqscan'), current_setting('enable_bitmapscan'),
+                         current_setting('enable_sort'), current_setting('hnsw.iterative_scan'),
+                         current_setting('hnsw.ef_search'), current_setting('hnsw.max_scan_tuples')];
+        PERFORM set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true),
+                set_config('enable_sort', 'off', true), set_config('hnsw.iterative_scan', 'relaxed_order', true),
+                set_config('hnsw.ef_search', v_settings.ef_search::text, true),
+                set_config('hnsw.max_scan_tuples', v_settings.max_scan_tuples::text, true);
+      END IF;
+      v_ids := ARRAY[]::uuid[];
+      v_scores := ARRAY[]::double precision[];
+      FOR v_row IN EXECUTE v_sql
+        USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
+              p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k, v_probe_cap, v_fetch
+      LOOP
+        v_ids := v_ids || v_row.id;
+        v_scores := v_scores || v_row.score;
+      END LOOP;
+      IF v_path = 'hnsw' THEN
+        PERFORM set_config('enable_seqscan', v_saved[1], true), set_config('enable_bitmapscan', v_saved[2], true),
+                set_config('enable_sort', v_saved[3], true), set_config('hnsw.iterative_scan', v_saved[4], true),
+                set_config('hnsw.ef_search', v_saved[5], true), set_config('hnsw.max_scan_tuples', v_saved[6], true);
+      END IF;
+      EXIT WHEN v_path IS DISTINCT FROM 'hnsw' OR cardinality(v_ids) >= least(p_k, v_count);
+      v_path := 'exact_fallback';
+    END LOOP;
+
+    FOR v_rank IN 1 .. cardinality(v_ids) LOOP
+      item_id := v_ids[v_rank];
       leg := v_leg;
       rank := v_rank;
-      raw_score := v_row.score;
+      raw_score := v_scores[v_rank];
       path := v_path;
       RETURN NEXT;
+    END LOOP;
+  END LOOP;
+END; $$;
+
+-- engram_item_candidates_explain makes engram_item_candidates' decisions for
+-- the same arguments, through the same validation, settings and statement
+-- texts, and returns one row per statement a leg runs: the leg, its path, on
+-- the vector legs the full filtered size (the probe runs with no cap, which
+-- reaches the same path and the same min(p_k, count)), and the statement's
+-- EXPLAIN (FORMAT JSON) plan, run with the same USING values and, on the
+-- HNSW branch, the same settings. With p_analyze the statements are executed
+-- under EXPLAIN ANALYZE; an HNSW plan whose top node returned fewer than
+-- min(p_k, count) rows is followed by the exact branch's plan, path
+-- exact_fallback, as the candidate function would run it. Without p_analyze
+-- no statement runs, so the fallback cannot be known and is not shown. For
+-- tests, measurement and checks on a live database.
+CREATE OR REPLACE FUNCTION public.engram_item_candidates_explain(p_embedding public.vector DEFAULT NULL::public.vector, p_query text DEFAULT NULL::text, p_terms text[] DEFAULT NULL::text[], p_hyde_embedding public.vector DEFAULT NULL::public.vector, p_entities text[] DEFAULT NULL::text[], p_classes text[] DEFAULT NULL::text[], p_kinds text[] DEFAULT NULL::text[], p_project_id text DEFAULT NULL::text, p_exclude_session text DEFAULT NULL::text, p_as_of timestamp with time zone DEFAULT NULL::timestamp with time zone, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL::smallint, p_k integer DEFAULT 50, p_force_path text DEFAULT NULL::text, p_analyze boolean DEFAULT false) RETURNS TABLE(leg text, path text, filtered_rows bigint, plan jsonb)
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path TO 'public'
+    SET enable_seqscan TO 'on'
+    SET enable_bitmapscan TO 'on'
+    SET enable_sort TO 'on'
+    SET hnsw.iterative_scan TO 'off'
+    SET hnsw.ef_search TO '40'
+    SET hnsw.max_scan_tuples TO '20000'
+    AS $$
+DECLARE
+  c_explain CONSTANT text := 'EXPLAIN (FORMAT JSON) ';
+  c_explain_analyze CONSTANT text := 'EXPLAIN (ANALYZE, FORMAT JSON) ';
+  v_classes text[];
+  v_hidden_kinds text[];
+  v_history boolean := coalesce(p_include_history, false);
+  v_analyze boolean := coalesce(p_analyze, false);
+  v_settings record;
+  v_probe_cap bigint;
+  v_fetch integer;
+  v_count bigint;
+  v_legs text[] := ARRAY[]::text[];
+  v_leg text;
+  v_path text;
+  v_sql text;
+  v_saved text[];
+  v_plan json;
+BEGIN
+  SELECT a.classes, a.hidden_kinds INTO v_classes, v_hidden_kinds
+    FROM public.engram_item_candidates_validate(p_embedding, p_query, p_hyde_embedding, p_entities, p_classes, p_kinds,
+                                                p_include_history, p_max_observation_trust, p_k, p_force_path) AS a;
+  SELECT s.exact_max_rows, s.ef_search, s.overfetch, s.max_scan_tuples INTO v_settings
+    FROM public.engram_item_access_settings() AS s;
+  -- LIMIT NULL: the probe counts every visible row.
+  v_probe_cap := NULL;
+  v_fetch := p_k * v_settings.overfetch;
+
+  IF p_embedding IS NOT NULL THEN
+    v_legs := v_legs || 'vector'::text;
+  END IF;
+  IF p_hyde_embedding IS NOT NULL THEN
+    v_legs := v_legs || 'hyde'::text;
+  END IF;
+  IF cardinality(p_terms) > 0 THEN
+    v_legs := v_legs || 'bm25'::text;
+  END IF;
+  IF p_query ~ '\S' THEN
+    v_legs := v_legs || 'subject'::text;
+  END IF;
+
+  FOREACH v_leg IN ARRAY v_legs LOOP
+    v_path := NULL;
+    filtered_rows := NULL;
+    IF v_leg IN ('vector', 'hyde') THEN
+      IF v_count IS NULL THEN
+        v_sql := public.engram_item_candidates_leg_sql(v_leg, 'count', p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
+                                                       v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
+                                                       p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
+        EXECUTE v_sql INTO v_count
+          USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
+                p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k, v_probe_cap, v_fetch;
+      END IF;
+      v_path := coalesce(p_force_path, public.engram_item_access_path(v_count));
+      filtered_rows := v_count;
+    END IF;
+
+    LOOP
+      v_sql := CASE WHEN v_analyze THEN c_explain_analyze ELSE c_explain END
+        || public.engram_item_candidates_leg_sql(v_leg, CASE WHEN v_path = 'exact_fallback' THEN 'exact' ELSE v_path END,
+                                                 p_kinds IS NOT NULL, v_hidden_kinds IS NOT NULL,
+                                                 v_history, p_as_of IS NOT NULL, p_exclude_session IS NOT NULL,
+                                                 p_max_observation_trust IS NOT NULL, p_project_id IS NOT NULL);
+      IF v_path = 'hnsw' THEN
+        v_saved := ARRAY[current_setting('enable_seqscan'), current_setting('enable_bitmapscan'),
+                         current_setting('enable_sort'), current_setting('hnsw.iterative_scan'),
+                         current_setting('hnsw.ef_search'), current_setting('hnsw.max_scan_tuples')];
+        PERFORM set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true),
+                set_config('enable_sort', 'off', true), set_config('hnsw.iterative_scan', 'relaxed_order', true),
+                set_config('hnsw.ef_search', v_settings.ef_search::text, true),
+                set_config('hnsw.max_scan_tuples', v_settings.max_scan_tuples::text, true);
+      END IF;
+      EXECUTE v_sql INTO v_plan
+        USING p_embedding, p_query, p_terms, p_hyde_embedding, p_entities, v_classes, p_kinds, v_hidden_kinds,
+              p_project_id, p_exclude_session, p_as_of, p_max_observation_trust, p_k, v_probe_cap, v_fetch;
+      IF v_path = 'hnsw' THEN
+        PERFORM set_config('enable_seqscan', v_saved[1], true), set_config('enable_bitmapscan', v_saved[2], true),
+                set_config('enable_sort', v_saved[3], true), set_config('hnsw.iterative_scan', v_saved[4], true),
+                set_config('hnsw.ef_search', v_saved[5], true), set_config('hnsw.max_scan_tuples', v_saved[6], true);
+      END IF;
+      leg := v_leg;
+      path := v_path;
+      plan := v_plan::jsonb;
+      RETURN NEXT;
+      EXIT WHEN v_path IS DISTINCT FROM 'hnsw' OR NOT v_analyze
+        OR (v_plan -> 0 -> 'Plan' ->> 'Actual Rows')::numeric >= least(p_k, v_count);
+      v_path := 'exact_fallback';
     END LOOP;
   END LOOP;
 END; $$;
@@ -758,9 +1032,12 @@ END; $$;
 -- The candidate functions are SECURITY DEFINER or serve one, and PostgREST
 -- serves public to the anon role: EXECUTE is revoked from PUBLIC, anon and
 -- authenticated and granted to service_role, as for engram_bm25_match.
+REVOKE EXECUTE ON FUNCTION public.engram_item_access_settings() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_access_path(bigint) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_explain(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text, boolean) FROM PUBLIC;
 
 DO $$
 DECLARE
@@ -769,23 +1046,32 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_access_settings() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_access_path(bigint) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_candidates_explain(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text, boolean) FROM %I', role_name);
     END IF;
   END LOOP;
 END
 $$;
 
+GRANT EXECUTE ON FUNCTION public.engram_item_access_settings() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_access_path(bigint) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_candidates_explain(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text, boolean) TO service_role;
 
 -- The statement text names to_bm25query and <@> only inside strings, so no
--- dependency is recorded for them. Declaring one on each of the three
--- functions makes DROP EXTENSION pg_textsearch remove them together, instead
+-- dependency is recorded for them. Declaring one on each candidate function
+-- and helper makes DROP EXTENSION pg_textsearch remove them together, instead
 -- of leaving a function whose every lexical call fails. Re-applying adds no
 -- second dependency.
+ALTER FUNCTION public.engram_item_access_settings() DEPENDS ON EXTENSION pg_textsearch;
+ALTER FUNCTION public.engram_item_access_path(bigint) DEPENDS ON EXTENSION pg_textsearch;
 ALTER FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) DEPENDS ON EXTENSION pg_textsearch;
 ALTER FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) DEPENDS ON EXTENSION pg_textsearch;
 ALTER FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) DEPENDS ON EXTENSION pg_textsearch;
+ALTER FUNCTION public.engram_item_candidates_explain(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text, boolean) DEPENDS ON EXTENSION pg_textsearch;
