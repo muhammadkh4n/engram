@@ -339,6 +339,71 @@ npx tsx packages/bench/src/eval/engram-recall-eval.ts compare ./eval/control.jso
 - Exit 2: usage error or existing outputs. Exit 4: a guard, pin, graph, degraded-recall or failed-leg check stopped
   the run; a stopped run writes no outputs.
 
+## Decision replay
+
+The recall benches measure ranking. `src/decisions/engram-decision-replay.ts` asks a different question: when an
+agent made a real decision, did the memory it needed reach it before the decision, through which lane, and did
+anything false reach it as current? Every score is deterministic matching; no model judges anything.
+
+- **A case** is one decision point, one JSON object per line: when it was decided (`decided_at`, with an offset),
+  by which agent, through which channel (`prompt`, `session_start`, `compaction`, `subagent_start`,
+  `agent_dispatch`, `executor_start`, `decision_point`, `hand_recall`), in which project, workspace and plan
+  folders, the query or tool text at that moment, the memories it needed (`needed`: ids or phrase groups and the
+  lane each is expected to arrive by) and the memories that would mislead it (`harmful`). Unknown fields are
+  refused at every level. A builder drafts cases from incident records, fact-check judgements and miss rows; only
+  cases marked `reviewed` are ever scored.
+- **Case data stays outside the repo.** Cases hold prompts and quotes, so the files live in a private directory
+  (0700, files 0600), never in a repo; tests use synthetic fixtures. No command prints a prompt, a quote or an
+  item's text: stdout and stderr carry counts, ids and field names only.
+- **Lanes,** rebuilt as of `decided_at`:
+  - *scope*: the dotfiles rule files and the checkout's `CLAUDE.md`/`AGENTS.md` at their last commit before the
+    decision; in the new arm also the standing-rulings register entries in force then (global, project, workspace)
+    and the class-A decisions of each plan folder dated by then;
+  - *decision point* (new arm, `decision_point` cases): in-force entries whose triggers name the decision's kind,
+    and the contradiction check, which lists entries with an applies-to token in the text being written;
+  - *query*: the new arm posts `/recall` with `as_of` under the case's own channel and the channel profile's
+    fields; the old arm runs the old recall pipeline on a frozen snapshot with `now` at the prompt's time, and an
+    item the snapshot created after that time is flagged `future`: shown, never counted.
+- **Arms:** `new` reads a copy of the memory server through `--recall-url` (a `rexvps` host or the
+  `ENGRAM_SERVER_URL` origin is refused); `old` builds the eval stack from `--dist` and `--env` with recorded model
+  replies (`--pins`), as the recall eval does.
+- **Scores per case:** each needed memory's delivering lanes, its hits (lane, item, status, provenance, id or phrase
+  match) and whether its expected lane delivered it with provenance; harmful items shown as current per lane (a
+  harmful match in a rule-file paragraph is reported apart, since rule files can only be shown as they were);
+  contradiction hits; characters per lane; future items; the gap between the snapshot and the decision; and a
+  sha256 over each lane's delivered ids and texts. A phrase group matches within one item only.
+- **Bars** (`report --bars`): `scope-coverage`, `decision-point-coverage`, `query-coverage`, `no-regression` (needs
+  the old arm's run over the same case file), `nothing-false-as-current` and `bounded-and-deterministic` (every
+  response within its budget, and the same sha256 on every pass, so it needs `--runs 2`). Each is pass or fail with
+  the failing case ids; a bar missing its input fails and names it.
+
+```bash
+npx tsx packages/bench/src/decisions/engram-decision-replay.ts check --cases cases.jsonl [--drafts]
+npx tsx packages/bench/src/decisions/engram-decision-replay.ts draft [--incidents … --class-lanes …] \
+  [--factcheck-cases … --factcheck-judgements … --marked …] [--misses …] --out drafts.jsonl
+
+npx tsx packages/bench/src/decisions/engram-decision-replay.ts run --arm new --cases cases.jsonl \
+  --label fresh --out ./replay --calibration-before 2026-09-29T19:00:00Z \
+  --registry projects.json --vault-root <notes root> --dotfiles <dotfiles checkout> --runs 2 \
+  --recall-url http://127.0.0.1:8787/recall --token-file token --channels channels.json
+
+npx tsx packages/bench/src/decisions/engram-decision-replay.ts run --arm old … \
+  --dist /path/to/engram-checkout --env engram.env --pins pins.json --pins-mode strict \
+  --calibration-query "<a query whose answer has graph associations>" \
+  --snapshot-label <snapshot> --snapshot-dumped-at <iso>
+
+npx tsx packages/bench/src/decisions/engram-decision-replay.ts report ./replay/fresh.json ./replay/baseline.json --bars
+```
+
+- `run` writes `<out>/<label>.json` (mode 0600): `meta` (arm, label, case-file sha256, store, dist and dotfiles
+  shas, register-file and plan-ledger sha256s, pins and channel-profile sha256s, the calibration cut, start and
+  finish times; the old arm adds its `ENGRAM_*` settings, secret-shaped names as `null`), per-case scores and
+  aggregates per split, source, channel and expected lane. The old arm's calibration recall runs as of the
+  snapshot's dump time, so strict pins replay it identically.
+- Exit 2: usage error or an existing output file. Exit 4: a stop: a degraded recall, a refused store URL, a write
+  guard, a pin miss, or (old arm, strict pins) a case whose lanes changed between passes; a stopped run writes no
+  output. Exit 1: any other error. `report` exits 0 whatever the bars say; the verdict is in its output.
+
 ## Example Runs
 
 ### Quick Test (First 5 Conversations)
