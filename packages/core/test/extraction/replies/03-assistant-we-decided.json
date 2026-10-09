@@ -1,0 +1,57 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000301",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "ok, carry on with the capture route",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:40Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-301"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "ok, carry on with the capture route",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000300",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "I checked the store adapters: only the Postgres adapter is wired into the server, and SQLite is used by tests alone.",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [],
+        "event_key": "tst-key-300"
+      }
+    },
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[],\"observations\":[{\"assistant_utterance_id\":\"turn-1\",\"claim\":\"We decided to keep Postgres as the only store.\",\"kind\":\"fact\",\"subject\":{\"new\":\"item store\"},\"evidence\":[],\"valid_at\":null,\"supersedes\":[]}]}"
+}

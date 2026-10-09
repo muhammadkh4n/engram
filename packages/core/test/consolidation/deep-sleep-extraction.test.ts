@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { deepSleep, DEFAULT_MAX_DIGESTS } from '../../src/consolidation/deep-sleep.js'
-import { factExtractionBackoffMs } from '../../src/consolidation/extraction-run.js'
+import { factExtractionBackoffMs } from '../../src/utils/backoff.js'
 import { extractDigestFacts } from '../../src/consolidation/fact-candidates.js'
 import { EmptyFactReplyError, FactExtractionError, classifyExtractionError } from '../../src/adapters/intelligence.js'
 import type { ExtractFactsInput, ExtractedFact, IntelligenceAdapter } from '../../src/adapters/intelligence.js'

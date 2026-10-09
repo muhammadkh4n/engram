@@ -5,11 +5,13 @@
  * ItemConstraintError without the error's `details`; materialize sends its
  * limit to engram_capture_materialize and checks the result's shape;
  * the embedding reads and writes map rows and refuse a malformed result;
- * embedding failures and their count go to their RPCs.
+ * embedding failures and their count go to their RPCs; the extraction calls
+ * send their arguments to their RPCs, map rows and results, and refuse a
+ * malformed one.
  */
 import { describe, it, expect, vi } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
-import { isItemConstraintError, sqlstateOf, type ProjectRow, type StoredEvent } from '@engram-mem/core'
+import { isItemConstraintError, sqlstateOf, type ExtractionItem, type ProjectRow, type StoredEvent } from '@engram-mem/core'
 import { PostgRestCaptureStore } from '../src/capture-store.js'
 
 interface Result {
@@ -443,5 +445,257 @@ describe('PostgRestCaptureStore embedding failures', () => {
     await expect(storeWith({ data: -1, error: null }).store.embeddingFailedCount()).rejects.toThrow(
       'embeddingFailedCount failed: the RPC returned no count',
     )
+  })
+})
+
+describe('PostgRestCaptureStore extraction', () => {
+  const ANCHOR = '00000000-0000-4000-8000-00000000e001'
+  const RUN = '00000000-0000-4000-8000-00000000e002'
+  const SUBJECT = '00000000-0000-4000-8000-00000000e003'
+  const NOW = new Date('2026-09-14T10:00:00.000Z')
+
+  function item(overrides: Partial<ExtractionItem> = {}): ExtractionItem {
+    return {
+      id: '00000000-0000-4000-8000-00000000e004',
+      class: 'mk_statement',
+      kind: 'ruling',
+      speaker: 'mk',
+      trust: 0,
+      projectId: 'tst-repo',
+      workspaceId: 'tst-ws',
+      planSlug: null,
+      sessionId: 'sess-1',
+      subjectId: null,
+      subjectKey: 'subj-a',
+      content: 'ship it behind a flag',
+      searchText: 'ship it behind a flag',
+      context: null,
+      occurredAt: new Date('2026-09-14T09:00:00.000Z'),
+      standing: true,
+      registerStatus: 'candidate',
+      source: { type: 'extraction', event_key: 'x:stmt-1', scope: 'project', applies_to: [] },
+      lineage: [ANCHOR],
+      entities: [{ entity: 'TST-77', entityType: 'ticket' }],
+      ...overrides,
+    }
+  }
+
+  it('asks engram_extraction_pending with the idle time in seconds and maps its rows', async () => {
+    const row = {
+      anchor_item_id: ANCHOR,
+      session_id: 'sess-1',
+      anchor_kind: 'trailing',
+      occurred_at: '2026-09-14T09:00:00+00:00',
+      failures: 3,
+      held_failures: 1,
+      transient_failures: 1,
+      running_run_id: RUN,
+      running_started_at: '2026-09-14T09:05:00+00:00',
+    }
+    const { store, calls } = storeWith({ data: [row, { ...row, running_run_id: null, running_started_at: null }], error: null })
+    const anchors = await store.extractionPending({ version: 'extract-v1', limit: 20, idleMs: 30 * 60_000, now: NOW })
+    expect(calls).toEqual([
+      {
+        fn: 'engram_extraction_pending',
+        args: { p_version: 'extract-v1', p_limit: 20, p_idle_seconds: 1800, p_now: '2026-09-14T10:00:00.000Z' },
+      },
+    ])
+    expect(anchors).toEqual([
+      {
+        anchorId: ANCHOR,
+        sessionId: 'sess-1',
+        anchorKind: 'trailing',
+        occurredAt: new Date('2026-09-14T09:00:00.000Z'),
+        failures: 3,
+        heldFailures: 1,
+        transientFailures: 1,
+        runningRunId: RUN,
+        runningStartedAt: new Date('2026-09-14T09:05:00.000Z'),
+      },
+      expect.objectContaining({ runningRunId: null, runningStartedAt: null }),
+    ])
+  })
+
+  it('refuses a bad pending query without calling the RPC, and a row it cannot read', async () => {
+    const { store, calls } = storeWith({ data: [], error: null })
+    const query = { version: 'extract-v1', limit: 20, idleMs: 60_000, now: NOW }
+    await expect(store.extractionPending({ ...query, limit: 0 })).rejects.toThrow('limit must be an integer from 1 to 1000')
+    await expect(store.extractionPending({ ...query, limit: 1001 })).rejects.toThrow('limit must be an integer from 1 to 1000')
+    await expect(store.extractionPending({ ...query, idleMs: 1500 })).rejects.toThrow('idleMs must be a whole number of seconds')
+    await expect(store.extractionPending({ ...query, now: new Date(Number.NaN) })).rejects.toThrow('now must be a valid date')
+    expect(calls).toEqual([])
+    const bad = { anchor_item_id: ANCHOR, session_id: 'sess-1', anchor_kind: 'assistant_turn', occurred_at: NOW.toISOString(), failures: 0, running_run_id: null, running_started_at: null }
+    await expect(storeWith({ data: [bad], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const moreCountedThanFailed = { ...bad, anchor_kind: 'user_prompt', failures: 2, held_failures: 1, transient_failures: 2 }
+    await expect(storeWith({ data: [moreCountedThanFailed], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const noHeldCount = { ...bad, anchor_kind: 'user_prompt', transient_failures: 0 }
+    await expect(storeWith({ data: [noHeldCount], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const noTransientCount = { ...bad, anchor_kind: 'user_prompt', held_failures: 0 }
+    await expect(storeWith({ data: [noTransientCount], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+    const halfOpen = { ...bad, anchor_kind: 'user_prompt', running_run_id: RUN }
+    await expect(storeWith({ data: [halfOpen], error: null }).store.extractionPending(query)).rejects.toThrow(
+      'extractionPending failed: the RPC returned an unexpected row',
+    )
+  })
+
+  it('reads a window from engram_extraction_window, null for a gone anchor, without asking for a malformed id', async () => {
+    const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turn: null, observed: false, subjects: [] }
+    const { store, calls } = storeWith({ data: window, error: null })
+    await expect(store.extractionWindow(ANCHOR, 500, 40)).resolves.toEqual(window)
+    expect(calls).toEqual([
+      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40 } },
+    ])
+    await expect(store.extractionWindow('not-a-uuid', 500, 40)).resolves.toBeNull()
+    await expect(store.extractionWindow(ANCHOR, 0, 40)).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
+    await expect(store.extractionWindow(ANCHOR, 500, 201)).rejects.toThrow('recentLimit must be an integer from 1 to 200')
+    expect(calls).toHaveLength(1)
+    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40)).resolves.toBeNull()
+    await expect(storeWith({ data: { turn: null }, error: null }).store.extractionWindow(ANCHOR, 500, 40)).rejects.toThrow(
+      'extractionWindow failed: the RPC returned no window',
+    )
+  })
+
+  it('opens a run through engram_extraction_begin, null when one is open or succeeded', async () => {
+    const opened = storeWith({ data: RUN, error: null })
+    await expect(
+      opened.store.extractionBegin({ anchorId: ANCHOR, sessionId: 'sess-1', version: 'extract-v1', model: 'test-model' }),
+    ).resolves.toBe(RUN)
+    expect(opened.calls).toEqual([
+      { fn: 'engram_extraction_begin', args: { p_anchor: ANCHOR, p_session: 'sess-1', p_version: 'extract-v1', p_model: 'test-model' } },
+    ])
+    const taken = storeWith({ data: null, error: null })
+    await expect(taken.store.extractionBegin({ anchorId: ANCHOR, sessionId: 'sess-1', version: 'extract-v1', model: null })).resolves.toBeNull()
+    await expect(
+      storeWith({ data: 7, error: null }).store.extractionBegin({ anchorId: ANCHOR, sessionId: 'sess-1', version: 'extract-v1', model: null }),
+    ).rejects.toThrow('extractionBegin failed: the RPC returned no run id')
+  })
+
+  it('closes a run through engram_extraction_fail with its class and count, and makes the error text storable', async () => {
+    const { store, calls } = storeWith({ data: true, error: null })
+    await expect(
+      store.extractionFail(RUN, { error: 'bad\u0000reply \ud800', failure: 'held', counted: true, stats: { reply_chars: 12 } }),
+    ).resolves.toBe(true)
+    expect(calls).toEqual([
+      {
+        fn: 'engram_extraction_fail',
+        args: { p_run: RUN, p_error: 'bad�reply �', p_failure: 'held', p_counted: true, p_stats: { reply_chars: 12 } },
+      },
+    ])
+    await expect(
+      store.extractionFail(RUN, { error: 'x', failure: 'later' as 'held', counted: true, stats: {} }),
+    ).rejects.toThrow('failure must be transient or held')
+    await expect(
+      store.extractionFail(RUN, { error: 'x', failure: 'transient', counted: 'yes' as unknown as boolean, stats: {} }),
+    ).rejects.toThrow('counted must be a boolean')
+    expect(calls).toHaveLength(1)
+    await expect(storeWith({ data: null, error: null }).store.extractionFail(RUN, { error: 'x', failure: 'transient', counted: false, stats: {} })).rejects.toThrow(
+      'extractionFail failed: the RPC returned no result',
+    )
+  })
+
+  it('sends a commit to engram_extraction_commit as snake_case and maps the result', async () => {
+    const result = { item_ids: ['00000000-0000-4000-8000-00000000e004', '00000000-0000-4000-8000-00000000e005'], subjects_created: 1, duplicates: 0 }
+    const { store, calls } = storeWith({ data: result, error: null })
+    const listed = item({
+      id: '00000000-0000-4000-8000-00000000e005',
+      class: 'observation',
+      kind: 'finding',
+      speaker: 'assistant',
+      trust: 3,
+      subjectId: SUBJECT,
+      subjectKey: null,
+      standing: null,
+      registerStatus: null,
+      entities: [],
+    })
+    await expect(
+      store.extractionCommit(RUN, {
+        subjects: [{ key: 'subj-a', label: 'importer flags', projectId: 'tst-repo' }],
+        items: [item(), listed],
+        stats: { statements: { proposed: 1 } },
+      }),
+    ).resolves.toEqual({ itemIds: result.item_ids, subjectsCreated: 1, duplicates: 0 })
+    const args = calls[0]!.args as { p_run: string; p_payload: { subjects: unknown; items: Array<Record<string, unknown>>; stats: unknown } }
+    expect(calls[0]!.fn).toBe('engram_extraction_commit')
+    expect(args.p_run).toBe(RUN)
+    expect(args.p_payload.subjects).toEqual([{ key: 'subj-a', label: 'importer flags', project_id: 'tst-repo' }])
+    expect(args.p_payload.stats).toEqual({ statements: { proposed: 1 } })
+    expect(args.p_payload.items[0]).toEqual({
+      id: '00000000-0000-4000-8000-00000000e004',
+      class: 'mk_statement',
+      kind: 'ruling',
+      speaker: 'mk',
+      trust: 0,
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
+      plan_slug: null,
+      session_id: 'sess-1',
+      subject_key: 'subj-a',
+      content: 'ship it behind a flag',
+      search_text: 'ship it behind a flag',
+      context: null,
+      occurred_at: '2026-09-14T09:00:00.000Z',
+      standing: true,
+      register_status: 'candidate',
+      source: { type: 'extraction', event_key: 'x:stmt-1', scope: 'project', applies_to: [] },
+      lineage: [ANCHOR],
+      entities: [{ entity: 'TST-77', entity_type: 'ticket' }],
+    })
+    expect(args.p_payload.items[1]).toMatchObject({ subject_id: SUBJECT, entities: [] })
+    expect(args.p_payload.items[1]).not.toHaveProperty('subject_key')
+  })
+
+  it('refuses a commit it cannot send, and a result that does not match the items', async () => {
+    const { store, calls } = storeWith({ data: { item_ids: [], subjects_created: 0, duplicates: 0 }, error: null })
+    await expect(store.extractionCommit(RUN, { subjects: [], items: [item({ content: 'a\u0000b' })], stats: {} })).rejects.toThrow(
+      'extractionCommit failed: items[0].content holds U+0000 or an unpaired surrogate',
+    )
+    await expect(store.extractionCommit(RUN, { subjects: [], items: [item({ occurredAt: new Date(Number.NaN) })], stats: {} })).rejects.toThrow(
+      'extractionCommit failed: item 1: occurredAt is not a valid date',
+    )
+    const tooMany = Array.from({ length: 501 }, () => item())
+    await expect(store.extractionCommit(RUN, { subjects: [], items: tooMany, stats: {} })).rejects.toThrow('501 items, at most 500 per commit')
+    expect(calls).toEqual([])
+    await expect(store.extractionCommit(RUN, { subjects: [], items: [item()], stats: {} })).rejects.toThrow(
+      'extractionCommit failed: the RPC returned an unexpected result',
+    )
+  })
+
+  it('gives a commit it refuses before sending the class 22 SQLSTATE PostgreSQL would give the same data', async () => {
+    const { store, calls } = storeWith({ data: null, error: null })
+    const refusal = (commit: Parameters<typeof store.extractionCommit>[1]) =>
+      store.extractionCommit(RUN, commit).catch((e: unknown) => e)
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ content: 'a\u0000b' })], stats: {} }))).toBe('22P05')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ context: '\ud800' })], stats: {} }))).toBe('22P05')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ occurredAt: new Date(Number.NaN) })], stats: {} }))).toBe('22007')
+    expect(sqlstateOf(await refusal({ subjects: [], items: [item({ occurredAt: new Date(Date.UTC(10_000, 0, 1)) })], stats: {} }))).toBe('22008')
+    const tooMany = Array.from({ length: 501 }, () => item())
+    expect(sqlstateOf(await refusal({ subjects: [], items: tooMany, stats: {} }))).toBe('22023')
+    expect(calls).toEqual([])
+  })
+
+  it('reports a refused quote as ItemConstraintError naming the trigger, without details', async () => {
+    const { store } = storeWith({
+      data: null,
+      error: {
+        code: '23514',
+        message: 'memory_items_lineage: the quote does not occur in an mk utterance of its lineage',
+        details: SECRET_ROW,
+        hint: null,
+      },
+    })
+    const err = await store.extractionCommit(RUN, { subjects: [], items: [item()], stats: {} }).catch((e: unknown) => e)
+    expect(isItemConstraintError(err)).toBe(true)
+    expect((err as { constraint: string }).constraint).toBe('memory_items_lineage')
+    expect((err as Error).message).not.toContain('hunter-two')
+    expect(sqlstateOf(err)).toBe('23514')
   })
 })

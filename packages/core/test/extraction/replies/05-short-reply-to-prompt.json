@@ -1,0 +1,57 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000501",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "ok",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:10Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-501"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "ok",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000500",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "The release branch is green on CI and the changelog is written.\nShip it now?",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [],
+        "event_key": "tst-key-500"
+      }
+    },
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"ok\",\"question\":\"Ship it now?\",\"kind\":\"ruling\",\"standing\":false,\"scope\":\"project\",\"subject\":{\"new\":\"release\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}"
+}

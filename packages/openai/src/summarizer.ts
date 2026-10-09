@@ -17,6 +17,8 @@ import type {
   SupersessionCandidate,
   SupersessionVerdict,
   SupersessionStatedAt,
+  CompleteJsonRequest,
+  CompleteJsonResult,
 } from '@engram-mem/core'
 import {
   EmptyClassifierReplyError,
@@ -25,10 +27,10 @@ import {
   SUPERSESSION_NEW_FACT_KEY,
   UnclassifiableReplyError,
   cutWholeChars,
+  extractJsonReply,
   isSupersessionFactKind,
   tailWholeChars,
 } from '@engram-mem/core'
-import { extractJsonReply } from './json-reply.js'
 import { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
 export interface OpenAISummarizerOptions {
@@ -680,6 +682,30 @@ export class OpenAISummarizer {
       throw new FactExtractionError('parse', `extractFacts: reply holds no {"facts": [...]} object (chars=${raw.length})`)
     }
     return parseExtractedFacts(reply['facts'] as unknown[], episodes)
+  }
+
+  /**
+   * One JSON-mode call at temperature 0 (see IntelligenceAdapter.completeJson).
+   * The reply is returned as received: the caller validates it, so this
+   * method never parses, retries or swallows an SDK error.
+   */
+  async completeJson(req: CompleteJsonRequest): Promise<CompleteJsonResult> {
+    const resp = await this.chatCreate(req.label, {
+      model: this.model,
+      messages: [
+        { role: 'system', content: req.system },
+        { role: 'user', content: req.user },
+      ],
+      max_tokens: req.maxTokens,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+    })
+    const choice = resp.choices?.[0]
+    return {
+      text: choice?.message?.content ?? '',
+      finishReason: choice?.finish_reason ?? null,
+      model: resp.model || this.model,
+    }
   }
 
   /**

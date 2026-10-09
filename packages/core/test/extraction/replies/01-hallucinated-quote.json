@@ -1,0 +1,57 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "keep the old route until the new one is live",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:30Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-101"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "keep the old route until the new one is live",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000100",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "The new capture route is deployed behind a flag.\nShould the old route be removed now?",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [],
+        "event_key": "tst-key-100"
+      }
+    },
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"keep the legacy route alive\",\"question\":\"Should the old route be removed now?\",\"kind\":\"ruling\",\"standing\":false,\"scope\":\"project\",\"subject\":{\"new\":\"capture route\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}"
+}

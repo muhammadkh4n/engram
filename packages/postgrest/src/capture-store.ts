@@ -1,17 +1,37 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { EMBEDDING_BATCH_MAX, ItemConstraintError, MATERIALIZE_LIMIT_MAX } from '@engram-mem/core'
+import {
+  EMBEDDING_BATCH_MAX,
+  EXTRACTION_COMMIT_ITEMS_MAX,
+  EXTRACTION_PENDING_LIMIT_MAX,
+  EXTRACTION_WINDOW_RECENT_MAX,
+  EXTRACTION_WINDOW_SUBJECTS_MAX,
+  ItemConstraintError,
+  MATERIALIZE_LIMIT_MAX,
+  findPostgresUnsafeText,
+  toPostgresText,
+} from '@engram-mem/core'
 import type {
+  AnchorKind,
   CaptureStore,
   EmbeddingFailure,
+  ExtractionBegin,
+  ExtractionCommit,
+  ExtractionCommitResult,
+  ExtractionFailure,
+  ExtractionItem,
+  ExtractionPendingQuery,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
+  PendingAnchor,
   PendingEmbedding,
   ProjectRow,
+  RawExtractionWindow,
   ScanRow,
   ScanTarget,
   StoredEvent,
 } from '@engram-mem/core'
+import { isUuid } from './uuid.js'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
 const CONSTRAINT_CODES = new Set(['23514', '23503', '23505'])
@@ -27,6 +47,8 @@ const SCAN_COLUMNS: Record<ScanTarget, string> = {
 const SCAN_PAGE_MAX = 1000
 /** The counts a locked materialize call returns, each a non-negative integer. */
 const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead'] as const
+const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'trailing'])
+const FAILURE_CLASSES: ReadonlySet<string> = new Set(['transient', 'held'])
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -225,6 +247,253 @@ export class PostgRestCaptureStore implements CaptureStore {
       texts: target === 'memory_items' ? itemTexts(row) : eventTexts(row),
     }))
   }
+
+  async extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]> {
+    const { version, limit, idleMs, now } = query
+    if (!Number.isInteger(limit) || limit < 1 || limit > EXTRACTION_PENDING_LIMIT_MAX) {
+      throw new Error(`extractionPending: limit must be an integer from 1 to ${EXTRACTION_PENDING_LIMIT_MAX}`)
+    }
+    if (!Number.isSafeInteger(idleMs) || idleMs < 1000 || idleMs % 1000 !== 0) {
+      throw new Error('extractionPending: idleMs must be a whole number of seconds, at least 1000')
+    }
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+      throw new Error('extractionPending: now must be a valid date')
+    }
+    const { data, error } = await this.client.rpc('engram_extraction_pending', {
+      p_version: version,
+      p_limit: limit,
+      p_idle_seconds: idleMs / 1000,
+      p_now: now.toISOString(),
+    })
+    if (error) throw toStoreError('extractionPending', error)
+    if (!Array.isArray(data)) throw new Error('extractionPending failed: the RPC returned no rows array')
+    return (data as unknown as Array<Record<string, unknown>>).map(toPendingAnchor)
+  }
+
+  async extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null> {
+    if (!Number.isInteger(subjectLimit) || subjectLimit < 1 || subjectLimit > EXTRACTION_WINDOW_SUBJECTS_MAX) {
+      throw new Error(`extractionWindow: subjectLimit must be an integer from 1 to ${EXTRACTION_WINDOW_SUBJECTS_MAX}`)
+    }
+    if (!Number.isInteger(recentLimit) || recentLimit < 1 || recentLimit > EXTRACTION_WINDOW_RECENT_MAX) {
+      throw new Error(`extractionWindow: recentLimit must be an integer from 1 to ${EXTRACTION_WINDOW_RECENT_MAX}`)
+    }
+    // A malformed id names no utterance; PostgREST would refuse the whole call.
+    if (!isUuid(anchorId)) return null
+    const { data, error } = await this.client.rpc('engram_extraction_window', {
+      p_anchor: anchorId,
+      p_subject_limit: subjectLimit,
+      p_recent_limit: recentLimit,
+    })
+    if (error) throw toStoreError('extractionWindow', error)
+    if (data === null) return null
+    const window = data as unknown as Record<string, unknown>
+    const anchor = isRecord(window) ? window.anchor : undefined
+    if (!isRecord(anchor) || typeof anchor.id !== 'string') {
+      throw new Error('extractionWindow failed: the RPC returned no window')
+    }
+    return window as unknown as RawExtractionWindow
+  }
+
+  async extractionBegin(run: ExtractionBegin): Promise<string | null> {
+    const { data, error } = await this.client.rpc('engram_extraction_begin', {
+      p_anchor: run.anchorId,
+      p_session: run.sessionId,
+      p_version: run.version,
+      p_model: run.model,
+    })
+    if (error) throw toStoreError('extractionBegin', error)
+    if (data === null) return null
+    if (typeof data !== 'string' || !isUuid(data)) throw new Error('extractionBegin failed: the RPC returned no run id')
+    return data
+  }
+
+  async extractionFail(runId: string, failure: ExtractionFailure): Promise<boolean> {
+    if (!FAILURE_CLASSES.has(failure.failure)) {
+      throw new Error('extractionFail: failure must be transient or held')
+    }
+    if (typeof failure.counted !== 'boolean') {
+      throw new Error('extractionFail: counted must be a boolean')
+    }
+    refuseUnsafeText('extractionFail', 'stats.', failure.stats)
+    const { data, error } = await this.client.rpc('engram_extraction_fail', {
+      p_run: runId,
+      // An error message may carry any character; PostgreSQL text cannot hold
+      // U+0000 or an unpaired surrogate, and a refused close would leave the
+      // run open until it goes stale.
+      p_error: toPostgresText(failure.error),
+      p_failure: failure.failure,
+      p_counted: failure.counted,
+      p_stats: failure.stats,
+    })
+    if (error) throw toStoreError('extractionFail', error)
+    if (typeof data !== 'boolean') throw new Error('extractionFail failed: the RPC returned no result')
+    return data
+  }
+
+  async extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
+    if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
+      throw refusedData(
+        `extractionCommit: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
+        INVALID_PARAMETER_VALUE,
+      )
+    }
+    const payload = {
+      subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
+      items: commit.items.map(toCommitItem),
+      stats: commit.stats,
+    }
+    refuseUnsafeText('extractionCommit', '', payload)
+    const { data, error } = await this.client.rpc('engram_extraction_commit', { p_run: runId, p_payload: payload })
+    if (error) throw toStoreError('extractionCommit', error)
+    return toCommitResult(data, commit.items.length)
+  }
+}
+
+function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
+  const unexpected = new Error('extractionPending failed: the RPC returned an unexpected row')
+  const { anchor_item_id: anchorId, session_id: sessionId, anchor_kind: anchorKind, failures } = row
+  const heldFailures = row.held_failures
+  const transientFailures = row.transient_failures
+  const runningRunId = row.running_run_id
+  const occurredAt = parseTime(row.occurred_at)
+  const isOpen = runningRunId !== null
+  const runningStartedAt = isOpen ? parseTime(row.running_started_at) : null
+  if (
+    typeof anchorId !== 'string' ||
+    typeof sessionId !== 'string' ||
+    typeof anchorKind !== 'string' ||
+    !ANCHOR_KINDS.has(anchorKind) ||
+    occurredAt === null ||
+    !isCount(failures) ||
+    !isCount(heldFailures) ||
+    !isCount(transientFailures) ||
+    heldFailures + transientFailures > failures ||
+    (isOpen && (typeof runningRunId !== 'string' || runningStartedAt === null)) ||
+    (!isOpen && row.running_started_at !== null)
+  ) {
+    throw unexpected
+  }
+  return {
+    anchorId,
+    sessionId,
+    anchorKind: anchorKind as AnchorKind,
+    occurredAt,
+    failures,
+    heldFailures,
+    transientFailures,
+    runningRunId: isOpen ? (runningRunId as string) : null,
+    runningStartedAt,
+  }
+}
+
+/** A Date for a returned time, null for a value that is not one. */
+function parseTime(value: unknown): Date | null {
+  if (typeof value !== 'string') return null
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? null : new Date(ms)
+}
+
+/**
+ * The item as the commit RPC takes it: engram_insert_items' columns plus
+ * subject_key and entities. Only the set one of subject_id and subject_key is
+ * sent.
+ */
+function toCommitItem(item: ExtractionItem, index: number): Record<string, unknown> {
+  const object: Record<string, unknown> = {
+    id: item.id,
+    class: item.class,
+    kind: item.kind,
+    speaker: item.speaker,
+    trust: item.trust,
+    project_id: item.projectId,
+    workspace_id: item.workspaceId,
+    plan_slug: item.planSlug,
+    session_id: item.sessionId,
+    content: item.content,
+    search_text: item.searchText,
+    context: item.context,
+    occurred_at: isoTime(item.occurredAt, index + 1),
+    standing: item.standing,
+    register_status: item.registerStatus,
+    source: item.source,
+    lineage: [...item.lineage],
+    entities: item.entities.map((e) => ({ entity: e.entity, entity_type: e.entityType })),
+  }
+  if (item.subjectId !== null) object.subject_id = item.subjectId
+  if (item.subjectKey !== null) object.subject_key = item.subjectKey
+  return object
+}
+
+/**
+ * toISOString writes a year outside 1 to 9999 as a signed six-digit year,
+ * which engram_insert_items refuses, so such a date is refused here by item.
+ */
+function isoTime(value: Date, position: number): string {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw refusedData(`extractionCommit failed: item ${position}: occurredAt is not a valid date`, INVALID_DATETIME_FORMAT)
+  }
+  const year = value.getUTCFullYear()
+  if (year < 1 || year > 9999) {
+    throw refusedData(
+      `extractionCommit failed: item ${position}: occurredAt has a year outside 1 to 9999`,
+      DATETIME_FIELD_OVERFLOW,
+    )
+  }
+  return value.toISOString()
+}
+
+function toCommitResult(data: unknown, itemCount: number): ExtractionCommitResult {
+  const unexpected = new Error('extractionCommit failed: the RPC returned an unexpected result')
+  if (!isRecord(data)) throw unexpected
+  const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates } = data
+  if (
+    !Array.isArray(itemIds) ||
+    itemIds.length !== itemCount ||
+    !itemIds.every((id) => typeof id === 'string') ||
+    !isCount(subjectsCreated) ||
+    !isCount(duplicates) ||
+    duplicates > itemCount
+  ) {
+    throw unexpected
+  }
+  return { itemIds: itemIds as string[], subjectsCreated, duplicates }
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * PostgreSQL refuses U+0000 and unpaired surrogates in text and jsonb, and
+ * the refusal fails the whole call; refusing here names the path (never the
+ * text) before anything is sent.
+ */
+function refuseUnsafeText(operation: string, prefix: string, value: unknown): void {
+  const path = findPostgresUnsafeText(value)
+  if (path !== null) {
+    throw refusedData(
+      `${operation} failed: ${prefix}${path} holds U+0000 or an unpaired surrogate, which PostgreSQL cannot store`,
+      UNTRANSLATABLE_CHARACTER,
+    )
+  }
+}
+
+const UNTRANSLATABLE_CHARACTER = '22P05'
+const INVALID_DATETIME_FORMAT = '22007'
+const DATETIME_FIELD_OVERFLOW = '22008'
+const INVALID_PARAMETER_VALUE = '22023'
+
+/**
+ * A value refused before it is sent carries the class 22 SQLSTATE PostgreSQL
+ * would refuse it with, so a caller reading sqlstateOf treats it as the
+ * refused data it is, not as a store fault worth retrying.
+ */
+function refusedData(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code })
 }
 
 function toMaterializeResult(data: unknown): MaterializeResult {

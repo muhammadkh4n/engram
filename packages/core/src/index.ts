@@ -35,14 +35,28 @@ export {
   EMBEDDING_BATCH_MAX,
   EMBEDDING_CLAIM_LEASE_SECONDS,
   EMBEDDING_ERROR_MAX_CHARS,
+  EXTRACTION_COMMIT_ITEMS_MAX,
+  EXTRACTION_PENDING_LIMIT_MAX,
+  EXTRACTION_WINDOW_RECENT_MAX,
+  EXTRACTION_WINDOW_SUBJECTS_MAX,
   MATERIALIZE_LIMIT_MAX,
   SCAN_TARGETS,
   sqlstateOf,
+  isDataRefusal,
 } from './items/capture-store.js'
 export type {
   CaptureSecretHit,
   CaptureStore,
   EmbeddingFailure,
+  ExtractionBegin,
+  ExtractionCommit,
+  ExtractionCommitResult,
+  ExtractionEntity,
+  ExtractionFailure,
+  ExtractionItem,
+  ExtractionNewSubject,
+  ExtractionPendingQuery,
+  PendingAnchor,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
@@ -72,7 +86,7 @@ export {
   factExtractionBackoffMs,
   FACT_EXTRACTION_BACKOFF_BASE_MS,
   FACT_EXTRACTION_BACKOFF_MAX_MS,
-} from './consolidation/extraction-run.js'
+} from './utils/backoff.js'
 export { statementClock, factStatementClock, epochMs } from './consolidation/statement-time.js'
 export type { StatementClock, FactClock, FactSources } from './consolidation/statement-time.js'
 export type {
@@ -98,6 +112,7 @@ export type { AnalysisContext } from './intent/analyzer.js'
 export { INTENT_PATTERNS, STRATEGY_TABLE, classifyMode, selectRecallMode, RECALL_STRATEGIES } from './intent/intents.js'
 export { generateId } from './utils/id.js'
 export { estimateTokens } from './utils/tokens.js'
+export { extractJsonReply } from './utils/json-reply.js'
 export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
 export { parseContent } from './ingestion/content-parser.js'
@@ -170,6 +185,8 @@ export type {
   SupersessionRuleOutcome,
   FactExtractionErrorKind,
   ExtractionErrorClass,
+  CompleteJsonRequest,
+  CompleteJsonResult,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,
@@ -252,3 +269,86 @@ export { createMemory } from './create-memory.js'
 export { synthesize } from './synthesis/index.js'
 export type { SynthesizeInput } from './synthesis/index.js'
 export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'
+
+// Extraction: the window, the versioned prompt and the reply parser
+export { EXTRACTOR_VERSION, EXTRACTION_SYSTEM_PROMPT } from './extraction/prompt.js'
+export {
+  buildWindow,
+  renderUserMessage,
+  extractionMaxTokens,
+  shownTurnText,
+  SUBJECT_LISTING_LIMIT,
+  RECENT_LISTING_LIMIT,
+  LISTED_CONTENT_MAX_CHARS,
+  TURN_MAX_CHARS,
+  EARLIER_TEXT_MARKER,
+} from './extraction/window.js'
+export type {
+  AnchorKind,
+  UtteranceKind,
+  RawExtractionWindow,
+  RawWindowUtterance,
+  RawWindowEvent,
+  RawWindowSubject,
+  RawWindowItem,
+  RawWindowProject,
+  RawWindowTool,
+  ExtractionWindow,
+  WindowUtterance,
+  WindowTurn,
+  WindowTool,
+  WindowDialog,
+  WindowDialogQuestion,
+  WindowDialogOption,
+  WindowSubject,
+  WindowListedItem,
+} from './extraction/window.js'
+export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
+export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
+export { buildCommitPayload, extractionEventKey } from './extraction/persist.js'
+export type { ExtractionItemClass } from './extraction/persist.js'
+export {
+  extractWindow,
+  runExtractionTick,
+  extractionFailureClass,
+  isExtractionReplyError,
+  ExtractionReplyError,
+  SESSION_IDLE_MS,
+  EXTRACTION_WINDOWS_PER_TICK,
+  EXTRACTION_STALE_RUN_MS,
+  EXTRACTION_HELD_FAILURES_MAX,
+  EXTRACTION_TRANSIENT_FAILURES_MAX,
+} from './extraction/run.js'
+export type {
+  ExtractWindowDeps,
+  ExtractWindowResult,
+  ExtractionCall,
+  ExtractionReplyFault,
+  ExtractionStore,
+  ExtractionTickDeps,
+  ExtractionTickResult,
+} from './extraction/run.js'
+export { orderSubjects, normalizeLabel, labelKey } from './extraction/subjects.js'
+export type { OrderableSubject } from './extraction/subjects.js'
+export {
+  parseReply,
+  REJECTION_RULES,
+  STATEMENT_KINDS,
+  OBSERVATION_KINDS,
+  STATEMENT_SCOPES,
+  EVIDENCE_TYPES,
+} from './extraction/reply.js'
+export type {
+  ParsedReply,
+  ProposedStatement,
+  ProposedObservation,
+  ProposedSubject,
+  ProposedEvidence,
+  ExtractionRejection,
+  RejectionRule,
+  StatementKind,
+  ObservationKind,
+  StatementScope,
+  EvidenceType,
+  ItemSide,
+} from './extraction/reply.js'

@@ -1,0 +1,66 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000701",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "thanks",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:30Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-701"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "thanks",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000700",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "Committed: the capture worker now parks a capture event after three failed attempts instead of retrying it forever. The tests pass.",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [
+          {
+            "name": "Bash",
+            "ref": "c0ffee5d1e9a7b3f2a4d6c8e0b1a3c5d7e9f1a2b"
+          },
+          {
+            "name": "Read",
+            "ref": "/home/tester/tst-repo/packages/mcp/src/capture-events/worker.ts"
+          }
+        ],
+        "event_key": "tst-key-700"
+      }
+    },
+    "observed": false,
+    "subjects": [],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[],\"observations\":[{\"assistant_utterance_id\":\"turn-1\",\"claim\":\"The capture worker in tst-repo parks a capture event after three failed attempts instead of retrying it forever.\",\"kind\":\"finding\",\"subject\":{\"new\":\"capture worker\"},\"evidence\":[{\"type\":\"commit\",\"ref\":\"c0ffee5d1e9a\"}],\"valid_at\":null,\"supersedes\":[]}]}"
+}

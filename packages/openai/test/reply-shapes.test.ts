@@ -9,7 +9,6 @@ vi.mock('openai', () => ({
 }))
 
 import { OpenAISummarizer } from '../src/summarizer.js'
-import { extractJsonReply } from '../src/json-reply.js'
 
 const TURN = 'We moved the ingest worker to a systemd timer and removed the pm2 cron entry.'
 
@@ -94,43 +93,5 @@ describe.each(PARSERS)('$name reads every reply shape', (parser) => {
     mockChatCreate.mockResolvedValueOnce(reply(PROSE_ONLY))
 
     await parser.proseOnly(new OpenAISummarizer({ apiKey: 'k' }))
-  })
-})
-
-const anyValue = (): boolean => true
-const isObject = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v)
-
-describe('extractJsonReply', () => {
-  it('skips escaped quotes inside a string when scanning for the span', () => {
-    expect(extractJsonReply('Result: {"a": "say \\"}\\" now", "b": [1]} done', anyValue)).toEqual({
-      a: 'say "}" now',
-      b: [1],
-    })
-  })
-
-  it('takes the first span that parses when earlier brackets do not', () => {
-    expect(extractJsonReply('Options [a, b]: {"ok": true}', anyValue)).toEqual({ ok: true })
-  })
-
-  it('walks past parseable spans of the wrong shape to the first accepted one', () => {
-    expect(extractJsonReply('See [1] and [] then {"ok": true} or {"ok": false}', isObject)).toEqual({ ok: true })
-  })
-
-  it('throws when values parse but none has the accepted shape', () => {
-    expect(() => extractJsonReply('Per the rules [1] and [2].', isObject)).toThrow(/expected shape/)
-  })
-
-  it('passes over parsed values the caller does not accept', () => {
-    const isStringArray = (v: unknown): boolean => Array.isArray(v) && v.some((i) => typeof i === 'string')
-    expect(extractJsonReply('{"terms": ["Alice", "Bob"]}', isStringArray)).toEqual(['Alice', 'Bob'])
-  })
-
-  it.each([
-    ['an empty reply', '   '],
-    ['prose only', 'nothing structured here'],
-    ['an unclosed object', '{"a": 1'],
-    ['mismatched brackets', '{"a": [1}'],
-  ])('throws on %s', (_label, raw) => {
-    expect(() => extractJsonReply(raw, anyValue)).toThrow(/JSON value/)
   })
 })

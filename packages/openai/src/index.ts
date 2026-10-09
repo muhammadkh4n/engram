@@ -112,5 +112,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     digestTranscript(excerpt, digestOpts) {
       return summarizer.digestTranscript(excerpt, digestOpts)
     },
+    completeJson(req) {
+      return summarizer.completeJson(req)
+    },
   }
 }

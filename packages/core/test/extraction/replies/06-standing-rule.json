@@ -1,0 +1,64 @@
+{
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-000000000601",
+      "kind": "user_prompt",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "Good. From now on every schema change ships with its rollback script in the same PR.",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:50Z",
+      "source": {
+        "type": "transcript",
+        "line": 3,
+        "event_key": "tst-key-601"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "Good. From now on every schema change ships with its rollback script in the same PR.",
+        "transcript_line": 3
+      },
+      "plan_dirs": []
+    },
+    "turn": {
+      "id": "00000000-0000-4000-8000-000000000600",
+      "kind": "assistant_turn",
+      "session_id": "tst-session-1",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "The column rename is applied to schema.sql.",
+      "context": null,
+      "occurred_at": "2026-10-01T09:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 2,
+        "tools": [],
+        "event_key": "tst-key-600"
+      }
+    },
+    "observed": false,
+    "subjects": [
+      {
+        "id": "00000000-0000-4000-8000-000000000610",
+        "label": "schema changes",
+        "project_id": "tst-repo",
+        "last_used_at": "2026-09-28T12:00:00Z"
+      }
+    ],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"every schema change ships with its rollback script in the same PR\",\"question\":null,\"kind\":\"ruling\",\"standing\":true,\"scope\":\"project\",\"subject\":{\"id\":\"subj-1\"},\"applies_to\":[\"schema.sql\"],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}"
+}
