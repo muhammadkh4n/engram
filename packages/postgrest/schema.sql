@@ -2230,6 +2230,16 @@ CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (l
 CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
 CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
+
+-- memory_items.fts is search_text as an 'english' tsvector, like the fts
+-- column of each tier table. The candidate statement's lexical leg matches
+-- each term as a phrase on it through idx_items_fts and only then scores the
+-- matches with BM25: a BM25 index keeps no positions, so it cannot tell a row
+-- that holds an identifier such as 'xyz-123' from one that holds 'xyz' and
+-- '123' apart. Adding the column to a table that has rows rewrites the
+-- table once; re-applying adds nothing.
+ALTER TABLE public.memory_items ADD COLUMN IF NOT EXISTS fts tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, coalesce(search_text, ''))) STORED;
+CREATE INDEX IF NOT EXISTS idx_items_fts ON public.memory_items USING gin (fts);
 CREATE INDEX IF NOT EXISTS idx_item_links_to_item ON public.memory_item_links USING btree (to_item);
 CREATE INDEX IF NOT EXISTS idx_item_links_run ON public.memory_item_links USING btree (run_id);
 -- Materialize candidates in session and event-time order: one probe finds

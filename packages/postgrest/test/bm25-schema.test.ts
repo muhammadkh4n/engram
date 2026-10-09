@@ -134,8 +134,9 @@ const TIERS = {
 } as const
 
 /**
- * The item store's index. It reads the items' own search_text column, so it
- * has no tier fts column to match and no branch in engram_bm25_match.
+ * The item store's index. It reads the items' own search_text column and has
+ * no branch in engram_bm25_match: engram_item_candidates matches the items'
+ * fts column and scores with this index.
  */
 const ITEMS_INDEX = {
   name: 'idx_items_bm25',
@@ -282,10 +283,13 @@ describe("bm25.sql revokes EXECUTE on pg_textsearch's own functions", () => {
     expect(block).toContain("EXECUTE format('REVOKE EXECUTE ON ROUTINE %s FROM %I', fn, role_name);")
   })
 
-  it('grants EXECUTE back to no role; the only grant is engram_bm25_match to service_role', () => {
+  it('grants EXECUTE back to no role; the only grants are the RPC functions to service_role', () => {
     const grants = bm25.match(/^.*\bGRANT\b.*$/gm) ?? []
     expect(grants).toEqual([
       'GRANT EXECUTE ON FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_candidates_validate(public.vector, text, public.vector, text[], text[], text[], boolean, smallint, integer, text) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_candidates_leg_sql(text, text, boolean, boolean, boolean, boolean, boolean, boolean, boolean) TO service_role;',
+      'GRANT EXECUTE ON FUNCTION public.engram_item_candidates(public.vector, text, text[], public.vector, text[], text[], text[], text, text, timestamp with time zone, boolean, smallint, integer, text) TO service_role;',
     ])
   })
 
