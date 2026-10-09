@@ -22,7 +22,8 @@ const PROMPT_WINDOW: RawExtractionWindow = {
     source: { type: 'transcript', event_key: 'tst-key-11' },
   },
   anchor_event: { payload: { text: 'ignored' }, plan_dirs: ['Active/tst-plan', 'Active/tst-other'] },
-  turn: {
+  turns: [
+    {
     id: uuid(10),
     kind: 'assistant_turn',
     session_id: 'tst-session-1',
@@ -38,8 +39,9 @@ const PROMPT_WINDOW: RawExtractionWindow = {
         { name: 'Bash', ref: null },
       ],
     },
-  },
-  observed: false,
+    observed: false,
+    },
+  ],
   subjects: [
     { id: uuid(21), label: 'capture route', project_id: 'tst-repo', last_used_at: '2026-09-01T00:00:00Z' },
     { id: uuid(22), label: 'deploy steps', project_id: null, last_used_at: '2026-09-30T00:00:00Z' },
@@ -143,17 +145,18 @@ const DIALOG_WINDOW: RawExtractionWindow = {
     },
     plan_dirs: [],
   },
-  // A dialog carries its own question: the assistant turn before it is not shown.
-  turn: {
-    id: uuid(9),
-    kind: 'assistant_turn',
-    session_id: 'tst-session-2',
-    project_id: null,
-    workspace_id: 'tst-ws',
-    content: 'Asking two questions.',
-    occurred_at: '2026-10-02T12:29:00Z',
-  },
-  observed: false,
+  // A dialog carries its own question: an assistant turn is never shown with it.
+  turns: [
+    {
+      id: uuid(9),
+      kind: 'assistant_turn',
+      session_id: 'tst-session-2',
+      project_id: null,
+      workspace_id: 'tst-ws',
+      content: 'Asking two questions.',
+      occurred_at: '2026-10-02T12:29:00Z',
+    },
+  ],
   subjects: [],
   statements: [],
   observations: [],
@@ -174,10 +177,7 @@ const DIALOG_MESSAGE = [
   'CURRENT OBSERVATIONS:',
   'none',
   '',
-  'turn-1:',
-  'none',
-  '',
-  'TOOLS OF turn-1:',
+  'TURNS:',
   'none',
   '',
   'utt-1 (MK, 2026-10-02T12:30:00.000Z):',
@@ -207,8 +207,19 @@ const TRAILING_WINDOW: RawExtractionWindow = {
     source: { type: 'transcript', event_key: 'tst-key-13', tools: [{ name: 'Bash', ref: 'abc1234' }] },
   },
   anchor_event: { payload: { text: 'ignored' }, plan_dirs: ['Active/tst-plan/'] },
-  turn: null,
-  observed: false,
+  turns: [
+    {
+      id: uuid(13),
+      kind: 'assistant_turn',
+      session_id: 'tst-session-3',
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
+      content: 'Merged the fix in commit abc1234 on tst-repo.',
+      occurred_at: '2026-10-03T18:00:00Z',
+      source: { type: 'transcript', event_key: 'tst-key-13', tools: [{ name: 'Bash', ref: 'abc1234' }] },
+      observed: false,
+    },
+  ],
   subjects: [{ id: uuid(24), label: 'merge flow', project_id: 'tst-repo', last_used_at: '2026-10-01T00:00:00Z' }],
   statements: [],
   observations: [],
@@ -250,17 +261,19 @@ const OBSERVED_WINDOW: RawExtractionWindow = {
     occurred_at: '2026-10-04T08:01:00Z',
   },
   anchor_event: null,
-  turn: {
-    id: uuid(14),
-    kind: 'assistant_turn',
-    session_id: 'tst-session-4',
-    project_id: 'tst-repo',
-    workspace_id: null,
-    content: 'Done.',
-    occurred_at: '2026-10-04T08:00:00Z',
-    source: { type: 'transcript', tools: [] },
-  },
-  observed: true,
+  turns: [
+    {
+      id: uuid(14),
+      kind: 'assistant_turn',
+      session_id: 'tst-session-4',
+      project_id: 'tst-repo',
+      workspace_id: null,
+      content: 'Done.',
+      occurred_at: '2026-10-04T08:00:00Z',
+      source: { type: 'transcript', tools: [] },
+      observed: true,
+    },
+  ],
 }
 
 const OBSERVED_MESSAGE = [
@@ -291,7 +304,7 @@ describe('renderUserMessage', () => {
   it.each([
     ['a prompt', PROMPT_WINDOW, PROMPT_MESSAGE],
     ['a dialog with notes', DIALOG_WINDOW, DIALOG_MESSAGE],
-    ['a trailing turn', TRAILING_WINDOW, TRAILING_MESSAGE],
+    ['an observation-only window of turns', TRAILING_WINDOW, TRAILING_MESSAGE],
     ['a window whose turn is already observed', OBSERVED_WINDOW, OBSERVED_MESSAGE],
   ])('renders %s byte for byte', (_label, raw, expected) => {
     expect(renderUserMessage(buildWindow(raw))).toBe(expected)
@@ -308,8 +321,9 @@ describe('buildWindow', () => {
 
     expect(w.anchorKind).toBe('user_prompt')
     expect(w.utterance).toMatchObject({ alias: 'utt-1', id: uuid(11), eventKey: 'tst-key-11', dialog: null })
-    expect(w.turn).toMatchObject({ alias: 'turn-1', id: uuid(10), alreadyObserved: false })
-    expect(w.turn!.tools).toEqual([
+    expect(w.turns).toHaveLength(1)
+    expect(w.turns[0]).toMatchObject({ alias: 'turn-1', id: uuid(10), alreadyObserved: false })
+    expect(w.turns[0]!.tools).toEqual([
       { name: 'Read', ref: 'packages/mcp/src/capture-route.ts' },
       { name: 'Bash', ref: null },
     ])
@@ -323,7 +337,7 @@ describe('buildWindow', () => {
   it('gives a dialog answer no turn and aliases its questions in order', () => {
     const w = buildWindow(DIALOG_WINDOW)
 
-    expect(w.turn).toBeNull()
+    expect(w.turns).toEqual([])
     expect(w.utterance!.content).toBe('Postgres only\nNo SQLite anywhere.\n\nLater\n\nShip it.')
     expect(w.utterance!.dialog!.questions.map((q) => [q.alias, q.question, q.notes])).toEqual([
       ['q-1', STORE_QUESTION, 'No SQLite anywhere.'],
@@ -331,12 +345,29 @@ describe('buildWindow', () => {
     ])
   })
 
-  it('makes a trailing anchor its own turn-1 with no utt-1', () => {
+  it('makes a window anchored at an assistant turn observation-only, with no utt-1', () => {
     const w = buildWindow(TRAILING_WINDOW)
 
-    expect(w.anchorKind).toBe('trailing')
+    expect(w.anchorKind).toBe('turns')
     expect(w.utterance).toBeNull()
-    expect(w.turn).toMatchObject({ id: uuid(13), eventKey: 'tst-key-13' })
+    expect(w.turns).toMatchObject([{ alias: 'turn-1', id: uuid(13), eventKey: 'tst-key-13' }])
+  })
+
+  it('aliases several turns oldest first and renders each with its tools before utt-1', () => {
+    const first = { ...PROMPT_WINDOW.turns![0]!, id: uuid(8), content: 'Read the route.', occurred_at: '2026-10-01T08:59:00Z' }
+    const later = { ...PROMPT_WINDOW.turns![0]!, observed: true }
+    const w = buildWindow({ ...PROMPT_WINDOW, turns: [first, later] })
+
+    expect(w.turns.map((t) => [t.alias, t.id, t.alreadyObserved])).toEqual([
+      ['turn-1', uuid(8), false],
+      ['turn-2', uuid(10), true],
+    ])
+    const message = renderUserMessage(w)
+    expect(message).toContain(
+      'turn-1 (ASSISTANT, 2026-10-01T08:59:00.000Z):\nRead the route.\n\nTOOLS OF turn-1:\n- Read: packages/mcp/src/capture-route.ts\n- Bash\n\n' +
+        'turn-2 (ASSISTANT, 2026-10-01T09:00:00.000Z): (already observed)\n',
+    )
+    expect(message.indexOf('TOOLS OF turn-2:')).toBeLessThan(message.indexOf('utt-1 (MK'))
   })
 
   it('refuses an anchor that is not an utterance', () => {
@@ -411,19 +442,19 @@ describe('listings and text limits', () => {
 
   it('shows the last 24,000 characters of a 30,000-character turn after the marker', () => {
     const content = 'w'.repeat(6000) + 'y'.repeat(24_000)
-    const raw = { ...PROMPT_WINDOW, turn: { ...PROMPT_WINDOW.turn!, content } }
+    const raw = { ...PROMPT_WINDOW, turns: [{ ...PROMPT_WINDOW.turns![0]!, content }] }
 
     const message = renderUserMessage(buildWindow(raw))
     expect(message).toContain(
       `turn-1 (ASSISTANT, 2026-10-01T09:00:00.000Z):\n[earlier text not shown]\n${'y'.repeat(24_000)}\n\nTOOLS OF turn-1:`,
     )
     expect(message).not.toContain('ww')
-    expect(buildWindow(raw).turn!.content).toBe(content)
+    expect(buildWindow(raw).turns[0]!.content).toBe(content)
   })
 
   it('shows a turn of exactly 24,000 characters whole', () => {
     const content = 'y'.repeat(24_000)
-    const raw = { ...PROMPT_WINDOW, turn: { ...PROMPT_WINDOW.turn!, content } }
+    const raw = { ...PROMPT_WINDOW, turns: [{ ...PROMPT_WINDOW.turns![0]!, content }] }
 
     expect(renderUserMessage(buildWindow(raw))).not.toContain('[earlier text not shown]')
   })
@@ -447,5 +478,42 @@ describe('extractionMaxTokens', () => {
     [200_000, 6000],
   ])('caps a reply to a %i-character message at %i tokens', (chars, expected) => {
     expect(extractionMaxTokens('a'.repeat(chars))).toBe(expected)
+  })
+})
+
+describe('shown items', () => {
+  const shownItem = (n: number, content = `shown memory ${n}`) => ({
+    id: uuid(3000 + n),
+    class: 'observation',
+    kind: 'fact',
+    subject_id: null,
+    project_id: 'tst-far',
+    workspace_id: null,
+    content,
+    occurred_at: '2026-09-25T10:00:00Z',
+  })
+
+  it('lists each shown item once, in the store order, at most 24, each cut at 1500 characters', () => {
+    const items = [shownItem(0, 'y'.repeat(1600)), shownItem(1), shownItem(0), ...Array.from({ length: 30 }, (_, i) => shownItem(10 + i))]
+    const w = buildWindow({ ...PROMPT_WINDOW, shown: items })
+
+    expect(w.shown).toHaveLength(24)
+    expect(w.shown.slice(0, 3).map((item) => [item.alias, item.id])).toEqual([
+      ['shown-1', uuid(3000)],
+      ['shown-2', uuid(3001)],
+      ['shown-3', uuid(3010)],
+    ])
+    expect(w.shown[0]!.content).toBe('y'.repeat(1500))
+    expect(w.shown[0]).toMatchObject({ class: 'observation', projectId: 'tst-far', workspaceId: null })
+  })
+
+  it('renders the shown items before the turn, one line each', () => {
+    const message = renderUserMessage(buildWindow({ ...PROMPT_WINDOW, shown: [shownItem(1, 'The port\nis 3850.')] }))
+    expect(message).toContain('SHOWN TO THE ASSISTANT BEFORE THE TURNS:\nshown-1 [observation/fact, 2026-09-25] The port is 3850.\n\nturn-1')
+  })
+
+  it('omits the section when nothing was shown, and lists nothing shown for a trailing turn', () => {
+    expect(renderUserMessage(buildWindow(PROMPT_WINDOW))).not.toContain('SHOWN')
+    expect(buildWindow({ ...TRAILING_WINDOW, shown: [shownItem(1)] }).shown).toEqual([])
   })
 })

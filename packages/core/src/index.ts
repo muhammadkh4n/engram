@@ -39,6 +39,8 @@ export {
   EXTRACTION_PENDING_LIMIT_MAX,
   EXTRACTION_WINDOW_RECENT_MAX,
   EXTRACTION_WINDOW_SUBJECTS_MAX,
+  EXTRACTION_CANDIDATES_LIMIT_MAX,
+  DUE_SESSIONS_LIMIT_MAX,
   MATERIALIZE_LIMIT_MAX,
   SCAN_TARGETS,
   sqlstateOf,
@@ -49,14 +51,27 @@ export type {
   CaptureStore,
   EmbeddingFailure,
   ExtractionBegin,
+  ExtractionCandidate,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionEntity,
   ExtractionFailure,
   ExtractionItem,
+  ExtractionLink,
+  ExtractionRejectedLink,
+  ExtractionRetractions,
   ExtractionNewSubject,
   ExtractionPendingQuery,
+  ExtractionReplaceResult,
+  ExtractionRerunStore,
+  ExtractionSession,
+  ExtractionSessionQuery,
   PendingAnchor,
+  ReplacedSupersession,
+  SessionAnchor,
+  ExtractedBy,
   IngestedEvent,
   ItemEmbedding,
   MaterializeResult,
@@ -65,6 +80,12 @@ export type {
   ScanRow,
   ScanTarget,
   StoredEvent,
+  DueSession,
+  SessionIndexCommitRef,
+  SessionIndexCommitResult,
+  SessionIndexItem,
+  SessionIndexSource,
+  SessionIndexUtterance,
 } from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
 export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
@@ -271,7 +292,12 @@ export type { SynthesizeInput } from './synthesis/index.js'
 export { classifyComputeIntent, isPreferenceRequest } from './synthesis/intent.js'
 
 // Extraction: the window, the versioned prompt and the reply parser
-export { EXTRACTOR_VERSION, EXTRACTION_SYSTEM_PROMPT } from './extraction/prompt.js'
+export {
+  EXTRACTOR_VERSION,
+  EXTRACTION_SYSTEM_PROMPT,
+  DECISION_SYSTEM_PROMPT,
+  DECISION_REPLY_SCHEMA,
+} from './extraction/prompt.js'
 export {
   buildWindow,
   renderUserMessage,
@@ -280,6 +306,8 @@ export {
   SUBJECT_LISTING_LIMIT,
   RECENT_LISTING_LIMIT,
   LISTED_CONTENT_MAX_CHARS,
+  SHOWN_LISTING_LIMIT,
+  SHOWN_CONTENT_MAX_CHARS,
   TURN_MAX_CHARS,
   EARLIER_TEXT_MARKER,
 } from './extraction/window.js'
@@ -291,6 +319,8 @@ export type {
   RawWindowEvent,
   RawWindowSubject,
   RawWindowItem,
+  RawWindowShownItem,
+  RawWindowTurnRef,
   RawWindowProject,
   RawWindowTool,
   ExtractionWindow,
@@ -302,19 +332,85 @@ export type {
   WindowDialogOption,
   WindowSubject,
   WindowListedItem,
+  WindowShownItem,
+  WindowTurnRef,
 } from './extraction/window.js'
 export { gateWindow, MAX_ITEMS_PER_SIDE, ATTRIBUTION_PATTERNS } from './extraction/gate.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
-export { buildCommitPayload, extractionEventKey } from './extraction/persist.js'
-export type { ExtractionItemClass } from './extraction/persist.js'
+export { buildCommitPayload, draftCommit, draftLinks, finishCommit } from './extraction/persist.js'
+export type { ExtractionItemClass, CommitDraft, CommitDecisions } from './extraction/persist.js'
+export {
+  candidateQueries,
+  planDecisions,
+  renderDecisionMessage,
+  decisionMaxTokens,
+  parseDecisionReply,
+  decisionsOf,
+  DECISION_CANDIDATES_MAX,
+  DECISION_ITEM_MAX_CHARS,
+  DECISION_LABEL,
+  DECISION_RELATIONS,
+} from './extraction/decide.js'
+export type {
+  CandidateQueries,
+  DecisionCandidate,
+  AskedItem,
+  DecisionPlan,
+  ParsedDecision,
+  ParsedDecisions,
+  DecisionRelation,
+} from './extraction/decide.js'
+export {
+  buildSessionIndexItem,
+  clipLine,
+  indexTime,
+  renderSessionIndex,
+  runSessionIndexTick,
+  SESSION_INDEX_IDLE_MS,
+  SESSION_INDEX_LINE_MAX_CODE_POINTS,
+  SESSION_INDEX_SESSIONS_PER_TICK,
+} from './extraction/session-index.js'
+export type { SessionIndexStore, SessionIndexTickDeps, SessionIndexTickResult } from './extraction/session-index.js'
+export {
+  itemEventKey,
+  sessionIndexEventKey,
+  validateLinks,
+  isCurrent,
+  isRegisterEntry,
+  inScope,
+  LINK_REJECT_REASONS,
+} from './extraction/links.js'
+export {
+  scanRetractions,
+  splitSentences,
+  isRetraction,
+  idsIn,
+  RETRACTION_GAP_MAX_CHARS,
+  NEGATION_LOOKBACK_WORDS,
+} from './extraction/retractions.js'
+export type { RetractionScan } from './extraction/retractions.js'
+export type {
+  IdentityClass,
+  LinkRel,
+  LinkRejectReason,
+  LinkSource,
+  LinkTarget,
+  LinkProposal,
+  AcceptedLink,
+  RejectedLink,
+  LinkValidation,
+} from './extraction/links.js'
 export {
   extractWindow,
+  askDecisions,
   runExtractionTick,
   extractionFailureClass,
   isExtractionReplyError,
   ExtractionReplyError,
   SESSION_IDLE_MS,
   EXTRACTION_WINDOWS_PER_TICK,
+  EXTRACTION_WINDOWS_PER_TICK_MAX,
+  isExtractionWindowsPerTick,
   EXTRACTION_STALE_RUN_MS,
   EXTRACTION_HELD_FAILURES_MAX,
   EXTRACTION_TRANSIENT_FAILURES_MAX,
@@ -322,6 +418,7 @@ export {
 export type {
   ExtractWindowDeps,
   ExtractWindowResult,
+  DecisionCallResult,
   ExtractionCall,
   ExtractionReplyFault,
   ExtractionStore,

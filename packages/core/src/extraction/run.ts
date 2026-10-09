@@ -1,11 +1,18 @@
 /**
- * Extraction runs: one model call per window, recorded as one run row per
- * anchor and extractor version.
+ * Extraction runs: one model call per window, and a second when any new item
+ * has current items on its subject to be weighed against, recorded as one run
+ * row per anchor and extractor version.
  *
- * A tick takes the due anchors the store hands out (each session's earliest
- * pending anchor, oldest first, backoff already applied in SQL), opens a run
- * on each, calls the model, gates the reply and commits the accepted items
- * with the run's close in one transaction. A run that does not commit is
+ * A tick takes the due anchors the store hands out (sessions most recently
+ * received first, each session's anchors in event order, backoff already
+ * applied in SQL), up to its budget of windows, and runs them one at a time:
+ * a window lists what the windows before it stored, so they never overlap.
+ * A session whose window does not succeed yields its later anchors to the
+ * next fetch, where they wait behind it. Each run opens on its anchor, calls
+ * the model, gates the reply, runs the decision pass
+ * (./decide.ts) and commits the accepted items and links with the run's close
+ * in one transaction. A failed decision read or call closes the run as the
+ * window's own read or call would. A run that does not commit is
  * closed as failed with its class:
  * - `transient` (an empty or moderated reply, a provider or network fault);
  * - `held` (a reply cut off at its cap, an unreadable reply, a window that
@@ -47,13 +54,27 @@ import {
   EXTRACTION_WINDOW_SUBJECTS_MAX,
   isDataRefusal,
   type CaptureStore,
+  type ExtractionCandidateRead,
   type ExtractionCommit,
   type ExtractionCommitResult,
   type PendingAnchor,
 } from '../items/capture-store.js'
+import {
+  candidateQueries,
+  decisionMaxTokens,
+  decisionsOf,
+  DECISION_CANDIDATES_MAX,
+  DECISION_LABEL,
+  parseDecisionReply,
+  planDecisions,
+  renderDecisionMessage,
+  type CandidateQueries,
+  type DecisionPlan,
+  type ParsedDecisions,
+} from './decide.js'
 import { gateWindow, type GateResult } from './gate.js'
-import { buildCommitPayload } from './persist.js'
-import { EXTRACTION_SYSTEM_PROMPT, EXTRACTOR_VERSION } from './prompt.js'
+import { draftCommit, finishCommit, type CommitDecisions, type CommitDraft } from './persist.js'
+import { DECISION_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, EXTRACTOR_VERSION } from './prompt.js'
 import { parseReply } from './reply.js'
 import { cutWholeChars } from '../text/cut-text.js'
 import {
@@ -67,8 +88,10 @@ import {
 
 /** A session with no capture event for this long has ended. */
 export const SESSION_IDLE_MS = 30 * 60_000
-/** Windows one tick runs at most. */
+/** Windows one tick runs at most, unless the worker is given another budget. */
 export const EXTRACTION_WINDOWS_PER_TICK = 20
+/** The largest budget a tick may be given. */
+export const EXTRACTION_WINDOWS_PER_TICK_MAX = 200
 /** A run still `running` after this long was abandoned by its process. */
 export const EXTRACTION_STALE_RUN_MS = 10 * 60_000
 /** Held failures after which an anchor is no longer pending (the pending RPC holds the same number). */
@@ -176,9 +199,55 @@ export async function extractWindow(window: ExtractionWindow, deps: ExtractWindo
   return { ...gateWindow(window, parsed), call }
 }
 
+export interface DecisionCallResult {
+  parsed: ParsedDecisions
+  call: ExtractionCall
+}
+
+/**
+ * Asks the model once, in JSON mode, for a decision on every item the plan
+ * holds. Throws ExtractionReplyError for an empty, cut-off or unreadable
+ * reply; a failed call rejects with the adapter's own error.
+ */
+export async function askDecisions(plan: DecisionPlan, deps: ExtractWindowDeps): Promise<DecisionCallResult> {
+  const completeJson = deps.intelligence.completeJson
+  if (!completeJson) throw new Error('extraction needs an intelligence adapter with completeJson')
+  const user = renderDecisionMessage(plan)
+  const started = Date.now()
+  const reply: CompleteJsonResult = await completeJson.call(deps.intelligence, {
+    label: DECISION_LABEL,
+    system: DECISION_SYSTEM_PROMPT,
+    user,
+    maxTokens: decisionMaxTokens(plan),
+  })
+  const call: ExtractionCall = {
+    promptChars: user.length,
+    replyChars: reply.text.length,
+    finishReason: reply.finishReason,
+    replyModel: reply.model || null,
+    modelMs: Date.now() - started,
+  }
+  if (reply.text.trim() === '') {
+    throw new ExtractionReplyError('empty', 'the decision reply was empty', call)
+  }
+  if (reply.finishReason === 'length') {
+    throw new ExtractionReplyError('length', `the decision reply was cut off at its token cap (${call.replyChars} chars)`, call)
+  }
+  const parsed = parseDecisionReply(reply.text)
+  if (!parsed.ok) {
+    throw new ExtractionReplyError('parse', `the reply is not the decision reply object: ${parsed.reason}`, call)
+  }
+  return { parsed, call }
+}
+
 export type ExtractionStore = Pick<
   CaptureStore,
-  'extractionPending' | 'extractionWindow' | 'extractionBegin' | 'extractionFail' | 'extractionCommit'
+  | 'extractionPending'
+  | 'extractionWindow'
+  | 'extractionCandidates'
+  | 'extractionBegin'
+  | 'extractionFail'
+  | 'extractionCommit'
 >
 
 export interface ExtractionTickDeps {
@@ -188,7 +257,18 @@ export interface ExtractionTickDeps {
   model: string | null
   /** The clock due-ness, idleness and staleness are judged by. */
   now?: () => Date
+  /**
+   * Windows the tick runs at most, an integer from 1 to
+   * EXTRACTION_WINDOWS_PER_TICK_MAX (default EXTRACTION_WINDOWS_PER_TICK);
+   * the caller checks it once, at startup (isExtractionWindowsPerTick).
+   */
+  windowsPerTick?: number
   log: (line: string) => void
+}
+
+/** Whether `value` is a budget a tick may be given. */
+export function isExtractionWindowsPerTick(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= EXTRACTION_WINDOWS_PER_TICK_MAX
 }
 
 export interface ExtractionTickResult {
@@ -216,8 +296,8 @@ const EMPTY_TICK: ExtractionTickResult = { windows: 0, succeeded: 0, held: 0, tr
 let reportedNoCompleteJson = false
 
 /**
- * Runs up to EXTRACTION_WINDOWS_PER_TICK windows. Never throws: a store
- * failure outside a run ends the tick with a log line.
+ * Runs up to `windowsPerTick` windows. Never throws: a store failure outside
+ * a run ends the tick with a log line.
  */
 export async function runExtractionTick(deps: ExtractionTickDeps): Promise<ExtractionTickResult> {
   const { intelligence, log } = deps
@@ -228,39 +308,45 @@ export async function runExtractionTick(deps: ExtractionTickDeps): Promise<Extra
     }
     return { ...EMPTY_TICK }
   }
+  const budget = deps.windowsPerTick ?? EXTRACTION_WINDOWS_PER_TICK
   const counts = { ...EMPTY_TICK }
   try {
-    await runWindows({ ...deps, intelligence }, counts)
+    await runWindows({ ...deps, intelligence }, budget, counts)
   } catch (err) {
     log(`extraction: tick stopped: ${describeError(err)}`)
   }
-  return { ...counts, full: counts.windows >= EXTRACTION_WINDOWS_PER_TICK }
+  return { ...counts, full: counts.windows >= budget }
 }
 
-async function runWindows(deps: TickDeps, counts: ExtractionTickResult): Promise<void> {
+async function runWindows(deps: TickDeps, budget: number, counts: ExtractionTickResult): Promise<void> {
   const now = deps.now ?? (() => new Date())
   // An anchor handed out twice in one tick (held by another process, gone)
   // is not retried here; a fetch that brings nothing new ends the tick.
   const seen = new Set<string>()
-  while (counts.windows < EXTRACTION_WINDOWS_PER_TICK) {
+  while (counts.windows < budget) {
     const pending = await deps.store.extractionPending({
       version: EXTRACTOR_VERSION,
-      limit: EXTRACTION_WINDOWS_PER_TICK - counts.windows,
+      limit: budget - counts.windows,
       idleMs: SESSION_IDLE_MS,
       now: now(),
     })
     const fresh = pending.filter((anchor) => !seen.has(anchor.anchorId))
     if (fresh.length === 0) return
+    // A session's later anchors wait behind one that did not succeed; the
+    // next fetch hands them out again only once it has.
+    const halted = new Set<string>()
     for (const anchor of fresh) {
+      if (halted.has(anchor.sessionId)) continue
       seen.add(anchor.anchorId)
       const status = await runWindow(deps, anchor, now)
+      if (status !== 'succeeded' && status !== 'gone') halted.add(anchor.sessionId)
       if (status === 'skipped') continue
       counts.windows += 1
       if (status === 'succeeded') counts.succeeded += 1
       else if (status === 'held') counts.held += 1
       else if (status === 'transient' || status === 'outage') counts.transient += 1
       if (status === 'outage') return
-      if (counts.windows >= EXTRACTION_WINDOWS_PER_TICK) return
+      if (counts.windows >= budget) return
     }
   }
 }
@@ -289,22 +375,17 @@ async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date)
 
   let raw: RawExtractionWindow | null
   try {
-    raw = await store.extractionWindow(anchor.anchorId, EXTRACTION_WINDOW_SUBJECTS_MAX, RECENT_LISTING_LIMIT)
+    raw = await store.extractionWindow(
+      anchor.anchorId,
+      EXTRACTION_WINDOW_SUBJECTS_MAX,
+      RECENT_LISTING_LIMIT,
+      EXTRACTOR_VERSION,
+      'any_version',
+    )
   } catch (err) {
     return failStore(deps, anchor, runId, err, {}, line)
   }
-  if (raw === null) {
-    // Forgotten or deleted since it was handed out: nothing to extract, and
-    // the pending read no longer returns it.
-    await store.extractionFail(runId, {
-      error: 'the anchor is gone',
-      failure: 'transient',
-      counted: false,
-      stats: { anchor_kind: anchor.anchorKind },
-    })
-    line('gone', '')
-    return 'gone'
-  }
+  if (raw === null) return closeGone(deps, anchor, runId, line)
 
   let window: ExtractionWindow
   try {
@@ -322,6 +403,21 @@ async function runWindow(deps: TickDeps, anchor: PendingAnchor, now: () => Date)
     return failCall(deps, anchor, runId, err, line)
   }
   return commitWindow(deps, anchor, runId, window, result, line)
+}
+
+/**
+ * The anchor was forgotten or deleted since it was handed out: nothing to
+ * extract, and the pending read no longer returns it.
+ */
+async function closeGone(deps: TickDeps, anchor: PendingAnchor, runId: string, line: WindowLine): Promise<WindowStatus> {
+  await deps.store.extractionFail(runId, {
+    error: 'the anchor is gone',
+    failure: 'transient',
+    counted: false,
+    stats: { anchor_kind: anchor.anchorKind },
+  })
+  line('gone', '')
+  return 'gone'
 }
 
 /**
@@ -444,15 +540,29 @@ async function commitWindow(
   result: ExtractWindowResult,
   line: WindowLine,
 ): Promise<WindowStatus> {
-  let commit: ExtractionCommit
+  let draft: CommitDraft
   try {
-    const payload = buildCommitPayload(window, result, runId)
-    commit = {
-      ...payload,
-      stats: { anchor_kind: anchor.anchorKind, ...callStats(result.call), ...payload.stats },
-    }
+    draft = draftCommit(window, result, runId)
   } catch (err) {
     // The reply cannot be turned into a payload; the same reply fails the same way.
+    return failHeld(deps, anchor, runId, err, callStats(result.call), line)
+  }
+  const decided = await decideWindow(deps, anchor, runId, draft, result, line)
+  if (typeof decided === 'string') return decided
+  let commit: ExtractionCommit
+  try {
+    const payload = finishCommit(draft, decided.decisions)
+    commit = {
+      ...payload,
+      stats: {
+        anchor_kind: anchor.anchorKind,
+        ...callStats(result.call),
+        model_calls: 1 + (decided.call === null ? 0 : 1),
+        ...(decided.call === null ? {} : { decision_call: callStats(decided.call) }),
+        ...payload.stats,
+      },
+    }
+  } catch (err) {
     return failHeld(deps, anchor, runId, err, callStats(result.call), line)
   }
   let stored: ExtractionCommitResult
@@ -464,9 +574,58 @@ async function commitWindow(
   line(
     'succeeded',
     ` statements=${result.statements.length} observations=${result.observations.length}` +
-      ` rejected=${result.rejected.length} duplicates=${stored.duplicates} subjects_created=${stored.subjectsCreated}`,
+      ` rejected=${result.rejected.length} duplicates=${stored.duplicates} restatements=${stored.restatements}` +
+      ` subjects_created=${stored.subjectsCreated} decision_calls=${decided.call === null ? 0 : 1}`,
   )
   return 'succeeded'
+}
+
+interface WindowDecided {
+  decisions: CommitDecisions
+  call: ExtractionCall | null
+}
+
+/**
+ * The decision pass: reads what each new item must be weighed against and,
+ * when any item has candidates, asks the model once. A failed read or call
+ * closes the run the way the window's own read or call would.
+ */
+async function decideWindow(
+  deps: TickDeps,
+  anchor: PendingAnchor,
+  runId: string,
+  draft: CommitDraft,
+  result: ExtractWindowResult,
+  line: WindowLine,
+): Promise<WindowDecided | WindowStatus> {
+  let queries: CandidateQueries
+  let reads: ExtractionCandidateRead[] | null = []
+  try {
+    queries = candidateQueries(draft)
+  } catch (err) {
+    return failHeld(deps, anchor, runId, err, callStats(result.call), line)
+  }
+  if (queries.queries.length > 0) {
+    try {
+      reads = await deps.store.extractionCandidates(anchor.anchorId, queries.queries, DECISION_CANDIDATES_MAX)
+    } catch (err) {
+      return failStore(deps, anchor, runId, err, callStats(result.call), line)
+    }
+  }
+  if (reads === null) return closeGone(deps, anchor, runId, line)
+  let plan: DecisionPlan
+  try {
+    plan = planDecisions(draft, queries, reads)
+  } catch (err) {
+    return failHeld(deps, anchor, runId, err, callStats(result.call), line)
+  }
+  if (plan.asked.length === 0) return { decisions: decisionsOf(plan, null, 0), call: null }
+  try {
+    const { parsed, call } = await askDecisions(plan, { intelligence: deps.intelligence })
+    return { decisions: decisionsOf(plan, parsed, 1), call }
+  } catch (err) {
+    return failCall(deps, anchor, runId, err, line)
+  }
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   MEMORY_INGEST_SOURCE,
   RECALL_BUDGET_TOO_SMALL,
   parseSalienceThresholdEnv,
+  parseExtractWindowsPerTickEnv,
   captureModelFromEnv,
   sharedInit,
   CONSOLIDATION_WORKER_CYCLES,
@@ -763,6 +764,24 @@ describe('parseSalienceThresholdEnv', () => {
 
   it.each(['abc', '1.5', '-0.2', '0x1', '1e-1', 'NaN'])('throws on %s', (raw) => {
     expect(() => parseSalienceThresholdEnv({ ENGRAM_SALIENCE_THRESHOLD: raw })).toThrow(/ENGRAM_SALIENCE_THRESHOLD/)
+  })
+})
+
+describe('parseExtractWindowsPerTickEnv', () => {
+  it('defaults to 20 when unset or blank', () => {
+    expect(parseExtractWindowsPerTickEnv({})).toBe(20)
+    expect(parseExtractWindowsPerTickEnv({ ENGRAM_EXTRACT_WINDOWS_PER_TICK: '  ' })).toBe(20)
+  })
+
+  it('reads an integer from 1 to 200', () => {
+    expect(parseExtractWindowsPerTickEnv({ ENGRAM_EXTRACT_WINDOWS_PER_TICK: '1' })).toBe(1)
+    expect(parseExtractWindowsPerTickEnv({ ENGRAM_EXTRACT_WINDOWS_PER_TICK: ' 200 ' })).toBe(200)
+  })
+
+  it.each(['0', '201', '-3', '2.5', '1e2', 'twenty'])('fails startup on %s', (raw) => {
+    expect(() => parseExtractWindowsPerTickEnv({ ENGRAM_EXTRACT_WINDOWS_PER_TICK: raw })).toThrow(
+      `ENGRAM_EXTRACT_WINDOWS_PER_TICK must be an integer from 1 to 200, got "${raw}"`,
+    )
   })
 })
 

@@ -1,0 +1,73 @@
+{
+  "note": "MK's statement names a new port; the current observation on the subject says 3850.",
+  "window": {
+    "anchor": {
+      "id": "00000000-0000-4000-8000-0000000d0003",
+      "kind": "user_prompt",
+      "session_id": "tst-session-d",
+      "project_id": "tst-repo",
+      "workspace_id": "tst-ws",
+      "content": "no, the server listens on 3851",
+      "context": null,
+      "occurred_at": "2026-10-06T14:00:00Z",
+      "source": {
+        "type": "transcript",
+        "line": 5,
+        "event_key": "tst-key-0003"
+      }
+    },
+    "anchor_event": {
+      "payload": {
+        "text": "no, the server listens on 3851",
+        "transcript_line": 5
+      },
+      "plan_dirs": []
+    },
+    "turns": [],
+    "subjects": [
+      {
+        "id": "00000000-0000-4000-8000-0000000d0040",
+        "label": "server port",
+        "project_id": "tst-repo",
+        "last_used_at": "2026-10-01T12:00:00Z"
+      }
+    ],
+    "statements": [],
+    "observations": [],
+    "projects": [
+      {
+        "id": "tst-ws",
+        "kind": "workspace"
+      },
+      {
+        "id": "tst-repo",
+        "kind": "project"
+      }
+    ]
+  },
+  "reply": "{\"statements\":[{\"utterance_id\":\"utt-1\",\"quote\":\"the server listens on 3851\",\"question\":null,\"kind\":\"correction\",\"standing\":false,\"scope\":\"project\",\"subject\":{\"id\":\"subj-1\"},\"applies_to\":[],\"supersedes\":[],\"restates\":[],\"corrects\":[]}],\"observations\":[]}",
+  "reads": [
+    {
+      "stored": null,
+      "repeatOf": null,
+      "total": 1,
+      "read": [
+        "00000000-0000-4000-8000-0000000d0041"
+      ],
+      "candidates": [
+        {
+          "id": "00000000-0000-4000-8000-0000000d0041",
+          "class": "observation",
+          "kind": "fact",
+          "subjectId": "00000000-0000-4000-8000-0000000d0040",
+          "subjectLabel": "server port",
+          "projectId": "tst-repo",
+          "workspaceId": "tst-ws",
+          "content": "The engram MCP server listens on port 3850.",
+          "occurredAt": "2026-10-01T12:00:00Z"
+        }
+      ]
+    }
+  ],
+  "decision_reply": "{\"decisions\":[{\"item\":0,\"relation\":\"independent\",\"targets\":[],\"corrects\":[\"c-1\"]}]}"
+}

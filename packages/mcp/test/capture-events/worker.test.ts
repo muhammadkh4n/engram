@@ -32,6 +32,7 @@ import type {
   MaterializeResult,
   PendingAnchor,
   PendingEmbedding,
+  SessionIndexStore,
 } from '@engram-mem/core'
 import {
   WORKER_EMBED_BACKOFF_MAX_MS,
@@ -675,6 +676,60 @@ describe('startCaptureWorker', () => {
     await stopping
     expect(stopped).toBe(true)
   })
+
+  it('builds due session indexes after extraction, in a tick that held the lock', async () => {
+    const f = fakes()
+    const { extraction } = extractionFakes(f.calls, [])
+    const commits: Array<[string, number]> = []
+    const sessionIndex: { store: SessionIndexStore; now: () => Date } = {
+      now: () => new Date(Date.UTC(2026, 0, 12, 9)),
+      store: {
+        async dueSessions() {
+          f.calls.push('dueSessions')
+          return [{ sessionId: 'sess-worker', lastEventId: 7 }]
+        },
+        async sessionIndexSource(sessionId) {
+          f.calls.push('sessionIndexSource')
+          return {
+            sessionId,
+            firstEventId: 7,
+            lastEventId: 7,
+            firstAt: new Date(Date.UTC(2026, 0, 12, 8)),
+            lastAt: new Date(Date.UTC(2026, 0, 12, 8)),
+            history: false,
+            projects: [],
+            workspaces: [],
+            plans: [],
+            utterances: [],
+            hasUtterance: false,
+            statements: [],
+            observations: [],
+            commits: [],
+            toolRefs: [],
+            ledger: [],
+            currentIndex: null,
+          }
+        },
+        async sessionIndexCommit(sessionId, item, eventId) {
+          f.calls.push('sessionIndexCommit')
+          commits.push([sessionId, eventId])
+          expect(item).toBeNull()
+          return { written: false, stale: false, itemId: null }
+        },
+      },
+    }
+    const worker = startCaptureWorker({ ...f.opts, extraction, sessionIndex })
+    await vi.advanceTimersByTimeAsync(0)
+    await worker.stop(1000)
+
+    expect(f.calls.slice(f.calls.indexOf('extractionPending'))).toEqual([
+      'extractionPending',
+      'dueSessions',
+      'sessionIndexSource',
+      'sessionIndexCommit',
+    ])
+    expect(commits).toEqual([['sess-worker', 7]])
+  })
 })
 
 function fakeServer(opts: { openConnection?: boolean } = {}) {
@@ -732,6 +787,7 @@ function extractionFakes(calls: string[], anchors: PendingAnchor[]) {
       return anchors.length > 1 ? `run-${begun.length}` : null
     },
     extractionWindow: async () => null,
+    extractionCandidates: async () => null,
     extractionFail: async () => true,
     extractionCommit: async () => {
       throw new Error('no commit expected')

@@ -22,23 +22,25 @@
       },
       "plan_dirs": []
     },
-    "turn": {
-      "id": "00000000-0000-4000-8000-000000000100",
-      "kind": "assistant_turn",
-      "session_id": "tst-session-1",
-      "project_id": "tst-repo",
-      "workspace_id": "tst-ws",
-      "content": "The new capture route is deployed behind a flag.\nShould the old route be removed now?",
-      "context": null,
-      "occurred_at": "2026-10-01T09:00:00Z",
-      "source": {
-        "type": "transcript",
-        "line": 2,
-        "tools": [],
-        "event_key": "tst-key-100"
+    "turns": [
+      {
+        "id": "00000000-0000-4000-8000-000000000100",
+        "kind": "assistant_turn",
+        "session_id": "tst-session-1",
+        "project_id": "tst-repo",
+        "workspace_id": "tst-ws",
+        "content": "The new capture route is deployed behind a flag.\nShould the old route be removed now?",
+        "context": null,
+        "occurred_at": "2026-10-01T09:00:00Z",
+        "source": {
+          "type": "transcript",
+          "line": 2,
+          "tools": [],
+          "event_key": "tst-key-100"
+        },
+        "observed": false
       }
-    },
-    "observed": false,
+    ],
     "subjects": [],
     "statements": [],
     "observations": [],

@@ -13,12 +13,15 @@ import { describe, expect, it } from 'vitest'
 import type { CompleteJsonRequest, IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import type {
   ExtractionBegin,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
   ExtractionFailure,
   PendingAnchor,
 } from '../../src/items/capture-store.js'
-import { buildCommitPayload, extractionEventKey } from '../../src/extraction/persist.js'
+import { itemEventKey } from '../../src/extraction/links.js'
+import { buildCommitPayload } from '../../src/extraction/persist.js'
 import { extractWindow, runExtractionTick, type ExtractionStore } from '../../src/extraction/run.js'
 import { buildWindow, renderUserMessage, type RawExtractionWindow } from '../../src/extraction/window.js'
 
@@ -80,7 +83,7 @@ class OneWindowStore implements ExtractionStore {
       {
         anchorId: anchor.id,
         sessionId: anchor.session_id!,
-        anchorKind: anchor.kind === 'assistant_turn' ? 'trailing' : anchor.kind,
+        anchorKind: anchor.kind === 'assistant_turn' ? 'turns' : anchor.kind,
         occurredAt: new Date(anchor.occurred_at),
         failures: 0,
         heldFailures: 0,
@@ -93,6 +96,11 @@ class OneWindowStore implements ExtractionStore {
 
   async extractionWindow(): Promise<RawExtractionWindow | null> {
     return this.raw
+  }
+
+  /** Nothing is stored on any subject, so no item has candidates. */
+  async extractionCandidates(_anchorId: string, items: readonly ExtractionCandidateQuery[]): Promise<ExtractionCandidateRead[]> {
+    return items.map(() => ({ stored: null, repeatOf: null, total: 0, read: [], candidates: [] }))
   }
 
   async extractionBegin(_run: ExtractionBegin): Promise<string | null> {
@@ -108,7 +116,7 @@ class OneWindowStore implements ExtractionStore {
   async extractionCommit(_runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
     this.closed = true
     this.commits.push(commit)
-    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0 }
+    return { itemIds: commit.items.map((i) => i.id), subjectsCreated: commit.subjects.length, duplicates: 0, restatements: 0 }
   }
 }
 
@@ -187,12 +195,14 @@ describe('recorded extraction replies', () => {
           type: 'extraction',
           utterance_id: utteranceId,
           run_id: RUN_ID,
-          event_key: extractionEventKey(window.anchorId, 'mk_statement', 'ok'),
+          event_key: itemEventKey('mk_statement', utteranceId, 'ok'),
           scope: 'project',
           applies_to: [],
         },
         lineage: [utteranceId],
         entities: [],
+        links: [],
+        linksRejected: [],
       },
     ])
   })
@@ -242,7 +252,7 @@ describe('recorded extraction replies', () => {
 
   it('stores a finding backed by a commit the turn touched at trust 2 with its sha entity', async () => {
     const { window, result, payload } = await run('07-evidenced-observation')
-    const turnId = window.turn!.id
+    const turnId = window.turns[0]!.id
     const claim =
       'The capture worker in tst-repo parks a capture event after three failed attempts instead of retrying it forever.'
 

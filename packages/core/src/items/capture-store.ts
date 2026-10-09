@@ -1,4 +1,5 @@
 import type { ExtractionErrorClass } from '../adapters/intelligence.js'
+import type { LinkRejectReason, LinkRel } from '../extraction/links.js'
 import type { AnchorKind, RawExtractionWindow } from '../extraction/window.js'
 import type { EntityType, ItemKind, ItemSource, RegisterStatus, Speaker } from './types.js'
 
@@ -134,6 +135,8 @@ export const EXTRACTION_WINDOW_SUBJECTS_MAX = 1000
 export const EXTRACTION_WINDOW_RECENT_MAX = 200
 /** The most items one extraction commit stores. */
 export const EXTRACTION_COMMIT_ITEMS_MAX = 500
+/** The most candidates one candidate read returns per item. */
+export const EXTRACTION_CANDIDATES_LIMIT_MAX = 100
 
 /** What decides which anchors are next. */
 export interface ExtractionPendingQuery {
@@ -202,6 +205,18 @@ export interface ExtractionEntity {
   entityType: EntityType
 }
 
+/** A link from an item of the commit to an existing item, already validated. */
+export interface ExtractionLink {
+  rel: LinkRel
+  target: string
+}
+
+/** A proposed link validation refused; the commit records it in the run's stats. */
+export interface ExtractionRejectedLink {
+  target: string
+  reason: LinkRejectReason
+}
+
 /**
  * One item an extraction commit stores. Its subject is either a listed one
  * (`subjectId`) or a new one of the same payload (`subjectKey`), never both.
@@ -228,24 +243,106 @@ export interface ExtractionItem {
   source: ItemSource
   lineage: readonly string[]
   entities: readonly ExtractionEntity[]
+  /**
+   * Applied in the commit's transaction. An item whose links restate (and
+   * none supersede) is not stored: each restated target gains its time.
+   */
+  links?: readonly ExtractionLink[]
+  linksRejected?: readonly ExtractionRejectedLink[]
+  /**
+   * Every current item on its subject the item was weighed against, with the
+   * targets its links name. The commit records, as a link race, any current
+   * item on that subject outside this list: it appeared after the read.
+   */
+  candidatesRead?: readonly string[]
+}
+
+/**
+ * One new item to be weighed against the current items on its subject: a
+ * stored subject, its class, time, words and event key, and the ids its own
+ * links already name, which are not read again.
+ */
+export interface ExtractionCandidateQuery {
+  /** Null when the item names a subject the commit creates: nothing is filed under it yet. */
+  subjectId: string | null
+  /** The new subject's label, given with a null subjectId; a register entry matches on it. */
+  subjectLabel: string | null
+  class: 'mk_statement' | 'observation'
+  /** A standing statement is also weighed against the active register entries on its subject's label. */
+  standing: boolean
+  occurredAt: Date
+  content: string
+  eventKey: string
+  exclude: readonly string[]
+}
+
+/**
+ * A current item a new one is weighed against. Times are UTC ISO 8601. A
+ * register entry has no subject id; its label is the entry's own subject.
+ */
+export interface ExtractionCandidate {
+  id: string
+  class: string
+  kind: string
+  subjectId: string | null
+  subjectLabel: string | null
+  projectId: string | null
+  workspaceId: string | null
+  content: string
+  occurredAt: string
+}
+
+/**
+ * What one item is weighed against. `stored` names the item that already
+ * holds its event key and `repeatOf` a current item of its class and subject
+ * in the anchor's scope holding the same words; either means it needs no
+ * decision, and then the
+ * lists are empty. Otherwise `read` lists every current item on its subject
+ * in the anchor's scope that occurred no later (minus the excluded ids),
+ * `total` counts them and `candidates` holds the newest of them, up to the
+ * limit asked.
+ */
+export interface ExtractionCandidateRead {
+  stored: string | null
+  repeatOf: string | null
+  total: number
+  read: string[]
+  candidates: ExtractionCandidate[]
+}
+
+/**
+ * The items one assistant turn retracts by id: each target becomes a
+ * `retracts` link from the turn, applied with the window's items; `rejected`
+ * holds the ones the link rules refused.
+ */
+export interface ExtractionRetractions {
+  from: string
+  targets: readonly string[]
+  rejected: readonly ExtractionRejectedLink[]
 }
 
 /** Everything one run stores, in one transaction. `stats` holds counts only, never text. */
 export interface ExtractionCommit {
   subjects: readonly ExtractionNewSubject[]
   items: readonly ExtractionItem[]
+  /** One entry per turn of the window that retracts something. */
+  retractions?: readonly ExtractionRetractions[]
   stats: Record<string, unknown>
 }
 
 /**
  * What a commit stored. `itemIds` holds one id per item in input order; an
  * item whose event key was already stored counts in `duplicates` and its id
- * is the stored item's.
+ * is the stored item's; an item stored as a restatement counts in
+ * `restatements` and its id is its first restated target's.
  */
 export interface ExtractionCommitResult {
   itemIds: string[]
   subjectsCreated: number
   duplicates: number
+  restatements: number
+  /** Links the commit applied: supersessions and link rows; absent from a store that does not report it. */
+  linksApplied?: number
 }
 
 /**
@@ -255,6 +352,91 @@ export interface ExtractionCommitResult {
  * The database applies the table rules, so an implementation forwards writes
  * and reports a refused rule as `ItemConstraintError`.
  */
+/** engram_due_sessions returns at most this many sessions per call. */
+export const DUE_SESSIONS_LIMIT_MAX = 1000
+
+/** A session whose index is out of date and may be built now. */
+export interface DueSession {
+  sessionId: string
+  /** The last event stored for the session when it was found due; the index built now reflects it. */
+  lastEventId: number
+}
+
+/** An MK utterance as the session index lists it. */
+export interface SessionIndexUtterance {
+  id: string
+  kind: 'user_prompt' | 'user_answer'
+  occurredAt: Date
+  /** A prompt's content; an answer's search text, which pairs each question with MK's answer. */
+  text: string
+}
+
+/** A commit sha, from a commit item or from an assistant turn's tool ref. */
+export interface SessionIndexCommitRef {
+  /** The commit's repo; a tool ref's turn project, null when the turn had none. */
+  repo: string | null
+  sha: string
+  occurredAt: Date
+}
+
+/**
+ * Everything one session's index is rendered from, read in one snapshot
+ * (see engram_session_index_source). Lists are in the order first seen.
+ */
+export interface SessionIndexSource {
+  sessionId: string
+  firstEventId: number | null
+  lastEventId: number | null
+  firstAt: Date | null
+  lastAt: Date | null
+  /** A prompt of the session was recovered from shell history rather than a transcript. */
+  history: boolean
+  projects: string[]
+  workspaces: string[]
+  plans: string[]
+  utterances: SessionIndexUtterance[]
+  /** The session holds an utterance that is not forgotten, MK's or the assistant's. */
+  hasUtterance: boolean
+  statements: string[]
+  observations: string[]
+  commits: SessionIndexCommitRef[]
+  /** Tool refs of the current assistant turns that look like a commit sha or a pull request URL. */
+  toolRefs: Array<{ repo: string | null; ref: string; occurredAt: Date }>
+  /** `<phase>/<task>` for a ruling, the decision id for a decision. */
+  ledger: Array<{ plan: string; id: string }>
+  currentIndex: { id: string; content: string; occurredAt: Date } | null
+}
+
+/** A rendered session index, as engram_session_index_commit takes it. */
+export interface SessionIndexItem {
+  content: string
+  occurredAt: Date
+  projectId: string | null
+  workspaceId: string | null
+  /** The MK utterances the index quotes. */
+  lineage: string[]
+  source: {
+    type: 'transcript' | 'history'
+    session_id: string
+    event_key: string
+    first_event_id: string
+    last_event_id: string
+  }
+  /** The statement and observation ids the text names. */
+  listed: string[]
+  /** The current index the text was rendered against. */
+  replaces: string | null
+}
+
+export interface SessionIndexCommitResult {
+  /** A new index item was stored. */
+  written: boolean
+  /** The session changed after the read; nothing was stored and it stays due. */
+  stale: boolean
+  /** The session's current index after the call. */
+  itemId: string | null
+}
+
 export interface CaptureStore {
   /**
    * Upserts every row, workspaces before projects, and never deletes one: a
@@ -284,10 +466,10 @@ export interface CaptureStore {
    * Claims and returns up to `limit` (1 to EMBEDDING_BATCH_MAX) items that
    * still need an embedding, oldest first: no embedding, not forgotten, fewer
    * than EMBEDDING_ATTEMPTS_MAX recorded failures, not an assistant
-   * utterance, and not a session_index or legacy item. An item another
-   * claimant holds under a live claim is left out; every item returned is
-   * claimed for `claimant` (a uuid) for EMBEDDING_CLAIM_LEASE_SECONDS, so two
-   * concurrent reads never return the same item.
+   * utterance, and not a legacy item. An item another claimant holds under a
+   * live claim is left out; every item returned is claimed for `claimant` (a
+   * uuid) for EMBEDDING_CLAIM_LEASE_SECONDS, so two concurrent reads never
+   * return the same item.
    */
   pendingEmbeddings(limit: number, claimant: string): Promise<PendingEmbedding[]>
 
@@ -337,22 +519,47 @@ export interface CaptureStore {
   scanPage(target: ScanTarget, afterId: string | null, limit: number): Promise<ScanRow[]>
 
   /**
-   * Up to `limit` anchors to extract next, oldest first and at most one per
-   * session: each session's earliest anchor with no succeeded run, fewer
-   * than 3 counted held and fewer than 6 counted transient failures at
-   * `version`, and only once the backoff for all its failures, counted or
-   * not, has passed since the latest. Anchors are MK utterances, and a trailing assistant
-   * turn once its session has ended or been idle for `idleMs`.
+   * Up to `limit` anchors to extract next: sessions most recently received
+   * first, each session's anchors in event order. An anchor is pending while
+   * no run at any extractor version succeeded on it (a version bump
+   * re-extracts nothing by itself) and it has, at `version`, fewer than 3
+   * counted held and fewer than 6 counted transient failures; a turn
+   * observed at any version is observed for it. A session's pending anchors
+   * are handed out from its earliest on, up to the first one still in the
+   * backoff for all its failures, counted or not. Anchors are MK utterances,
+   * however few a session holds, and a trailing assistant turn once its
+   * session has ended with no later event or received nothing for `idleMs`,
+   * with none of its events waiting for materialize.
    */
   extractionPending(query: ExtractionPendingQuery): Promise<PendingAnchor[]>
 
   /**
-   * The window around an anchor as the RPC returns it, or null when the
-   * anchor is gone (missing or forgotten). Lists up to `subjectLimit` active
-   * subjects of its scope and up to `recentLimit` current statements and
-   * observations.
+   * The window around an anchor as the RPC returns it for extractor
+   * `version`, or null when the anchor is gone (missing or forgotten). Lists
+   * up to `subjectLimit` active subjects of its scope and up to
+   * `recentLimit` current statements and observations. Its turns are those
+   * no succeeded run that `extractedBy` counts has extracted, plus an
+   * observed context turn; pass the rule the anchor was chosen by.
    */
-  extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null>
+  extractionWindow(
+    anchorId: string,
+    subjectLimit: number,
+    recentLimit: number,
+    version: string,
+    extractedBy: ExtractedBy,
+  ): Promise<RawExtractionWindow | null>
+
+  /**
+   * One read per item, in input order, of what that item must be weighed
+   * against (see ExtractionCandidateRead), up to `limit` (1 to
+   * EXTRACTION_CANDIDATES_LIMIT_MAX) candidates each; null when the anchor
+   * is gone. Scope is the anchor's, as the window lists it.
+   */
+  extractionCandidates(
+    anchorId: string,
+    items: readonly ExtractionCandidateQuery[],
+    limit: number,
+  ): Promise<ExtractionCandidateRead[] | null>
 
   /**
    * Opens a running run on the anchor and returns its id, or null when a run
@@ -369,6 +576,99 @@ export interface CaptureStore {
    * the run running for the caller to fail.
    */
   extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult>
+
+  /**
+   * Up to `limit` (1 to DUE_SESSIONS_LIMIT_MAX) sessions whose index is out
+   * of date and that ended, or received nothing for `idleSeconds` before
+   * `now`, with no event waiting to be materialized; longest idle first.
+   */
+  dueSessions(idleSeconds: number, limit: number, now: Date): Promise<DueSession[]>
+
+  /** What the session's index is rendered from, read in one snapshot. */
+  sessionIndexSource(sessionId: string): Promise<SessionIndexSource>
+
+  /**
+   * Stores the session's rendered index (null: the session has no utterance)
+   * as of event `eventId`: nothing when unchanged or stale, else a new item
+   * superseding the current index, in one transaction.
+   */
+  sessionIndexCommit(sessionId: string, item: SessionIndexItem | null, eventId: number): Promise<SessionIndexCommitResult>
+}
+
+/** Which sessions an operator re-run of extraction covers: exactly one of `sessionId` and `since`. */
+export interface ExtractionSessionQuery {
+  sessionId: string | null
+  /** Every session with an MK utterance at or after this time. */
+  since: Date | null
+  /** A session with no capture event received for this long may be closed (a whole number of seconds, at least one). */
+  idleMs: number
+  now: Date
+}
+
+/** A session a re-run covers, oldest first. */
+export interface ExtractionSession {
+  sessionId: string
+  /** Its earliest MK utterance in the range, or null when it holds none. */
+  firstAt: Date | null
+  /** False while the session is live: its windows belong to the worker. */
+  due: boolean
+}
+
+/** One window of a session at a version, in the order the worker runs them. */
+/**
+ * Which succeeded runs count as having extracted a window or a turn:
+ * - `any_version`: a run at any extractor version. The worker and a gap fill
+ *   read this way, so a version bump re-extracts nothing by itself.
+ * - `this_version`: only a run at the version asked for. A replace reads
+ *   this way, to re-run what other versions extracted.
+ */
+export type ExtractedBy = 'any_version' | 'this_version'
+
+export interface SessionAnchor {
+  anchorId: string
+  anchorKind: AnchorKind
+  occurredAt: Date
+  /** A run that the read's ExtractedBy counts succeeded on it. */
+  succeeded: boolean
+  /** A run still open on it, held by another process until it closes. */
+  runningRunId: string | null
+}
+
+/** A live item a replace re-pointed (`to` set) or restored (`to` null) after retiring its successor `from`. */
+export interface ReplacedSupersession {
+  item: string
+  from: string
+  to: string | null
+}
+
+/** What a replace did on top of the commit's own result. */
+export interface ExtractionReplaceResult extends ExtractionCommitResult {
+  /** Old-version items of the window the new run did not reproduce, now retired. */
+  retired: string[]
+  restored: ReplacedSupersession[]
+  /** Unreproduced old-version items MK recorded in a register: never retired. */
+  keptRecorded: string[]
+  /** Old-version restatement times removed from their targets. */
+  unrestated: number
+}
+
+/**
+ * The reads and the replace an operator re-run of extraction needs on top of
+ * the worker's extraction calls.
+ */
+export interface ExtractionRerunStore {
+  extractionSessions(query: ExtractionSessionQuery): Promise<ExtractionSession[]>
+  /**
+   * Every window of the session at `version`, in run order, with its run
+   * state; which windows exist and which have succeeded follow `extractedBy`.
+   */
+  extractionSessionAnchors(version: string, sessionId: string, extractedBy: ExtractedBy): Promise<SessionAnchor[]>
+  /**
+   * Commits the run like extractionCommit after retiring the window's
+   * old-version items the commit does not reproduce, handing back what they
+   * superseded and removing their restatement times, in one transaction.
+   */
+  extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult>
 }
 
 const SQLSTATE = /^[0-9A-Z]{5}$/

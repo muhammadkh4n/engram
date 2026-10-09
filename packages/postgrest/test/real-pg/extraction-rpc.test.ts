@@ -5,11 +5,12 @@
  * - pending: one anchor per session, oldest first; a later anchor waits behind
  *   a pending earlier one, due or not; a held failure backs off and counts, a
  *   transient one does neither; an exhausted anchor no longer blocks;
- * - a trailing assistant turn is pending after session_end or after the idle
- *   time, and not before; a later MK prompt makes it an ordinary turn again;
+ * - assistant turns no MK prompt follows are pending, as a window of turns,
+ *   after session_end or after the idle time, and not before; a later MK
+ *   prompt makes them that prompt's turns;
  * - begin opens one run per anchor and version while one runs or succeeded;
- * - the window: anchor, event, turn and whether an earlier window showed that
- *   turn, and the subjects, statements and observations of the anchor's scope;
+ * - the window: anchor, event, turns and whether an earlier run extracted
+ *   each, and the subjects, statements and observations of the anchor's scope;
  * - commit stores statements, observations, new subjects and entities
  *   together; a quote MK never said raises and writes nothing; a repeated
  *   event key is a duplicate;
@@ -33,6 +34,7 @@ const TEST_TIMEOUT_MS = 60_000
 
 const BASE_MS = Date.parse('2026-09-14T09:00:00Z')
 const VERSION = 'extract-test'
+const OTHER_VERSION = 'extract-other-test'
 const IDLE_MS = 30 * 60_000
 const UNKNOWN_ID = '00000000-0000-4000-8000-000000000009'
 
@@ -131,6 +133,13 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
 
   const count = (sql: string): Promise<number> => pg.psql(sql).then(Number)
 
+  /** Sets when the session's latest event was received, as minutes past the base time. */
+  async function received(sessionId: string, minutes: number): Promise<void> {
+    await pg.psql(
+      `UPDATE public.memory_session_state SET last_received_at = '${at(minutes)}' WHERE session_id = '${sessionId}';`,
+    )
+  }
+
   function pending(now: Date, limit = 20) {
     return store.extractionPending({ version: VERSION, limit, idleMs: IDLE_MS, now })
   }
@@ -151,9 +160,14 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(await store.extractionFail(run, { error: 'provider unavailable', failure: 'transient', counted, stats: {} })).toBe(true)
   }
 
-  async function succeed(anchorId: string, sessionId: string): Promise<void> {
-    const run = await begin(anchorId, sessionId)
-    await store.extractionCommit(run, { subjects: [], items: [], stats: {} })
+  async function succeed(
+    anchorId: string,
+    sessionId: string,
+    observationSources: string[] = [],
+    version = VERSION,
+  ): Promise<void> {
+    const run = await begin(anchorId, sessionId, version)
+    await store.extractionCommit(run, { subjects: [], items: [], stats: { observation_sources: observationSources } })
   }
 
   /** The latest failure's end, in ms with microseconds kept. */
@@ -213,25 +227,28 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     }
   }
 
-  it('returns each session\'s earliest due anchor, oldest first, backing off every failure', async () => {
+  it('returns each session\'s due anchors in order, the most recently received session first, backing off every failure', async () => {
     const [a1, a2, b1] = await seed([
       prompt('sess-a', 'First request in session a.', 0),
       prompt('sess-a', 'Second request in session a.', 2),
       prompt('sess-b', 'First request in session b.', 1),
     ])
+    await received('sess-a', 2)
+    await received('sess-b', 3)
     const now = new Date()
 
     const first = await pending(now)
     expect(first.map((p) => [p.anchorId, p.sessionId, p.anchorKind, p.failures])).toEqual([
-      [a1, 'sess-a', 'user_prompt', 0],
       [b1, 'sess-b', 'user_prompt', 0],
+      [a1, 'sess-a', 'user_prompt', 0],
+      [a2, 'sess-a', 'user_prompt', 0],
     ])
-    expect(first[0]!.occurredAt.toISOString()).toBe(at(0))
-    expect(first[0]!.runningRunId).toBeNull()
-    expect(await pending(now, 1)).toHaveLength(1)
+    expect(first[1]!.occurredAt.toISOString()).toBe(at(0))
+    expect(first[1]!.runningRunId).toBeNull()
+    expect((await pending(now, 1)).map((p) => p.anchorId)).toEqual([b1])
 
     const open = await begin(a1!, 'sess-a')
-    const running = (await pending(now))[0]!
+    const running = (await pending(now))[1]!
     expect(running.anchorId).toBe(a1)
     expect(running.runningRunId).toBe(open)
     expect(running.runningStartedAt).toBeInstanceOf(Date)
@@ -243,8 +260,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect((await pending(new Date(Math.floor(failedAt) + 59_000))).map((p) => p.anchorId)).toEqual([b1])
     const due = await pending(new Date(Math.ceil(failedAt) + 60_000))
     expect(due.map((p) => [p.anchorId, p.failures])).toEqual([
-      [a1, 1],
       [b1, 0],
+      [a1, 1],
+      [a2, 0],
     ])
 
     // A transient failure backs its anchor off too, and counts apart from
@@ -254,8 +272,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect((await pending(new Date(Math.floor(flakyAt) + 59_000))).map((p) => p.anchorId)).not.toContain(b1)
     const both = await pending(new Date(Math.ceil(flakyAt) + 60_000))
     expect(both.map((p) => [p.anchorId, p.failures, p.heldFailures, p.transientFailures])).toEqual([
-      [a1, 1, 1, 0],
       [b1, 1, 0, 1],
+      [a1, 1, 1, 0],
+      [a2, 0, 0, 0],
     ])
 
     // The backoff follows the count of both classes: a held failure after a
@@ -266,8 +285,9 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(
       (await pending(new Date(Math.ceil(mixedAt) + 120_000))).map((p) => [p.anchorId, p.failures, p.heldFailures, p.transientFailures]),
     ).toEqual([
-      [a1, 1, 1, 0],
       [b1, 2, 1, 1],
+      [a1, 1, 1, 0],
+      [a2, 0, 0, 0],
     ])
 
     // The third held failure exhausts the earlier anchor, and the later one
@@ -308,11 +328,17 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect((await pending(new Date(Math.floor(lastAt) + sixHours - 1000))).map((p) => p.anchorId)).toEqual([])
     expect(
       (await pending(new Date(Math.ceil(lastAt) + sixHours))).map((p) => [p.anchorId, p.failures, p.heldFailures, p.transientFailures]),
-    ).toEqual([[a1, 10, 0, 0]])
+    ).toEqual([
+      [a1, 10, 0, 0],
+      [a2, 0, 0, 0],
+    ])
 
     // Counted failures still exhaust it at six, whatever came uncounted before.
     for (let i = 0; i < 5; i++) await transientFailure(a1!, 'sess-o')
-    expect((await pending(later)).map((p) => [p.anchorId, p.failures, p.transientFailures])).toEqual([[a1, 15, 5]])
+    expect((await pending(later)).map((p) => [p.anchorId, p.failures, p.transientFailures])).toEqual([
+      [a1, 15, 5],
+      [a2, 0, 0],
+    ])
     await transientFailure(a1!, 'sess-o')
     expect((await pending(later)).map((p) => p.anchorId)).toEqual([a2])
     expect(
@@ -329,23 +355,32 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     ])
     await succeed(p1!, 'sess-t')
     await succeed(q1!, 'sess-e')
+    await received('sess-t', 1)
+    await received('sess-e', 1.5)
 
     expect(await pending(atDate(5))).toEqual([])
     await seed([sessionEnd('sess-e', 2)])
-    expect((await pending(atDate(5))).map((p) => [p.anchorId, p.anchorKind])).toEqual([[u1, 'trailing']])
+    await received('sess-e', 2)
+    expect((await pending(atDate(5))).map((p) => [p.anchorId, p.anchorKind])).toEqual([[u1, 'turns']])
 
-    // sess-t's newest event is the turn at minute 1: idle from minute 31.
-    expect((await pending(atDate(30.9))).map((p) => p.anchorId)).toEqual([u1])
-    expect((await pending(atDate(31))).map((p) => [p.anchorId, p.anchorKind])).toEqual([
-      [t1, 'trailing'],
-      [u1, 'trailing'],
+    // Idleness is judged by received time: sess-t was last received at
+    // minute 1, so it is idle once minute 31 has passed.
+    expect((await pending(atDate(31))).map((p) => p.anchorId)).toEqual([u1])
+    expect((await pending(atDate(31.1))).map((p) => [p.anchorId, p.anchorKind])).toEqual([
+      [u1, 'turns'],
+      [t1, 'turns'],
     ])
+
+    // A backlog whose events are old but were received just now is not idle.
+    await received('sess-t', 30.5)
+    expect((await pending(atDate(31.1))).map((p) => p.anchorId)).toEqual([u1])
 
     // MK coming back to the session makes the turn an ordinary one again.
     const [p2] = await seed([prompt('sess-t', 'And once more.', 40)])
+    await received('sess-t', 40)
     expect((await pending(atDate(80))).map((p) => [p.anchorId, p.anchorKind])).toEqual([
-      [u1, 'trailing'],
       [p2, 'user_prompt'],
+      [u1, 'turns'],
     ])
   }, TEST_TIMEOUT_MS)
 
@@ -374,7 +409,16 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       status: 'succeeded',
       finished: true,
       error: null,
-      stats: { statements: { proposed: 0 }, subjects_created: 0, entities: 0, duplicates: 0 },
+      stats: {
+        statements: { proposed: 0 },
+        subjects_created: 0,
+        entities: 0,
+        duplicates: 0,
+        links_applied: 0,
+        links_rejected: [],
+        restatements: [],
+        link_race: [],
+      },
     })
     expect(await store.extractionBegin({ anchorId: p1!, sessionId: 'sess-r', version: VERSION, model: null })).toBeNull()
 
@@ -388,7 +432,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     expect(sqlstateOf(noAnchor)).toBe('22023')
   }, TEST_TIMEOUT_MS)
 
-  it('builds the window: the anchor, its event and turn, and whether an earlier window showed that turn', async () => {
+  it('builds the window: the anchor, its event and turns, and whether an earlier run extracted each turn', async () => {
     const tools = [
       { name: 'Read', ref: 'src/importer.ts' },
       { name: 'Bash', ref: 'npm test' },
@@ -407,7 +451,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       event('sess-w', 'user_answer', answer, 4, plan),
     ])
 
-    const w2 = await store.extractionWindow(p2!, 500, 40)
+    const w2 = await store.extractionWindow(p2!, 500, 40, VERSION, 'any_version')
     expect(w2).toMatchObject({
       anchor: {
         id: p2,
@@ -420,8 +464,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
         occurred_at: '2026-09-14T09:02:00.000000Z',
       },
       anchor_event: { plan_dirs: ['Active/tst-plan/'], payload: { text: 'Ship the importer behind a flag for TST-77.' } },
-      turn: { id: t1, kind: 'assistant_turn', content: 'The importer skips rows without an id.', source: { tools } },
-      observed: false,
+      turns: [{ id: t1, kind: 'assistant_turn', content: 'The importer skips rows without an id.', source: { tools }, observed: false }],
       subjects: [],
       statements: [],
       observations: [],
@@ -433,23 +476,30 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     })
     const built = buildWindow(w2!)
     expect(built.planSlug).toBe('tst-plan')
-    expect(built.turn?.tools).toEqual(tools)
+    expect(built.turns.map((t) => t.tools)).toEqual([tools])
     expect(renderUserMessage(built)).toContain('turn-1 (ASSISTANT, 2026-09-14T09:01:00.000Z):\nThe importer skips')
 
-    // p3 follows p2 with no turn between them: the same turn, already shown.
-    expect(await store.extractionWindow(p3!, 500, 40)).toMatchObject({ turn: { id: t1 }, observed: true })
-    expect(await store.extractionWindow(p1!, 500, 40)).toMatchObject({ turn: null, observed: false })
-    expect(await store.extractionWindow(a1!, 500, 40)).toMatchObject({
+    // p3 follows p2 with no turn between them. The turn is p2's to extract,
+    // so p3 shows it only once a run of p2 has extracted it, and then as
+    // context. Under the worker's rule a run at any version counts; a
+    // replace counts only runs at its own version.
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [] })
+    await succeed(p2!, 'sess-w', [t1!], OTHER_VERSION)
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [{ id: t1, observed: true }] })
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'this_version')).toMatchObject({ turns: [] })
+    await succeed(p2!, 'sess-w', [t1!])
+    expect(await store.extractionWindow(p3!, 500, 40, VERSION, 'this_version')).toMatchObject({ turns: [{ id: t1, observed: true }] })
+    expect(await store.extractionWindow(p1!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [] })
+    expect(await store.extractionWindow(a1!, 500, 40, VERSION, 'any_version')).toMatchObject({
       anchor: { kind: 'user_answer' },
       anchor_event: { payload: answer },
-      turn: null,
-      observed: false,
+      turns: [],
     })
-    expect(await store.extractionWindow(UNKNOWN_ID, 500, 40)).toBeNull()
-    expect(await store.extractionWindow('not-a-uuid', 500, 40)).toBeNull()
+    expect(await store.extractionWindow(UNKNOWN_ID, 500, 40, VERSION, 'any_version')).toBeNull()
+    expect(await store.extractionWindow('not-a-uuid', 500, 40, VERSION, 'any_version')).toBeNull()
 
-    // A turn that already ran as a trailing anchor is observed by the prompt
-    // that later resumed its session.
+    // A turn a flush extracted is context to the prompt that later resumed
+    // its session, and its own window shows nothing more.
     const [x1, t9] = await seed([
       prompt('sess-x', 'Rebuild the index.', 0),
       turn('sess-x', 'The index was rebuilt.', 1),
@@ -457,10 +507,38 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     ])
     await succeed(x1!, 'sess-x')
     expect((await pending(atDate(3))).map((p) => p.anchorId)).toContain(t9)
-    await succeed(t9!, 'sess-x')
+    await succeed(t9!, 'sess-x', [t9!])
     const [p9] = await seed([prompt('sess-x', 'Check it again.', 60)])
-    expect(await store.extractionWindow(p9!, 500, 40)).toMatchObject({ turn: { id: t9 }, observed: true })
-    expect(await store.extractionWindow(t9!, 500, 40)).toMatchObject({ anchor: { kind: 'assistant_turn' }, turn: null, observed: false })
+    expect(await store.extractionWindow(p9!, 500, 40, VERSION, 'any_version')).toMatchObject({ turns: [{ id: t9, observed: true }] })
+    expect(await store.extractionWindow(t9!, 500, 40, VERSION, 'any_version')).toMatchObject({ anchor: { kind: 'assistant_turn' }, turns: [] })
+  }, TEST_TIMEOUT_MS)
+
+  it('passes the turns of an exhausted prompt to the next prompt, and shows a dialog answer none', async () => {
+    const answer = {
+      questions: [{ question: 'Which flag name?', header: 'Flag', options: [{ label: 'v2', description: 'new' }], multiSelect: false }],
+      answers: { 'Which flag name?': 'v2' },
+      transcript_line: 9,
+    }
+    const [t1, p1, t2, a1, p2] = await seed([
+      turn('sess-g', 'The importer reads rows in batches.', 0),
+      prompt('sess-g', 'Go on.', 1),
+      turn('sess-g', 'The importer skips rows without an id.', 2),
+      event('sess-g', 'user_answer', answer, 3),
+      prompt('sess-g', 'Ship it.', 4),
+    ])
+    const turnsOf = async (anchor: string) =>
+      ((await store.extractionWindow(anchor, 500, 40, VERSION, 'any_version'))!.turns ?? []).map((t) => [t.id, t.observed])
+
+    expect(await turnsOf(p1!)).toEqual([[t1, false]])
+    expect(await turnsOf(a1!)).toEqual([])
+    expect(await turnsOf(p2!)).toEqual([[t2, false]])
+
+    for (let i = 0; i < 3; i++) await heldFailure(p1!, 'sess-g')
+    expect(await turnsOf(p2!)).toEqual([
+      [t1, false],
+      [t2, false],
+    ])
+    expect((await pending(atDate(5))).map((p) => p.anchorId)).toEqual([a1, p2])
   }, TEST_TIMEOUT_MS)
 
   it('lists the subjects, statements and observations of the anchor\'s scope only', async () => {
@@ -511,13 +589,15 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
     })
     await pg.psql(`SELECT public.engram_retire_items(ARRAY['${ids[7]}']::uuid[], 'replaced');`)
 
-    const inProject = await store.extractionWindow(p1!, 500, 40)
+    const inProject = await store.extractionWindow(p1!, 500, 40, VERSION, 'any_version')
     expect(inProject!.statements!.map((s) => s.content)).toEqual(['foxtrot', 'delta', 'charlie', 'bravo', 'alpha'])
     expect(inProject!.statements![2]).toEqual({
       id: ids[2],
       kind: 'ruling',
       subject_id: expect.any(String),
       subject_label: 'importer flags',
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
       content: 'charlie',
       occurred_at: '2026-09-14T09:00:03.000000Z',
     })
@@ -532,13 +612,13 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       ['importer flags', 'tst-repo', '2026-09-14T09:00:11.000000Z'],
     ])
 
-    const atRoot = await store.extractionWindow(r1!, 500, 40)
+    const atRoot = await store.extractionWindow(r1!, 500, 40, VERSION, 'any_version')
     expect(atRoot!.anchor.project_id).toBeNull()
     expect(atRoot!.statements!.map((s) => s.content)).toEqual(['bravo', 'alpha'])
     expect(atRoot!.observations!.map((o) => o.content)).toEqual(['The workspace keeps one importer.'])
     expect(atRoot!.subjects!.map((s) => s.label)).toEqual(['house rules'])
 
-    const cut = await store.extractionWindow(p1!, 1, 2)
+    const cut = await store.extractionWindow(p1!, 1, 2, VERSION, 'any_version')
     expect(cut!.statements!.map((s) => s.content)).toEqual(['foxtrot', 'delta'])
     expect(cut!.subjects!.map((s) => s.label)).toEqual(['house rules'])
   }, TEST_TIMEOUT_MS)
@@ -600,6 +680,8 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       itemIds: ['00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000202'],
       subjectsCreated: 1,
       duplicates: 0,
+      restatements: 0,
+      linksApplied: 0,
     })
 
     const rows = JSON.parse(
@@ -627,12 +709,16 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
         subjects_created: 1,
         entities: 3,
         duplicates: 0,
+        links_applied: 0,
+        links_rejected: [],
+        link_race: [],
+        restatements: [],
       },
     })
 
     // The committed items and their subject are what the next window lists.
     const [later] = await seed([prompt('sess-c', 'Next step?', 5)])
-    const next = await store.extractionWindow(later!, 500, 40)
+    const next = await store.extractionWindow(later!, 500, 40, VERSION, 'any_version')
     expect(next!.subjects!.map((s) => s.label)).toEqual(['Importer flags'])
     expect(next!.statements!.map((s) => s.id)).toEqual(['00000000-0000-4000-8000-000000000201'])
     expect(next!.observations!.map((s) => s.id)).toEqual(['00000000-0000-4000-8000-000000000202'])
@@ -679,7 +765,13 @@ describe.skipIf(!realPgImage || !postgrestImage)('extraction RPCs through PostgR
       items: [{ ...repeat.items[0]!, id: '00000000-0000-4000-8000-000000000204' }],
       stats: {},
     })
-    expect(result).toEqual({ itemIds: ['00000000-0000-4000-8000-000000000201'], subjectsCreated: 0, duplicates: 1 })
+    expect(result).toEqual({
+      itemIds: ['00000000-0000-4000-8000-000000000201'],
+      subjectsCreated: 0,
+      duplicates: 1,
+      restatements: 0,
+      linksApplied: 0,
+    })
     expect(await count(`SELECT count(*) FROM public.memory_items WHERE class = 'mk_statement';`)).toBe(1)
     expect(await count('SELECT count(*) FROM public.memory_subjects;')).toBe(1)
     expect(await count('SELECT count(*) FROM public.memory_item_entities;')).toBe(3)

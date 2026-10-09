@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
 
 import { gateWindow, type GateResult } from '../../src/extraction/gate.js'
-import { buildCommitPayload, extractionEventKey } from '../../src/extraction/persist.js'
-import { EXTRACTOR_VERSION } from '../../src/extraction/prompt.js'
+import { itemEventKey } from '../../src/extraction/links.js'
+import { buildCommitPayload } from '../../src/extraction/persist.js'
 import { parseReply } from '../../src/extraction/reply.js'
 import { buildWindow, type ExtractionWindow, type RawExtractionWindow } from '../../src/extraction/window.js'
 
@@ -26,17 +26,18 @@ const RAW: RawExtractionWindow = {
     source: { event_key: 'tst-key-11' },
   },
   anchor_event: { payload: {}, plan_dirs: ['Active/tst-plan'] },
-  turn: {
-    id: uuid(10),
-    kind: 'assistant_turn',
-    session_id: 'tst-session-1',
-    project_id: 'tst-repo',
-    workspace_id: 'tst-ws',
-    content: `The capture route writes to Postgres in packages/core/src/a.ts.\n${QUESTION}`,
-    occurred_at: '2026-10-01T09:00:00Z',
-    source: { event_key: 'tst-key-10', tools: [{ name: 'Bash', ref: 'abc1234' }] },
-  },
-  observed: false,
+  turns: [
+    {
+      id: uuid(10),
+      kind: 'assistant_turn',
+      session_id: 'tst-session-1',
+      project_id: 'tst-repo',
+      workspace_id: 'tst-ws',
+      content: `The capture route writes to Postgres in packages/core/src/a.ts.\n${QUESTION}`,
+      occurred_at: '2026-10-01T09:00:00Z',
+      source: { event_key: 'tst-key-10', tools: [{ name: 'Bash', ref: 'abc1234' }] },
+    },
+  ],
   subjects: [{ id: uuid(21), label: 'capture route', project_id: 'tst-repo', last_used_at: '2026-09-01T00:00:00Z' }],
   statements: [],
   observations: [],
@@ -115,7 +116,7 @@ describe('buildCommitPayload', () => {
       type: 'extraction',
       utterance_id: uuid(11),
       run_id: RUN,
-      event_key: extractionEventKey(uuid(11), 'mk_statement', 'keep Postgres'),
+      event_key: itemEventKey('mk_statement', uuid(11), 'keep Postgres'),
       scope: 'project',
       applies_to: ['postgres'],
     })
@@ -160,18 +161,43 @@ describe('buildCommitPayload', () => {
       type: 'extraction',
       utterance_id: uuid(10),
       run_id: RUN,
-      event_key: extractionEventKey(uuid(11), 'observation', 'The engram capture route writes to Postgres.'),
+      event_key: itemEventKey('observation', uuid(10), 'The engram capture route writes to Postgres.'),
       evidence: [{ type: 'commit', ref: 'abc1234' }],
     })
     expect(items[0]!.entities).toContainEqual({ entity: 'abc1234', entityType: 'sha' })
   })
 
-  it('keys the event on version, anchor, class and the normalized content', () => {
-    const expected = createHash('sha256')
-      .update(JSON.stringify([EXTRACTOR_VERSION, uuid(11), 'mk_statement', 'keep Postgres']))
-      .digest('hex')
-    expect(extractionEventKey(uuid(11), 'mk_statement', '  keep  Postgres ')).toBe(`x:${expected}`)
-    expect(extractionEventKey(uuid(11), 'observation', 'keep Postgres')).not.toBe(`x:${expected}`)
+  it('keys a statement on its utterance and normalized quote, and an observation on its turn and claim', () => {
+    const digest = createHash('sha256').update('keep Postgres', 'utf8').digest('hex')
+    expect(itemEventKey('mk_statement', uuid(11), '  keep  Postgres ')).toBe(`mk_statement:${uuid(11)}:${digest}`)
+    expect(itemEventKey('observation', uuid(10), 'keep\u00a0Postgres')).toBe(`observation:${uuid(10)}:${digest}`)
+  })
+
+  it('attaches each link the listed items allow and records the rest with their reasons', () => {
+    const listed = buildWindow({
+      ...RAW,
+      statements: [
+        { id: uuid(31), kind: 'ruling', subject_id: uuid(21), content: 'keep SQLite too', occurred_at: '2026-09-20T09:00:00Z' },
+        { id: uuid(32), kind: 'ruling', subject_id: uuid(21), content: 'keep Postgres', occurred_at: '2026-10-01T09:00:05Z' },
+      ],
+      observations: [
+        { id: uuid(41), kind: 'fact', subject_id: uuid(21), content: 'The route writes twice.', occurred_at: '2026-10-02T00:00:00Z' },
+      ],
+    })
+    const reply = {
+      statements: [
+        statement({ quote: 'keep Postgres for the capture route', supersedes: ['stmt-1', 'stmt-2'] }),
+        statement({ quote: 'Track it in TST-77.', corrects: ['obs-1'] }),
+      ],
+      observations: [observation({ supersedes: ['obs-1'] })],
+    }
+    const { items } = buildCommitPayload(listed, gated(listed, reply), RUN)
+
+    expect(items.map((i) => [i.links, i.linksRejected])).toEqual([
+      [[{ rel: 'supersedes', target: uuid(31) }], [{ target: uuid(32), reason: 'target_same_time' }]],
+      [[], [{ target: uuid(41), reason: 'target_newer' }]],
+      [[], [{ target: uuid(41), reason: 'target_newer' }]],
+    ])
   })
 
   it('gives a re-run of the same reply the same event keys and fresh row ids', () => {
@@ -212,6 +238,19 @@ describe('buildCommitPayload', () => {
     expect(commit.subjects[0]!.label).toBe('nul � bytes')
   })
 
+  it('names every turn it extracts observations from, and none already observed', () => {
+    const reply = { statements: [statement({})], observations: [] }
+    const turn = window.turns[0]!
+    expect(buildCommitPayload(window, gated(window, reply), RUN).stats['observation_sources']).toEqual([turn.id])
+    const observed = { ...window, turns: [{ ...turn, alreadyObserved: true }] }
+    expect(buildCommitPayload(observed, gated(observed, reply), RUN).stats['observation_sources']).toEqual([])
+    const noTurn = { ...window, turns: [] }
+    expect(buildCommitPayload(noTurn, gated(noTurn, reply), RUN).stats['observation_sources']).toEqual([])
+    const earlier = { ...turn, id: uuid(9), alias: 'turn-1' }
+    const two = { ...window, turns: [earlier, { ...turn, alias: 'turn-2' }] }
+    expect(buildCommitPayload(two, gated(two, reply), RUN).stats['observation_sources']).toEqual([uuid(9), turn.id])
+  })
+
   it('counts proposals, stores and rejections per side, never text', () => {
     const reply = {
       statements: [statement({}), statement({ quote: 'words MK never wrote' })],
@@ -219,6 +258,7 @@ describe('buildCommitPayload', () => {
     }
     const { stats } = buildCommitPayload(window, gated(window, reply), RUN)
     expect(stats).toEqual({
+      observation_sources: [window.turns[0]!.id],
       statements: { proposed: 2, stored: 1, rejected: 1 },
       observations: { proposed: 3, stored: 1, rejected: 2, trust2: 0, trust3: 1 },
       rejected: [
@@ -226,6 +266,7 @@ describe('buildCommitPayload', () => {
         { item: 'observation', index: 1, rule: 'attributed_to_user' },
         { item: 'observation', index: 2, rule: 'schema' },
       ],
+      retractions_unresolved: 0,
       scope_downgraded: 0,
       valid_at_clamped: 0,
     })

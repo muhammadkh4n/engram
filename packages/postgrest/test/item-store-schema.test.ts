@@ -32,6 +32,7 @@ const ITEM_TABLES = [
   'memory_projects',
   'memory_items',
   'memory_item_entities',
+  'memory_item_links',
   'memory_capture_events',
   'memory_capture_event_counts',
   'memory_secret_hits',
@@ -192,12 +193,12 @@ describe('item store tables are reachable only through their own grants', () => 
     for (const stmt of grants) expect(stmt).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALL)\b/)
   })
 
-  it('revokes all on the three id sequences and grants nothing back', () => {
+  it('revokes all on the four id sequences and grants nothing back', () => {
     const section = privilegeSection()
     expect(section).toContain(
-      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;',
+      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq FROM PUBLIC, service_role;',
     )
-    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|capture_event_counts|secret_hits)_id_seq/)
+    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|capture_event_counts|secret_hits|item_links)_id_seq/)
   })
 })
 
@@ -252,7 +253,11 @@ describe('memory_items triggers', () => {
 
   it('creates exactly these triggers, each once', () => {
     const created = [...schema.matchAll(/^[ \t]*CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
-    expect(created).toEqual([...TRIGGER_NAMES, ...CAPTURE_TRIGGERS.map(([name]) => name)])
+    expect(created).toEqual([
+      ...TRIGGER_NAMES,
+      'memory_capture_events_session_activity',
+      ...CAPTURE_TRIGGERS.map(([name]) => name),
+    ])
   })
 
   it.each(TRIGGER_NAMES)('%s runs a SECURITY DEFINER plpgsql function with a fixed search_path', (name) => {
@@ -517,7 +522,7 @@ describe('the pending-embedding index', () => {
       'forgotten_at IS NULL',
       'embedding_attempts < 5',
       "NOT (class = 'utterance' AND speaker = 'assistant')",
-      "class NOT IN ('session_index', 'legacy')",
+      "class <> 'legacy'",
     ]) {
       expect(predicate).toContain(clause)
     }

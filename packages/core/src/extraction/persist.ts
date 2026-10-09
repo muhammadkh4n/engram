@@ -1,49 +1,178 @@
 /**
  * The gate's accepted items as one commit payload: the item rows, the new
- * subjects they name and their entities. Every value is fixed by the window,
- * the gate result and the run id, apart from each row id (a fresh UUIDv7), so
- * a re-run of the same reply under a new run stores nothing twice: the event
- * key depends only on the extractor version, the anchor, the class and the
- * normalized content, and the insert skips a key it already holds.
+ * subjects they name, their entities and their checked links. Every value is
+ * fixed by the window, the gate result and the run id, apart from each row id
+ * (a fresh UUIDv7), so a re-run of the same reply under a new run stores
+ * nothing twice: the event key depends only on the class, the utterance the
+ * words came from and the normalized words, and the insert skips a key it
+ * already holds.
  *
  * `content_hash` is never sent; the insert trigger computes it from the
  * stored content.
  */
-import { createHash } from 'node:crypto'
-
-import type { ExtractionCommit, ExtractionEntity, ExtractionItem, ExtractionNewSubject } from '../items/capture-store.js'
-import { normalizeQuote } from '../items/quote.js'
+import type {
+  ExtractionCommit,
+  ExtractionEntity,
+  ExtractionItem,
+  ExtractionNewSubject,
+  ExtractionRetractions,
+} from '../items/capture-store.js'
 import { toPostgresText } from '../text/postgres-text.js'
 import { generateId } from '../utils/id.js'
 import { observationEntities, statementEntities, type ExtractedEntity } from './entities.js'
 import type { GatedObservation, GatedStatement, GatedSubject, GateResult } from './gate.js'
-import { EXTRACTOR_VERSION } from './prompt.js'
+import {
+  itemEventKey,
+  validateLinks,
+  type LinkProposal,
+  type LinkSource,
+  type LinkTarget,
+  type LinkValidation,
+} from './links.js'
+import { scanRetractions } from './retractions.js'
 import { labelKey } from './subjects.js'
-import type { ExtractionWindow } from './window.js'
+import type { ExtractionWindow, WindowListedItem, WindowShownItem } from './window.js'
 
 export type ExtractionItemClass = 'mk_statement' | 'observation'
 
 /**
- * The key that makes an extracted item idempotent: the same content from the
- * same anchor under the same extractor version is one item, however often
- * the window runs.
+ * A commit before its links are settled: the item rows, the new subjects
+ * they name, and what the link rules need about each item and the window's
+ * listed targets. Items are indexed statements first, then observations, as
+ * the payload orders them.
  */
-export function extractionEventKey(anchorId: string, itemClass: ExtractionItemClass, content: string): string {
-  const digest = createHash('sha256')
-    .update(JSON.stringify([EXTRACTOR_VERSION, anchorId, itemClass, normalizeQuote(content)]))
-    .digest('hex')
-  return `x:${digest}`
+export interface CommitDraft {
+  subjects: ExtractionNewSubject[]
+  items: ExtractionItem[]
+  sources: LinkSource[]
+  /** The links the window's reply proposed, by item index. */
+  proposals: LinkProposal[]
+  /** The window's listed and shown items, current when the window was read. */
+  targets: LinkTarget[]
+  /** The assistant turns' retractions by id, already checked by the link rules. */
+  retractions: ExtractionRetractions[]
+  stats: Record<string, unknown>
 }
 
-export function buildCommitPayload(window: ExtractionWindow, gated: GateResult, runId: string): ExtractionCommit {
+/**
+ * What the decision pass adds to a commit: its proposals, the candidates they
+ * may name, and per item index every current item it was weighed against.
+ */
+export interface CommitDecisions {
+  proposals: readonly LinkProposal[]
+  targets: readonly LinkTarget[]
+  reads: ReadonlyMap<number, readonly string[]>
+  stats: Record<string, unknown>
+}
+
+export function draftCommit(window: ExtractionWindow, gated: GateResult, runId: string): CommitDraft {
   const subjects = new SubjectKeys()
   const statements = gated.statements.map((s) => statementItem(window, safeStatement(s), runId, subjects))
   const observations = gated.observations.map((o) => observationItem(window, safeObservation(o), runId, subjects))
+  const items = [...statements, ...observations]
+  const gatedItems = [...gated.statements, ...gated.observations]
+  const scan = scanRetractions(window)
+  const extracted = window.turns.filter((t) => !t.alreadyObserved).map((t) => t.id)
   return {
     subjects: subjects.list(),
-    items: [...statements, ...observations],
-    stats: gateStats(gated),
+    items,
+    sources: gatedItems.map((g, index) => ({
+      index,
+      class: items[index]!.class,
+      subjectId: items[index]!.subjectId,
+      subjectLabel: g.subject.label,
+      occurredAt: g.occurredAt,
+      // Scope is the source utterance's: MK's for a statement (not its
+      // downgraded columns), the named turn's for an observation.
+      ...('utteranceId' in g
+        ? { projectId: window.utterance?.projectId ?? null, workspaceId: window.utterance?.workspaceId ?? null }
+        : { projectId: g.projectId, workspaceId: g.workspaceId }),
+    })),
+    proposals: gatedItems.flatMap((g, index) => [
+      ...g.supersedes.map((target) => ({ item: index, rel: 'supersedes' as const, target })),
+      ...('restates' in g ? g.restates.map((target) => ({ item: index, rel: 'restates' as const, target })) : []),
+      ...('corrects' in g ? g.corrects.map((target) => ({ item: index, rel: 'corrects' as const, target })) : []),
+    ]),
+    targets: [
+      ...window.statements.map((t) => listedTarget(t, 'mk_statement')),
+      ...window.observations.map((t) => listedTarget(t, 'observation')),
+      // After the listings, so an item both listed and shown counts as shown.
+      ...window.shown.map(shownTarget),
+    ],
+    retractions: scan.retractions,
+    stats: {
+      ...gateStats(gated),
+      // The turns this run extracts observations from: a later window shows
+      // them again only as context, so each turn is extracted once per version.
+      observation_sources: extracted,
+      ...(extracted.length > 0 ? { retractions_unresolved: scan.unresolved } : {}),
+    },
   }
+}
+
+/** The links the window's reply alone settles. */
+export function draftLinks(draft: CommitDraft): LinkValidation {
+  return validateLinks(draft.sources, draft.proposals, draft.targets)
+}
+
+/**
+ * The payload: each item with its links, checked in one pass over the
+ * reply's proposals and the decisions', so an item that would both supersede
+ * and restate is caught across the two. A proposal both make is checked once,
+ * as the reply's.
+ */
+export function finishCommit(draft: CommitDraft, decisions?: CommitDecisions): ExtractionCommit {
+  const proposals = [...draft.proposals, ...(decisions?.proposals ?? [])]
+  const known = new Map(draft.targets.map((t) => [t.id, t]))
+  for (const target of decisions?.targets ?? []) if (!known.has(target.id)) known.set(target.id, target)
+  const { accepted, rejected } = validateLinks(draft.sources, proposals, [...known.values()])
+  const items = draft.items.map((item, index) => {
+    const read = decisions?.reads.get(index)
+    return {
+      ...item,
+      links: accepted.filter((l) => l.item === index).map((l) => ({ rel: l.rel, target: l.target })),
+      linksRejected: rejected.filter((l) => l.item === index).map((l) => ({ target: l.target, reason: l.reason })),
+      ...(read === undefined ? {} : { candidatesRead: [...read] }),
+    }
+  })
+  return {
+    subjects: draft.subjects,
+    items,
+    retractions: draft.retractions,
+    stats: { ...draft.stats, ...(decisions?.stats ?? {}) },
+  }
+}
+
+export function buildCommitPayload(
+  window: ExtractionWindow,
+  gated: GateResult,
+  runId: string,
+  decisions?: CommitDecisions,
+): ExtractionCommit {
+  return finishCommit(draftCommit(window, gated, runId), decisions)
+}
+
+/** The window lists only current items, so each is current as of its read. */
+function listedTarget(item: WindowListedItem, itemClass: ExtractionItemClass): LinkTarget {
+  return {
+    id: item.id,
+    class: itemClass,
+    kind: item.kind,
+    subjectId: item.subjectId,
+    subjectLabel: item.subjectLabel,
+    occurredAt: item.occurredAt,
+    supersededBy: null,
+    retiredAt: null,
+    forgottenAt: null,
+    projectId: item.projectId,
+    workspaceId: item.workspaceId,
+    shown: false,
+  }
+}
+
+/** The window shows only current items. */
+function shownTarget(item: WindowShownItem): LinkTarget {
+  return { ...listedTarget(item, 'mk_statement'), class: item.class, shown: true }
 }
 
 /** Counts only, never text. Proposed = accepted + rejected, per side. */
@@ -101,7 +230,7 @@ function statementItem(
   runId: string,
   subjects: SubjectKeys,
 ): ExtractionItem {
-  const eventKey = extractionEventKey(window.anchorId, 'mk_statement', s.content)
+  const eventKey = itemEventKey('mk_statement', s.utteranceId, s.content)
   return {
     id: generateId(),
     class: 'mk_statement',
@@ -138,7 +267,7 @@ function observationItem(
   runId: string,
   subjects: SubjectKeys,
 ): ExtractionItem {
-  const eventKey = extractionEventKey(window.anchorId, 'observation', o.content)
+  const eventKey = itemEventKey('observation', o.turnId, o.content)
   return {
     id: generateId(),
     class: 'observation',

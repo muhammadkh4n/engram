@@ -1174,7 +1174,7 @@ describe.skipIf(!realPgImage)('item store RPCs on real Postgres', () => {
     /** Empties the item tables; subjects stay. */
     async function emptyStore(): Promise<void> {
       await pg.psql(
-        'TRUNCATE public.memory_item_entities, public.memory_items, public.memory_extraction_runs, public.memory_capture_events, public.memory_projects;',
+        'TRUNCATE public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_items, public.memory_extraction_runs, public.memory_capture_events, public.memory_projects;',
       )
     }
 

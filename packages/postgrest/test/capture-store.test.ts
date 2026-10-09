@@ -484,7 +484,7 @@ describe('PostgRestCaptureStore extraction', () => {
     const row = {
       anchor_item_id: ANCHOR,
       session_id: 'sess-1',
-      anchor_kind: 'trailing',
+      anchor_kind: 'turns',
       occurred_at: '2026-09-14T09:00:00+00:00',
       failures: 3,
       held_failures: 1,
@@ -504,7 +504,7 @@ describe('PostgRestCaptureStore extraction', () => {
       {
         anchorId: ANCHOR,
         sessionId: 'sess-1',
-        anchorKind: 'trailing',
+        anchorKind: 'turns',
         occurredAt: new Date('2026-09-14T09:00:00.000Z'),
         failures: 3,
         heldFailures: 1,
@@ -547,18 +547,18 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('reads a window from engram_extraction_window, null for a gone anchor, without asking for a malformed id', async () => {
-    const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turn: null, observed: false, subjects: [] }
+    const window = { anchor: { id: ANCHOR, kind: 'user_prompt' }, turns: [], subjects: [] }
     const { store, calls } = storeWith({ data: window, error: null })
-    await expect(store.extractionWindow(ANCHOR, 500, 40)).resolves.toEqual(window)
+    await expect(store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).resolves.toEqual(window)
     expect(calls).toEqual([
-      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40 } },
+      { fn: 'engram_extraction_window', args: { p_anchor: ANCHOR, p_subject_limit: 500, p_recent_limit: 40, p_version: 'tst-extractor', p_any_version: true } },
     ])
-    await expect(store.extractionWindow('not-a-uuid', 500, 40)).resolves.toBeNull()
-    await expect(store.extractionWindow(ANCHOR, 0, 40)).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
-    await expect(store.extractionWindow(ANCHOR, 500, 201)).rejects.toThrow('recentLimit must be an integer from 1 to 200')
+    await expect(store.extractionWindow('not-a-uuid', 500, 40, 'tst-extractor', 'any_version')).resolves.toBeNull()
+    await expect(store.extractionWindow(ANCHOR, 0, 40, 'tst-extractor', 'any_version')).rejects.toThrow('subjectLimit must be an integer from 1 to 1000')
+    await expect(store.extractionWindow(ANCHOR, 500, 201, 'tst-extractor', 'any_version')).rejects.toThrow('recentLimit must be an integer from 1 to 200')
     expect(calls).toHaveLength(1)
-    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40)).resolves.toBeNull()
-    await expect(storeWith({ data: { turn: null }, error: null }).store.extractionWindow(ANCHOR, 500, 40)).rejects.toThrow(
+    await expect(storeWith({ data: null, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).resolves.toBeNull()
+    await expect(storeWith({ data: { turns: [] }, error: null }).store.extractionWindow(ANCHOR, 500, 40, 'tst-extractor', 'any_version')).rejects.toThrow(
       'extractionWindow failed: the RPC returned no window',
     )
   })
@@ -602,7 +602,7 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('sends a commit to engram_extraction_commit as snake_case and maps the result', async () => {
-    const result = { item_ids: ['00000000-0000-4000-8000-00000000e004', '00000000-0000-4000-8000-00000000e005'], subjects_created: 1, duplicates: 0 }
+    const result = { item_ids: ['00000000-0000-4000-8000-00000000e004', '00000000-0000-4000-8000-00000000e005'], subjects_created: 1, duplicates: 0, restatements: 0 }
     const { store, calls } = storeWith({ data: result, error: null })
     const listed = item({
       id: '00000000-0000-4000-8000-00000000e005',
@@ -622,7 +622,7 @@ describe('PostgRestCaptureStore extraction', () => {
         items: [item(), listed],
         stats: { statements: { proposed: 1 } },
       }),
-    ).resolves.toEqual({ itemIds: result.item_ids, subjectsCreated: 1, duplicates: 0 })
+    ).resolves.toEqual({ itemIds: result.item_ids, subjectsCreated: 1, duplicates: 0, restatements: 0 })
     const args = calls[0]!.args as { p_run: string; p_payload: { subjects: unknown; items: Array<Record<string, unknown>>; stats: unknown } }
     expect(calls[0]!.fn).toBe('engram_extraction_commit')
     expect(args.p_run).toBe(RUN)
@@ -654,7 +654,7 @@ describe('PostgRestCaptureStore extraction', () => {
   })
 
   it('refuses a commit it cannot send, and a result that does not match the items', async () => {
-    const { store, calls } = storeWith({ data: { item_ids: [], subjects_created: 0, duplicates: 0 }, error: null })
+    const { store, calls } = storeWith({ data: { item_ids: [], subjects_created: 0, duplicates: 0, restatements: 0 }, error: null })
     await expect(store.extractionCommit(RUN, { subjects: [], items: [item({ content: 'a\u0000b' })], stats: {} })).rejects.toThrow(
       'extractionCommit failed: items[0].content holds U+0000 or an unpaired surrogate',
     )

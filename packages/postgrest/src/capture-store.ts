@@ -1,6 +1,8 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import {
+  DUE_SESSIONS_LIMIT_MAX,
   EMBEDDING_BATCH_MAX,
+  EXTRACTION_CANDIDATES_LIMIT_MAX,
   EXTRACTION_COMMIT_ITEMS_MAX,
   EXTRACTION_PENDING_LIMIT_MAX,
   EXTRACTION_WINDOW_RECENT_MAX,
@@ -13,12 +15,23 @@ import {
 import type {
   AnchorKind,
   CaptureStore,
+  DueSession,
   EmbeddingFailure,
+  ExtractedBy,
   ExtractionBegin,
+  ExtractionCandidate,
+  ExtractionCandidateQuery,
+  ExtractionCandidateRead,
   ExtractionCommit,
   ExtractionCommitResult,
+  ExtractionReplaceResult,
+  ExtractionRerunStore,
+  ExtractionSession,
+  ExtractionSessionQuery,
+  SessionAnchor,
   ExtractionFailure,
   ExtractionItem,
+  ExtractionRetractions,
   ExtractionPendingQuery,
   IngestedEvent,
   ItemEmbedding,
@@ -29,8 +42,13 @@ import type {
   RawExtractionWindow,
   ScanRow,
   ScanTarget,
+  SessionIndexCommitResult,
+  SessionIndexItem,
+  SessionIndexSource,
   StoredEvent,
 } from '@engram-mem/core'
+import { toCommitIndexItem, toDueSessions, toSessionIndexCommitResult, toSessionIndexSource } from './session-index.js'
+import { toExtractionSessions, toReplaceExtras, toSessionAnchors } from './extraction-rerun.js'
 import { isUuid } from './uuid.js'
 
 /** SQLSTATEs for a refused rule: check (CHECKs, RPC rules), foreign key, unique. */
@@ -47,8 +65,9 @@ const SCAN_COLUMNS: Record<ScanTarget, string> = {
 const SCAN_PAGE_MAX = 1000
 /** The counts a locked materialize call returns, each a non-negative integer. */
 const MATERIALIZE_COUNTS = ['processed', 'failed', 'skipped', 'pending', 'dead'] as const
-const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'trailing'])
+const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorKind>(['user_prompt', 'user_answer', 'turns'])
 const FAILURE_CLASSES: ReadonlySet<string> = new Set(['transient', 'held'])
+const EXTRACTED_BY: ReadonlySet<string> = new Set<ExtractedBy>(['any_version', 'this_version'])
 
 export interface PostgRestCaptureStoreOptions {
   url: string
@@ -67,7 +86,7 @@ interface PgError {
  * Errors carry the code and message only, never PostgREST's `details`, which
  * can hold the failing row.
  */
-export class PostgRestCaptureStore implements CaptureStore {
+export class PostgRestCaptureStore implements CaptureStore, ExtractionRerunStore {
   private readonly client: PostgrestClient
 
   constructor(opts: PostgRestCaptureStoreOptions) {
@@ -270,19 +289,31 @@ export class PostgRestCaptureStore implements CaptureStore {
     return (data as unknown as Array<Record<string, unknown>>).map(toPendingAnchor)
   }
 
-  async extractionWindow(anchorId: string, subjectLimit: number, recentLimit: number): Promise<RawExtractionWindow | null> {
+  async extractionWindow(
+    anchorId: string,
+    subjectLimit: number,
+    recentLimit: number,
+    version: string,
+    extractedBy: ExtractedBy,
+  ): Promise<RawExtractionWindow | null> {
     if (!Number.isInteger(subjectLimit) || subjectLimit < 1 || subjectLimit > EXTRACTION_WINDOW_SUBJECTS_MAX) {
       throw new Error(`extractionWindow: subjectLimit must be an integer from 1 to ${EXTRACTION_WINDOW_SUBJECTS_MAX}`)
     }
     if (!Number.isInteger(recentLimit) || recentLimit < 1 || recentLimit > EXTRACTION_WINDOW_RECENT_MAX) {
       throw new Error(`extractionWindow: recentLimit must be an integer from 1 to ${EXTRACTION_WINDOW_RECENT_MAX}`)
     }
+    if (typeof version !== 'string' || !/\S/.test(version) || version.length > 64) {
+      throw new Error('extractionWindow: version must be a non-blank text of at most 64 characters')
+    }
+    if (!EXTRACTED_BY.has(extractedBy)) throw new Error('extractionWindow: extractedBy must be any_version or this_version')
     // A malformed id names no utterance; PostgREST would refuse the whole call.
     if (!isUuid(anchorId)) return null
     const { data, error } = await this.client.rpc('engram_extraction_window', {
       p_anchor: anchorId,
       p_subject_limit: subjectLimit,
       p_recent_limit: recentLimit,
+      p_version: version,
+      p_any_version: extractedBy === 'any_version',
     })
     if (error) throw toStoreError('extractionWindow', error)
     if (data === null) return null
@@ -292,6 +323,46 @@ export class PostgRestCaptureStore implements CaptureStore {
       throw new Error('extractionWindow failed: the RPC returned no window')
     }
     return window as unknown as RawExtractionWindow
+  }
+
+  async extractionCandidates(
+    anchorId: string,
+    items: readonly ExtractionCandidateQuery[],
+    limit: number,
+  ): Promise<ExtractionCandidateRead[] | null> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > EXTRACTION_CANDIDATES_LIMIT_MAX) {
+      throw new Error(`extractionCandidates: limit must be an integer from 1 to ${EXTRACTION_CANDIDATES_LIMIT_MAX}`)
+    }
+    if (items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
+      throw refusedData(
+        `extractionCandidates: ${items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per read`,
+        INVALID_PARAMETER_VALUE,
+      )
+    }
+    // A malformed id names no utterance; PostgREST would refuse the whole call.
+    if (!isUuid(anchorId)) return null
+    const payload = items.map((item, index) => ({
+      subject_id: item.subjectId,
+      subject_label: item.subjectLabel,
+      class: item.class,
+      standing: item.standing,
+      occurred_at: isoTime(item.occurredAt, index + 1),
+      content: item.content,
+      event_key: item.eventKey,
+      exclude: [...item.exclude],
+    }))
+    refuseUnsafeText('extractionCandidates', '', payload)
+    const { data, error } = await this.client.rpc('engram_extraction_candidates', {
+      p_anchor: anchorId,
+      p_items: payload,
+      p_limit: limit,
+    })
+    if (error) throw toStoreError('extractionCandidates', error)
+    if (data === null) return null
+    if (!Array.isArray(data) || data.length !== items.length) {
+      throw new Error('extractionCandidates failed: the RPC returned no read per item')
+    }
+    return data.map(toCandidateRead)
   }
 
   async extractionBegin(run: ExtractionBegin): Promise<string | null> {
@@ -331,22 +402,163 @@ export class PostgRestCaptureStore implements CaptureStore {
   }
 
   async extractionCommit(runId: string, commit: ExtractionCommit): Promise<ExtractionCommitResult> {
-    if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
-      throw refusedData(
-        `extractionCommit: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
-        INVALID_PARAMETER_VALUE,
-      )
-    }
-    const payload = {
-      subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
-      items: commit.items.map(toCommitItem),
-      stats: commit.stats,
-    }
-    refuseUnsafeText('extractionCommit', '', payload)
+    const payload = commitPayload('extractionCommit', commit)
     const { data, error } = await this.client.rpc('engram_extraction_commit', { p_run: runId, p_payload: payload })
     if (error) throw toStoreError('extractionCommit', error)
     return toCommitResult(data, commit.items.length)
   }
+
+  async extractionReplace(runId: string, commit: ExtractionCommit): Promise<ExtractionReplaceResult> {
+    const payload = commitPayload('extractionReplace', commit)
+    const { data, error } = await this.client.rpc('engram_extraction_replace', { p_run: runId, p_payload: payload })
+    if (error) throw toStoreError('extractionReplace', error)
+    return { ...toCommitResult(data, commit.items.length), ...toReplaceExtras(data) }
+  }
+
+  async extractionSessions(query: ExtractionSessionQuery): Promise<ExtractionSession[]> {
+    const { sessionId, since, idleMs, now } = query
+    if ((sessionId === null) === (since === null)) {
+      throw new Error('extractionSessions: give exactly one of sessionId and since')
+    }
+    if (since !== null && Number.isNaN(since.getTime())) throw new Error('extractionSessions: since is not a valid date')
+    if (!Number.isSafeInteger(idleMs) || idleMs < 1000 || idleMs % 1000 !== 0) {
+      throw new Error('extractionSessions: idleMs must be a whole number of seconds, at least 1000')
+    }
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new Error('extractionSessions: now is not a valid date')
+    const { data, error } = await this.client.rpc('engram_extraction_sessions', {
+      p_session: sessionId,
+      p_since: since === null ? null : since.toISOString(),
+      p_idle_seconds: idleMs / 1000,
+      p_now: now.toISOString(),
+    })
+    if (error) throw toStoreError('extractionSessions', error)
+    return toExtractionSessions(data)
+  }
+
+  async extractionSessionAnchors(version: string, sessionId: string, extractedBy: ExtractedBy): Promise<SessionAnchor[]> {
+    if (!EXTRACTED_BY.has(extractedBy)) {
+      throw new Error('extractionSessionAnchors: extractedBy must be any_version or this_version')
+    }
+    const { data, error } = await this.client.rpc('engram_extraction_session_anchors', {
+      p_version: version,
+      p_session: sessionId,
+      p_any_version: extractedBy === 'any_version',
+    })
+    if (error) throw toStoreError('extractionSessionAnchors', error)
+    return toSessionAnchors(data)
+  }
+
+  async dueSessions(idleSeconds: number, limit: number, now: Date): Promise<DueSession[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > DUE_SESSIONS_LIMIT_MAX) {
+      throw new Error(`dueSessions: limit must be an integer from 1 to ${DUE_SESSIONS_LIMIT_MAX}`)
+    }
+    if (!Number.isInteger(idleSeconds) || idleSeconds < 0) {
+      throw new Error('dueSessions: idleSeconds must be a whole number of seconds, 0 or more')
+    }
+    if (!(now instanceof Date) || Number.isNaN(now.getTime())) throw new Error('dueSessions: now is not a valid date')
+    const { data, error } = await this.client.rpc('engram_due_sessions', {
+      p_idle_seconds: idleSeconds,
+      p_limit: limit,
+      p_now: now.toISOString(),
+    })
+    if (error) throw toStoreError('dueSessions', error)
+    return toDueSessions(data)
+  }
+
+  async sessionIndexSource(sessionId: string): Promise<SessionIndexSource> {
+    const { data, error } = await this.client.rpc('engram_session_index_source', { p_session: sessionId })
+    if (error) throw toStoreError('sessionIndexSource', error)
+    return toSessionIndexSource(data, sessionId)
+  }
+
+  async sessionIndexCommit(
+    sessionId: string,
+    item: SessionIndexItem | null,
+    eventId: number,
+  ): Promise<SessionIndexCommitResult> {
+    const pItem = item === null ? null : toCommitIndexItem(item)
+    if (pItem !== null) refuseUnsafeText('sessionIndexCommit', 'item.', pItem)
+    const { data, error } = await this.client.rpc('engram_session_index_commit', {
+      p_session: sessionId,
+      p_item: pItem,
+      p_event_id: eventId,
+    })
+    if (error) throw toStoreError('sessionIndexCommit', error)
+    return toSessionIndexCommitResult(data)
+  }
+}
+
+function toCandidateRead(row: unknown): ExtractionCandidateRead {
+  const unexpected = new Error('extractionCandidates failed: the RPC returned an unexpected read')
+  if (!isRecord(row)) throw unexpected
+  const { stored, repeat_of: repeatOf, total, read, candidates } = row
+  if (
+    !isNullableUuid(stored) ||
+    !isNullableUuid(repeatOf) ||
+    !isCount(total) ||
+    !Array.isArray(read) ||
+    !read.every((id) => typeof id === 'string') ||
+    read.length !== total ||
+    !Array.isArray(candidates) ||
+    candidates.length > total
+  ) {
+    throw unexpected
+  }
+  return {
+    stored,
+    repeatOf,
+    total,
+    read: [...(read as string[])],
+    candidates: candidates.map((c) => toCandidate(c, unexpected)),
+  }
+}
+
+function toCandidate(value: unknown, unexpected: Error): ExtractionCandidate {
+  if (!isRecord(value)) throw unexpected
+  const { id, class: itemClass, kind, subject_id: subjectId, subject_label: subjectLabel, content } = value
+  const { project_id: projectId, workspace_id: workspaceId } = value
+  const occurredAt = parseTime(value.occurred_at)
+  if (
+    typeof id !== 'string' ||
+    typeof itemClass !== 'string' ||
+    typeof kind !== 'string' ||
+    !isNullableString(subjectId) ||
+    !isNullableString(subjectLabel) ||
+    !isNullableString(projectId) ||
+    !isNullableString(workspaceId) ||
+    typeof content !== 'string' ||
+    occurredAt === null
+  ) {
+    throw unexpected
+  }
+  return {
+    id,
+    class: itemClass,
+    kind,
+    subjectId,
+    subjectLabel,
+    projectId,
+    workspaceId,
+    content,
+    occurredAt: occurredAt.toISOString(),
+  }
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+/** The retractions as the commit RPC takes them: one entry per retracting turn. */
+function toCommitRetractions(retractions: readonly ExtractionRetractions[]): Record<string, unknown>[] {
+  return retractions.map((r) => ({
+    from: r.from,
+    targets: [...r.targets],
+    rejected: r.rejected.map((l) => ({ target: l.target, reason: l.reason })),
+  }))
+}
+
+function isNullableUuid(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && isUuid(value))
 }
 
 function toPendingAnchor(row: Record<string, unknown>): PendingAnchor {
@@ -395,8 +607,9 @@ function parseTime(value: unknown): Date | null {
 
 /**
  * The item as the commit RPC takes it: engram_insert_items' columns plus
- * subject_key and entities. Only the set one of subject_id and subject_key is
- * sent.
+ * subject_key, entities, links, links_rejected and candidates_read (sent
+ * whenever the item was weighed, even against nothing). Only the set one of
+ * subject_id and subject_key is sent, and the link lists only when non-empty.
  */
 function toCommitItem(item: ExtractionItem, index: number): Record<string, unknown> {
   const object: Record<string, unknown> = {
@@ -421,6 +634,11 @@ function toCommitItem(item: ExtractionItem, index: number): Record<string, unkno
   }
   if (item.subjectId !== null) object.subject_id = item.subjectId
   if (item.subjectKey !== null) object.subject_key = item.subjectKey
+  if (item.links && item.links.length > 0) object.links = item.links.map((l) => ({ rel: l.rel, target: l.target }))
+  if (item.linksRejected && item.linksRejected.length > 0) {
+    object.links_rejected = item.linksRejected.map((l) => ({ target: l.target, reason: l.reason }))
+  }
+  if (item.candidatesRead !== undefined) object.candidates_read = [...item.candidatesRead]
   return object
 }
 
@@ -445,18 +663,45 @@ function isoTime(value: Date, position: number): string {
 function toCommitResult(data: unknown, itemCount: number): ExtractionCommitResult {
   const unexpected = new Error('extractionCommit failed: the RPC returned an unexpected result')
   if (!isRecord(data)) throw unexpected
-  const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates } = data
+  const { item_ids: itemIds, subjects_created: subjectsCreated, duplicates, restatements } = data
+  const linksApplied = data.links_applied
   if (
     !Array.isArray(itemIds) ||
     itemIds.length !== itemCount ||
     !itemIds.every((id) => typeof id === 'string') ||
     !isCount(subjectsCreated) ||
     !isCount(duplicates) ||
-    duplicates > itemCount
+    !isCount(restatements) ||
+    duplicates + restatements > itemCount ||
+    (linksApplied !== undefined && !isCount(linksApplied))
   ) {
     throw unexpected
   }
-  return { itemIds: itemIds as string[], subjectsCreated, duplicates }
+  return {
+    itemIds: itemIds as string[],
+    subjectsCreated,
+    duplicates,
+    restatements,
+    ...(linksApplied === undefined ? {} : { linksApplied }),
+  }
+}
+
+/** The commit payload engram_extraction_commit and engram_extraction_replace take, checked before it is sent. */
+function commitPayload(operation: string, commit: ExtractionCommit): Record<string, unknown> {
+  if (commit.items.length > EXTRACTION_COMMIT_ITEMS_MAX) {
+    throw refusedData(
+      `${operation}: ${commit.items.length} items, at most ${EXTRACTION_COMMIT_ITEMS_MAX} per commit`,
+      INVALID_PARAMETER_VALUE,
+    )
+  }
+  const payload = {
+    subjects: commit.subjects.map((s) => ({ key: s.key, label: s.label, project_id: s.projectId })),
+    items: commit.items.map(toCommitItem),
+    retractions: toCommitRetractions(commit.retractions ?? []),
+    stats: commit.stats,
+  }
+  refuseUnsafeText(operation, '', payload)
+  return payload
 }
 
 function isCount(value: unknown): value is number {
