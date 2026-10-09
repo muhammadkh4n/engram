@@ -27,12 +27,28 @@ import { loadProjectRoots, projectForRoot } from './project-roots.js'
 const MAX_ANCESTORS = 20
 
 export function detectProject(cwd: string = process.cwd()): string | null {
+  return detectCheckout(cwd)?.repo ?? null
+}
+
+/**
+ * The checkout holding cwd: the owning repository's name (as detectProject
+ * names it), `repoRoot` = the directory holding the `.git` entry, and
+ * `worktree` = that directory's name when it is a linked worktree, else
+ * null. No git ancestor → null.
+ */
+export interface Checkout {
+  repo: string
+  repoRoot: string
+  worktree: string | null
+}
+
+export function detectCheckout(cwd: string = process.cwd()): Checkout | null {
   let current = resolve(cwd)
 
   for (let i = 0; i < MAX_ANCESTORS; i++) {
     const gitPath = `${current}/.git`
     if (existsSync(gitPath)) {
-      return repositoryNameFor(current, gitPath)
+      return checkoutFor(current, gitPath)
     }
 
     const parent = dirname(current)
@@ -43,15 +59,20 @@ export function detectProject(cwd: string = process.cwd()): string | null {
   return null
 }
 
-function repositoryNameFor(checkoutDir: string, gitPath: string): string | null {
+function checkoutFor(checkoutDir: string, gitPath: string): Checkout | null {
   const own = basename(checkoutDir) || null
+  const commonDir = linkedCommonDir(checkoutDir, gitPath)
+  const shared = commonDir ? repositoryNameFromCommonDir(commonDir) : null
+  const repo = shared ?? own
+  if (!repo) return null
+  return { repo, repoRoot: checkoutDir, worktree: shared ? own : null }
+}
+
+/** The shared git dir of a linked worktree, or null for a main checkout or a submodule. */
+function linkedCommonDir(checkoutDir: string, gitPath: string): string | null {
   const gitDir = readGitDirPointer(gitPath, checkoutDir)
-  if (!gitDir) return own
-
-  const commonDir = readCommonDir(gitDir)
-  if (!commonDir) return own
-
-  return repositoryNameFromCommonDir(commonDir) ?? own
+  if (!gitDir) return null
+  return readCommonDir(gitDir)
 }
 
 /**

@@ -113,6 +113,7 @@ export {
 export { EmbeddingInputError, isEmbeddingInputError } from './ingestion/embedding-input-error.js'
 export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
+export { PLACEHOLDER_PREFIX } from './ingest/placeholder.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
 export { findSecretCandidates } from './ingest/secret-candidates.js'
 export {
