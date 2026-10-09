@@ -200,6 +200,25 @@ describe('PostgRestItemStore.insertItems', () => {
     expect(rpc).not.toHaveBeenCalled()
   })
 
+  it('refuses an item holding text PostgreSQL cannot store, naming its position and path, without a request', async () => {
+    const { client, rpc } = mockClient()
+    const items = [utterance, { ...utterance, id: ID_B, content: 'ship it\u0000 on Friday' }, statement]
+
+    await expect(storeWith(client).insertItems(items))
+      .rejects.toThrow(/insertItems failed: item 2: content holds U\+0000 or an unpaired surrogate/)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('refuses an unpaired surrogate inside source, naming the path and not the text', async () => {
+    const { client, rpc } = mockClient()
+    const item = { ...utterance, source: { type: 'transcript', tools: [{ ref: 'deploy-secret\ud83d' }] } } as NewItem
+
+    const err = await storeWith(client).insertItems([item]).catch((e: unknown) => e)
+    expect(String((err as Error).message)).toMatch(/item 1: source\.tools\[0\]\.ref holds/)
+    expect(String((err as Error).message)).not.toContain('deploy-secret')
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
   it('returns no rows and makes no request for an empty list', async () => {
     const { client, rpc } = mockClient()
 
@@ -401,6 +420,15 @@ describe('PostgRestItemStore.getItems', () => {
 })
 
 describe('PostgRestItemStore write RPCs', () => {
+  it('refuses a forget or retire reason PostgreSQL cannot store, without a request', async () => {
+    const { client, rpc } = mockClient()
+    const store = storeWith(client)
+
+    await expect(store.forgetItems([ID_A], 'asked\u0000')).rejects.toThrow(/forgetItems failed: reason holds/)
+    await expect(store.retireItems([ID_A], 'stale\udc00')).rejects.toThrow(/retireItems failed: reason holds/)
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
   it('forgets through engram_forget_items and maps each effect', async () => {
     const { client, rpcCalls } = mockClient({
       rpc: {

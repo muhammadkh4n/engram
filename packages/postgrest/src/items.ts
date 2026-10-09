@@ -1,5 +1,5 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { ITEM_INVARIANTS, ItemConstraintError, generateId } from '@engram-mem/core'
+import { ITEM_INVARIANTS, ItemConstraintError, findPostgresUnsafeText, generateId } from '@engram-mem/core'
 import type {
   ForgetEffect,
   InsertedItem,
@@ -118,6 +118,7 @@ export class PostgRestItemStore implements ItemStore {
     }
     if (items.length === 0) return []
     const objects = items.map((item, i) => toInsertObject(item, i + 1))
+    objects.forEach((object, i) => refuseUnsafeText('insertItems', `item ${i + 1}: `, object))
 
     const { data, error } = await this.rpcRetryingRollbacks('engram_insert_items', { p_items: objects })
     if (error) throw toStoreError('insertItems', error)
@@ -168,6 +169,7 @@ export class PostgRestItemStore implements ItemStore {
   async forgetItems(ids: readonly string[], reason: string): Promise<ForgetEffect[]> {
     const pIds = idsForCall('forgetItems', ids)
     if (pIds.length === 0) return []
+    refuseUnsafeText('forgetItems', '', { reason })
     const { data, error } = await this.rpcRetryingRollbacks('engram_forget_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('forgetItems', error)
     return ((data ?? []) as ForgetRow[]).map((row) => ({ itemId: row.item_id, effect: row.effect, via: row.via }))
@@ -176,6 +178,7 @@ export class PostgRestItemStore implements ItemStore {
   async retireItems(ids: readonly string[], reason: string): Promise<string[]> {
     const pIds = idsForCall('retireItems', ids)
     if (pIds.length === 0) return []
+    refuseUnsafeText('retireItems', '', { reason })
     const { data, error } = await this.rpcRetryingRollbacks('engram_retire_items', { p_ids: pIds, p_reason: reason })
     if (error) throw toStoreError('retireItems', error)
     return (data ?? []) as string[]
@@ -225,6 +228,18 @@ export class PostgRestItemStore implements ItemStore {
       ItemInvariant,
       number
     >
+  }
+}
+
+/**
+ * PostgreSQL refuses U+0000 and unpaired surrogates in text and jsonb, and
+ * the refusal fails the whole call; refusing here names the object and the
+ * path (never the text) before anything is sent.
+ */
+function refuseUnsafeText(operation: string, prefix: string, value: Record<string, unknown>): void {
+  const path = findPostgresUnsafeText(value)
+  if (path !== null) {
+    throw new Error(`${operation} failed: ${prefix}${path} holds U+0000 or an unpaired surrogate, which PostgreSQL cannot store`)
   }
 }
 

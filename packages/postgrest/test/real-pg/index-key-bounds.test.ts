@@ -23,6 +23,7 @@ const ITEM_TABLES = [
   'memory_items',
   'memory_item_entities',
   'memory_capture_events',
+  'memory_capture_event_counts',
   'memory_secret_hits',
 ] as const
 
@@ -355,6 +356,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       reports.flatMap((r) => r.keys.map((k) => [`${r.index}: ${k.key}`, `${k.bytes} by ${k.checks.join(', ')}`])),
     )
     expect(bounds).toEqual({
+      'idx_capture_events_candidates: session_id': '1024 by memory_capture_events_session_id_check',
       'idx_capture_events_session: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_capture_events_session_event_key: session_id': '1024 by memory_capture_events_session_id_check',
       'memory_capture_events_session_event_key: event_uuid': '512 by memory_capture_events_event_uuid_check',
@@ -365,6 +367,7 @@ describe.skipIf(!realPgImage)('btree index keys on the item store tables', () =>
       'idx_items_class_kind: class': '16 by memory_items_class_check',
       'idx_items_class_kind: kind': '15 by memory_items_kind_check',
       "idx_items_event_key: ((source ->> 'event_key'::text))": '2048 by memory_items_source_check',
+      "idx_items_version_of: ((source ->> 'version_of'::text))": '2048 by memory_items_version_of_check',
       'idx_items_project: project_id': '100 by memory_items_ids_check',
       'idx_items_session: session_id': '1024 by memory_items_ids_check',
       'memory_projects_id_kind_key: id': '100 by memory_projects_id_check',

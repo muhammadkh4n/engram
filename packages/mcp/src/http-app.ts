@@ -5,8 +5,14 @@
  *
  * Routes:
  *   GET  /health, /healthz — liveness, no auth
- *   *    /mcp              — MCP Streamable HTTP, bearer auth
- *   POST /capture          — the capture pipeline (hooks and CLIs), bearer auth
+ *   *    /mcp              — MCP Streamable HTTP, BEARER_TOKEN auth
+ *   POST /capture          — the capture pipeline (hooks and CLIs), BEARER_TOKEN auth
+ *   POST /capture/events   — raw capture events, ENGRAM_CAPTURE_TOKEN auth; 503
+ *                            while that token is unset
+ *
+ * Tokens are per route: BEARER_TOKEN is refused on /capture/events and the
+ * capture token on /mcp and /capture, so a leaked capture client token
+ * cannot read memory.
  */
 
 import type http from 'node:http'
@@ -19,6 +25,15 @@ import {
   type CaptureResponse,
   type CaptureRouteDeps,
 } from './capture-route.js'
+import { CAPTURE_EVENTS_BODY_MAX_BYTES } from './capture-events/contract.js'
+import {
+  CAPTURE_EVENTS_DISABLED_MESSAGE,
+  failedCaptureEventsResponse,
+  runCaptureEventsRequest,
+  unavailableCaptureEventsResponse,
+  type CaptureEventsResponse,
+  type CaptureEventsRouteDeps,
+} from './capture-events/route.js'
 
 /**
  * A capture carries at most 100,000 content chars plus small metadata. JSON
@@ -27,10 +42,15 @@ import {
  */
 export const CAPTURE_BODY_MAX_BYTES = 1024 * 1024
 
+/** The shortest ENGRAM_CAPTURE_TOKEN accepted. */
+export const CAPTURE_TOKEN_MIN_CHARS = 32
+
 export interface HttpConfig {
   port: number
   host: string
   bearerToken: string
+  /** ENGRAM_CAPTURE_TOKEN; null leaves /capture/events answering 503. */
+  captureToken: string | null
   allowedHosts: ReadonlySet<string> | null
 }
 
@@ -38,6 +58,9 @@ export interface HttpHandlers {
   mcp: (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>
   capture: CaptureRouteDeps
   captureBodyMaxBytes?: number
+  /** Wired when the capture token is set; absent, /capture/events answers 503. */
+  captureEvents?: CaptureEventsRouteDeps
+  captureEventsBodyMaxBytes?: number
   logError?: (line: string) => void
 }
 
@@ -55,7 +78,14 @@ export function loadHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig
   const allowedHosts = allowedHostsEnv
     ? new Set(allowedHostsEnv.split(',').map((h) => h.trim().toLowerCase()).filter(Boolean))
     : null
-  return { port, host, bearerToken, allowedHosts }
+  const captureToken = env['ENGRAM_CAPTURE_TOKEN'] || null
+  if (captureToken !== null && captureToken.length < CAPTURE_TOKEN_MIN_CHARS) {
+    throw new Error(`ENGRAM_CAPTURE_TOKEN must be at least ${CAPTURE_TOKEN_MIN_CHARS} characters`)
+  }
+  if (captureToken !== null && captureToken === bearerToken) {
+    throw new Error('ENGRAM_CAPTURE_TOKEN must differ from BEARER_TOKEN')
+  }
+  return { port, host, bearerToken, captureToken, allowedHosts }
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -157,6 +187,65 @@ async function handleCapture(
   sendCapture(res, await runCaptureRequest(handlers.capture, parsed))
 }
 
+function sendCaptureEvents(res: http.ServerResponse, response: CaptureEventsResponse): void {
+  res.writeHead(response.status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(response.body))
+}
+
+async function handleCaptureEvents(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: HttpConfig,
+  handlers: HttpHandlers,
+  logError: (line: string) => void,
+): Promise<void> {
+  if (config.captureToken === null) {
+    req.resume()
+    sendCaptureEvents(res, unavailableCaptureEventsResponse(CAPTURE_EVENTS_DISABLED_MESSAGE))
+    return
+  }
+  if (!checkAuth(req, config.captureToken)) {
+    req.resume()
+    res.writeHead(401, {
+      'content-type': 'application/json',
+      'www-authenticate': 'Bearer realm="engram-capture"',
+    })
+    res.end(JSON.stringify({ error: 'unauthorized' }))
+    return
+  }
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+  const maxBytes = handlers.captureEventsBodyMaxBytes ?? CAPTURE_EVENTS_BODY_MAX_BYTES
+  let read: BodyRead
+  try {
+    read = await readBody(req, maxBytes)
+  } catch (err) {
+    logError(`[engram-mcp-http] capture events body read failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (!res.headersSent && !res.destroyed) sendCaptureEvents(res, failedCaptureEventsResponse())
+    return
+  }
+  if ('tooLarge' in read) {
+    sendCaptureEvents(res, { status: 413, body: { error: `body exceeds ${maxBytes} bytes` } })
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(read.body.toString('utf8'))
+  } catch {
+    sendCaptureEvents(res, { status: 400, body: { error: 'the body is not valid JSON' } })
+    return
+  }
+  if (!handlers.captureEvents) {
+    sendCaptureEvents(res, unavailableCaptureEventsResponse())
+    return
+  }
+  sendCaptureEvents(res, await runCaptureEventsRequest(handlers.captureEvents, parsed))
+}
+
 async function route(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -179,6 +268,11 @@ async function route(
 
   const url = req.url ?? ''
   const path = url.split('?')[0]
+  if (path === '/capture/events') {
+    await handleCaptureEvents(req, res, config, handlers, logError)
+    return
+  }
+
   if (path !== '/mcp' && path !== '/capture') {
     res.writeHead(404, { 'content-type': 'text/plain' })
     res.end('Not found\n')

@@ -30,7 +30,31 @@ export type {
 } from './items/types.js'
 export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
 export type { ItemStore } from './items/item-store.js'
+export {
+  EMBEDDING_ATTEMPTS_MAX,
+  EMBEDDING_BATCH_MAX,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
+  EMBEDDING_ERROR_MAX_CHARS,
+  MATERIALIZE_LIMIT_MAX,
+  SCAN_TARGETS,
+  sqlstateOf,
+} from './items/capture-store.js'
+export type {
+  CaptureSecretHit,
+  CaptureStore,
+  EmbeddingFailure,
+  IngestedEvent,
+  ItemEmbedding,
+  MaterializeResult,
+  PendingEmbedding,
+  ProjectRow,
+  ScanRow,
+  ScanTarget,
+  StoredEvent,
+} from './items/capture-store.js'
 export { normalizeQuote, quoteOccursIn } from './items/quote.js'
+export { PostgresTextKeyCollision, findPostgresUnsafeText, toPostgresText } from './text/postgres-text.js'
+export { cutWholeChars, tailWholeChars } from './text/cut-text.js'
 export { lightSleep } from './consolidation/light-sleep.js'
 export type { LightSleepOptions } from './consolidation/light-sleep.js'
 export {
@@ -78,11 +102,34 @@ export { extractEntities } from './ingestion/entity-extractor.js'
 export { scoreSalience } from './ingestion/salience.js'
 export { parseContent } from './ingestion/content-parser.js'
 export type { ParsedContent, ParsedPart } from './ingestion/content-parser.js'
-export { buildTextToEmbed, EMBED_MAX_CHARS, EMBED_CONTEXT_MAX_CHARS, EMBED_TEXT_VERSION } from './ingestion/embed-text.js'
+export {
+  buildTextToEmbed,
+  capEmbedText,
+  EMBED_MAX_CHARS,
+  EMBED_MAX_UTF8_BYTES,
+  EMBED_CONTEXT_MAX_CHARS,
+  EMBED_TEXT_VERSION,
+} from './ingestion/embed-text.js'
+export { EmbeddingInputError, isEmbeddingInputError } from './ingestion/embedding-input-error.js'
 export type { EmbedTextInput } from './ingestion/embed-text.js'
 export { scrubSecrets } from './ingest/scrub-secrets.js'
 export type { ScrubResult, SecretRedaction } from './ingest/scrub-secrets.js'
 export { findSecretCandidates } from './ingest/secret-candidates.js'
+export {
+  createSecretRegistry,
+  defaultSecretRegistry,
+  resetDefaultSecretRegistry,
+  MIN_SECRET_LENGTH,
+  PROCESS_SECRET_ENV_NAMES,
+  SECRET_SOURCES_ENV,
+} from './ingest/secret-registry.js'
+export type {
+  KnownValueSpan,
+  SecretRegistry,
+  SecretRegistryOptions,
+  SecretRegistryStatus,
+} from './ingest/secret-registry.js'
+export type { NamedValue } from './ingest/secret-source-formats.js'
 export type { SecretCandidate } from './ingest/secret-candidates.js'
 export { scrubMessage, describeRedactions } from './ingest/scrub-message.js'
 export type { ScrubbedMessage } from './ingest/scrub-message.js'

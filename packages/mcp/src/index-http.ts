@@ -17,79 +17,18 @@
  *                           If unset, every host is allowed.
  *   NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
  *   ENGRAM_SALIENCE_THRESHOLD — capture classifier confidence cut, 0..1, default 0.7
+ *   ENGRAM_CAPTURE_TOKEN  — enables POST /capture/events (at least 32 chars, not
+ *                           BEARER_TOKEN). When set, ENGRAM_PROJECT_REGISTRY_FILE
+ *                           (a valid registry) and ENGRAM_SECRET_SOURCES_FILE are
+ *                           required too, or startup fails naming the variable.
+ *                           The capture worker then materializes stored events
+ *                           and embeds the new items.
  */
 
-import http from 'node:http'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import {
-  createEngramServer,
-  getCaptureDeps,
-  recallOutputPolicyAtStartup,
-  captureModelFromEnv,
-  parseSalienceThresholdEnv,
-} from './server-core.js'
-import { createRequestListener, loadHttpConfig } from './http-app.js'
+import { main } from './http-server.js'
 
-async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  // MCP Streamable HTTP requires `Accept: application/json, text/event-stream`.
-  // Some clients (notably Claude Code's HTTP MCP client) send only one of the two,
-  // which the SDK rejects with 406. Normalize the header so the SDK sees both.
-  const incomingAccept = (req.headers['accept'] ?? '').toString()
-  if (req.method === 'POST') {
-    const wantsJson = incomingAccept.includes('application/json') || incomingAccept.includes('*/*') || incomingAccept === ''
-    const wantsSse = incomingAccept.includes('text/event-stream') || incomingAccept.includes('*/*') || incomingAccept === ''
-    if (wantsJson && wantsSse) {
-      req.headers['accept'] = 'application/json, text/event-stream'
-    }
-  }
-
-  const server = createEngramServer()
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // stateless mode — Engram has no per-session state
-    enableJsonResponse: true,
-  })
-
-  res.on('close', () => {
-    transport.close().catch(() => {})
-    server.close().catch(() => {})
-  })
-
-  await server.connect(transport)
-  await transport.handleRequest(req, res)
-}
-
-async function main(): Promise<void> {
-  const config = loadHttpConfig()
-  // Parsed before listening so a malformed threshold fails startup instead
-  // of silently gating every capture at a value nobody chose.
-  const threshold = parseSalienceThresholdEnv()
-  const captureModel = captureModelFromEnv()
-  recallOutputPolicyAtStartup()
-
-  const httpServer = http.createServer(
-    createRequestListener(config, {
-      mcp: handleMcp,
-      capture: {
-        captureModel,
-        captureDeps: () => getCaptureDeps({ threshold, captureModel }),
-        log: (line) => process.stderr.write(`[engram-mcp-http] ${line}\n`),
-      },
-    }),
-  )
-
-  httpServer.listen(config.port, config.host, () => {
-    process.stdout.write(`[engram-mcp-http] listening on http://${config.host}:${config.port}/mcp\n`)
-  })
-
-  const shutdown = (signal: string): void => {
-    process.stdout.write(`[engram-mcp-http] ${signal} — shutting down\n`)
-    httpServer.close(() => process.exit(0))
-    setTimeout(() => process.exit(1), 5_000).unref()
-  }
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
-}
-
+// Runs on import as well as when started as the script, so a launcher that
+// imports this module (pm2, a wrapper) starts the server or fails loudly.
 main().catch((err) => {
   process.stderr.write(`[engram-mcp-http] Fatal: ${err instanceof Error ? err.message : String(err)}\n`)
   process.exit(1)

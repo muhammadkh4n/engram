@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   CAPTURE_EVENT_TYPES,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
   ENTITY_TYPES,
   ITEM_CLASSES,
   ITEM_INVARIANTS,
@@ -32,6 +33,7 @@ const ITEM_TABLES = [
   'memory_items',
   'memory_item_entities',
   'memory_capture_events',
+  'memory_capture_event_counts',
   'memory_secret_hits',
 ] as const
 
@@ -190,12 +192,12 @@ describe('item store tables are reachable only through their own grants', () => 
     for (const stmt of grants) expect(stmt).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|ALL)\b/)
   })
 
-  it('revokes all on the two id sequences and grants nothing back', () => {
+  it('revokes all on the three id sequences and grants nothing back', () => {
     const section = privilegeSection()
     expect(section).toContain(
-      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;',
+      'REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq FROM PUBLIC, service_role;',
     )
-    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|secret_hits)_id_seq/)
+    expect(schema).not.toMatch(/GRANT [^;]* ON SEQUENCE public\.memory_(capture_events|capture_event_counts|secret_hits)_id_seq/)
   })
 })
 
@@ -224,6 +226,17 @@ const TRIGGERS = [
 
 const TRIGGER_NAMES = TRIGGERS.map(([name]) => name)
 
+const CAPTURE_TRIGGERS = [
+  [
+    'memory_capture_events_count',
+    'CREATE TRIGGER memory_capture_events_count AFTER INSERT OR DELETE OR UPDATE OF processed_at, attempts ON public.memory_capture_events FOR EACH ROW EXECUTE FUNCTION public.memory_capture_events_count();',
+  ],
+  [
+    'memory_capture_events_count_truncate',
+    'CREATE TRIGGER memory_capture_events_count_truncate AFTER TRUNCATE ON public.memory_capture_events FOR EACH STATEMENT EXECUTE FUNCTION public.memory_capture_events_count();',
+  ],
+] as const
+
 /** The body of a function definition, from its CREATE to the closing `$$;`. */
 function functionDefinition(name: string): string {
   const start = schema.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`)
@@ -238,8 +251,8 @@ describe('memory_items triggers', () => {
   })
 
   it('creates exactly these triggers, each once', () => {
-    const created = [...schema.matchAll(/^CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
-    expect(created).toEqual(TRIGGER_NAMES)
+    const created = [...schema.matchAll(/^[ \t]*CREATE (?:CONSTRAINT )?TRIGGER (\w+)/gm)].map((m) => m[1])
+    expect(created).toEqual([...TRIGGER_NAMES, ...CAPTURE_TRIGGERS.map(([name]) => name)])
   })
 
   it.each(TRIGGER_NAMES)('%s runs a SECURITY DEFINER plpgsql function with a fixed search_path', (name) => {
@@ -304,6 +317,21 @@ describe('memory_items triggers', () => {
       expect(schema).not.toMatch(new RegExp(`GRANT [^;]*public\\.${name}\\(`))
     }
     expect(schema).not.toContain('this file defines no trigger functions')
+  })
+})
+
+describe('memory_capture_events triggers', () => {
+  it.each(CAPTURE_TRIGGERS)('%s is dropped and created again on every apply', (name, create) => {
+    expect(squash(schema)).toContain(`DROP TRIGGER IF EXISTS ${name} ON public.memory_capture_events; ${create}`)
+  })
+
+  it('counts through a SECURITY DEFINER plpgsql function with a fixed search_path, executable by no role', () => {
+    expect(squash(functionDefinition('memory_capture_events_count'))).toMatch(
+      /^CREATE OR REPLACE FUNCTION public\.memory_capture_events_count\(\) RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS \$\$/,
+    )
+    expect(schema).toContain('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;')
+    expect(schema).toContain('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM service_role;')
+    expect(schema).not.toMatch(/GRANT [^;]*public\.memory_capture_events_count\(/)
   })
 })
 
@@ -458,4 +486,40 @@ describe('valid_to is derived from superseded_by', () => {
       expect(functionDefinition(name)).not.toMatch(/valid_to/)
     },
   )
+})
+
+describe('the embedding claim lease', () => {
+  it('is EMBEDDING_CLAIM_LEASE_SECONDS wherever a claim is taken or renewed', () => {
+    for (const name of ['engram_items_pending_embedding', 'engram_items_renew_embedding_claims']) {
+      const body = functionDefinition(name)
+      expect(body).toContain(`embedding_claimed_until = now() + interval '${EMBEDDING_CLAIM_LEASE_SECONDS} seconds'`)
+      expect(body.match(/interval '/g)).toHaveLength(1)
+    }
+  })
+})
+
+describe('the pending-embedding index', () => {
+  it('holds exactly the rows engram_items_pending_embedding may claim: its WHERE is the predicate word for word, then the claim clause', () => {
+    const index = schema.match(
+      /CREATE INDEX IF NOT EXISTS idx_items_pending_embedding ON public\.memory_items USING btree \(created_at, id\) WHERE \((.*)\);/,
+    )
+    if (!index) throw new Error('idx_items_pending_embedding not found')
+    const fn = schema.match(
+      /FUNCTION public\.engram_items_pending_embedding\(p_limit integer, p_claimant uuid\)[\s\S]*?FROM public\.memory_items i\s+WHERE ([\s\S]*?)\s+ORDER BY i\.created_at, i\.id/,
+    )
+    if (!fn) throw new Error('engram_items_pending_embedding WHERE not found')
+    const predicate = squash(index[1]!)
+    expect(squash(fn[1]!)).toBe(
+      `${predicate} AND (embedding_claimed_by = p_claimant OR embedding_claimed_until IS NULL OR embedding_claimed_until <= now())`,
+    )
+    for (const clause of [
+      'embedding IS NULL',
+      'forgotten_at IS NULL',
+      'embedding_attempts < 5',
+      "NOT (class = 'utterance' AND speaker = 'assistant')",
+      "class NOT IN ('session_index', 'legacy')",
+    ]) {
+      expect(predicate).toContain(clause)
+    }
+  })
 })

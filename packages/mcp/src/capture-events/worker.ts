@@ -1,0 +1,364 @@
+/**
+ * The capture worker: materializes stored capture events into items, then
+ * embeds the items that still need a vector.
+ *
+ * Only one materialize call runs at a time across every server process: the
+ * RPC takes a transaction-scoped Postgres advisory lock and returns
+ * `locked: false` without touching anything when another call holds it. A
+ * PostgREST request is one pooled transaction, so a lock held in process
+ * memory or across requests would not exclude another replica.
+ *
+ * That lock is released when the materialize call returns, so it does not
+ * cover embedding. Instead the pending read claims every item it returns for
+ * this worker (a random claimant id per worker) for
+ * EMBEDDING_CLAIM_LEASE_SECONDS, and no other worker reads an item while its
+ * claim is live: two server processes never send the same item to the
+ * provider side by side. While a pass runs the worker renews its claims every
+ * WORKER_EMBED_CLAIM_RENEW_MS, so a pass that outlasts one lease (a provider
+ * call can retry for longer) keeps its items; a worker that crashed stops
+ * renewing and its claims lapse within the lease. Only if every renewal of a
+ * pass fails for a whole lease can another worker take its items while the
+ * pass still runs; a refusal is then still recorded once, because the
+ * database ignores a refusal from a pass whose claim was taken over.
+ *
+ * An item the provider refuses on its own (EmbeddingInputError: HTTP 400 or
+ * 422) would fail every batch it sits in, and the pending read returns the
+ * oldest items first, so it would stop embedding for every newer item. A
+ * refused batch is therefore embedded again one item at a time. A refusal
+ * counts against an item only in a pass where another item of the same batch
+ * embedded: that proves the provider accepts input, so the refusal is the
+ * item's own. After EMBEDDING_ATTEMPTS_MAX such failures it leaves the
+ * pending set. A pass where nothing embedded (a lone item included) counts
+ * nothing: a provider or proxy fault that refuses every request would
+ * otherwise move the whole backlog out of the pending set within a few
+ * passes. Like any other failure (network, timeout, 408, 409, 429, 5xx, a
+ * malformed vector, a store error), it leaves the items pending, and the next
+ * embedding pass waits a backoff that doubles from the interval up to
+ * WORKER_EMBED_BACKOFF_MAX_MS. Materialization keeps its own interval through
+ * a backoff: only the embedding step waits.
+ *
+ * The loop is a self-scheduling timeout, so ticks never overlap, and all of
+ * its state lives in the returned handle. Log lines carry counts, error codes
+ * and messages only, never stored text.
+ */
+import { randomUUID } from 'node:crypto'
+import {
+  buildTextToEmbed,
+  cutWholeChars,
+  EMBEDDING_CLAIM_LEASE_SECONDS,
+  EMBEDDING_ERROR_MAX_CHARS,
+  isEmbeddingInputError,
+  scrubSecrets,
+  toPostgresText,
+  type CaptureStore,
+  type EmbeddingFailure,
+  type MaterializeResult,
+  type PendingEmbedding,
+} from '@engram-mem/core'
+
+/** Events one materialize call takes. */
+export const WORKER_MATERIALIZE_LIMIT = 200
+/** Items one embedding batch takes. */
+export const WORKER_EMBED_BATCH = 32
+export const WORKER_INTERVAL_MS = 2000
+/** The longest wait after repeated embedding failures that are not the input's fault. */
+export const WORKER_EMBED_BACKOFF_MAX_MS = 60_000
+/** How often a running embedding pass renews its claims: four times per lease. */
+export const WORKER_EMBED_CLAIM_RENEW_MS = (EMBEDDING_CLAIM_LEASE_SECONDS * 1000) / 4
+/** Longest error message a log line keeps. */
+const ERROR_MESSAGE_MAX_CHARS = 500
+
+export interface CaptureWorkerEmbedder {
+  embedBatch(texts: string[]): Promise<number[][]>
+  dimensions(): number
+}
+
+export interface CaptureWorkerOptions {
+  store: Pick<
+    CaptureStore,
+    | 'materialize'
+    | 'pendingEmbeddings'
+    | 'renewEmbeddingClaims'
+    | 'setEmbeddings'
+    | 'recordEmbeddingFailures'
+    | 'embeddingFailedCount'
+  >
+  embedder: CaptureWorkerEmbedder
+  /** Stored with every vector: `<model>:<dimensions>:v<embed text version>`. */
+  embeddingModel: string
+  intervalMs?: number
+  log: (line: string) => void
+}
+
+export interface CaptureWorker {
+  /**
+   * Schedules no further tick and waits for a tick in flight, at most
+   * `graceMs`. A tick cut off at the grace loses nothing: a materialize call
+   * commits or rolls back whole, and an unwritten embedding batch stays
+   * pending.
+   */
+  stop(graceMs: number): Promise<void>
+}
+
+interface TickOutcome {
+  /** A full batch was taken, so more work is likely waiting. */
+  full: boolean
+}
+
+interface EmbedOutcome {
+  /** Pending items read. */
+  read: number
+  /** Vectors stored. */
+  written: number
+  /** Input-specific failures recorded. */
+  recorded: number
+  /** The first refusal's message when every item read was refused, so nothing was recorded. */
+  refusedAll: string | null
+  /** The failure that is not the input's fault and cut the pass short, if any. */
+  error: unknown
+}
+
+const NO_PASS: EmbedOutcome = { read: 0, written: 0, recorded: 0, refusedAll: null, error: null }
+
+export function startCaptureWorker(opts: CaptureWorkerOptions): CaptureWorker {
+  const { store, embedder, embeddingModel, log } = opts
+  const intervalMs = opts.intervalMs ?? WORKER_INTERVAL_MS
+  /** Names this worker's embedding claims; no other worker shares it. */
+  const claimant = randomUUID()
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let inFlight: Promise<void> | null = null
+  let stopped = false
+  let lastDead = 0
+  /** Items out of the pending set; null until read. */
+  let embedFailed: number | null = null
+  let lastEmbedFailed: number | null = 0
+  /** Consecutive embedding passes that failed or embedded nothing. */
+  let embedFailures = 0
+  /** Date.now() before which no embedding pass runs. */
+  let embedNotBefore = 0
+
+  /**
+   * Sends `texts` to the provider with each U+0000 and unpaired surrogate
+   * replaced by U+FFFD. A lone surrogate has no UTF-8 encoding: a provider
+   * either refuses the request or embeds text other than what was stored, so
+   * no cut or stored text upstream is trusted to be well-formed here.
+   */
+  const embedWellFormed = (texts: string[]): Promise<number[][]> =>
+    embedder.embedBatch(texts.map((text) => toPostgresText(text)))
+
+  const checkedVectors = (vectors: number[][], expected: number): number[][] => {
+    if (vectors.length !== expected) {
+      throw new Error(`the embedder returned ${vectors.length} vectors for ${expected} texts`)
+    }
+    const dimensions = embedder.dimensions()
+    vectors.forEach((vector, i) => {
+      if (vector.length !== dimensions) {
+        throw new Error(`vector ${i} has ${vector.length} dimensions, not ${dimensions}`)
+      }
+      if (!vector.every((v) => Number.isFinite(v))) {
+        throw new Error(`vector ${i} holds a non-finite value`)
+      }
+    })
+    return vectors
+  }
+
+  /**
+   * Embeds the refused batch one item at a time. Stops at the first failure
+   * that is not the input's fault, keeping what it got so far.
+   */
+  const embedOneByOne = async (
+    pending: PendingEmbedding[],
+    texts: string[],
+  ): Promise<{ vectors: Array<number[] | null>; failures: EmbeddingFailure[]; error: unknown }> => {
+    const vectors: Array<number[] | null> = []
+    const failures: EmbeddingFailure[] = []
+    for (let i = 0; i < pending.length; i++) {
+      try {
+        vectors.push(checkedVectors(await embedWellFormed([texts[i]!]), 1)[0]!)
+      } catch (err) {
+        if (!isEmbeddingInputError(err)) return { vectors, failures, error: err }
+        failures.push({ id: pending[i]!.id, error: await failureText(err) })
+        vectors.push(null)
+      }
+    }
+    return { vectors, failures, error: null }
+  }
+
+  /** Renews the claims on `ids` until the returned function is called. */
+  const holdClaims = (ids: string[]): (() => void) => {
+    const timer = setInterval(() => {
+      store.renewEmbeddingClaims(ids, claimant).catch((err: unknown) => {
+        log(`capture worker: renewing embedding claims failed: ${describeError(err)}`)
+      })
+    }, WORKER_EMBED_CLAIM_RENEW_MS)
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }
+
+  const embedPending = async (): Promise<EmbedOutcome> => {
+    const pending = await store.pendingEmbeddings(WORKER_EMBED_BATCH, claimant)
+    if (pending.length === 0) return { ...NO_PASS }
+    const release = holdClaims(pending.map((p) => p.id))
+    try {
+      return await embedClaimed(pending)
+    } finally {
+      release()
+    }
+  }
+
+  const embedClaimed = async (pending: PendingEmbedding[]): Promise<EmbedOutcome> => {
+    const texts = pending.map((p) => buildTextToEmbed({ cleanText: p.searchText }))
+
+    let vectors: Array<number[] | null>
+    let refusals: EmbeddingFailure[] = []
+    let error: unknown = null
+    try {
+      vectors = checkedVectors(await embedWellFormed(texts), pending.length)
+    } catch (err) {
+      if (!isEmbeddingInputError(err)) throw err
+      if (pending.length === 1) {
+        // A batch of one already failed alone.
+        vectors = [null]
+        refusals = [{ id: pending[0]!.id, error: await failureText(err) }]
+      } else {
+        ;({ vectors, failures: refusals, error } = await embedOneByOne(pending, texts))
+      }
+    }
+
+    const rows = vectors.flatMap((vector, i) =>
+      vector === null ? [] : [{ id: pending[i]!.id, embedding: vector, model: embeddingModel }],
+    )
+    const written = rows.length > 0 ? await store.setEmbeddings(rows) : 0
+    // A vector the provider returned in this pass proves it accepts input,
+    // so only then is a refusal the refused item's own.
+    const accepted = rows.length > 0
+    const recorded = accepted && refusals.length > 0 ? await store.recordEmbeddingFailures(refusals, claimant) : 0
+    const refusedAll = !accepted && error === null && refusals.length > 0 ? refusals[0]!.error : null
+    return { read: pending.length, written, recorded, refusedAll, error }
+  }
+
+  const refreshEmbedFailed = async (recorded: number): Promise<void> => {
+    if (embedFailed !== null && recorded === 0) return
+    try {
+      embedFailed = await store.embeddingFailedCount()
+    } catch (err) {
+      log(`capture worker: reading the embed_failed count failed: ${describeError(err)}`)
+    }
+  }
+
+  const tick = async (): Promise<TickOutcome> => {
+    let result: MaterializeResult | null = null
+    try {
+      result = await store.materialize(WORKER_MATERIALIZE_LIMIT)
+    } catch (err) {
+      log(`capture worker: materialize failed: ${describeError(err)}`)
+    }
+    if (result === null || !result.locked) return { full: false }
+
+    let embedded: EmbedOutcome = { ...NO_PASS }
+    if (Date.now() >= embedNotBefore) {
+      try {
+        embedded = await embedPending()
+      } catch (err) {
+        embedded = { ...NO_PASS, error: err }
+      }
+      if (embedded.error === null && embedded.refusedAll === null) {
+        embedFailures = 0
+      } else {
+        embedFailures += 1
+        const waitMs = backoffMs()
+        embedNotBefore = Date.now() + waitMs
+        log(
+          embedded.error !== null
+            ? `capture worker: embedding failed: ${describeError(embedded.error)}; next embedding pass in ${waitMs} ms`
+            : `capture worker: embedding refused for every item: ${embedded.refusedAll}`,
+        )
+      }
+    }
+    await refreshEmbedFailed(embedded.recorded)
+
+    const happened = result.processed + result.failed + result.skipped + embedded.written + embedded.recorded > 0
+    if (happened || result.dead !== lastDead || embedFailed !== lastEmbedFailed) {
+      log(
+        `capture worker: processed=${result.processed} failed=${result.failed} skipped=${result.skipped} ` +
+          `pending=${result.pending} dead=${result.dead} embedded=${embedded.written} ` +
+          `embed_failed=${embedFailed ?? 'unknown'}`,
+      )
+    }
+    lastDead = result.dead
+    lastEmbedFailed = embedFailed
+    const embeddedFull = embedded.read >= WORKER_EMBED_BATCH && embedded.error === null && embedded.refusedAll === null
+    return { full: result.processed >= WORKER_MATERIALIZE_LIMIT || embeddedFull }
+  }
+
+  /** The interval doubled once per consecutive failed embedding pass, capped. */
+  function backoffMs(): number {
+    return Math.min(intervalMs * 2 ** embedFailures, WORKER_EMBED_BACKOFF_MAX_MS)
+  }
+
+  const schedule = (delayMs: number): void => {
+    if (stopped) return
+    timer = setTimeout(run, delayMs)
+  }
+
+  function run(): void {
+    timer = null
+    inFlight = tick()
+      .catch((err: unknown): TickOutcome => {
+        log(`capture worker: tick failed: ${describeError(err)}`)
+        return { full: false }
+      })
+      .then((outcome) => {
+        inFlight = null
+        schedule(outcome.full ? 0 : intervalMs)
+      })
+  }
+
+  schedule(0)
+
+  return {
+    async stop(graceMs: number): Promise<void> {
+      stopped = true
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      if (inFlight === null) return
+      let graceTimer: ReturnType<typeof setTimeout> | undefined
+      const grace = new Promise<void>((resolve) => {
+        graceTimer = setTimeout(resolve, graceMs)
+      })
+      try {
+        await Promise.race([inFlight, grace])
+      } finally {
+        clearTimeout(graceTimer)
+      }
+    },
+  }
+}
+
+/**
+ * The provider's message for an input it refused, as the item keeps it:
+ * scrubbed of credentials, then cut, so a cut never leaves part of a secret
+ * that a detector no longer matches.
+ */
+async function failureText(err: Error): Promise<string> {
+  const status = (err as { status?: unknown }).status
+  const fallback = typeof status === 'number' ? `HTTP ${status}` : 'refused input'
+  const firstLine = err.message.split('\n', 1)[0]!.trim()
+  if (firstLine === '') return fallback
+  try {
+    const scrubbed = cutWholeChars((await scrubSecrets(firstLine)).text, EMBEDDING_ERROR_MAX_CHARS).trim()
+    return scrubbed === '' ? fallback : scrubbed
+  } catch {
+    return fallback
+  }
+}
+
+/** `<code or error name>: <message>`, the message capped; never a stack or a row. */
+function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return 'unknown error'
+  const code = (err as { code?: unknown }).code
+  const label = typeof code === 'string' || typeof code === 'number' ? String(code) : err.name
+  return `${label}: ${cutWholeChars(err.message, ERROR_MESSAGE_MAX_CHARS)}`
+}

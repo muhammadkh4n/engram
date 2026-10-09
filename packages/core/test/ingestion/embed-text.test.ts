@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
+import { findPostgresUnsafeText } from '../../src/text/postgres-text.js'
 import { sqliteAdapter } from '@engram-mem/sqlite'
 import { createMemory } from '../../src/create-memory.js'
 import type { IntelligenceAdapter } from '../../src/adapters/intelligence.js'
 import {
   buildTextToEmbed,
+  capEmbedText,
   EMBED_MAX_CHARS,
+  EMBED_MAX_UTF8_BYTES,
   EMBED_CONTEXT_MAX_CHARS,
   EMBED_TEXT_VERSION,
 } from '../../src/ingestion/embed-text.js'
@@ -104,6 +107,50 @@ describe('buildTextToEmbed — isolated and short messages', () => {
   })
 })
 
+describe('buildTextToEmbed — every cut keeps whole characters', () => {
+  // An emoji whose surrogate pair straddles the cap: units 5999 and 6000.
+  const straddling = `${'x'.repeat(EMBED_MAX_CHARS - 1)}😀tail`
+
+  function expectWellFormed(out: string): void {
+    expect(findPostgresUnsafeText(out)).toBeNull()
+  }
+
+  it('cuts a preamble and message before a pair the cap would split', () => {
+    const preamble = 'A sample preamble.'
+    const prefix = `${preamble}\n\n`
+    const message = `${'x'.repeat(EMBED_MAX_CHARS - prefix.length - 1)}😀tail`
+    const out = buildTextToEmbed({ cleanText: message, preamble })
+    expect(out).toBe(`${prefix}${'x'.repeat(EMBED_MAX_CHARS - prefix.length - 1)}`)
+    expectWellFormed(out)
+  })
+
+  it('starts the context after a pair its budget would split', () => {
+    const message = 'a sample message long enough to take context'
+    const turns = [`an earlier turn 😀${'c'.repeat(EMBED_CONTEXT_MAX_CHARS - 1)}`]
+    const out = buildTextToEmbed({ cleanText: message, contextTurns: turns })
+    expect(out).toBe(`${'c'.repeat(EMBED_CONTEXT_MAX_CHARS - 1)}\n${message}`)
+    expectWellFormed(out)
+  })
+
+  it('cuts a message with no room for context before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: straddling, contextTurns: ['an earlier turn'] })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
+  })
+
+  it('cuts a long isolated message before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: straddling })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
+  })
+
+  it('cuts the raw content of a short message before a pair the cap would split', () => {
+    const out = buildTextToEmbed({ cleanText: 'ok', rawContent: straddling })
+    expect(out).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+    expectWellFormed(out)
+  })
+})
+
 describe('buildTextToEmbed — unchanged for inputs the tail rule did not cut', () => {
   const contextCases: Array<[string, string[]]> = [
     [text('a', 21), [text('p', 40)]],
@@ -178,5 +225,48 @@ describe('Memory.ingest — embed-text version marker', () => {
 
     errorSpy.mockRestore()
     await memory.dispose()
+  })
+})
+
+describe('capEmbedText — the UTF-8 bound under the model token limit', () => {
+  const bytes = (t: string): number => new TextEncoder().encode(t).length
+
+  it('returns ASCII and mixed text whose head fits unchanged', () => {
+    const ascii = text('ascii', EMBED_MAX_CHARS)
+    expect(capEmbedText(ascii)).toBe(ascii)
+    const mixed = `${'é'.repeat(2000)}${'x'.repeat(4000)}`
+    expect(bytes(mixed)).toBeLessThanOrEqual(EMBED_MAX_UTF8_BYTES)
+    expect(capEmbedText(mixed)).toBe(mixed)
+  })
+
+  it('cuts 6,000 CJK characters (18,000 bytes) to the bound on a character boundary', () => {
+    const cjk = '語'.repeat(EMBED_MAX_CHARS)
+    const capped = capEmbedText(cjk)
+    expect(bytes(capped)).toBeLessThanOrEqual(EMBED_MAX_UTF8_BYTES)
+    expect(capped).toBe('語'.repeat(Math.floor(EMBED_MAX_UTF8_BYTES / 3)))
+  })
+
+  it('never splits a four-byte character', () => {
+    const emoji = `ab${'🙂'.repeat(2999)}`
+    const capped = capEmbedText(emoji)
+    expect(bytes(capped)).toBeLessThanOrEqual(EMBED_MAX_UTF8_BYTES)
+    expect(capped).toBe(`ab${'🙂'.repeat(Math.floor((EMBED_MAX_UTF8_BYTES - 2) / 4))}`)
+    expect(capped).not.toContain('\uFFFD')
+  })
+
+  it('drops the first half of a surrogate pair the character cap would split', () => {
+    const split = `${'x'.repeat(EMBED_MAX_CHARS - 1)}🙂`
+    expect(capEmbedText(split)).toBe('x'.repeat(EMBED_MAX_CHARS - 1))
+  })
+
+  it('applies to every buildTextToEmbed rule', () => {
+    const cjk = '語'.repeat(EMBED_MAX_CHARS)
+    for (const input of [
+      { cleanText: cjk },
+      { cleanText: cjk, preamble: 'A preamble.' },
+      { cleanText: cjk, contextTurns: ['an earlier turn'] },
+    ]) {
+      expect(bytes(buildTextToEmbed(input))).toBeLessThanOrEqual(EMBED_MAX_UTF8_BYTES)
+    }
   })
 })

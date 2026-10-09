@@ -1,5 +1,7 @@
-import { afterAll, beforeAll, describe, it, expect } from 'vitest'
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest'
+import { randomBytes } from 'node:crypto'
 import { scrubSecrets } from '../../src/ingest/scrub-secrets.js'
+import { resetDefaultSecretRegistry } from '../../src/ingest/secret-registry.js'
 import { findSecretCandidates } from '../../src/ingest/secret-candidates.js'
 import { secretlintSpans } from '../../src/ingest/secretlint-spans.js'
 import { useNoRegistry, useTempRegistry } from './registry-fixture.js'
@@ -544,5 +546,94 @@ describe('scrubSecrets — idempotence', () => {
 
   it('reports kinds in text order', async () => {
     expect(await kinds(`SLACK_BOT=${SLACK_BOT}\nNEO4J_PASSWORD=x1y2`)).toEqual(['slack', 'named-secret'])
+  })
+})
+
+/** A random token with a digit and a lower-case letter in it, never a plain word. */
+function randomToken(length: number): string {
+  return ('k7' + randomBytes(length).toString('hex')).slice(0, length)
+}
+
+describe('scrubSecrets — the process’s own credentials', () => {
+  it('masks a set BEARER_TOKEN under its variable name, and nothing once it is unset', async () => {
+    const value = randomToken(32)
+    try {
+      vi.stubEnv('BEARER_TOKEN', value)
+      resetDefaultSecretRegistry()
+      expect((await scrubSecrets(`token ${value} here`)).text).toBe('token [REDACTED:BEARER_TOKEN] here')
+      vi.stubEnv('BEARER_TOKEN', '')
+      resetDefaultSecretRegistry()
+      expect((await scrubSecrets(`token ${value} here`)).text).toBe(`token ${value} here`)
+    } finally {
+      vi.unstubAllEnvs()
+      restoreRegistry()
+      restoreRegistry = useNoRegistry()
+    }
+  })
+})
+
+describe('scrubSecrets — OpenPGP private-key blocks', () => {
+  const body = [mixed(64), mixed(32) + 'Zq4Y' + mixed(28), mixed(64), mixed(22)]
+  const block = [
+    '-----BEGIN PGP PRIVATE KEY BLOCK-----',
+    'Version: GnuPG v2',
+    'Comment: exported for the test host',
+    '',
+    ...body,
+    '=Xq9T',
+    '-----END PGP PRIVATE KEY BLOCK-----',
+  ].join('\n')
+
+  it('masks the whole block: armor headers, blank line, body, checksum and END line', async () => {
+    const { text, redactions } = await scrubSecrets(`the backup key:\n${block}\nstored offline`)
+    expect(text).toBe('the backup key:\n[REDACTED:private-key]\nstored offline')
+    expect(redactions).toEqual([{ kind: 'private-key' }])
+  })
+
+  it('masks a block without armor headers', async () => {
+    const bare = ['-----BEGIN PGP PRIVATE KEY BLOCK-----', '', ...body, '=Xq9T', '-----END PGP PRIVATE KEY BLOCK-----'].join('\n')
+    expect((await scrubSecrets(`${bare}\n`)).text).toBe('[REDACTED:private-key]\n')
+  })
+
+  it('masks a block cut off after two body lines', async () => {
+    const cut = ['-----BEGIN PGP PRIVATE KEY BLOCK-----', 'Version: GnuPG v2', '', body[0], body[1]].join('\n')
+    const { text } = await scrubSecrets(`pasted:\n${cut}`)
+    expect(text).toBe('pasted:\n[REDACTED:private-key]')
+    for (const line of body.slice(0, 2)) expect(text).not.toContain(line)
+  })
+
+  it('masks a block escaped inside a JSON string', async () => {
+    const escaped = JSON.stringify({ armored: block })
+    const { text } = await scrubSecrets(escaped)
+    expect(text).toBe('{"armored":"[REDACTED:private-key]"}')
+  })
+
+  it('leaves its header alone in prose', async () => {
+    const input =
+      'An exported secret key starts with -----BEGIN PGP PRIVATE KEY BLOCK----- and gpg --import reads it.\nNext, trust the key.'
+    expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
+  })
+})
+
+describe('scrubSecrets — Authorization in escaped JSON, nginx, Go and Ruby forms', () => {
+  const t = randomToken(24)
+  const cases: Array<[string, string]> = [
+    [`{\\"Authorization\\": \\"Bearer ${t}\\"}`, `{\\"Authorization\\": \\"Bearer [REDACTED:authorization]\\"}`],
+    [`{\\\\\\"Authorization\\\\\\": \\\\\\"Bearer ${t}\\\\\\"}`, `{\\\\\\"Authorization\\\\\\": \\\\\\"Bearer [REDACTED:authorization]\\\\\\"}`],
+    [`proxy_set_header Authorization "Bearer ${t}";`, 'proxy_set_header Authorization "Bearer [REDACTED:authorization]";'],
+    [`req.Header.Set("Authorization", "Basic ${t}")`, 'req.Header.Set("Authorization", "Basic [REDACTED:authorization]")'],
+    [`headers = { 'Authorization' => 'Bearer ${t}' }`, "headers = { 'Authorization' => 'Bearer [REDACTED:authorization]' }"],
+  ]
+  for (const [input, expected] of cases) {
+    it(`masks only the credential in ${input.replace(t, '<t>').slice(0, 48)}`, async () => {
+      const { text, redactions } = await scrubSecrets(input)
+      expect(text).toBe(expected)
+      expect(redactions).toEqual([{ kind: 'authorization' }])
+    })
+  }
+
+  it('keeps prose with no separator before a plain-word credential', async () => {
+    const input = 'Authorization bearer tokens must be rotated'
+    expect(await scrubSecrets(input)).toEqual({ text: input, redactions: [] })
   })
 })

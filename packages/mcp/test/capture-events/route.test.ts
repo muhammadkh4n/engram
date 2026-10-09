@@ -1,0 +1,440 @@
+/**
+ * runCaptureEventsRequest with a fake store: response counts across valid,
+ * duplicate, invalid and scope-rejected events; a registered secret reaches
+ * the store masked and as a hit; unregistered scope is stored NULL and
+ * reported; nothing is stored before the registry syncs or while the secret
+ * registry is degraded; a store failure is a retryable 500 whose log line
+ * carries no row data.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { randomBytes } from 'node:crypto'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createSecretRegistry, resetDefaultSecretRegistry } from '@engram-mem/core'
+import type { IngestedEvent, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
+import { parseProjectRegistry, type ProjectRegistry } from '../../src/capture-events/project-registry.js'
+import { runCaptureEventsRequest, type CaptureEventsRouteDeps } from '../../src/capture-events/route.js'
+import { RECEIVED_AT, envelope, validEvent } from './fixtures.js'
+
+const TOKEN = ('c4' + randomBytes(24).toString('hex')).slice(0, 40)
+const HEALTHY: SecretRegistryStatus = { configured: true, unreadable: [], values: 3 }
+
+const REGISTRY: ProjectRegistry = parseProjectRegistry({
+  version: 1,
+  workspaces: { 'ws-test': { root: '~/work/ws-test', vault_folder: 'Sample Workspace', register_prefix: 'TSTW' } },
+  projects: { 'sample-repo': { workspace: 'ws-test', vault_folder: 'Sample Repo', register_prefix: 'TST' } },
+})
+
+interface Harness {
+  deps: CaptureEventsRouteDeps
+  stored: StoredEvent[][]
+  logs: string[]
+}
+
+function harness(
+  opts: {
+    duplicates?: ReadonlySet<string>
+    ready?: ProjectRegistry | null
+    status?: () => SecretRegistryStatus
+    fail?: Error
+  } = {},
+): Harness {
+  const stored: StoredEvent[][] = []
+  const logs: string[] = []
+  const ingestEvents = async (events: readonly StoredEvent[]): Promise<IngestedEvent[]> => {
+    if (opts.fail) throw opts.fail
+    stored.push([...events])
+    return events.map((e, i) => ({
+      eventId: String(100 + i),
+      status: opts.duplicates?.has(e.eventUuid) ? 'duplicate' : 'accepted',
+    }))
+  }
+  const deps: CaptureEventsRouteDeps = {
+    store: { ingestEvents },
+    ready: () => (opts.ready === undefined ? REGISTRY : opts.ready),
+    status: opts.status ?? (() => HEALTHY),
+    log: (line) => logs.push(line),
+    now: () => RECEIVED_AT,
+  }
+  return { deps, stored, logs }
+}
+
+beforeEach(() => {
+  vi.stubEnv('ENGRAM_SECRET_SOURCES_FILE', '')
+  vi.stubEnv('ENGRAM_CAPTURE_TOKEN', TOKEN)
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  resetDefaultSecretRegistry()
+})
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.restoreAllMocks()
+  resetDefaultSecretRegistry()
+})
+
+describe('runCaptureEventsRequest', () => {
+  it('counts accepted, duplicate and rejected events, the counts summing to the batch', async () => {
+    const invalid = validEvent('assistant_turn', 9)
+    invalid.role = 'assistant'
+    const events = [
+      validEvent('user_prompt', 1),
+      invalid,
+      validEvent('git_commit', 2),
+      validEvent('session_end', 3),
+      validEvent('ledger_ruling', 4),
+    ]
+    const h = harness({ duplicates: new Set(['evt-session_end-3']) })
+
+    const res = await runCaptureEventsRequest(h.deps, envelope(events))
+
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        accepted: 3,
+        duplicates: 1,
+        rejected: [
+          { index: 1, session_id: 'sess-a1', event_uuid: 'evt-assistant_turn-9', reason: 'unknown field(s): role' },
+        ],
+      },
+    })
+    expect(h.stored).toHaveLength(1)
+    expect(h.stored[0]!.map((e) => e.eventUuid)).toEqual([
+      'evt-user_prompt-1',
+      'evt-git_commit-2',
+      'evt-session_end-3',
+      'evt-ledger_ruling-4',
+    ])
+    expect(h.stored[0]![0]).toMatchObject({
+      sessionId: 'sess-a1',
+      type: 'user_prompt',
+      occurredAt: '2026-10-05T11:30:00Z',
+      client: { name: 'sample-client', version: '1.0.0' },
+      project: { id: 'sample-repo', workspace: 'ws-test', repo_root: '/home/dev/sample-repo', branch: 'main', worktree: null },
+      scrub: { masked: [] },
+      hits: [],
+    })
+  })
+
+  it('stores a registered value masked and lists it as a hit, never by value', async () => {
+    const prompt = validEvent('user_prompt')
+    prompt.payload.text = `deploy with ${TOKEN} tonight`
+    prompt.cwd = `/tmp/${TOKEN}`
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([prompt]))
+
+    expect(res.body).toMatchObject({ accepted: 1, duplicates: 0, rejected: [] })
+    const stored = h.stored[0]![0]!
+    expect(stored.payload.text).toBe('deploy with [REDACTED:ENGRAM_CAPTURE_TOKEN] tonight')
+    expect(stored.cwd).toBe('/tmp/[REDACTED:ENGRAM_CAPTURE_TOKEN]')
+    expect(stored.hits).toEqual([
+      { field: 'cwd', detector: 'known', secretName: 'ENGRAM_CAPTURE_TOKEN' },
+      { field: 'payload.text', detector: 'known', secretName: 'ENGRAM_CAPTURE_TOKEN' },
+    ])
+    expect(stored.scrub.masked).toEqual([
+      { field: 'cwd', detector: 'known', secret_name: 'ENGRAM_CAPTURE_TOKEN' },
+      { field: 'payload.text', detector: 'known', secret_name: 'ENGRAM_CAPTURE_TOKEN' },
+    ])
+    expect(JSON.stringify(h.stored)).not.toContain(TOKEN)
+  })
+
+  it('stores an unregistered project as NULL and reports the sent id', async () => {
+    const worktree = validEvent('user_prompt')
+    worktree.project = { ...(worktree.project as object), id: 'sample-repo-feature', workspace: 'ws-unknown' }
+    const h = harness()
+
+    await runCaptureEventsRequest(h.deps, envelope([worktree]))
+
+    const stored = h.stored[0]![0]!
+    expect(stored.project).toMatchObject({ id: null, workspace: null, repo_root: '/home/dev/sample-repo' })
+    expect(stored.scrub).toEqual({
+      masked: [],
+      project_rejected: 'sample-repo-feature',
+      workspace_rejected: 'ws-unknown',
+    })
+  })
+
+  it('rejects a register entry whose scope does not match the registry, storing the rest', async () => {
+    const entry = validEvent('register_entry')
+    entry.payload.id = 'R-TSTX-4'
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('user_prompt'), entry]))
+
+    expect(res.body).toEqual({
+      accepted: 1,
+      duplicates: 0,
+      rejected: [
+        {
+          index: 1,
+          session_id: 'sess-a1',
+          event_uuid: 'evt-register_entry-1',
+          reason: "payload.scope: no registry vault folder has the entry id's prefix",
+        },
+      ],
+    })
+  })
+
+  it('makes no store call when every event is rejected', async () => {
+    const bad = validEvent('user_prompt')
+    bad.occurred_at = '2019-12-31T23:59:59Z'
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([bad]))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 0, duplicates: 0 })
+    expect(h.stored).toHaveLength(0)
+  })
+
+  it('answers 400 to a bad envelope, storing nothing', async () => {
+    const h = harness()
+    const res = await runCaptureEventsRequest(h.deps, { ...envelope([validEvent('user_prompt')]), dry_run: true })
+    expect(res.status).toBe(400)
+    expect(res.body).toHaveProperty('error')
+    expect(h.stored).toHaveLength(0)
+  })
+
+  it('answers 503 before the project registry syncs', async () => {
+    const h = harness({ ready: null })
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('user_prompt')]))
+    expect(res).toEqual({ status: 503, body: { error: expect.any(String), retryable: true } })
+    expect(h.stored).toHaveLength(0)
+  })
+
+  it('answers 503 while the secret registry is degraded, logging each change once', async () => {
+    let status: SecretRegistryStatus = { configured: true, unreadable: ['/etc/engram/sources/db.env'], values: 2 }
+    const h = harness({ status: () => status })
+    const body = envelope([validEvent('user_prompt')])
+
+    expect((await runCaptureEventsRequest(h.deps, body)).status).toBe(503)
+    expect((await runCaptureEventsRequest(h.deps, body)).status).toBe(503)
+    status = { configured: false, unreadable: [], values: 2 }
+    expect((await runCaptureEventsRequest(h.deps, body)).status).toBe(503)
+    status = HEALTHY
+    expect((await runCaptureEventsRequest(h.deps, body)).status).toBe(200)
+
+    expect(h.logs).toEqual([
+      'capture events refused until the secret registry recovers: the secret registry could not read: /etc/engram/sources/db.env',
+      'capture events refused until the secret registry recovers: the secret registry read no sources configuration',
+      'capture events: the secret registry recovered',
+    ])
+    expect(h.stored).toHaveLength(1)
+  })
+
+  // A mode-000 directory is still readable by root.
+  it.skipIf(process.getuid?.() === 0)('answers 503 while a source directory of the secret registry is unreadable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'engram-capture-route-'))
+    const lockedDir = join(dir, 'locked')
+    mkdirSync(lockedDir)
+    writeFileSync(join(lockedDir, 'app.env'), `API_TOKEN=${TOKEN}-locked\n`)
+    chmodSync(lockedDir, 0o000)
+    try {
+      writeFileSync(join(dir, 'sources.json'), JSON.stringify({ sources: [{ path: 'locked/*.env', format: 'dotenv' }] }))
+      const secrets = createSecretRegistry({ configPath: join(dir, 'sources.json'), log: () => {} })
+      const h = harness({ status: () => secrets.status() })
+      const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('user_prompt')]))
+      expect(res).toEqual({ status: 503, body: { error: expect.any(String), retryable: true } })
+      expect(h.stored).toHaveLength(0)
+      expect(h.logs).toEqual([
+        `capture events refused until the secret registry recovers: the secret registry could not read: ${lockedDir}`,
+      ])
+    } finally {
+      chmodSync(lockedDir, 0o755)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('answers a store failure with a retryable 500, logging code and message only', async () => {
+    const failure = Object.assign(new Error('ingestEvents failed (08006): connection lost'), {
+      code: '08006',
+      details: 'Failing row contains (secret row data)',
+    })
+    const h = harness({ fail: failure })
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('user_prompt')]))
+
+    expect(res).toEqual({ status: 500, body: { error: 'capture events failed; retry later', retryable: true } })
+    expect(h.logs).toEqual(['capture events: store failed: 08006 ingestEvents failed (08006): connection lost'])
+    expect(h.logs.join('\n')).not.toContain('secret row data')
+  })
+})
+
+describe('runCaptureEventsRequest — every accepted event can be stored', () => {
+  const R = '�'
+
+  function refusingStore(refused: ReadonlySet<string>, code: string) {
+    const calls: StoredEvent[][] = []
+    const ingestEvents = async (events: readonly StoredEvent[]): Promise<IngestedEvent[]> => {
+      calls.push([...events])
+      if (events.some((e) => refused.has(e.eventUuid))) {
+        throw Object.assign(new Error(`ingestEvents failed (${code}): unsupported Unicode escape sequence`), { code })
+      }
+      return events.map((_e, i) => ({ eventId: String(200 + i), status: 'accepted' as const }))
+    }
+    return { calls, ingestEvents }
+  }
+
+  it('stores U+0000, unpaired surrogates and an unsafe answer key as U+FFFD, and a valid pair unchanged', async () => {
+    const h = harness()
+    const turn = (n: number, text: string) => {
+      const e = validEvent('assistant_turn', n)
+      return { ...e, payload: { ...e.payload, text } }
+    }
+    const question = 'Which store\u0000 should the worker read?'
+    const answer = validEvent('user_answer', 6)
+    answer.payload = {
+      questions: [{ question, header: '', options: [], multiSelect: false }],
+      answers: { [question]: 'Postgres' },
+      transcript_line: 7,
+    }
+    const res = await runCaptureEventsRequest(
+      h.deps,
+      envelope([turn(1, 'timer\u0000 now'), turn(2, 'abc\ud83d'), turn(3, '\ude00 low'), turn(4, 'ship 😀'), answer]),
+    )
+
+    expect(res).toEqual({ status: 200, body: { accepted: 5, duplicates: 0, rejected: [] } })
+    const payloads = h.stored[0]!.map((e) => e.payload)
+    expect(payloads.slice(0, 4).map((p) => p.text)).toEqual([`timer${R} now`, `abc${R}`, `${R} low`, 'ship 😀'])
+    expect(payloads[4]!.answers).toEqual({ [`Which store${R} should the worker read?`]: 'Postgres' })
+  })
+
+  it('answers a data refusal of event 2 of 3 with 200, storing the other two one at a time', async () => {
+    const h = harness()
+    const store = refusingStore(new Set(['evt-assistant_turn-2']), '22P05')
+    h.deps.store = { ingestEvents: store.ingestEvents }
+    const events = [1, 2, 3].map((n) => validEvent('assistant_turn', n))
+
+    const res = await runCaptureEventsRequest(h.deps, envelope(events))
+
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        accepted: 2,
+        duplicates: 0,
+        rejected: [{ index: 1, session_id: 'sess-a1', event_uuid: 'evt-assistant_turn-2', reason: 'storage:22P05' }],
+      },
+    })
+    expect(store.calls.map((c) => c.map((e) => e.eventUuid))).toEqual([
+      ['evt-assistant_turn-1', 'evt-assistant_turn-2', 'evt-assistant_turn-3'],
+      ['evt-assistant_turn-1'],
+      ['evt-assistant_turn-2'],
+      ['evt-assistant_turn-3'],
+    ])
+  })
+
+  it('treats a refused rule (class 23) the same way', async () => {
+    const h = harness()
+    const store = refusingStore(new Set(['evt-assistant_turn-1']), '23514')
+    h.deps.store = { ingestEvents: store.ingestEvents }
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2)]))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 1, rejected: [{ index: 0, reason: 'storage:23514' }] })
+  })
+
+  it('keeps a failure that is not a data error a retryable 500, in the batch or in the one-at-a-time pass', async () => {
+    const h = harness()
+    const lost = refusingStore(new Set(['evt-assistant_turn-1']), '08006')
+    h.deps.store = { ingestEvents: lost.ingestEvents }
+    expect((await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1)]))).status).toBe(500)
+    expect(lost.calls).toHaveLength(1)
+
+    let call = 0
+    h.deps.store = {
+      ingestEvents: async (events) => {
+        call++
+        if (call === 1) throw Object.assign(new Error('refused'), { code: '22P05' })
+        if (call === 3) throw Object.assign(new Error('connection lost'), { code: '08006' })
+        return events.map((_e, i) => ({ eventId: String(i), status: 'accepted' as const }))
+      },
+    }
+    const res = await runCaptureEventsRequest(
+      h.deps,
+      envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2), validEvent('assistant_turn', 3)]),
+    )
+    expect(res).toEqual({ status: 500, body: { error: 'capture events failed; retry later', retryable: true } })
+    expect(call).toBe(3)
+  })
+})
+
+describe('runCaptureEventsRequest — one boundary per event', () => {
+  const DEPTH_REASON = /^\[0\](\[0\]){63}: nested deeper than 64 levels$/
+
+  it('rejects a 200 KB event of 100,000 nested arrays for its depth and stores the two valid events beside it', async () => {
+    const deep = '['.repeat(100_000) + ']'.repeat(100_000)
+    const first = JSON.stringify(validEvent('assistant_turn', 1))
+    const last = JSON.stringify(validEvent('assistant_turn', 2))
+    const body: unknown = JSON.parse(
+      `{"client":{"name":"sample-client","version":"1.0.0"},"events":[${first},${deep},${last}]}`,
+    )
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, body)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 2, duplicates: 0 })
+    const rejected = (res.body as { rejected: Array<{ index: number; reason: string }> }).rejected
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]).toMatchObject({ index: 1, session_id: null, event_uuid: null })
+    expect(rejected[0]!.reason).toMatch(DEPTH_REASON)
+    expect(h.stored[0]!.map((e) => e.eventUuid)).toEqual(['evt-assistant_turn-1', 'evt-assistant_turn-2'])
+  })
+
+  it('rejects an event whose scrubbing throws as internal:TypeError, logging the stack and not the message', async () => {
+    const h = harness()
+    const { scrubEvent } = await import('../../src/capture-events/scrub.js')
+    h.deps.scrub = async (event) => {
+      if (event.event_uuid === 'evt-assistant_turn-2') throw new TypeError('ZQXMARKER value in the message')
+      return scrubEvent(event)
+    }
+    const events = [1, 2, 3].map((n) => validEvent('assistant_turn', n))
+
+    const res = await runCaptureEventsRequest(h.deps, envelope(events))
+
+    expect(res).toEqual({
+      status: 200,
+      body: {
+        accepted: 2,
+        duplicates: 0,
+        rejected: [{ index: 1, session_id: 'sess-a1', event_uuid: 'evt-assistant_turn-2', reason: 'internal:TypeError' }],
+      },
+    })
+    expect(h.stored[0]!.map((e) => e.eventUuid)).toEqual(['evt-assistant_turn-1', 'evt-assistant_turn-3'])
+    const logged = h.logs.join('\n')
+    expect(logged).toContain('TypeError')
+    expect(logged).toMatch(/\n\s+at /)
+    expect(logged).not.toContain('ZQXMARKER')
+  })
+
+  it('rejects an event when scope resolution throws, as internal:<name>, and stores the rest', async () => {
+    const h = harness()
+    let calls = 0
+    const registry = new Proxy(REGISTRY, {
+      get(target, prop, receiver) {
+        if (prop === 'projects' && ++calls === 1) throw new RangeError('ZQXMARKER')
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    h.deps.ready = () => registry
+
+    const res = await runCaptureEventsRequest(h.deps, envelope([validEvent('assistant_turn', 1), validEvent('assistant_turn', 2)]))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ accepted: 1, rejected: [{ index: 0, reason: 'internal:RangeError' }] })
+  })
+
+  it('refuses a client nested deeper than 64 levels as an envelope error, never a 500', async () => {
+    let client: unknown = 'x'
+    for (let i = 0; i < 100_000; i++) client = [client]
+    const h = harness()
+
+    const res = await runCaptureEventsRequest(h.deps, { client, events: [validEvent('assistant_turn', 1)] })
+
+    expect(res.status).toBe(400)
+    expect((res.body as { error: string }).error).toMatch(/^client(\[0\]){64}: nested deeper than 64 levels$/)
+    expect(h.stored).toEqual([])
+  })
+})

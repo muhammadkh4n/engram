@@ -5,21 +5,41 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createRequestListener, loadHttpConfig, type HttpConfig } from '../src/http-app.js'
 import type { CaptureRouteDeps } from '../src/capture-route.js'
 import type { CaptureDeps } from '../src/ingest/capture.js'
+import type { IngestedEvent, SecretRegistryStatus, StoredEvent } from '@engram-mem/core'
+import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-events/project-registry.js'
+import type { CaptureEventsRouteDeps } from '../src/capture-events/route.js'
+import { RECEIVED_AT, envelope, validEvent } from './capture-events/fixtures.js'
 
 const TOKEN = 'test-bearer-token'
+const CAPTURE_TOKEN = 'test-capture-token-0123456789abcdef'
 const BODY_CAP = 2048
+const EVENTS_BODY_CAP = 4096
+
+const REGISTRY: ProjectRegistry = parseProjectRegistry({
+  version: 1,
+  workspaces: { 'ws-test': { root: '~/work/ws-test', vault_folder: null, register_prefix: null } },
+  projects: { 'sample-repo': { workspace: 'ws-test', vault_folder: null, register_prefix: 'TST' } },
+})
 
 interface Harness {
   url: string
   mcp: ReturnType<typeof vi.fn>
   captureDeps: ReturnType<typeof vi.fn>
+  ingestEvents: ReturnType<typeof vi.fn>
   logError: ReturnType<typeof vi.fn>
   port: number
   close: () => Promise<void>
 }
 
-async function startServer(): Promise<Harness> {
-  const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, allowedHosts: null }
+interface ServerOptions {
+  captureToken?: string | null
+  ready?: () => ProjectRegistry | null
+  status?: () => SecretRegistryStatus
+}
+
+async function startServer(opts: ServerOptions = {}): Promise<Harness> {
+  const captureToken = opts.captureToken === undefined ? CAPTURE_TOKEN : opts.captureToken
+  const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken, allowedHosts: null }
   const mcp = vi.fn(async (_req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end('{"mcp":true}')
@@ -36,9 +56,26 @@ async function startServer(): Promise<Harness> {
     captureModel: 'test-chat-model',
   }) as unknown as CaptureDeps)
   const capture: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps }
+  const ingestEvents = vi.fn(async (events: readonly StoredEvent[]): Promise<IngestedEvent[]> =>
+    events.map((_, i) => ({ eventId: String(i + 1), status: 'accepted' })),
+  )
+  const captureEvents: CaptureEventsRouteDeps = {
+    store: { ingestEvents },
+    ready: opts.ready ?? (() => REGISTRY),
+    status: opts.status ?? (() => ({ configured: true, unreadable: [], values: 1 })),
+    log: () => {},
+    now: () => RECEIVED_AT,
+  }
   const logError = vi.fn()
   const server = http.createServer(
-    createRequestListener(config, { mcp, capture, captureBodyMaxBytes: BODY_CAP, logError }),
+    createRequestListener(config, {
+      mcp,
+      capture,
+      captureBodyMaxBytes: BODY_CAP,
+      captureEvents,
+      captureEventsBodyMaxBytes: EVENTS_BODY_CAP,
+      logError,
+    }),
   )
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
@@ -46,6 +83,7 @@ async function startServer(): Promise<Harness> {
     url: `http://127.0.0.1:${port}`,
     mcp,
     captureDeps,
+    ingestEvents,
     logError,
     port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
@@ -137,7 +175,7 @@ describe('POST /capture', () => {
   })
 
   it('answers a failed body read with a retryable capture outcome, not a JSON-RPC body', async () => {
-    const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, allowedHosts: null }
+    const config: HttpConfig = { port: 0, host: '127.0.0.1', bearerToken: TOKEN, captureToken: null, allowedHosts: null }
     const capture: CaptureRouteDeps = { captureModel: 'test-chat-model', captureDeps: vi.fn() }
     const logError = vi.fn()
     const listener = createRequestListener(config, { mcp: vi.fn(), capture, logError })
@@ -216,11 +254,111 @@ describe('other routes', () => {
     expect(res.status).toBe(200)
     expect(h.mcp).toHaveBeenCalledTimes(1)
   })
+
+  it('refuses the capture token on /mcp and /capture', async () => {
+    const auth = { authorization: `Bearer ${CAPTURE_TOKEN}` }
+    expect((await post(`${h.url}/mcp`, '{}', auth)).status).toBe(401)
+    expect((await post(`${h.url}/capture`, '{}', auth)).status).toBe(401)
+    expect(h.mcp).not.toHaveBeenCalled()
+    expect(h.captureDeps).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /capture/events', () => {
+  const eventsUrl = (): string => `${h.url}/capture/events`
+  const postEvents = (body: string, token = CAPTURE_TOKEN): Promise<Response> =>
+    post(eventsUrl(), body, { authorization: `Bearer ${token}` })
+  const batch = (): string => JSON.stringify(envelope([validEvent('user_prompt'), validEvent('session_start')]))
+
+  it('refuses a request without a token and one with BEARER_TOKEN', async () => {
+    const bare = await fetch(eventsUrl(), { method: 'POST', body: batch() })
+    expect(bare.status).toBe(401)
+    expect(bare.headers.get('www-authenticate')).toContain('Bearer')
+    expect((await postEvents(batch(), TOKEN)).status).toBe(401)
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+
+  it('answers 405 to anything but POST', async () => {
+    const res = await fetch(eventsUrl(), { headers: { authorization: `Bearer ${CAPTURE_TOKEN}` } })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('POST')
+  })
+
+  it('answers 413 above the body cap', async () => {
+    const big = validEvent('user_prompt')
+    big.payload.text = 'z'.repeat(EVENTS_BODY_CAP)
+    const res = await postEvents(JSON.stringify(envelope([big])))
+    expect(res.status).toBe(413)
+    expect(await res.json()).toEqual({ error: `body exceeds ${EVENTS_BODY_CAP} bytes` })
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+
+  it('answers 400 to a body that is not JSON and to a bad envelope', async () => {
+    expect((await postEvents('{"client":')).status).toBe(400)
+    const res = await postEvents(JSON.stringify({ client: { name: 'sample-client', version: '1' }, events: [] }))
+    expect(res.status).toBe(400)
+    expect(await res.json()).toHaveProperty('error')
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+
+  it('stores a valid batch and answers the counts', async () => {
+    const res = await postEvents(batch())
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual({ accepted: 2, duplicates: 0, rejected: [] })
+    expect(h.ingestEvents).toHaveBeenCalledTimes(1)
+  })
+
+  it('answers 503 with the capture token unset, draining the body', async () => {
+    await h.close()
+    h = await startServer({ captureToken: null })
+    const res = await postEvents(batch())
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ retryable: true })
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 before the project registry syncs', async () => {
+    await h.close()
+    h = await startServer({ ready: () => null })
+    const res = await postEvents(batch())
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ retryable: true })
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+
+  it('answers 503 while the secret registry lists an unreadable source', async () => {
+    await h.close()
+    h = await startServer({ status: () => ({ configured: true, unreadable: ['/etc/engram/sources/db.env'], values: 4 }) })
+    const res = await postEvents(batch())
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ retryable: true })
+    expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
 })
 
 describe('loadHttpConfig', () => {
   it('requires BEARER_TOKEN', () => {
     expect(() => loadHttpConfig({})).toThrow(/BEARER_TOKEN/)
+  })
+
+  it('leaves the capture token null when ENGRAM_CAPTURE_TOKEN is unset', () => {
+    expect(loadHttpConfig({ BEARER_TOKEN: 't' }).captureToken).toBeNull()
+  })
+
+  it('reads a capture token of 32 or more characters', () => {
+    const token = 'c'.repeat(32)
+    expect(loadHttpConfig({ BEARER_TOKEN: 't', ENGRAM_CAPTURE_TOKEN: token }).captureToken).toBe(token)
+  })
+
+  it('refuses a 31-char capture token and one equal to BEARER_TOKEN', () => {
+    expect(() => loadHttpConfig({ BEARER_TOKEN: 't', ENGRAM_CAPTURE_TOKEN: 'c'.repeat(31) })).toThrow(
+      /ENGRAM_CAPTURE_TOKEN must be at least 32 characters/,
+    )
+    const shared = 's'.repeat(40)
+    expect(() => loadHttpConfig({ BEARER_TOKEN: shared, ENGRAM_CAPTURE_TOKEN: shared })).toThrow(
+      /ENGRAM_CAPTURE_TOKEN must differ from BEARER_TOKEN/,
+    )
   })
 
   it('reads port, host and allowed hosts', () => {

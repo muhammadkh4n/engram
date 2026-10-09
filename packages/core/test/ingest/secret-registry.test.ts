@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createSecretRegistry } from '../../src/ingest/secret-registry.js'
@@ -547,5 +547,148 @@ describe('glob path cache, literal paths', () => {
     const registry = createSecretRegistry({ configPath, pathCacheFile: cacheFile, log: (line) => logs.push(line) })
     expect(isKnown(registry, `lit-${ALNUM}`)).toBe(true)
     expect(existsSync(cacheFile)).toBe(false)
+  })
+})
+
+describe('given values and status()', () => {
+  it('registers given values under their own names, with no configuration at all', () => {
+    const registry = createSecretRegistry({
+      configPath: undefined,
+      values: [{ name: 'SERVICE_TOKEN', value: ALNUM }],
+      log: (line) => logs.push(line),
+    })
+    expect(mask(registry, `sent ${ALNUM} upstream`)).toBe('sent [REDACTED:SERVICE_TOKEN] upstream')
+    expect(registry.status()).toEqual({ configured: false, unreadable: [], values: 1 })
+  })
+
+  it('joins given values with the sources, a given name winning for a value found in both', () => {
+    write('run/secrets/api_token', `${ALNUM}\n`)
+    write('run/secrets/db_password', `pw-${ALNUM}\n`)
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'run/secrets/*', format: 'value' }] }))
+    const registry = createSecretRegistry({
+      configPath,
+      values: [{ name: 'SERVICE_TOKEN', value: ALNUM }],
+      log: (line) => logs.push(line),
+    })
+    expect(mask(registry, `${ALNUM} and pw-${ALNUM}`)).toBe('[REDACTED:SERVICE_TOKEN] and [REDACTED:db_password]')
+    expect(registry.status()).toEqual({ configured: true, unreadable: [], values: 2 })
+  })
+
+  it('skips given values that are too short or publicly known', () => {
+    const registry = createSecretRegistry({
+      configPath: undefined,
+      values: [
+        { name: 'SHORT', value: 'abc12' },
+        { name: 'DEFAULT', value: 'postgres' },
+      ],
+      log: (line) => logs.push(line),
+    })
+    expect(registry.status().values).toBe(0)
+    expect(logs.join('\n')).not.toContain('postgres')
+  })
+
+  it('lists a configuration path that is a directory as unreadable', () => {
+    const configPath = join(dir, 'sources-dir')
+    mkdirSync(configPath)
+    const registry = createSecretRegistry({ configPath, log: (line) => logs.push(line) })
+    expect(registry.status()).toEqual({ configured: false, unreadable: [configPath], values: 0 })
+  })
+
+  // A mode-000 file is still readable by root.
+  it.skipIf(process.getuid?.() === 0)('lists an unreadable source file and keeps the readable ones', () => {
+    write('run/secrets/api_token', `${ALNUM}\n`)
+    chmodSync(write('run/secrets/locked_token', `pw-${ALNUM}\n`), 0o000)
+    const registry = registryFor([
+      { path: 'run/secrets/api_token', format: 'value' },
+      { path: 'run/secrets/locked_token', format: 'value' },
+    ])
+    const status = registry.status()
+    expect(status.configured).toBe(true)
+    expect(status.unreadable).toEqual([join(dir, 'run/secrets/locked_token')])
+    expect(status.values).toBe(1)
+  })
+
+  it('reports a configuration that is not sources JSON as not configured, without its content', () => {
+    const configPath = write('sources.json', `{"sources": "${ALNUM}"}`)
+    const registry = createSecretRegistry({ configPath, log: (line) => logs.push(line) })
+    expect(registry.status()).toEqual({ configured: false, unreadable: [], values: 0 })
+    expect(JSON.stringify(registry.status())).not.toContain(ALNUM)
+  })
+})
+
+// A mode-000 directory is still readable by root.
+describe.skipIf(process.getuid?.() === 0)('unreadable directories under a source', () => {
+  const locked: string[] = []
+
+  /** Creates `rel` as a directory and takes every permission away from it until the test ends. */
+  function lock(rel: string): string {
+    const path = join(dir, rel)
+    mkdirSync(path, { recursive: true })
+    chmodSync(path, 0o000)
+    locked.push(path)
+    return path
+  }
+
+  afterEach(() => {
+    for (const path of locked.splice(0)) chmodSync(path, 0o755)
+  })
+
+  it('lists a source directory at mode 000 as unreadable, for a glob and for a literal path under it', () => {
+    write('secrets/app.env', `API_TOKEN=open-${ALNUM}\n`)
+    write('locked/app.env', `API_TOKEN=locked-${ALNUM}\n`)
+    const lockedDir = lock('locked')
+    const registry = registryFor([
+      { path: 'secrets/*.env', format: 'dotenv' },
+      { path: 'locked/*.env', format: 'dotenv' },
+      { path: 'locked/db_password', format: 'value' },
+    ])
+    const status = registry.status()
+    expect(status.configured).toBe(true)
+    expect(status.unreadable).toEqual([lockedDir, join(lockedDir, 'db_password')])
+    expect(isKnown(registry, `open-${ALNUM}`)).toBe(true)
+    expect(logs.join('\n')).toContain(`${lockedDir}: unreadable (EACCES)`)
+  })
+
+  it('a missing source directory changes nothing', () => {
+    write('secrets/app.env', `API_TOKEN=open-${ALNUM}\n`)
+    write('plain-file', 'not a directory\n')
+    const registry = registryFor([
+      { path: 'secrets/*.env', format: 'dotenv' },
+      { path: 'absent/*.env', format: 'dotenv' },
+      { path: 'absent/**/.env', format: 'dotenv' },
+      { path: 'absent/db_password', format: 'value' },
+      { path: 'plain-file/*.env', format: 'dotenv' },
+      { path: 'plain-file/db_password', format: 'value' },
+    ])
+    expect(registry.status()).toEqual({ configured: true, unreadable: [], values: 1 })
+  })
+
+  it('a ** walk that meets one unreadable subdirectory lists it and keeps its siblings', () => {
+    write('projects/alpha/.env', `API_TOKEN=alpha-${ALNUM}\n`)
+    write('projects/beta/deep/.env', `API_TOKEN=beta-${ALNUM}\n`)
+    const lockedDir = lock('projects/gamma')
+    const registry = registryFor([{ path: 'projects/**/.env', format: 'dotenv' }])
+    expect(registry.status().unreadable).toEqual([lockedDir])
+    expect(isKnown(registry, `alpha-${ALNUM}`)).toBe(true)
+    expect(isKnown(registry, `beta-${ALNUM}`)).toBe(true)
+  })
+
+  it('recovers at the next recheck once the directory is readable again, through the path cache too', () => {
+    let t = 0
+    write('locked/app.env', `API_TOKEN=locked-${ALNUM}\n`)
+    const lockedDir = lock('locked')
+    const configPath = write('sources.json', JSON.stringify({ sources: [{ path: 'locked/*.env', format: 'dotenv' }] }))
+    const registry = createSecretRegistry({
+      configPath,
+      pathCacheFile: join(dir, 'cache', 'paths.json'),
+      log: (line) => logs.push(line),
+      now: () => t,
+    })
+    expect(registry.status().unreadable).toEqual([lockedDir])
+    // chmod changes a directory's ctime, never its mtime: recovery cannot wait for an mtime change.
+    chmodSync(lockedDir, 0o755)
+    t += 60_000
+    expect(registry.status().unreadable).toEqual([])
+    expect(isKnown(registry, `locked-${ALNUM}`)).toBe(true)
   })
 })

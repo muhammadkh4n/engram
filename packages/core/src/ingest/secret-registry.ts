@@ -15,6 +15,10 @@
  * common-passwords.ts) are never registered: they are not secret, and
  * masking a dev default such as `postgres` would erase an ordinary word.
  *
+ * A caller may also pass values it already holds (`values`), such as the
+ * process's own credentials; they are registered alongside the sources and
+ * whatever the configuration's state.
+ *
  * Values stay in this process's memory: they are never logged, and no
  * message or error built here carries one. Sources are read on first use and
  * read again when any source file, a directory a glob walked, or the
@@ -45,9 +49,25 @@ export interface KnownValueSpan {
   name: string
 }
 
+/**
+ * What the last build of the registry saw, never a value. A caller that must
+ * not run on a partial registry (masking stored text, counting stored
+ * secrets) checks it first: an empty or partly read registry masks less and
+ * would report a false zero.
+ */
+export interface SecretRegistryStatus {
+  /** The sources configuration was set, read and parsed. */
+  configured: boolean
+  /** Paths of the configuration or source files whose read failed. */
+  unreadable: string[]
+  /** How many distinct values are registered. */
+  values: number
+}
+
 export interface SecretRegistry {
   /** Every occurrence of a registered value, in any of its spellings, longest spelling first at each offset. */
   findKnownValues(text: string): KnownValueSpan[]
+  status(): SecretRegistryStatus
 }
 
 export interface SecretRegistryOptions {
@@ -55,6 +75,8 @@ export interface SecretRegistryOptions {
   configPath: string | undefined
   /** File caching glob walk results (paths and directory mtimes only); `undefined` walks every build. */
   pathCacheFile?: string
+  /** Values registered alongside the sources' values, under their own names. */
+  values?: readonly NamedValue[]
   now?: () => number
   log?: (line: string) => void
 }
@@ -75,6 +97,7 @@ interface Snapshot {
   index: Map<string, Form[]>
   /** mtime per watched path; -1 when the path did not exist. */
   mtimes: Map<string, number>
+  status: SecretRegistryStatus
 }
 
 const BOOLEAN_OR_NULL_RE = /^(?:true|false|null)$/i
@@ -102,6 +125,8 @@ function candidateValues(value: string): string[] {
 
 interface BuiltIndex {
   index: Map<string, Form[]>
+  /** Distinct values registered. */
+  valueCount: number
   /** Key names whose value (or one of whose lines) is a public default and was not registered. */
   publicDefaults: string[]
   publicDefaultCount: number
@@ -133,7 +158,7 @@ function buildIndex(values: readonly NamedValue[], publicPasswords: ReadonlySet<
     index.set(key, [...(index.get(key) ?? []), { text, name }])
   }
   for (const bucket of index.values()) bucket.sort((a, b) => b.text.length - a.text.length)
-  return { index, publicDefaults: [...publicDefaultNames], publicDefaultCount }
+  return { index, valueCount: nameByValue.size, publicDefaults: [...publicDefaultNames], publicDefaultCount }
 }
 
 function mtimeOf(path: string): number {
@@ -171,8 +196,6 @@ function parseConfig(raw: string, report: (line: string) => void): SourceEntry[]
   })
 }
 
-const EMPTY_INDEX = new Map<string, Form[]>()
-
 export function createSecretRegistry(options: SecretRegistryOptions): SecretRegistry {
   const now = options.now ?? Date.now
   const log = options.log ?? ((line: string) => console.warn(`[engram] secret registry: ${line}`))
@@ -183,25 +206,38 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
     log(line)
   }
 
-  function readSources(configPath: string, watched: Set<string>): NamedValue[] {
+  const given = options.values ?? []
+
+  interface SourceRead {
+    values: NamedValue[]
+    configured: boolean
+    unreadable: string[]
+  }
+
+  function readSources(configPath: string, watched: Set<string>): SourceRead {
     let raw: string
     try {
       raw = readFileSync(configPath, 'utf8')
     } catch (err) {
-      logOnce(`cannot read ${configPath} (${errorCode(err)}); no known secret values are masked`)
-      return []
+      logOnce(`cannot read ${configPath} (${errorCode(err)}); no known secret values from its sources are masked`)
+      return { values: [], configured: false, unreadable: [configPath] }
     }
     const sources = parseConfig(raw, logOnce)
     if (sources === undefined) {
-      logOnce(`${configPath} is not {"sources": [...]} JSON; no known secret values are masked`)
-      return []
+      logOnce(`${configPath} is not {"sources": [...]} JSON; no known secret values from its sources are masked`)
+      return { values: [], configured: false, unreadable: [] }
     }
+    const unreadable: string[] = []
     const pathCache = openGlobPathCache(options.pathCacheFile, logOnce)
     const values = sources.flatMap((source) => {
       const pattern = resolve(dirname(configPath), expandHome(source.path))
       const expansion = pathCache.expand(pattern, source.exclude)
       expansion.watched.forEach((p) => watched.add(p))
       if (expansion.truncated) logOnce(`${source.path}: glob walk stopped early; narrow the pattern`)
+      for (const { path, code } of expansion.unreadable) {
+        logOnce(`${path}: unreadable (${code}); the files under it are not registered`)
+        unreadable.push(path)
+      }
       const unnamed: string[] = []
       const values = expansion.files.flatMap((file) => {
         watched.add(file)
@@ -210,6 +246,7 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
           content = readFileSync(file, 'utf8')
         } catch (err) {
           logOnce(`${file}: unreadable (${errorCode(err)}); skipped`)
+          unreadable.push(file)
           return []
         }
         const parsed = parseSource(source.format, content, file)
@@ -223,29 +260,45 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
       return values
     })
     pathCache.save()
-    return values
+    return { values, configured: true, unreadable }
+  }
+
+  function indexOf(values: readonly NamedValue[]): BuiltIndex {
+    const built = buildIndex(values, commonPasswords(logOnce))
+    if (built.publicDefaultCount > 0) {
+      logOnce(
+        `${built.publicDefaultCount} publicly known default value(s) not registered, under: ${built.publicDefaults.join(', ')}`,
+      )
+    }
+    return built
+  }
+
+  function snapshotOf(read: SourceRead, mtimes: Map<string, number>): Snapshot {
+    // Given values come first, so a value also found in a source keeps the name its holder gave it.
+    const built = indexOf([...given, ...read.values])
+    return {
+      index: built.index,
+      mtimes,
+      status: { configured: read.configured, unreadable: read.unreadable, values: built.valueCount },
+    }
   }
 
   function build(): Snapshot {
+    const none: SourceRead = { values: [], configured: false, unreadable: [] }
     if (options.configPath === undefined || options.configPath === '') {
-      logOnce(`${SECRET_SOURCES_ENV} is unset; no known secret values are masked`)
-      return { index: EMPTY_INDEX, mtimes: new Map() }
+      logOnce(`${SECRET_SOURCES_ENV} is unset; no known secret values from sources are masked`)
+      return snapshotOf(none, new Map())
     }
     const configPath = resolve(expandHome(options.configPath))
     const watched = new Set([configPath])
+    const mtimes = (): Map<string, number> => new Map([...watched].map((p) => [p, mtimeOf(p)]))
     try {
-      const values = readSources(configPath, watched)
-      const built = buildIndex(values, commonPasswords(logOnce))
-      if (built.publicDefaultCount > 0) {
-        logOnce(
-          `${built.publicDefaultCount} publicly known default value(s) not registered, under: ${built.publicDefaults.join(', ')}`,
-        )
-      }
-      return { index: built.index, mtimes: new Map([...watched].map((p) => [p, mtimeOf(p)])) }
+      const read = readSources(configPath, watched)
+      return snapshotOf(read, mtimes())
     } catch (err) {
       // Report the error's class only: its message may quote a source file.
-      logOnce(`building the registry failed (${err instanceof Error ? err.name : 'error'}); no known secret values are masked`)
-      return { index: EMPTY_INDEX, mtimes: new Map([...watched].map((p) => [p, mtimeOf(p)])) }
+      logOnce(`building the registry failed (${err instanceof Error ? err.name : 'error'}); no known secret values from sources are masked`)
+      return snapshotOf({ ...none, unreadable: [configPath] }, mtimes())
     }
   }
 
@@ -261,7 +314,10 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
     }
     if (t - checkedAt < RECHECK_INTERVAL_MS) return snapshot
     checkedAt = t
-    const stale = [...snapshot.mtimes].some(([path, mtime]) => mtimeOf(path) !== mtime)
+    // A permission fix changes ctime, never mtime: a registry that could not
+    // read a path re-reads at every recheck until it can.
+    const stale =
+      snapshot.status.unreadable.length > 0 || [...snapshot.mtimes].some(([path, mtime]) => mtimeOf(path) !== mtime)
     if (stale) snapshot = build()
     return snapshot
   }
@@ -285,10 +341,40 @@ export function createSecretRegistry(options: SecretRegistryOptions): SecretRegi
     return spans
   }
 
-  return { findKnownValues }
+  function status(): SecretRegistryStatus {
+    const { status: s } = current()
+    return { configured: s.configured, unreadable: [...s.unreadable], values: s.values }
+  }
+
+  return { findKnownValues, status }
 }
 
 let defaultRegistry: SecretRegistry | undefined
+
+/**
+ * Credentials the server process itself holds. Text sent to it may quote any
+ * of them (a pasted config, a curl line), so each one that is set is masked
+ * under its variable's name. Values shorter than MIN_SECRET_LENGTH and
+ * publicly known defaults are skipped as for any source.
+ */
+export const PROCESS_SECRET_ENV_NAMES = [
+  'SUPABASE_KEY',
+  'SUPABASE_SERVICE_KEY',
+  'OPENAI_API_KEY',
+  'BEARER_TOKEN',
+  'ENGRAM_CAPTURE_TOKEN',
+  'ENGRAM_DOCUMENTS_TOKEN',
+  'NEO4J_PASSWORD',
+  'ENGRAM_CHAT_API_KEY',
+  'ENGRAM_SERVER_TOKEN',
+] as const
+
+function processSecretValues(): NamedValue[] {
+  return PROCESS_SECRET_ENV_NAMES.flatMap((name) => {
+    const value = process.env[name]
+    return value !== undefined && value !== '' ? [{ name, value }] : []
+  })
+}
 
 function defaultPathCacheFile(): string {
   const cacheHome = process.env.XDG_CACHE_HOME
@@ -296,9 +382,16 @@ function defaultPathCacheFile(): string {
   return join(base, 'engram', 'secret-source-paths.json')
 }
 
-/** The process-wide registry configured by `ENGRAM_SECRET_SOURCES_FILE`, created on first use. */
+/**
+ * The process-wide registry: the sources `ENGRAM_SECRET_SOURCES_FILE` names
+ * plus the process's own credentials, created on first use.
+ */
 export function defaultSecretRegistry(): SecretRegistry {
-  defaultRegistry ??= createSecretRegistry({ configPath: process.env[SECRET_SOURCES_ENV], pathCacheFile: defaultPathCacheFile() })
+  defaultRegistry ??= createSecretRegistry({
+    configPath: process.env[SECRET_SOURCES_ENV],
+    pathCacheFile: defaultPathCacheFile(),
+    values: processSecretValues(),
+  })
   return defaultRegistry
 }
 
