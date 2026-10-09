@@ -237,6 +237,35 @@ npm test -- packages/core/test/memory.test.ts
 npm test -- --coverage
 ```
 
+#### Real-Postgres tests
+
+The tests under `packages/postgrest/test/real-pg/` start a throwaway PostgreSQL 17 (pgvector 0.8.2 and
+pg_textsearch 1.4.0) and, for the PostgREST cases, a PostgREST 12.2.3 container, apply `schema.sql` and
+`bm25.sql`, and run against them. They are skipped unless the two image variables are set:
+
+```bash
+ENGRAM_TEST_PG_IMAGE=engram-postgres:pg17-pgvector0.8.2-textsearch1.4.0 \
+ENGRAM_TEST_POSTGREST_IMAGE=postgrest/postgrest:v12.2.3 \
+npx turbo run test --concurrency=1 -- --maxWorkers=2
+```
+
+Set only `ENGRAM_TEST_PG_IMAGE` to run the Postgres cases without PostgREST. Both variables are declared in
+the `test` task's `env` in `turbo.json`, so they are part of turbo's cache key: a cached run without the images
+never stands in for one with them.
+
+The images must already exist locally; the harness never pulls (`docker run --pull never`) and fails with the
+build command when an image is missing. Build the Postgres image from this repo:
+
+```bash
+docker build -t engram-postgres:pg17-pgvector0.8.2-textsearch1.4.0 packages/postgrest/docker
+```
+
+`postgrest/postgrest:v12.2.3` has to be present too (pull it yourself once, outside the test run). Postgres alone
+runs with `--network none`; with PostgREST both containers join a bridge network created for the run, and
+PostgREST publishes its port on `127.0.0.1` only. Containers and the network are removed when the suite ends.
+
+CI leaves both variables unset, so these tests are skipped there.
+
 ## Code Style
 
 - TypeScript with strict mode enabled

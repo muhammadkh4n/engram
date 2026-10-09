@@ -32,6 +32,7 @@
 --   DROP INDEX public.idx_digests_bm25;
 --   DROP INDEX public.idx_semantic_bm25;
 --   DROP INDEX public.idx_procedural_bm25;
+--   DROP INDEX public.idx_items_bm25;
 --   DROP FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], text);
 --   DROP EXTENSION pg_textsearch;
 --
@@ -117,7 +118,7 @@ $$;
 -- pg_class.reloptions: the metapage, and so every score, keeps the old value
 -- until the index is rebuilt. CREATE INDEX IF NOT EXISTS skips an index that
 -- exists, whatever its options. So, for re-applying this file to move an
--- existing install to the options below, this block drops each of the four
+-- existing install to the options below, this block drops each of the five
 -- indexes whose stored options are not exactly that set, and the CREATE
 -- statements that follow build it again. An index that already carries them
 -- is kept, so a second apply rebuilds nothing. engram_bm25_match names the
@@ -134,7 +135,7 @@ BEGIN
     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public'
       AND c.relkind = 'i'
-      AND c.relname IN ('idx_episodes_bm25', 'idx_digests_bm25', 'idx_semantic_bm25', 'idx_procedural_bm25')
+      AND c.relname IN ('idx_episodes_bm25', 'idx_digests_bm25', 'idx_semantic_bm25', 'idx_procedural_bm25', 'idx_items_bm25')
       AND NOT (coalesce(c.reloptions, '{}') @> target AND coalesce(c.reloptions, '{}') <@ target)
   LOOP
     EXECUTE format('DROP INDEX public.%I', index_name);
@@ -155,6 +156,12 @@ CREATE INDEX IF NOT EXISTS idx_semantic_bm25 ON public.memory_semantic
 
 CREATE INDEX IF NOT EXISTS idx_procedural_bm25 ON public.memory_procedural
   USING bm25 ((trigger_text || ' ' || procedure)) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
+  WHERE forgotten_at IS NULL;
+
+-- The item store's lexical index. Items carry their own search_text, so the
+-- index reads that column.
+CREATE INDEX IF NOT EXISTS idx_items_bm25 ON public.memory_items
+  USING bm25 (search_text) WITH (text_config = 'english', k1 = 1.2, b = 0.4)
   WHERE forgotten_at IS NULL;
 
 
