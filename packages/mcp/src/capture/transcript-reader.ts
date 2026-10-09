@@ -468,6 +468,12 @@ interface Mark {
   lastUuid: string | null
   lastLineStart: number | null
   planDirs: string[]
+  /** The promptId of the last line that yielded a prompt. */
+  lastPromptId: string | null
+}
+
+function promptIdOf(entry: Json): string | null {
+  return typeof entry.promptId === 'string' && entry.promptId.length > 0 ? entry.promptId : null
 }
 
 class TranscriptRead {
@@ -494,6 +500,7 @@ class TranscriptRead {
       lastUuid: cursor.last_uuid,
       lastLineStart: cursor.last_line_start,
       planDirs: [...cursor.plan_dirs],
+      lastPromptId: cursor.last_prompt_id,
     }
     this.here = { ...this.mark }
     this.carried = new Map(cursor.pending_calls.map((p) => [p.id, carriedCall(p)]))
@@ -512,18 +519,28 @@ class TranscriptRead {
     const uuid = typeof entry?.uuid === 'string' ? entry.uuid : null
     const inScope = entry !== null && !isOutOfScope(entry)
     const planDirs = inScope ? planDirsAfter(entry, before.planDirs) : before.planDirs
+    const prompt = inScope ? humanPromptText(entry) : null
+    const promptId = entry !== null && prompt !== null ? promptIdOf(entry) : null
     this.here = {
       offset: raw.end,
       line: lineNo,
       lastUuid: uuid ?? before.lastUuid,
       lastLineStart: uuid !== null ? raw.start : before.lastLineStart,
       planDirs,
+      lastPromptId: promptId ?? before.lastPromptId,
     }
-    if (inScope) await this.entry(entry, lineNo, planDirs, before)
+    // One promptId is one prompt. Compaction writes the `/compact` the user typed a second
+    // time after its summary (a caveat, the command as tags, its output) under the original
+    // promptId, and no other prompt line comes between the two; so a prompt line with the
+    // previous prompt line's id is that same prompt and yields none. The id rides in the mark,
+    // so a re-read from the mark sees the same previous id, and a replay read later than the
+    // plain line still finds it in the cursor. A line without a promptId is a prompt of its own.
+    const repeated = promptId !== null && promptId === before.lastPromptId
+    if (inScope) await this.entry(entry, lineNo, planDirs, before, repeated ? null : prompt)
     if (this.turn === null) this.setMark(this.here)
   }
 
-  private async entry(entry: Json, lineNo: number, planDirs: string[], before: Mark): Promise<void> {
+  private async entry(entry: Json, lineNo: number, planDirs: string[], before: Mark, prompt: string | null): Promise<void> {
     if (isTurnStart(entry)) {
       if (this.turn) await this.closeTurn()
       // The new turn's lines are read again until it closes.
@@ -532,7 +549,6 @@ class TranscriptRead {
     } else if (this.turn === null && isTurnContent(entry)) {
       this.turn = newTurn()
     }
-    const prompt = humanPromptText(entry)
     if (prompt !== null) {
       await this.emit(entry, lineNo, planDirs, { type: 'user_prompt', payload: promptPayload(prompt, lineNo) })
     } else {
@@ -598,6 +614,7 @@ class TranscriptRead {
         open_turn_emitted: this.tracked.filter((t) => t.line > m.line).map((t) => t.uuid),
         plan_dirs: m.planDirs,
         pending_calls: boundedPending(this.markCarried),
+        last_prompt_id: m.lastPromptId,
       },
     }
   }

@@ -104,6 +104,20 @@ describe('cursor files', () => {
     expect(await loadCursor(root, SESSION)).toBeNull()
   })
 
+  it('carries the last prompt id, and loads a cursor written before it was kept', async () => {
+    expect(emptyCursor('/tmp/session.jsonl').last_prompt_id).toBeNull()
+    const cursor: TranscriptCursor = { ...emptyCursor('/tmp/session.jsonl'), last_prompt_id: 'prompt-compact' }
+    await saveCursor(root, SESSION, cursor)
+    expect(await loadCursor(root, SESSION)).toEqual(cursor)
+
+    const { last_prompt_id: _none, ...withoutPromptId } = emptyCursor('/tmp/session.jsonl')
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify(withoutPromptId))
+    expect(await loadCursor(root, SESSION)).toEqual(emptyCursor('/tmp/session.jsonl'))
+
+    writeFileSync(join(root, `${SESSION}.json`), JSON.stringify({ ...emptyCursor('/tmp/session.jsonl'), last_prompt_id: 7 }))
+    expect(await loadCursor(root, SESSION)).toBeNull()
+  })
+
   it('names a session file so it never starts with a dot', () => {
     expect(sessionFileName('.hidden')).toBe('%2Ehidden')
     expect(sessionFileName('a/b c')).toBe('a%2Fb%20c')

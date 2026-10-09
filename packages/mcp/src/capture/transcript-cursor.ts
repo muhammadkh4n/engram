@@ -45,6 +45,12 @@ export interface TranscriptCursor {
    * result written after an idle sweep (a dialog answered later) still finds its call.
    */
   pending_calls: PendingCall[]
+  /**
+   * The promptId of the last line before `offset` that yielded a prompt. Compaction writes
+   * `/compact` again after its summary, under the same promptId; a replay read after this
+   * cursor was saved is known to be the same prompt by this id.
+   */
+  last_prompt_id: string | null
 }
 
 export const READER_LOCK_STALE_MS = 60_000
@@ -77,6 +83,7 @@ export function emptyCursor(transcriptPath: string): TranscriptCursor {
     open_turn_emitted: [],
     plan_dirs: [],
     pending_calls: [],
+    last_prompt_id: null,
   }
 }
 
@@ -124,7 +131,9 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     isStringArray(c.open_turn_emitted) &&
     isStringArray(c.plan_dirs) &&
     // A cursor written before calls were carried has none waiting.
-    (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall)))
+    (c.pending_calls === undefined || (Array.isArray(c.pending_calls) && c.pending_calls.every(isPendingCall))) &&
+    // A cursor written before the last prompt id was kept knows of none.
+    (c.last_prompt_id === undefined || c.last_prompt_id === null || typeof c.last_prompt_id === 'string')
   if (!valid) return null
   return {
     v: 1,
@@ -136,6 +145,7 @@ function parseCursor(value: unknown): TranscriptCursor | null {
     open_turn_emitted: [...(c.open_turn_emitted as string[])],
     plan_dirs: [...(c.plan_dirs as string[])],
     pending_calls: [...((c.pending_calls as PendingCall[] | undefined) ?? [])],
+    last_prompt_id: (c.last_prompt_id as string | null | undefined) ?? null,
   }
 }
 
