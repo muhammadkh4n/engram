@@ -468,7 +468,7 @@ interface Mark {
   lastUuid: string | null
   lastLineStart: number | null
   planDirs: string[]
-  /** The timestamp of the last compact boundary. */
+  /** The timestamp of the last compact boundary, until a prompt line is stamped at or after it. */
   compactBoundaryAt: string | null
 }
 
@@ -483,21 +483,25 @@ function instant(timestamp: unknown): number | null {
 }
 
 /**
- * A user line stamped before the last compact boundary. A manual compaction writes the command
- * that ran it twice: the line the user typed, before compacting, and, after the boundary and
- * summary, a replay (a caveat, the command as tags, its output) stamped with the command's
- * original time. Both read as prompts. A prompt typed after the boundary is stamped after it,
- * so a prompt line stamped before it is the replay; that holds too for a continued session's
- * file that opens with a boundary and the replay of a command typed in the parent file. The
- * promptId cannot tell the replay apart: some compactions give its two lines different ids,
- * and prompts typed during or after one can carry the replay's id. A timestamp that does not
- * parse marks no replay.
+ * Where a user prompt line is stamped against the last compact boundary. A manual compaction
+ * writes the command that ran it twice: the line the user typed, before compacting, and, after
+ * the boundary and summary, a replay (a caveat, the command as tags, its output) stamped with
+ * the command's original time. Both read as prompts. A prompt typed after the boundary is
+ * stamped after it, so a prompt line stamped before it is the replay; that holds too for a
+ * continued session's file that opens with a boundary and the replay of a command typed in the
+ * parent file. The promptId cannot tell the replay apart: some compactions give its two lines
+ * different ids, and prompts typed during or after one can carry the replay's id.
+ *
+ * The replay comes before any prompt stamped after the boundary, so the first such prompt ends
+ * the boundary: a clock stepped back later in the session cannot make a typed prompt look like
+ * a replay. A timestamp that does not parse, on either side, says neither.
  */
-function isCommandReplay(entry: Json, boundaryAt: string | null): boolean {
-  if (entry.type !== 'user') return false
+function sideOfBoundary(entry: Json, boundaryAt: string | null): 'before' | 'after' | null {
+  if (entry.type !== 'user') return null
   const boundary = instant(boundaryAt)
   const stamped = instant(entry.timestamp)
-  return boundary !== null && stamped !== null && stamped < boundary
+  if (boundary === null || stamped === null) return null
+  return stamped < boundary ? 'before' : 'after'
 }
 
 class TranscriptRead {
@@ -544,6 +548,8 @@ class TranscriptRead {
     const inScope = entry !== null && !isOutOfScope(entry)
     const planDirs = inScope ? planDirsAfter(entry, before.planDirs) : before.planDirs
     const boundary = inScope && isCompactBoundary(entry)
+    const prompt = inScope ? humanPromptText(entry) : null
+    const side = entry !== null && prompt !== null ? sideOfBoundary(entry, before.compactBoundaryAt) : null
     this.here = {
       offset: raw.end,
       line: lineNo,
@@ -552,13 +558,15 @@ class TranscriptRead {
       planDirs,
       // Kept in the mark, so a turn re-read from the mark sees the boundary it saw the first
       // time, and a replay read after the boundary's read still finds it in the cursor.
-      compactBoundaryAt: boundary ? (typeof entry.timestamp === 'string' ? entry.timestamp : null) : before.compactBoundaryAt,
+      compactBoundaryAt: boundary
+        ? typeof entry.timestamp === 'string'
+          ? entry.timestamp
+          : null
+        : side === 'after'
+          ? null
+          : before.compactBoundaryAt,
     }
-    if (inScope) {
-      const prompt = humanPromptText(entry)
-      const replayed = prompt !== null && isCommandReplay(entry, before.compactBoundaryAt)
-      await this.entry(entry, lineNo, planDirs, before, replayed ? null : prompt)
-    }
+    if (inScope) await this.entry(entry, lineNo, planDirs, before, side === 'before' ? null : prompt)
     if (this.turn === null) this.setMark(this.here)
   }
 

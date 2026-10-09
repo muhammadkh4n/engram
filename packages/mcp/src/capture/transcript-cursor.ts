@@ -46,9 +46,10 @@ export interface TranscriptCursor {
    */
   pending_calls: PendingCall[]
   /**
-   * The timestamp of the last compact boundary before `offset`. A manual compaction writes the
-   * command that ran it again after the boundary, stamped with the command's original time, so
-   * a prompt line read after this cursor and stamped before this time is that replay.
+   * The timestamp of the last compact boundary before `offset`, until a prompt line stamped at
+   * or after it. A manual compaction writes the command that ran it again after the boundary,
+   * stamped with the command's original time, so a prompt line read after this cursor and
+   * stamped before this time is that replay.
    */
   compact_boundary_at: string | null
 }

@@ -824,6 +824,51 @@ describe('a command compaction replays', () => {
     expect(texts((await read(path, fourth.cursor, true)).events)).toEqual([])
   })
 
+  it('ends the boundary at the first prompt after it, so a clock stepped back drops no prompt', async () => {
+    const events = await eventsOf([
+      ...beforeCompaction('/compact'),
+      ...afterCompaction(''),
+      humanPrompt(uuid(10), at(BOUNDARY_AT + 10), 'next', pid('prompt-next')),
+      assistantText(uuid(11), at(BOUNDARY_AT + 11), 'Done.'),
+      turnEnd(uuid(12), at(BOUNDARY_AT + 12)),
+      humanPrompt(uuid(13), at(COMMAND_AT + 5), 'after the clock step', pid('prompt-step')),
+    ])
+    expect(texts(events)).toEqual(['start', '/compact', 'next', 'after the clock step'])
+  })
+
+  it('ends the boundary again when the prompt that ended it is read again from the mark', async () => {
+    const path = writeTranscript(dir, SESSION, [
+      ...beforeCompaction('/compact'),
+      ...afterCompaction(''),
+      humanPrompt(uuid(10), at(BOUNDARY_AT + 10), 'next', pid('prompt-next')),
+    ])
+    const first = await read(path)
+    expect(texts(first.events)).toEqual(['start', '/compact', 'next'])
+    // The prompt that ends the boundary opened a turn: the mark, and the boundary it saves, stay before it.
+    expect(first.cursor).toMatchObject({ line: 9, compact_boundary_at: at(BOUNDARY_AT) })
+
+    appendEntries(path, SESSION, [humanPrompt(uuid(11), at(COMMAND_AT + 5), 'after the clock step', pid('prompt-step'))])
+    const second = await read(path, first.cursor)
+    expect(texts(second.events)).toEqual(['after the clock step'])
+    expect(second.cursor).toMatchObject({ line: 10, compact_boundary_at: null })
+    expect(texts((await read(path, second.cursor, true)).events)).toEqual([])
+  })
+
+  it('marks no replay when the line timestamp does not parse', async () => {
+    const entries = [...beforeCompaction('/compact'), ...afterCompaction('')]
+    entries[7] = { ...entries[7], timestamp: 'not a time' }
+    // Read without the route check, which refuses the unparsable timestamp on its own.
+    const path = writeTranscript(dir, SESSION, entries)
+    const { events } = await readTranscriptEvents(path, null, { resolveProject: stubProject })
+    expect(texts(events)).toEqual(['start', '/compact', '/compact'])
+  })
+
+  it('marks no replay when the boundary timestamp does not parse', async () => {
+    const entries = [...beforeCompaction('/compact'), ...afterCompaction('')]
+    entries[4] = { ...entries[4], timestamp: 'not a time' }
+    expect(texts(await eventsOf(entries))).toEqual(['start', '/compact', '/compact'])
+  })
+
   it('captures a tagged-only command once', async () => {
     const events = await eventsOf([
       caveat(uuid(1), at(1), 'prompt-exit'),
