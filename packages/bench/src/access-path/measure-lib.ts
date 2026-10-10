@@ -263,9 +263,36 @@ export function formatTable(result: ThresholdResult, budgetMs: number = BUDGET_M
   return lines.join('\n')
 }
 
+export const DEFAULT_SAMPLE_ITEMS = 200
+/** A sampled item asks for k + 1 rows and p_k is at most 200. */
+export const MAX_RECALL_K = 199
+
 export type Command =
   | { command: 'seed'; container: string; rows: number; seed: number }
   | { command: 'latency'; container: string; sizes: number[]; seed: number; k: number }
+  | { command: 'recall'; container: string; db: string; pins: string[]; sampleItems: number; k: number }
+  | {
+      command: 'legs'
+      container: string
+      db: string
+      cases: string
+      gold: string
+      pins: string[]
+      calibrationBefore: string
+      k: number
+    }
+
+const COMMANDS = ['seed', 'latency', 'recall', 'legs'] as const
+const FLAGS: Record<(typeof COMMANDS)[number], readonly string[]> = {
+  seed: ['container', 'rows', 'seed'],
+  latency: ['container', 'sizes', 'seed', 'k'],
+  recall: ['container', 'db', 'pins', 'sample-items', 'k'],
+  legs: ['container', 'db', 'cases', 'gold', 'pins', 'calibration-before', 'k'],
+}
+/** Flags that take one or more values: every argument up to the next flag. */
+const LIST_FLAGS = new Set(['pins'])
+const DB_NAME = /^[A-Za-z0-9_][\w.-]*$/
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/
 
 function positiveInteger(name: string, value: string | undefined): number {
   const n = Number(value)
@@ -273,34 +300,94 @@ function positiveInteger(name: string, value: string | undefined): number {
   return n
 }
 
-export function parseCommand(argv: readonly string[]): Command {
-  const [command, ...rest] = argv
-  if (command !== 'seed' && command !== 'latency') throw new Error('the command is seed or latency')
-  const flags = new Map<string, string>()
-  for (let i = 0; i < rest.length; i += 2) {
+function nonNegativeInteger(name: string, value: string | undefined): number {
+  const n = Number(value)
+  if (value === undefined || !Number.isInteger(n) || n < 0) throw new Error(`${name} needs a non-negative integer`)
+  return n
+}
+
+function parseFlags(command: (typeof COMMANDS)[number], rest: readonly string[]): Map<string, string[]> {
+  const flags = new Map<string, string[]>()
+  let i = 0
+  while (i < rest.length) {
     const flag = rest[i]
-    if (!flag.startsWith('--') || rest[i + 1] === undefined) throw new Error(`expected --flag value at ${flag}`)
-    flags.set(flag.slice(2), rest[i + 1])
+    if (!flag.startsWith('--') || rest[i + 1] === undefined || rest[i + 1].startsWith('--')) {
+      throw new Error(`expected --flag value at ${flag}`)
+    }
+    const name = flag.slice(2)
+    if (!FLAGS[command].includes(name)) throw new Error(`${command} does not take --${name}`)
+    const values: string[] = []
+    i += 1
+    do {
+      values.push(rest[i])
+      i += 1
+    } while (LIST_FLAGS.has(name) && i < rest.length && !rest[i].startsWith('--'))
+    if (flags.has(name) && !LIST_FLAGS.has(name)) throw new Error(`--${name} is given twice`)
+    flags.set(name, [...(flags.get(name) ?? []), ...values])
   }
-  const allowed = command === 'seed' ? ['container', 'rows', 'seed'] : ['container', 'sizes', 'seed', 'k']
-  for (const name of flags.keys()) {
-    if (!allowed.includes(name)) throw new Error(`${command} does not take --${name}`)
-  }
-  const container = flags.get('container')
+  return flags
+}
+
+function required(flags: Map<string, string[]>, name: string): string {
+  const value = flags.get(name)?.[0]
+  if (value === undefined || value === '') throw new Error(`--${name} is required`)
+  return value
+}
+
+function kFlag(flags: Map<string, string[]>, max: number): number {
+  const k = flags.has('k') ? positiveInteger('--k', flags.get('k')?.[0]) : DEFAULT_K
+  if (k > max) throw new Error(`--k is at most ${max}`)
+  return k
+}
+
+function isCommandName(name: string | undefined): name is (typeof COMMANDS)[number] {
+  return (COMMANDS as readonly (string | undefined)[]).includes(name)
+}
+
+export function parseCommand(argv: readonly string[]): Command {
+  const [name, ...rest] = argv
+  if (!isCommandName(name)) throw new Error(`the command is ${COMMANDS.join(', ')}`)
+  const command = name
+  const flags = parseFlags(command, rest)
+  const container = flags.get('container')?.[0]
   if (!container || !CONTAINER_NAME.test(container)) throw new Error('--container needs a docker container name')
-  const seed = flags.has('seed') ? Number(flags.get('seed')) : DEFAULT_SEED
+
+  if (command === 'recall' || command === 'legs') {
+    const db = required(flags, 'db')
+    if (!DB_NAME.test(db)) throw new Error('--db needs a database name')
+    const pins = flags.get('pins') ?? []
+    if (pins.length === 0) throw new Error('--pins needs at least one file')
+    if (command === 'recall') {
+      const sampleItems = flags.has('sample-items')
+        ? nonNegativeInteger('--sample-items', flags.get('sample-items')?.[0])
+        : DEFAULT_SAMPLE_ITEMS
+      return { command, container, db, pins, sampleItems, k: kFlag(flags, MAX_RECALL_K) }
+    }
+    const calibrationBefore = required(flags, 'calibration-before')
+    if (!ISO_TIME.test(calibrationBefore)) throw new Error('--calibration-before needs an ISO-8601 time with an offset')
+    return {
+      command,
+      container,
+      db,
+      cases: required(flags, 'cases'),
+      gold: required(flags, 'gold'),
+      pins,
+      calibrationBefore,
+      k: kFlag(flags, 200),
+    }
+  }
+
+  const seed = flags.has('seed') ? Number(flags.get('seed')?.[0]) : DEFAULT_SEED
   pgSeed(seed)
-  if (command === 'seed') return { command, container, rows: positiveInteger('--rows', flags.get('rows')), seed }
+  if (command === 'seed') return { command, container, rows: positiveInteger('--rows', flags.get('rows')?.[0]), seed }
 
   const sizes = flags.has('sizes')
-    ? (flags.get('sizes') as string).split(',').map((s) => positiveInteger('--sizes', s))
+    ? (flags.get('sizes')?.[0] as string).split(',').map((s) => positiveInteger('--sizes', s))
     : [...THRESHOLD_GRID]
   for (const size of sizes) {
     if (!(THRESHOLD_GRID as readonly number[]).includes(size)) {
       throw new Error(`--sizes takes grid sizes only (${THRESHOLD_GRID.join(', ')}), got ${size}`)
     }
   }
-  const k = flags.has('k') ? positiveInteger('--k', flags.get('k')) : DEFAULT_K
-  if (k > 200) throw new Error('--k is at most 200')
-  return { command, container, sizes: [...new Set(sizes)].sort((a, b) => a - b), seed, k }
+  return { command, container, sizes: [...new Set(sizes)].sort((a, b) => a - b), seed, k: kFlag(flags, 200) }
 }
