@@ -400,7 +400,7 @@ function decisionCase(overrides: Partial<DecisionCase>): DecisionCase {
     agent: 'main', channel: 'prompt', session_id: 'tst-session', transcript: null, cwd: null, project_id: 'tst-proj',
     workspace_id: null, at_root: false, plan_dirs: [], query_text: 'Fix TST-42 in packages/tst/src/a.ts now.',
     prior_prompts: [], decision_kind: null, tool_text: null, expect_contradiction: false,
-    needed: [{ key: 'tst-need', kind: 'fact', expected_lane: 'query', phrases: [['heron rule']], register_ids: ['R-TST-1'], item_ids: [], legacy_ids: [] }],
+    needed: [{ key: 'tst-need', kind: 'fact', expected_lane: 'query', phrases: [['heron rule']], register_ids: ['R-TSTQ-907'], item_ids: [], legacy_ids: [] }],
     harmful: [{ key: 'tst-harm', phrases: [['old heron rule']], current_phrases: [['heron rule changed']], item_ids: [], legacy_ids: [] }],
     audit: null, note: '', ...overrides,
   }
@@ -497,7 +497,7 @@ describe('legs holding targets and the entity rule', () => {
   })
 
   it('matches by id, legacy id, register ref or phrase, and lets a current phrase clear harm', () => {
-    expect(matchesTarget({ ...needed, phrases: [], registerIds: ['R-TST-1'] }, itemText('a', 'x', { registerRef: 'R-TST-1' }))).toBe(true)
+    expect(matchesTarget({ ...needed, phrases: [], registerIds: ['R-TSTQ-907'] }, itemText('a', 'x', { registerRef: 'R-TSTQ-907' }))).toBe(true)
     expect(matchesTarget({ ...needed, phrases: [], legacyIds: ['l-1'] }, itemText('a', 'x', { legacyId: 'l-1' }))).toBe(true)
     expect(matchesTarget(needed, itemText('a', 'x', { context: 'The HERON   rule' }))).toBe(true)
     const cleared = { ...harmful, currentPhrases: [['osprey changed']] }
