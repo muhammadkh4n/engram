@@ -5,9 +5,62 @@ import type {
   InsertedItem,
   InvariantCounts,
   ItemActionResult,
+  ItemClass,
+  ItemKind,
   MemoryItem,
   NewItem,
 } from './types.js'
+
+/** The source a candidate came from; each runs as its own capped statement. */
+export type CandidateLeg = 'vector' | 'hyde' | 'bm25' | 'subject' | 'entity'
+
+/**
+ * How a vector leg read its rows: an exact scan over the filtered rows, the
+ * HNSW index, or an exact scan after HNSW came back with too few rows.
+ */
+export type AccessPath = 'exact' | 'hnsw' | 'exact_fallback'
+
+/**
+ * One candidate query. A field left out is not sent, so the database default
+ * applies; a leg runs only when its input is set (`embedding`,
+ * `hydeEmbedding`, a non-empty `terms`, `query`, a non-empty `entities`).
+ * Every filter applies inside each leg before its cap. `projectId` only
+ * orders the subject leg; it never filters.
+ */
+export interface CandidateRequest {
+  embedding?: readonly number[]
+  hydeEmbedding?: readonly number[]
+  query?: string
+  terms?: readonly string[]
+  entities?: readonly string[]
+  classes?: readonly ItemClass[]
+  kinds?: readonly ItemKind[]
+  projectId?: string
+  excludeSessionId?: string
+  asOf?: Date
+  includeHistory?: boolean
+  /** Observations above this trust are left out; unset keeps every trust. */
+  maxObservationTrust?: number
+  /** Rows per leg, 1 to 200; the database default is 50. */
+  k?: number
+  /** Pins the vector legs' access path, for measurement and tests. */
+  forcePath?: 'exact' | 'hnsw'
+}
+
+/**
+ * One row of one leg: ids and scores only, never text or an embedding.
+ * `rank` is 1-based within the leg. `rawScore` is the leg's own scale:
+ * 1 minus cosine distance for vector and hyde, the negated BM25 score for
+ * bm25, the label's lexeme count for subject, the matched entity count for
+ * entity. `path` is set on vector and hyde rows and null on the others.
+ */
+export interface Candidate {
+  itemId: string
+  leg: CandidateLeg
+  rank: number
+  rawScore: number
+  path: AccessPath | null
+}
 
 /**
  * Storage for typed memory items. The database enforces the item invariants
@@ -57,6 +110,12 @@ export interface ItemStore {
    */
   syncDocumentNote(note: DocumentNoteWrite): Promise<DocumentNoteSyncResult>
   invariantCounts(): Promise<InvariantCounts>
+  /**
+   * Ranked candidates, leg by leg in the order vector, hyde, bm25, subject,
+   * entity, each by rank. A failed query throws CandidateQueryError; how a
+   * failed leg degrades a recall is the caller's decision.
+   */
+  candidates(req: CandidateRequest): Promise<Candidate[]>
 }
 
 /**
@@ -80,4 +139,28 @@ export class ItemConstraintError extends Error {
  */
 export function isItemConstraintError(err: unknown): err is ItemConstraintError {
   return err instanceof ItemConstraintError || (err instanceof Error && err.name === 'ItemConstraintError')
+}
+
+/**
+ * The candidate query failed in the database. `fn` names the function that
+ * failed, `code` is its SQLSTATE ('unknown' when the server gave none) and
+ * `serverMessage` is the server's message, unchanged.
+ */
+export class CandidateQueryError extends Error {
+  readonly fn: string
+  readonly code: string
+  readonly serverMessage: string
+
+  constructor(fn: string, code: string, serverMessage: string, options?: { cause?: unknown }) {
+    super(`${fn} failed (${code}): ${serverMessage}`, options)
+    this.name = 'CandidateQueryError'
+    this.fn = fn
+    this.code = code
+    this.serverMessage = serverMessage
+  }
+}
+
+/** Matched by name as well as by class, as isItemConstraintError is. */
+export function isCandidateQueryError(err: unknown): err is CandidateQueryError {
+  return err instanceof CandidateQueryError || (err instanceof Error && err.name === 'CandidateQueryError')
 }

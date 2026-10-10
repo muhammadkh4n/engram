@@ -34,7 +34,12 @@ export type {
   ItemActionResult,
   InvariantCounts,
 } from './items/types.js'
-export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
+export {
+  ItemConstraintError,
+  isItemConstraintError,
+  CandidateQueryError,
+  isCandidateQueryError,
+} from './items/item-store.js'
 export {
   DOCUMENT_SECTION_KINDS,
   DOCUMENT_SECTIONS_MAX,
@@ -49,7 +54,7 @@ export type {
   DocumentSectionCounts,
   DocumentNoteSyncResult,
 } from './items/documents.js'
-export type { ItemStore } from './items/item-store.js'
+export type { ItemStore, CandidateLeg, AccessPath, CandidateRequest, Candidate } from './items/item-store.js'
 export {
   EMBEDDING_ATTEMPTS_MAX,
   EMBEDDING_BATCH_MAX,

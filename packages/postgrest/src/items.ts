@@ -1,5 +1,6 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import {
+  CandidateQueryError,
   DOCUMENT_NOTE_STATUSES,
   DOCUMENT_SECTIONS_MAX,
   ITEM_INVARIANTS,
@@ -8,6 +9,10 @@ import {
   generateId,
 } from '@engram-mem/core'
 import type {
+  AccessPath,
+  Candidate,
+  CandidateLeg,
+  CandidateRequest,
   DocumentNoteSyncResult,
   DocumentNoteWrite,
   DocumentSectionCounts,
@@ -109,6 +114,20 @@ interface OutcomeRow {
   id: string
   outcome: ItemActionOutcome
   register_ref: string | null
+}
+
+const CANDIDATES_FUNCTION = 'engram_item_candidates'
+const CANDIDATE_LEGS: ReadonlySet<string> = new Set<CandidateLeg>(['vector', 'hyde', 'bm25', 'subject', 'entity'])
+/** The legs that read through the access-path policy and so report a path. */
+const VECTOR_LEGS: ReadonlySet<string> = new Set<CandidateLeg>(['vector', 'hyde'])
+const ACCESS_PATHS: ReadonlySet<string> = new Set<AccessPath>(['exact', 'hnsw', 'exact_fallback'])
+
+interface CandidateRow {
+  item_id: unknown
+  leg: unknown
+  rank: unknown
+  raw_score: unknown
+  path: unknown
 }
 
 interface CountRow {
@@ -311,6 +330,80 @@ export class PostgRestItemStore implements ItemStore {
       ItemInvariant,
       number
     >
+  }
+
+  /**
+   * Not retried: the function only reads, and a failure is the caller's to
+   * weigh, so every RPC error surfaces once as CandidateQueryError.
+   */
+  async candidates(req: CandidateRequest): Promise<Candidate[]> {
+    const args = toCandidateArgs(req)
+    const { data, error } = (await this.client.rpc(CANDIDATES_FUNCTION, args)) as RpcResult
+    if (error) {
+      throw new CandidateQueryError(CANDIDATES_FUNCTION, error.code || 'unknown', error.message ?? '')
+    }
+    if (data === null || data === undefined) return []
+    if (!Array.isArray(data)) throw new Error('candidates failed: the result is not a list of rows')
+    return (data as CandidateRow[]).map((row, i) => fromCandidateRow(row, i + 1))
+  }
+}
+
+/**
+ * Only the fields that are set, so every other parameter keeps the
+ * function's default. Vectors travel as their JSON text, which PostgREST
+ * passes to the vector input function.
+ */
+function toCandidateArgs(req: CandidateRequest): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  const put = (param: string, value: unknown) => {
+    if (value !== undefined) args[param] = value
+  }
+  put('p_embedding', req.embedding === undefined ? undefined : JSON.stringify(req.embedding))
+  put('p_query', req.query)
+  put('p_terms', req.terms)
+  put('p_hyde_embedding', req.hydeEmbedding === undefined ? undefined : JSON.stringify(req.hydeEmbedding))
+  put('p_entities', req.entities)
+  put('p_classes', req.classes)
+  put('p_kinds', req.kinds)
+  put('p_project_id', req.projectId)
+  put('p_exclude_session', req.excludeSessionId)
+  put('p_as_of', req.asOf === undefined ? undefined : candidateAsOf(req.asOf))
+  put('p_include_history', req.includeHistory)
+  put('p_max_observation_trust', req.maxObservationTrust)
+  put('p_k', req.k)
+  put('p_force_path', req.forcePath)
+  return args
+}
+
+/** Years outside 1 to 9999 have no ISO-8601 form PostgreSQL reads; see isoDate. */
+function candidateAsOf(value: Date): string {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new Error('candidates failed: asOf is not a valid date')
+  }
+  const year = value.getUTCFullYear()
+  if (year < 1 || year > 9999) throw new Error('candidates failed: asOf has a year outside 1 to 9999')
+  return value.toISOString()
+}
+
+/** A row outside the function's contract is an error, never a guess. */
+function fromCandidateRow(row: CandidateRow, position: number): Candidate {
+  const fail = (what: string) => new Error(`candidates failed: row ${position} ${what}`)
+  if (typeof row.item_id !== 'string' || !isUuid(row.item_id)) throw fail('has no item id')
+  if (typeof row.leg !== 'string' || !CANDIDATE_LEGS.has(row.leg)) throw fail(`has an unknown leg: ${String(row.leg)}`)
+  if (typeof row.rank !== 'number' || !Number.isInteger(row.rank) || row.rank < 1) throw fail('has an invalid rank')
+  if (typeof row.raw_score !== 'number' || !Number.isFinite(row.raw_score)) throw fail('has an invalid raw score')
+  if (row.path !== null && (typeof row.path !== 'string' || !ACCESS_PATHS.has(row.path))) {
+    throw fail(`has an unknown path: ${String(row.path)}`)
+  }
+  const isVectorLeg = VECTOR_LEGS.has(row.leg)
+  if (isVectorLeg && row.path === null) throw new Error(`candidates failed: row ${position}: a ${row.leg} row carries no path`)
+  if (!isVectorLeg && row.path !== null) throw new Error(`candidates failed: row ${position}: a ${row.leg} row carries a path`)
+  return {
+    itemId: row.item_id,
+    leg: row.leg as CandidateLeg,
+    rank: row.rank,
+    rawScore: row.raw_score,
+    path: row.path as AccessPath | null,
   }
 }
 
