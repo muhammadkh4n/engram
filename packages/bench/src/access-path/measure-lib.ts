@@ -205,6 +205,8 @@ export function callSchedule(queries: number = QUERY_VECTORS, rounds: number = T
 export function latencySql(size: number, vectors: readonly number[][], k: number = DEFAULT_K): string {
   const values = vectors.map((v, i) => `(${i + 1}, '${vectorLiteral(v)}'::public.vector)`).join(',\n')
   const lines = [
+    // Quiet mode keeps command tags (SET, INSERT 0 20) out of the rows parseLatencyOutput reads.
+    '\\set QUIET on',
     'SET max_parallel_workers_per_gather = 0;',
     'CREATE TEMP TABLE access_path_queries (n integer PRIMARY KEY, v public.vector);',
     `INSERT INTO access_path_queries VALUES ${values};`,

@@ -157,7 +157,7 @@ describe('the latency run', () => {
 
   it('times the forced exact branch under EXPLAIN ANALYZE with parallel workers off', () => {
     const sql = latencySql(5000, queryVectors(1), 50)
-    expect(sql.startsWith('SET max_parallel_workers_per_gather = 0;')).toBe(true)
+    expect(sql.split('\n').slice(0, 2)).toEqual(['\\set QUIET on', 'SET max_parallel_workers_per_gather = 0;'])
     expect(sql.match(/engram_item_candidates_explain/g)).toHaveLength(1 + QUERY_VECTORS * TIMED_CALLS)
     expect(sql).toContain(`p_as_of => timestamptz '${asOfForSize(5000)}', p_k => 50, p_force_path => 'exact', p_analyze => true`)
     expect(sql).toContain("(e.plan -> 0 ->> 'Execution Time')")
