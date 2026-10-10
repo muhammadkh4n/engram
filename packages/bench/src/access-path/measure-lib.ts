@@ -34,7 +34,7 @@ export const WORDS = [
   'migration', 'schema', 'index', 'replica', 'latency', 'budget', 'cursor', 'buffer', 'vector', 'ranking',
 ] as const
 
-const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/
+const CONTAINER_NAME = /^[a-z0-9][\w.-]*$/i
 const MINUTE_MS = 60_000
 
 export interface TimingSummary {
