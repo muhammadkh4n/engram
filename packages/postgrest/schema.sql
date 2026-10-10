@@ -2230,6 +2230,12 @@ CREATE INDEX IF NOT EXISTS idx_items_lineage ON public.memory_items USING gin (l
 CREATE INDEX IF NOT EXISTS idx_items_embedding_hnsw ON public.memory_items USING hnsw (embedding public.vector_cosine_ops) WITH (m='16', ef_construction='64') WHERE (embedding IS NOT NULL AND forgotten_at IS NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_project_label ON public.memory_subjects USING btree ((coalesce(project_id, '')), lower(label));
 CREATE INDEX IF NOT EXISTS idx_item_entities_type_entity ON public.memory_item_entities USING btree (entity_type, entity);
+-- The candidate statement's entity leg matches entities ignoring case. A
+-- hash index, not a btree: lower() can lengthen a string in bytes, so a
+-- 2000-byte entity's lowered key has no bound under the btree row limit,
+-- while a hash index stores a fixed-size hash code for any key. The leg only
+-- ever tests equality.
+CREATE INDEX IF NOT EXISTS idx_item_entities_entity ON public.memory_item_entities USING hash (lower(entity));
 
 -- memory_items.fts is search_text as an 'english' tsvector, like the fts
 -- column of each tier table. The candidate statement's lexical leg matches

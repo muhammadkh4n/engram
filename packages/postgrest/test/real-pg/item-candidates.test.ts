@@ -13,6 +13,8 @@
  *   alone do not match;
  * - the subject leg puts current items before superseded ones and, with
  *   p_project_id, that project's subjects first;
+ * - the entity leg matches entities ignoring case, ranks items matching more
+ *   of them first and applies visibility like every other leg;
  * - ties break on the id and the same call returns the same rows.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -23,7 +25,7 @@ const TEST_TIMEOUT_MS = 60_000
 
 const DIMS = 1536
 const BASE_TIME = Date.parse('2026-02-03T04:00:00Z')
-const LEG_ORDER = ['vector', 'hyde', 'bm25', 'subject'] as const
+const LEG_ORDER = ['vector', 'hyde', 'bm25', 'subject', 'entity'] as const
 
 type Leg = (typeof LEG_ORDER)[number]
 
@@ -168,6 +170,13 @@ describe.skipIf(!realPgImage)('engram_item_candidates on real Postgres', () => {
       `INSERT INTO public.memory_items (id, class, kind, speaker, trust, session_id, subject_id, content, search_text,
          embedding, embedding_model, occurred_at, source, lineage, standing)
        VALUES ${items.map(valuesRow).join(',\n')};`,
+    )
+  }
+
+  async function tagEntities(itemId: string, entities: ReadonlyArray<[entity: string, type: string]>): Promise<void> {
+    await pg.psql(
+      `INSERT INTO public.memory_item_entities (item_id, entity, entity_type)
+       VALUES ${entities.map(([entity, type]) => `(${lit(itemId)}, ${lit(entity)}, ${lit(type)})`).join(', ')};`,
     )
   }
 
@@ -402,7 +411,7 @@ describe.skipIf(!realPgImage)('engram_item_candidates on real Postgres', () => {
       }
 
       const first = await candidates(args)
-      for (const leg of LEG_ORDER) expect(idsOf(first, leg)).toEqual([lower.id, higher.id])
+      for (const leg of LEG_ORDER.slice(0, 4)) expect(idsOf(first, leg)).toEqual([lower.id, higher.id])
       expect(first.map((r) => r.leg)).toEqual(['vector', 'vector', 'hyde', 'hyde', 'bm25', 'bm25', 'subject', 'subject'])
       expect(first.filter((r) => r.leg === 'vector' || r.leg === 'hyde').map((r) => r.path)).toEqual([
         'exact',
@@ -412,6 +421,36 @@ describe.skipIf(!realPgImage)('engram_item_candidates on real Postgres', () => {
       ])
       expect(first.find((r) => r.leg === 'vector')!.rawScore).toBeCloseTo(Math.cos(0.2), 5)
       expect(await candidates(args)).toEqual(first)
+    },
+    TEST_TIMEOUT_MS,
+  )
+
+  it(
+    'returns items by entity, ignoring case, more matched entities first, with visibility applied',
+    async () => {
+      const path = 'packages/tst/src/osprey.ts'
+      const both = note('osprey ticket and path', { occurredAt: at(1) })
+      const pathOnly = note('osprey path only', { occurredAt: at(5) })
+      const longerKey = note('osprey longer ticket key', { occurredAt: at(6) })
+      const oldRow = legacy('osprey legacy ticket', { occurredAt: at(7) })
+      await insert([both, pathOnly, longerKey, oldRow])
+      await tagEntities(both.id, [['TST-42', 'ticket'], [path, 'path']])
+      await tagEntities(pathOnly.id, [[path, 'path']])
+      await tagEntities(longerKey.id, [['TST-421', 'ticket']])
+      await tagEntities(oldRow.id, [['TST-42', 'ticket']])
+
+      const ticket = await candidates({ p_entities: textArray(['tst-42']) })
+      expect(ticket).toEqual([{ itemId: both.id, leg: 'entity', rank: 1, rawScore: 1, path: null }])
+
+      const two = await candidates({ p_entities: textArray(['tst-42', path.toUpperCase()]) })
+      expect(idsOf(two, 'entity')).toEqual([both.id, pathOnly.id])
+      expect(two.map((r) => r.rawScore)).toEqual([2, 1])
+
+      const withLegacy = await candidates({ p_entities: textArray(['TST-42']), p_classes: textArray(['document_section', 'legacy']) })
+      expect(idsOf(withLegacy, 'entity')).toEqual([oldRow.id, both.id])
+
+      const none = await candidates({ p_entities: "'{}'::text[]", p_query: lit('nothing to match here') })
+      expect(none).toEqual([])
     },
     TEST_TIMEOUT_MS,
   )
@@ -430,6 +469,7 @@ describe.skipIf(!realPgImage)('engram_item_candidates on real Postgres', () => {
     ['p_max_observation_trust', 'p_max_observation_trust => 4::smallint'],
     ['p_embedding', "p_embedding => '[1,0,0]'::public.vector"],
     ['p_hyde_embedding', "p_hyde_embedding => '[1,0,0]'::public.vector"],
+    ['p_entities', 'p_entities => ARRAY[NULL]::text[]'],
   ])(
     'refuses %s (%s) as an invalid parameter, naming it',
     async (name, args) => {

@@ -417,12 +417,12 @@ ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], tex
 --
 
 -- engram_item_candidates is the statement recall reads item candidates
--- through. It returns them from up to four legs, in this order: vector
--- (p_embedding), hyde (p_hyde_embedding), bm25 (p_terms) and subject
--- (p_query); a leg runs only when its input is set. Each row is an item id,
--- its leg, a 1-based rank within the leg, the leg's raw score and, on the
--- vector legs, the access path taken. No text and no embedding: the caller
--- fuses the legs and reads the items it keeps by id.
+-- through. It returns them from up to five legs, in this order: vector
+-- (p_embedding), hyde (p_hyde_embedding), bm25 (p_terms), subject (p_query)
+-- and entity (p_entities); a leg runs only when its input is set. Each row is
+-- an item id, its leg, a 1-based rank within the leg, the leg's raw score
+-- and, on the vector legs, the access path taken. No text and no embedding:
+-- the caller fuses the legs and reads the items it keeps by id.
 --
 -- Visibility applies inside every leg's statement, before its LIMIT, so each
 -- cap is filled with rows the caller may receive:
@@ -646,9 +646,9 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
       MESSAGE = 'engram_item_candidates: p_hyde_embedding must have 1536 dimensions';
   END IF;
-  IF cardinality(p_entities) > 0 THEN
-    RAISE EXCEPTION USING ERRCODE = 'feature_not_supported',
-      MESSAGE = 'engram_item_candidates: p_entities has no leg to run';
+  IF array_position(p_entities, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_candidates: p_entities holds a NULL entity';
   END IF;
 
   classes := coalesce(p_classes, ARRAY(
@@ -714,6 +714,12 @@ END; $$;
 -- first when it is set, then labels with more lexemes. Their visible items
 -- follow in subject order, current before superseded (as of p_as_of when it
 -- is set), newer first. The score is the label's lexeme count.
+--
+-- entity: the visible items holding an entity equal, ignoring case, to one
+-- of p_entities, found through idx_item_entities_entity, a hash index on
+-- lower(entity). Items matching more of the requested entities come first,
+-- then newer ones. The score is the number of distinct requested entities
+-- matched; an item that stores one entity in two spellings counts it once.
 CREATE OR REPLACE FUNCTION public.engram_item_candidates_leg_sql(p_leg text, p_branch text, p_has_kinds boolean, p_hide_kinds boolean, p_include_history boolean, p_has_as_of boolean, p_has_exclude_session boolean, p_has_trust_cap boolean, p_has_project boolean) RETURNS text
     LANGUAGE plpgsql IMMUTABLE
     SET search_path TO 'public'
@@ -808,8 +814,16 @@ BEGIN
       || ' ORDER BY m.subject_rank, (' || v_current || ') DESC, i.occurred_at DESC, i.id LIMIT $13';
   END IF;
 
+  IF p_leg = 'entity' THEN
+    RETURN 'SELECT i.id, count(DISTINCT lower(e.entity))::double precision AS score'
+      || ' FROM public.memory_item_entities e JOIN public.memory_items i ON i.id = e.item_id'
+      || ' WHERE lower(e.entity) = ANY (ARRAY(SELECT lower(x.v) FROM unnest($5) AS x(v)))'
+      || ' AND ' || v_visible
+      || ' GROUP BY i.id ORDER BY score DESC, i.occurred_at DESC, i.id LIMIT $13';
+  END IF;
+
   RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-    MESSAGE = 'engram_item_candidates_leg_sql: p_leg must be vector, hyde, bm25 or subject';
+    MESSAGE = 'engram_item_candidates_leg_sql: p_leg must be vector, hyde, bm25, subject or entity';
 END; $$;
 
 CREATE OR REPLACE FUNCTION public.engram_item_candidates(p_embedding public.vector DEFAULT NULL::public.vector, p_query text DEFAULT NULL::text, p_terms text[] DEFAULT NULL::text[], p_hyde_embedding public.vector DEFAULT NULL::public.vector, p_entities text[] DEFAULT NULL::text[], p_classes text[] DEFAULT NULL::text[], p_kinds text[] DEFAULT NULL::text[], p_project_id text DEFAULT NULL::text, p_exclude_session text DEFAULT NULL::text, p_as_of timestamp with time zone DEFAULT NULL::timestamp with time zone, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL::smallint, p_k integer DEFAULT 50, p_force_path text DEFAULT NULL::text) RETURNS TABLE(item_id uuid, leg text, rank integer, raw_score double precision, path text)
@@ -861,6 +875,9 @@ BEGIN
   END IF;
   IF p_query ~ '\S' THEN
     v_legs := v_legs || 'subject'::text;
+  END IF;
+  IF cardinality(p_entities) > 0 THEN
+    v_legs := v_legs || 'entity'::text;
   END IF;
 
   FOREACH v_leg IN ARRAY v_legs LOOP
@@ -982,6 +999,9 @@ BEGIN
   END IF;
   IF p_query ~ '\S' THEN
     v_legs := v_legs || 'subject'::text;
+  END IF;
+  IF cardinality(p_entities) > 0 THEN
+    v_legs := v_legs || 'entity'::text;
   END IF;
 
   FOREACH v_leg IN ARRAY v_legs LOOP
