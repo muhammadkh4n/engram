@@ -20,6 +20,35 @@ import {
   seedSql,
   summarize,
 } from '../src/access-path/measure-lib.js'
+import {
+  MIN_BUCKET_PAIRS,
+  bucketOf,
+  embeddingReplies,
+  pairRecall,
+  parseRecallOutput,
+  pinnedEmbedding,
+  pinnedHydeEmbedding,
+  recallSql,
+  summarizeRecall,
+  type RecallPair,
+} from '../src/access-path/recall-lib.js'
+import {
+  assertOtherLegsUnchanged,
+  caseQueries,
+  entityRule,
+  evaluateQuery,
+  goldQueries,
+  legsHolding,
+  legsSql,
+  matchesTarget,
+  parseLegsOutput,
+  queryTerms,
+  type CandidateRow,
+  type ItemText,
+  type LegQuery,
+} from '../src/access-path/legs-lib.js'
+import type { DecisionCase } from '../src/decisions/cases.js'
+import type { GoldEntry } from '../src/eval/gold.js'
 
 function constant(ms: number): number[] {
   return Array(QUERY_VECTORS * TIMED_CALLS).fill(ms)
@@ -202,7 +231,7 @@ describe('parseCommand', () => {
   })
 
   it('refuses unknown commands, flags, container names, off-grid sizes and bad numbers', () => {
-    expect(() => parseCommand(['recall', '--container', 'tst-ap'])).toThrow('seed or latency')
+    expect(() => parseCommand(['probe', '--container', 'tst-ap'])).toThrow('the command is seed, latency, recall, legs')
     expect(() => parseCommand(['seed', '--container', 'tst-ap', '--rows', '10', '--sizes', '1000'])).toThrow(
       'does not take --sizes',
     )
@@ -211,5 +240,303 @@ describe('parseCommand', () => {
     expect(() => parseCommand(['latency', '--container', 'tst-ap', '--sizes', '3000'])).toThrow('grid sizes only')
     expect(() => parseCommand(['latency', '--container', 'tst-ap', '--k', '201'])).toThrow('at most 200')
     expect(() => parseCommand(['latency', '--container'])).toThrow('--flag value')
+    expect(() => parseCommand(['latency', '--container', 'tst-ap', '--k', '5', '--k', '6'])).toThrow('given twice')
+  })
+
+  it('parses recall and legs, with every file after --pins', () => {
+    expect(parseCommand(['recall', '--container', 'tst-copy', '--db', 'engram', '--pins', 'a.json', 'b.json'])).toEqual({
+      command: 'recall',
+      container: 'tst-copy',
+      db: 'engram',
+      pins: ['a.json', 'b.json'],
+      sampleItems: 200,
+      k: 50,
+    })
+    expect(
+      parseCommand([
+        'legs', '--container', 'tst-copy', '--db', 'engram', '--cases', 'cases.jsonl', '--gold', 'gold.jsonl',
+        '--pins', 'a.json', '--calibration-before', '2026-09-01T00:00:00Z', '--pins', 'b.json',
+      ]),
+    ).toEqual({
+      command: 'legs',
+      container: 'tst-copy',
+      db: 'engram',
+      cases: 'cases.jsonl',
+      gold: 'gold.jsonl',
+      pins: ['a.json', 'b.json'],
+      calibrationBefore: '2026-09-01T00:00:00Z',
+      k: 50,
+    })
+  })
+
+  it('refuses recall and legs without their inputs or with a k a sampled item cannot get', () => {
+    const recall = ['recall', '--container', 'tst-copy', '--db', 'engram', '--pins', 'a.json']
+    expect(() => parseCommand([...recall, '--k', '200'])).toThrow('at most 199')
+    expect(() => parseCommand(['recall', '--container', 'tst-copy', '--pins', 'a.json'])).toThrow('--db is required')
+    expect(() => parseCommand(['recall', '--container', 'tst-copy', '--db', 'engram'])).toThrow('--pins needs at least one file')
+    expect(() => parseCommand(['recall', '--container', 'tst-copy', '--db', 'x;y', '--pins', 'a.json'])).toThrow(
+      '--db needs a database name',
+    )
+    expect(() => parseCommand([...recall, '--cases', 'c.jsonl'])).toThrow('does not take --cases')
+    const legs = ['legs', '--container', 'tst-copy', '--db', 'engram', '--cases', 'c', '--gold', 'g', '--pins', 'p']
+    expect(() => parseCommand(legs)).toThrow('--calibration-before is required')
+    expect(() => parseCommand([...legs, '--calibration-before', '2026-09-01'])).toThrow('ISO-8601')
+  })
+})
+
+function axis(i: number): number[] {
+  return Array.from({ length: DIMS }, (_, d) => (d === i ? 1 : 0))
+}
+
+function pair(overrides: Partial<RecallPair>): RecallPair {
+  return { filter: 'default', query: 1, itemId: null, filtered: 0, exactIds: [], hnswIds: [], hnswPath: 'hnsw', ...overrides }
+}
+
+describe('recall query vectors from pins', () => {
+  const table = {
+    embedQuery: { '["tst heron"]': axis(0) },
+    embed: { '["tst heron"]': axis(0), '["tst hyde doc"]': axis(2), '["tst osprey"]': axis(1) },
+    generateHypotheticalDoc: { '["tst heron"]': 'tst hyde doc' },
+  }
+
+  it('reads every embedding reply once, and refuses a reply of the wrong width', () => {
+    expect(embeddingReplies([table, { embed: { '["tst again"]': axis(1) } }])).toEqual([axis(0), axis(2), axis(1)])
+    expect(() => embeddingReplies([{ embed: { '["tst short"]': [1, 0] } }])).toThrow('not a 1536-dimension vector')
+  })
+
+  it('finds a text\'s recorded embedding and its HyDE document\'s, or null', () => {
+    expect(pinnedEmbedding([table], 'tst osprey')).toEqual(axis(1))
+    expect(pinnedEmbedding([table], 'tst unknown')).toBeNull()
+    expect(pinnedHydeEmbedding([table], 'tst heron')).toEqual(axis(2))
+    expect(pinnedHydeEmbedding([table], 'tst osprey')).toBeNull()
+  })
+})
+
+describe('recall against exact', () => {
+  it('scores overlap over min(k, exact rows) when the exact list is shorter than k', () => {
+    const p = pair({ exactIds: ['a', 'b', 'c'], hnswIds: ['a', 'c', 'x'] })
+    expect(pairRecall(p, 50)).toEqual({ recall: 2 / 3, fallback: false })
+  })
+
+  it('drops a sampled item from both lists and keeps k rows of each', () => {
+    const p = pair({ itemId: 's', exactIds: ['s', 'a', 'b', 'c'], hnswIds: ['a', 's', 'c', 'b'] })
+    expect(pairRecall(p, 2)).toEqual({ recall: 0.5, fallback: false })
+  })
+
+  it('scores a fallback as 1.0 and flags it', () => {
+    expect(pairRecall(pair({ exactIds: ['a'], hnswIds: ['b'], hnswPath: 'exact_fallback' }), 50)).toEqual({ recall: 1, fallback: true })
+  })
+
+  it('buckets filtered sizes above T into (T, 2T], (2T, 4T] and (4T, inf)', () => {
+    expect(bucketOf(5000, 5000)).toBeNull()
+    expect(bucketOf(5001, 5000)).toBe('(T, 2T]')
+    expect(bucketOf(10000, 5000)).toBe('(T, 2T]')
+    expect(bucketOf(10001, 5000)).toBe('(2T, 4T]')
+    expect(bucketOf(20000, 5000)).toBe('(2T, 4T]')
+    expect(bucketOf(20001, 5000)).toBe('(4T, inf)')
+  })
+
+  it('leaves a bucket under 100 pairs unresolved and judges one at 100 on its mean', () => {
+    const exactIds = ['a', 'b', 'c', 'd']
+    const full = (query: number) => pair({ query, filtered: 15000, exactIds, hnswIds: exactIds })
+    const pairs = [
+      ...Array.from({ length: MIN_BUCKET_PAIRS - 1 }, (_, i) => full(i + 1)),
+      pair({ query: 500, filtered: 7000, exactIds, hnswIds: ['a', 'b', 'c', 'x'] }),
+      ...Array.from({ length: MIN_BUCKET_PAIRS }, (_, i) =>
+        pair({ query: 1000 + i, filtered: 7000, exactIds, hnswIds: i < 10 ? ['a', 'x', 'y', 'z'] : exactIds }),
+      ),
+      pair({ query: 2000, filtered: 30000, exactIds, hnswIds: [], hnswPath: 'exact_fallback' }),
+      pair({ query: 3000, filtered: 100, exactIds, hnswIds: [] }),
+    ]
+    const summary = summarizeRecall(pairs, 5000, 4)
+    expect(summary.atOrBelowThreshold).toBe(1)
+    const [low, mid, high] = summary.buckets
+    expect(low).toMatchObject({ bucket: '(T, 2T]', n: 101, fallbacks: 0, min: 0.25, verdict: 'fail' })
+    expect(low.mean).toBeCloseTo((90 + 0.75 + 10 * 0.25) / 101, 10)
+    expect(low.low).toBe(0.25)
+    expect(mid).toMatchObject({ bucket: '(2T, 4T]', n: 99, mean: 1, verdict: 'unresolved' })
+    expect(high).toMatchObject({ bucket: '(4T, inf)', n: 1, fallbacks: 1, mean: 1, verdict: 'unresolved' })
+    expect(summary.worst).toEqual({ filter: 'default', query: 1000, itemId: null, filtered: 7000, recall: 0.25 })
+  })
+
+  it('passes a bucket of 100 pairs whose mean reaches the bar', () => {
+    const exactIds = Array.from({ length: 50 }, (_, i) => `id-${i}`)
+    const pairs = Array.from({ length: MIN_BUCKET_PAIRS }, (_, i) =>
+      pair({ query: i + 1, filtered: 6000, exactIds, hnswIds: i === 0 ? [...exactIds.slice(0, 49), 'x'] : exactIds }),
+    )
+    expect(summarizeRecall(pairs, 5000, 50).buckets[0]).toMatchObject({ n: 100, verdict: 'pass', min: 0.98 })
+  })
+
+  it('writes one filter\'s run with forced exact and hnsw calls, k + 1 rows for sampled items', () => {
+    const sql = recallSql('exclude_largest_session', [axis(0)], 200, 50)
+    expect(sql).toContain("INSERT INTO ap_queries VALUES (1, NULL, '[1,0,")
+    expect(sql).toContain('ORDER BY md5(id::text), id LIMIT 200')
+    expect(sql).toContain('CASE WHEN item_id IS NULL THEN 50 ELSE 51 END')
+    expect(sql).toContain("p_exclude_session => f.value, p_k => q.k, p_force_path => 'exact'")
+    expect(sql).toContain("p_exclude_session => f.value, p_k => q.k, p_force_path => 'hnsw'")
+    expect(sql).toContain('engram_item_candidates_explain(p_embedding => q.v, p_exclude_session => f.value, p_k => q.k')
+    expect(recallSql('utterances', [], 10, 50)).toContain("p_classes => ARRAY['utterance'],")
+    expect(recallSql('as_of_p25', [], 10, 50)).toContain('percentile_disc(0.25)')
+  })
+
+  it('parses a run and refuses a malformed pair', () => {
+    const out = [
+      '{"kind" : "filter", "value" : "tst-session"}',
+      '{"kind" : "pair", "n" : 1, "item_id" : null, "filtered" : 6000, "exact" : ["a"], "hnsw" : ["a"], "hnsw_path" : "hnsw"}',
+    ].join('\n')
+    expect(parseRecallOutput('default', out)).toEqual({
+      filter: 'default',
+      value: 'tst-session',
+      pairs: [pair({ filtered: 6000, exactIds: ['a'], hnswIds: ['a'] })],
+    })
+    expect(() => parseRecallOutput('default', out.replace('"hnsw"}', '"seq"}'))).toThrow('unexpected output line')
+    expect(() => parseRecallOutput('default', '')).toThrow('no filter line')
+  })
+})
+
+function decisionCase(overrides: Partial<DecisionCase>): DecisionCase {
+  return {
+    id: 'tst-case-alpha', source: { kind: 'incident', ref: 'tst' }, status: 'reviewed', decided_at: '2026-08-01T00:00:00Z',
+    agent: 'main', channel: 'prompt', session_id: 'tst-session', transcript: null, cwd: null, project_id: 'tst-proj',
+    workspace_id: null, at_root: false, plan_dirs: [], query_text: 'Fix TST-42 in packages/tst/src/a.ts now.',
+    prior_prompts: [], decision_kind: null, tool_text: null, expect_contradiction: false,
+    needed: [{ key: 'tst-need', kind: 'fact', expected_lane: 'query', phrases: [['heron rule']], register_ids: ['R-TST-1'], item_ids: [], legacy_ids: [] }],
+    harmful: [{ key: 'tst-harm', phrases: [['old heron rule']], current_phrases: [['heron rule changed']], item_ids: [], legacy_ids: [] }],
+    audit: null, note: '', ...overrides,
+  }
+}
+
+function goldEntry(overrides: Partial<GoldEntry>): GoldEntry {
+  return {
+    id: 'tst-gold-alpha', class: 'identifier', query: 'where is TST-42', gold_ids: ['legacy-1'], gold_phrases: [],
+    stale_ids: [], stale_phrases: [['osprey stale']], current_phrases: [], note: '', ...overrides,
+  }
+}
+
+function itemText(id: string, content: string, extra: Partial<ItemText> = {}): ItemText {
+  return { id, legacyId: null, registerRef: null, content, context: null, ...extra }
+}
+
+function row(leg: CandidateRow['leg'], rank: number, itemId: string, withEntities = true): CandidateRow {
+  return { n: 1, withEntities, leg, rank, itemId }
+}
+
+describe('the leg queries', () => {
+  const pins = [{ embedQuery: { '["Fix TST-42 in packages/tst/src/a.ts now."]': axis(0), '["where is TST-42"]': axis(1) } }]
+  const projects = [{ id: 'tst-proj', kind: 'project' }]
+
+  it('splits tokens into lexical terms, keeping inner identifier punctuation', () => {
+    expect(queryTerms('Fix TST-42, in "packages/tst/src/a.ts"; v1.2_b now. now')).toEqual([
+      'fix', 'tst-42', 'in', 'packages/tst/src/a.ts', 'v1.2_b', 'now',
+    ])
+  })
+
+  it('builds case queries as of the decision, without its session, and skips a case without a query', () => {
+    const cases = [
+      decisionCase({}),
+      decisionCase({ id: 'tst-case-beta', decided_at: '2026-09-02T00:00:00Z', query_text: 'tst unpinned words' }),
+      decisionCase({ id: 'tst-case-gamma', channel: 'session_start', query_text: null }),
+      decisionCase({ id: 'tst-case-delta', status: 'dropped' }),
+    ]
+    const { queries, skipped } = caseQueries(cases, '2026-09-01T00:00:00Z', projects, pins)
+    expect(skipped).toEqual([{ id: 'tst-case-gamma', reason: 'no_query' }])
+    expect(queries.map((q) => [q.id, q.split, q.vector === null])).toEqual([
+      ['tst-case-alpha', 'calibration', false],
+      ['tst-case-beta', 'check', true],
+    ])
+    expect(queries[0]).toMatchObject({
+      entities: ['TST-42', 'packages/tst/src/a.ts'], classes: null, projectId: 'tst-proj',
+      asOf: '2026-08-01T00:00:00Z', excludeSession: 'tst-session',
+    })
+    expect(queries[0].targets.map((t) => [t.role, t.key])).toEqual([['needed', 'tst-need'], ['harmful', 'tst-harm']])
+  })
+
+  it('builds gold queries in the calibration split, reading legacy rows', () => {
+    const [q] = goldQueries([goldEntry({})], projects, pins)
+    expect(q).toMatchObject({ split: 'calibration', vector: axis(1), entities: ['TST-42'] })
+    expect(q.classes).toContain('legacy')
+    expect(q.targets.map((t) => t.role)).toEqual(['gold', 'stale'])
+  })
+
+  it('quotes each request as one JSON literal and runs it with and without entities', () => {
+    const q = goldQueries([goldEntry({ query: "it's TST-42" })], projects, [{ embedQuery: { '["it\'s TST-42"]': axis(1) } }])[0]
+    const sql = legsSql([q], 50)
+    expect(sql).toContain("\"query\":\"it''s TST-42\"")
+    expect(sql).toContain('(1, true, ')
+    expect(sql).toContain('(1, false, ')
+    expect(sql).toContain('p_entities => CASE WHEN q.with_entities THEN')
+    expect(() => legsSql([{ ...q, vector: null }], 50)).toThrow('no query vector')
+  })
+
+  it('parses rows and items, and names only the line of a malformed one', () => {
+    const out = [
+      '{"kind" : "row", "n" : 1, "with_entities" : true, "leg" : "entity", "rank" : 1, "item_id" : "a"}',
+      '{"kind" : "item", "id" : "a", "legacy_id" : null, "register_ref" : null, "content" : "secret words", "context" : null}',
+    ]
+    const parsed = parseLegsOutput(out.join('\n'))
+    expect(parsed.rows).toEqual([row('entity', 1, 'a')])
+    expect(parsed.items.get('a')?.content).toBe('secret words')
+    expect(() => parseLegsOutput(out[1].replace('"content"', '"body"'))).toThrow(/^legs output line 1 has an unexpected shape$/)
+  })
+})
+
+describe('legs holding targets and the entity rule', () => {
+  function query(overrides: Partial<LegQuery>): LegQuery {
+    return {
+      id: 'tst-q', source: 'case', split: 'calibration', text: 't', vector: axis(0), hydeVector: null, terms: [], entities: ['TST-42'],
+      classes: null, projectId: null, asOf: null, excludeSession: null, targets: [], ...overrides,
+    }
+  }
+  const needed = { key: 'need', role: 'needed' as const, itemIds: [], legacyIds: [], registerIds: [], phrases: [['heron rule']], currentPhrases: [] }
+  const harmful = { key: 'harm', role: 'harmful' as const, itemIds: [], legacyIds: [], registerIds: [], phrases: [['old osprey']], currentPhrases: [] }
+
+  it('lists every leg holding an item', () => {
+    const rows = [row('vector', 1, 'a'), row('bm25', 3, 'a'), row('entity', 1, 'b')]
+    expect(legsHolding(rows, 'a')).toEqual(['vector', 'bm25'])
+    expect(legsHolding(rows, 'c')).toEqual([])
+  })
+
+  it('matches by id, legacy id, register ref or phrase, and lets a current phrase clear harm', () => {
+    expect(matchesTarget({ ...needed, phrases: [], registerIds: ['R-TST-1'] }, itemText('a', 'x', { registerRef: 'R-TST-1' }))).toBe(true)
+    expect(matchesTarget({ ...needed, phrases: [], legacyIds: ['l-1'] }, itemText('a', 'x', { legacyId: 'l-1' }))).toBe(true)
+    expect(matchesTarget(needed, itemText('a', 'x', { context: 'The HERON   rule' }))).toBe(true)
+    const cleared = { ...harmful, currentPhrases: [['osprey changed']] }
+    expect(matchesTarget(cleared, itemText('a', 'old osprey; osprey changed'))).toBe(false)
+    expect(matchesTarget({ ...cleared, role: 'stale', itemIds: ['a'] }, itemText('a', 'old osprey; osprey changed'))).toBe(true)
+  })
+
+  it('keeps the leg when it alone holds a needed target and no harmful item', () => {
+    const items = new Map([['a', itemText('a', 'the heron rule')], ['b', itemText('b', 'old osprey note')]])
+    const rows = [row('entity', 1, 'a'), row('vector', 1, 'b'), row('entity', 2, 'b')]
+    const result = evaluateQuery(query({ targets: [needed, harmful] }), rows, items)
+    expect(result.targets).toEqual([
+      { key: 'need', role: 'needed', legs: ['entity'], itemIds: ['a'], entityOnlyItemIds: ['a'] },
+      { key: 'harm', role: 'harmful', legs: ['vector', 'entity'], itemIds: ['b'], entityOnlyItemIds: [] },
+    ])
+    const verdict = entityRule([result], [])
+    expect(verdict.keep).toBe(true)
+    expect(verdict.calibration.helped).toEqual([{ query: 'tst-q', key: 'need' }])
+  })
+
+  it('drops the leg when it alone brings a harmful item, or helps only in the check split', () => {
+    const items = new Map([['a', itemText('a', 'the heron rule')], ['b', itemText('b', 'old osprey note')]])
+    const harms = evaluateQuery(query({ targets: [needed, harmful] }), [row('entity', 1, 'a'), row('entity', 2, 'b')], items)
+    const verdict = entityRule([harms], [{ id: 'tst-skip', reason: 'no_query' }])
+    expect(verdict.keep).toBe(false)
+    expect(verdict.calibration.harmed).toEqual([{ query: 'tst-q', key: 'harm', itemId: 'b' }])
+    expect(verdict.noQuery).toBe(1)
+
+    const lateOnly = evaluateQuery(query({ split: 'check', targets: [needed] }), [row('entity', 1, 'a')], items)
+    const shared = evaluateQuery(query({ id: 'tst-q2', targets: [needed] }), [row('entity', 1, 'a'), row('subject', 1, 'a')], items)
+    const second = entityRule([lateOnly, shared], [])
+    expect(second.keep).toBe(false)
+    expect(second.check.helped).toHaveLength(1)
+    expect(second.calibration.helped).toEqual([])
+  })
+
+  it('refuses a call without entities that changed another leg', () => {
+    const withRows = [row('vector', 1, 'a'), row('entity', 1, 'b')]
+    expect(() => assertOtherLegsUnchanged('tst-q', withRows, [row('vector', 1, 'a', false)])).not.toThrow()
+    expect(() => assertOtherLegsUnchanged('tst-q', withRows, [row('vector', 1, 'c', false)])).toThrow('changed the other legs')
   })
 })
