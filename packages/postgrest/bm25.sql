@@ -506,9 +506,14 @@ ALTER FUNCTION public.engram_bm25_match(text[], integer, text, text, text[], tex
 
 -- engram_item_access_settings is the one place the policy's four numbers
 -- live:
--- - exact_max_rows, the largest filtered size scanned exactly. 20000 equals
---   max_scan_tuples: an exact scan of at most 20000 rows does no more
---   distance work than an iterative scan that reaches its tuple cap;
+-- - exact_max_rows, the largest filtered size scanned exactly: the largest
+--   of 1000, 2000, 5000, 10000, 20000, 40000 and 80000 rows whose exact
+--   branch kept its p95 within 250 ms (20 query vectors, 3 timed calls each
+--   after a warm-up, no parallel workers), so the query and HyDE legs stay
+--   under 500 ms together. Measured at 5000 on synthetic 1536-dimension rows
+--   with packages/bench/src/access-path/engram-access-path.ts; the exact
+--   scan's cost per row depends on the vector width and the row size, not
+--   on the values;
 -- - ef_search, the HNSW candidate list. 400 covers the over-fetch of the
 --   largest p_k (200 rows, twice over);
 -- - overfetch, how many rows per requested row the HNSW branch fetches
@@ -519,7 +524,7 @@ CREATE OR REPLACE FUNCTION public.engram_item_access_settings() RETURNS TABLE(ex
     LANGUAGE sql IMMUTABLE
     SET search_path TO 'public'
     AS $$
-  SELECT 20000, 400, 2, 20000;
+  SELECT 5000, 400, 2, 20000;
 $$;
 
 -- engram_item_access_path names the path for a filtered size: exact at or
