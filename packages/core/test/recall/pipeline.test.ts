@@ -293,6 +293,25 @@ describe('runRecall', () => {
     expect(trace).toMatchObject({ reranker: 'tst-reranker', floor: 0.3, strong: 0.7, referenceDate: '2026-02-03', cacheFailures: 0 })
   })
 
+  it('shows the current successor the store read for a replaced match, flagged, with the register tokens of its time', async () => {
+    const a = row('a', { chain: 'superseded', currentId: 'b', supersededBy: 'b', contentHead: 'old tst-legacy-db note' })
+    const b = row('b', { requested: false, occurredAt: new Date('2026-02-03T05:00:00Z'), contentHead: 'tst-legacy-db is gone' })
+    const { deps, store } = setup({ rows: [a, b], candidates: [[cand('a', 'bm25', 1)]] })
+    vi.mocked(store.items).mockResolvedValueOnce([a, b])
+    vi.mocked(store.registerTokens).mockResolvedValueOnce([{ registerId: 'R-TST-1', token: 'tst-legacy-db' }])
+    const { response } = await runRecall(deps, req({ asOf: T0 }))
+    expect(response.items.map((i) => [i.id, i.status, i.flags])).toEqual([['b', 'current', ['contradicted_by:R-TST-1', 'supersedes:a']]])
+    expect(store.registerTokens).toHaveBeenCalledWith(T0)
+    expect(deps.rerank.rerank).toHaveBeenCalledWith('reranker floor value', [{ id: 'a', content: 'search a' }])
+  })
+
+  it('reads no register tokens when no document section can be shown', async () => {
+    const stmt = row('s', { class: 'mk_statement', kind: 'ruling', speaker: 'mk', trust: 0 })
+    const { deps, store } = setup({ rows: [stmt], candidates: [[cand('s', 'bm25', 1)]] })
+    await runRecall(deps, req())
+    expect(store.registerTokens).not.toHaveBeenCalled()
+  })
+
   it('shows the question only for an MK statement and returns verbatim text', async () => {
     const rows = [
       row('stmt', { class: 'mk_statement', kind: 'ruling', speaker: 'mk', trust: 0, question: 'tst question?' }),

@@ -6,9 +6,9 @@ import type { FloorCalibration } from './floor-calibration.js'
 import { ModelSteps, type ModelStepDeps, type ModelStepVersions } from './model-steps.js'
 import { isLookupQuestion, isMultiHop, isTemporal, lexicalTerms } from './query-signals.js'
 import { compareShown, fuse, scopeTier, SLATE_SIZE, type Band, type FusedCandidate, type ScopeContext } from './rank.js'
+import { resolveItems } from './resolve.js'
 import type {
   RecallDegraded,
-  RecallItem,
   RecallItemRow,
   RecallProject,
   RecallRequest,
@@ -137,8 +137,10 @@ interface Inputs {
  *    above the floor, band A at or above the strong score.
  * 6. Nothing passed and HyDE did not run: run HyDE, call again with its vector
  *    alone, fuse again and rerank the next 50 unscored. At most once.
- * Then order, apply the limit, and read the store version again. A recall
- * writes no item state.
+ * 7. Resolve supersession as of the recall's time: a replaced item gives its
+ *    place to its current successor; status and flags.
+ * Then apply the limit and read the store version again. A recall writes no
+ * item state.
  */
 export async function runRecall(deps: RecallDeps, request: RecallRequest): Promise<{ response: RecallResponse; trace: RecallTrace }> {
   const started = performance.now()
@@ -161,7 +163,9 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
   }
 
   const scope = scopeOf(request, inputs)
-  const items = order(passed, floor, slate.rerankFailed, scope).map(toRecallItem)
+  const ordered = order(passed, floor, slate.rerankFailed, scope)
+  const tokens = needsTokens(ordered, slate.rows) ? await deps.store.registerTokens(request.asOf) : []
+  const items = resolveItems(ordered, slate.rows, { includeHistory: request.includeHistory === true, filters, tokens }).map((r) => r.item)
   const shown = items.slice(0, request.limit ?? DEFAULT_LIMIT)
   const versionAfter = await deps.store.storeVersion()
   run.timings.total = performance.now() - started
@@ -288,6 +292,8 @@ class Slate {
   candidates: Candidate[] = []
   fused: FusedCandidate[] = []
   readonly scored = new Map<string, ScoredItem>()
+  /** Every row read, chain ends included, by id. */
+  readonly rows = new Map<string, RecallItemRow>()
   rerankFailed = false
 
   constructor(private readonly run: RecallRun) {}
@@ -317,6 +323,7 @@ class Slate {
     )
     timings.hydrate += result.ms
     if (!result.ok) throw result.error
+    for (const row of result.value) this.rows.set(row.id, row)
     return result.value.filter((row) => row.requested)
   }
 
@@ -388,22 +395,11 @@ function order(passed: ScoredItem[], floor: FloorCalibration, rerankFailed: bool
     .map((x) => x.row)
 }
 
-function toRecallItem(row: RecallItemRow): RecallItem {
-  return {
-    id: row.id,
-    class: row.class,
-    kind: row.kind,
-    speaker: row.speaker,
-    trust: row.trust,
-    occurredAt: row.occurredAt,
-    projectId: row.projectId,
-    ...(row.sessionId !== null ? { sessionId: row.sessionId } : {}),
-    ...(row.subjectLabel !== null ? { subject: row.subjectLabel } : {}),
-    text: row.contentHead,
-    ...(row.class === 'mk_statement' && row.question !== null ? { question: row.question } : {}),
-    source: { type: row.source.type, ref: '' },
-    status: 'current',
-    flags: [],
-    via: 'query',
-  }
+/** Register tokens matter only when a document section can be shown: matched, or the end of a matched chain. */
+function needsTokens(ordered: readonly RecallItemRow[], rows: ReadonlyMap<string, RecallItemRow>): boolean {
+  return ordered.some((row) => {
+    if (row.class === 'document_section') return true
+    const end = row.currentId === null ? undefined : rows.get(row.currentId)
+    return end?.class === 'document_section'
+  })
 }
