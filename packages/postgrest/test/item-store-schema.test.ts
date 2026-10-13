@@ -239,6 +239,26 @@ const CAPTURE_TRIGGERS = [
   ],
 ] as const
 
+const STORE_VERSION_TABLES = [
+  ['items', 'memory_items'],
+  ['subjects', 'memory_subjects'],
+  ['entities', 'memory_item_entities'],
+  ['projects', 'memory_projects'],
+] as const
+
+const STORE_VERSION_TRIGGERS = [
+  ...STORE_VERSION_TABLES.map(([name, table]) => [
+    `engram_store_version_${name}`,
+    table,
+    `CREATE CONSTRAINT TRIGGER engram_store_version_${name} AFTER INSERT OR UPDATE OR DELETE ON public.${table} DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.engram_store_version_bump();`,
+  ]),
+  ...STORE_VERSION_TABLES.map(([name, table]) => [
+    `engram_store_version_${name}_truncate`,
+    table,
+    `CREATE TRIGGER engram_store_version_${name}_truncate AFTER TRUNCATE ON public.${table} FOR EACH STATEMENT EXECUTE FUNCTION public.engram_store_version_bump();`,
+  ]),
+] as const
+
 /** The body of a function definition, from its CREATE to the closing `$$;`. */
 function functionDefinition(name: string): string {
   const start = schema.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`)
@@ -258,6 +278,7 @@ describe('memory_items triggers', () => {
       ...TRIGGER_NAMES,
       'memory_capture_events_session_activity',
       ...CAPTURE_TRIGGERS.map(([name]) => name),
+      ...STORE_VERSION_TRIGGERS.map(([name]) => name),
     ])
   })
 
@@ -284,9 +305,13 @@ describe('memory_items triggers', () => {
     }
   })
 
-  it('defers only the lineage and supersession checks', () => {
+  it('defers only the lineage and supersession checks, and the store version bumps to commit', () => {
     const deferred = [...schema.matchAll(/^CREATE CONSTRAINT TRIGGER (\w+) [^;]*\bDEFERRABLE\b[^;]*;$/gm)].map((m) => m[1])
-    expect(deferred).toEqual(['memory_items_lineage', 'memory_items_supersession'])
+    expect(deferred).toEqual([
+      'memory_items_lineage',
+      'memory_items_supersession',
+      ...STORE_VERSION_TABLES.map(([name]) => `engram_store_version_${name}`),
+    ])
   })
 
   // A deferred check runs at commit, after later statements of the same
@@ -323,6 +348,30 @@ describe('memory_items triggers', () => {
       expect(schema).not.toMatch(new RegExp(`GRANT [^;]*public\\.${name}\\(`))
     }
     expect(schema).not.toContain('this file defines no trigger functions')
+  })
+})
+
+describe('store version triggers', () => {
+  it.each(STORE_VERSION_TRIGGERS)('%s is dropped and created again on every apply', (name, table, create) => {
+    expect(squash(schema)).toContain(`DROP TRIGGER IF EXISTS ${name} ON public.${table}; ${create}`)
+  })
+
+  it('bumps a sequence through a SECURITY DEFINER plpgsql function with a fixed search_path, executable by no role', () => {
+    const definition = squash(functionDefinition('engram_store_version_bump'))
+    expect(definition).toMatch(
+      /^CREATE OR REPLACE FUNCTION public\.engram_store_version_bump\(\) RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public' AS \$\$/,
+    )
+    expect(definition).toContain("PERFORM nextval('public.memory_store_version_seq');")
+    expect(definition).not.toMatch(/\bUPDATE\b/)
+    expect(schema).toContain('REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM PUBLIC;')
+    expect(schema).toContain('REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM service_role;')
+    expect(schema).not.toMatch(/GRANT [^;]*public\.engram_store_version_bump\(/)
+  })
+
+  it('gives no role but the owner any privilege on the sequence', () => {
+    expect(schema).toContain('CREATE SEQUENCE IF NOT EXISTS public.memory_store_version_seq;')
+    expect(schema).toContain('REVOKE ALL ON SEQUENCE public.memory_store_version_seq FROM PUBLIC, service_role;')
+    expect(schema).not.toMatch(/GRANT [^;]*memory_store_version_seq/)
   })
 })
 

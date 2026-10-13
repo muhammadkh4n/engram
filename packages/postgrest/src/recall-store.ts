@@ -1,0 +1,233 @@
+import { PostgrestClient } from '@supabase/postgrest-js'
+import { ITEM_CLASSES, ITEM_KINDS, SPEAKERS, withRetry } from '@engram-mem/core'
+import type {
+  Candidate,
+  CandidateRequest,
+  ItemClass,
+  ItemKind,
+  ItemSource,
+  RecallChain,
+  RecallItemRow,
+  RecallItemState,
+  RecallItemsOptions,
+  RecallProject,
+  RecallStore,
+  RegisterToken,
+  Speaker,
+} from '@engram-mem/core'
+import { PostgRestItemStore } from './items.js'
+import { onlyUuids } from './uuid.js'
+
+/** engram_recall_items refuses more ids than this in one call. */
+const MAX_RECALL_IDS = 500
+/** Reads are repeated once after a short pause: a dropped connection or a restart rarely lasts longer. */
+const READ_RETRY = { maxRetries: 1, baseDelayMs: 200 } as const
+const CHAINS: ReadonlySet<string> = new Set<RecallChain>(['current', 'superseded', 'successor_retired'])
+const CLASSES: ReadonlySet<string> = new Set(ITEM_CLASSES)
+const KINDS: ReadonlySet<string> = new Set(Object.values(ITEM_KINDS).flat())
+const SPEAKER_SET: ReadonlySet<string> = new Set(SPEAKERS)
+
+export interface PostgRestRecallStoreOptions {
+  url: string
+  key: string
+}
+
+interface PgError {
+  code?: string
+  message?: string
+}
+
+interface RpcResult {
+  data: unknown
+  error: PgError | null
+}
+
+type Row = Record<string, unknown>
+
+/**
+ * The recall read side over PostgREST. Every method only reads. The candidate
+ * call is the item store's and is never retried (its failure is the caller's
+ * to weigh); the other reads are repeated once on any failure, since a read
+ * repeated changes nothing.
+ */
+export class PostgRestRecallStore implements RecallStore {
+  private readonly client: PostgrestClient
+  private readonly itemStore: PostgRestItemStore
+
+  constructor(opts: PostgRestRecallStoreOptions) {
+    // The same headers as the item store: bare PostgREST reads the bearer,
+    // Supabase's gateway also wants `apikey`, and `timezone=UTC` makes every
+    // time come back with a +00:00 offset.
+    this.client = new PostgrestClient(opts.url, {
+      headers: { Authorization: `Bearer ${opts.key}`, apikey: opts.key, Prefer: 'timezone=UTC' },
+    })
+    this.itemStore = new PostgRestItemStore(opts)
+  }
+
+  candidates(req: CandidateRequest): Promise<Candidate[]> {
+    return this.itemStore.candidates(req)
+  }
+
+  async items(ids: readonly string[], opts: RecallItemsOptions = {}): Promise<RecallItemRow[]> {
+    const wanted = [...new Set(onlyUuids(ids))]
+    if (wanted.length === 0) return []
+    if (wanted.length > MAX_RECALL_IDS) {
+      throw new Error(`recall items failed: ${wanted.length} ids, at most ${MAX_RECALL_IDS} per call`)
+    }
+    const args: Record<string, unknown> = { p_ids: wanted }
+    if (opts.asOf !== undefined) args.p_as_of = isoTime(opts.asOf, 'items', 'asOf')
+    if (opts.excludeSessionId !== undefined) args.p_exclude_session = opts.excludeSessionId
+    const rows = await this.read('items', 'engram_recall_items', args)
+    return rows.map((row, i) => toItemRow(row, i + 1))
+  }
+
+  async registerTokens(asOf?: Date): Promise<RegisterToken[]> {
+    const args = asOf === undefined ? {} : { p_as_of: isoTime(asOf, 'registerTokens', 'asOf') }
+    const rows = await this.read('registerTokens', 'engram_active_register_tokens', args)
+    return rows.map((row, i) => ({
+      registerId: requiredText(row, 'register_id', 'registerTokens', i + 1),
+      token: requiredText(row, 'token', 'registerTokens', i + 1),
+    }))
+  }
+
+  async storeVersion(): Promise<number> {
+    const data = await this.readValue('storeVersion', 'engram_store_version', {})
+    const version = typeof data === 'string' ? Number(data) : data
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) {
+      throw new Error('storeVersion failed: the result is not a non-negative integer')
+    }
+    return version
+  }
+
+  async itemStates(ids: readonly string[]): Promise<RecallItemState[]> {
+    const wanted = [...new Set(onlyUuids(ids))]
+    if (wanted.length === 0) return []
+    const rows = await this.read('itemStates', 'engram_recall_item_states', { p_ids: wanted })
+    return rows.map((row, i) => {
+      const id = requiredText(row, 'id', 'itemStates', i + 1)
+      return {
+        id,
+        forgottenAt: optionalTime(row, 'forgotten_at', 'itemStates', id),
+        retiredAt: optionalTime(row, 'retired_at', 'itemStates', id),
+      }
+    })
+  }
+
+  async projectWorkspace(projectId: string): Promise<string | null> {
+    const data = await this.readValue('projectWorkspace', 'engram_project_workspace', { p_project_id: projectId })
+    if (data === null || data === undefined) return null
+    if (typeof data !== 'string') throw new Error('projectWorkspace failed: the result is not text')
+    return data
+  }
+
+  async projects(): Promise<RecallProject[]> {
+    const rows = await this.read('projects', 'engram_recall_projects', {})
+    return rows.map((row, i) => ({
+      id: requiredText(row, 'id', 'projects', i + 1),
+      kind: requiredText(row, 'kind', 'projects', i + 1),
+    }))
+  }
+
+  private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {
+    return withRetry(async () => {
+      const { data, error } = (await this.client.rpc(fn, args)) as RpcResult
+      if (error) throw new Error(`${operation} failed: ${fn} returned ${error.code || 'an error'}`)
+      return data
+    }, READ_RETRY)
+  }
+
+  private async read(operation: string, fn: string, args: Record<string, unknown>): Promise<Row[]> {
+    const data = await this.readValue(operation, fn, args)
+    if (data === null || data === undefined) return []
+    if (!Array.isArray(data)) throw new Error(`${operation} failed: the result is not a list of rows`)
+    return data as Row[]
+  }
+}
+
+/** Years outside 1 to 9999 have no ISO-8601 form PostgreSQL reads. */
+function isoTime(value: Date, operation: string, field: string): string {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new Error(`${operation} failed: ${field} is not a valid date`)
+  }
+  const year = value.getUTCFullYear()
+  if (year < 1 || year > 9999) throw new Error(`${operation} failed: ${field} has a year outside 1 to 9999`)
+  return value.toISOString()
+}
+
+function requiredText(row: Row, column: string, operation: string, position: number): string {
+  const value = row[column]
+  if (typeof value !== 'string' || value === '') throw new Error(`${operation} failed: row ${position} has no ${column}`)
+  return value
+}
+
+function optionalText(row: Row, column: string): string | null {
+  const value = row[column]
+  return value === null || value === undefined ? null : String(value)
+}
+
+function time(value: unknown, column: string, operation: string, id: string): Date {
+  const parsed = new Date(String(value))
+  if (Number.isNaN(parsed.getTime())) throw new Error(`${operation} failed: item ${id}: ${column} is not a parseable timestamp`)
+  return parsed
+}
+
+function optionalTime(row: Row, column: string, operation: string, id: string): Date | null {
+  const value = row[column]
+  return value === null || value === undefined ? null : time(value, column, operation, id)
+}
+
+function integer(row: Row, column: string, id: string): number {
+  const value = row[column]
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`items failed: item ${id}: ${column} is not a non-negative integer`)
+  }
+  return value
+}
+
+function bool(row: Row, column: string, id: string): boolean {
+  const value = row[column]
+  if (typeof value !== 'boolean') throw new Error(`items failed: item ${id}: ${column} is not a boolean`)
+  return value
+}
+
+/** A row outside the function's contract is an error, never a guess. */
+function toItemRow(row: Row, position: number): RecallItemRow {
+  const id = requiredText(row, 'id', 'items', position)
+  const fail = (what: string) => new Error(`items failed: item ${id}: ${what}`)
+  const cls = row.class
+  const kind = row.kind
+  const speaker = row.speaker
+  const chain = row.chain
+  if (typeof cls !== 'string' || !CLASSES.has(cls)) throw fail('unknown class')
+  if (typeof kind !== 'string' || !KINDS.has(kind)) throw fail('unknown kind')
+  if (typeof speaker !== 'string' || !SPEAKER_SET.has(speaker)) throw fail('unknown speaker')
+  if (typeof chain !== 'string' || !CHAINS.has(chain)) throw fail('unknown chain state')
+  if (typeof row.content_head !== 'string' || typeof row.search_head !== 'string') throw fail('has no text')
+  const source = row.source
+  if (source === null || typeof source !== 'object' || Array.isArray(source)) throw fail('source is not an object')
+  return {
+    id,
+    class: cls as ItemClass,
+    kind: kind as ItemKind,
+    speaker: speaker as Speaker,
+    trust: integer(row, 'trust', id),
+    projectId: optionalText(row, 'project_id'),
+    workspaceId: optionalText(row, 'workspace_id'),
+    planSlug: optionalText(row, 'plan_slug'),
+    sessionId: optionalText(row, 'session_id'),
+    subjectLabel: optionalText(row, 'subject_label'),
+    contentHead: row.content_head,
+    contentLength: integer(row, 'content_length', id),
+    question: optionalText(row, 'question'),
+    searchHead: row.search_head,
+    occurredAt: time(row.occurred_at, 'occurred_at', 'items', id),
+    supersededBy: optionalText(row, 'superseded_by'),
+    retired: bool(row, 'retired', id),
+    restated: integer(row, 'restated', id),
+    source: source as ItemSource,
+    requested: bool(row, 'requested', id),
+    currentId: optionalText(row, 'current_id'),
+    chain: chain as RecallChain,
+    endExcluded: bool(row, 'end_excluded', id),
+  }
+}
