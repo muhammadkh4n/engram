@@ -90,6 +90,30 @@ describe('recall read functions', () => {
   })
 })
 
+describe('the step cache', () => {
+  it('reads and writes through two SECURITY DEFINER functions, the writer VOLATILE', () => {
+    expect(squash(functionDefinition('engram_recall_cache_get'))).toContain(
+      "CREATE OR REPLACE FUNCTION public.engram_recall_cache_get(p_step text, p_keys text[]) RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector) LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$",
+    )
+    expect(squash(functionDefinition('engram_recall_cache_put'))).toContain(
+      "CREATE OR REPLACE FUNCTION public.engram_recall_cache_put(p_step text, p_key text, p_version text, p_text_output jsonb, p_vector_output public.vector) RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector) LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path TO 'public' AS $$",
+    )
+  })
+
+  it('keeps the first writer and reads the stored row back', () => {
+    const body = squash(functionDefinition('engram_recall_cache_put'))
+    expect(body).toContain('ON CONFLICT ON CONSTRAINT memory_recall_step_cache_pkey DO NOTHING;')
+    expect(body).toContain('RETURN QUERY SELECT c.cache_key, c.version, c.text_output, c.vector_output FROM public.memory_recall_step_cache c WHERE c.step = p_step AND c.cache_key = p_key;')
+    expect(body).not.toMatch(/\bUPDATE\b|\bDELETE\b/)
+  })
+
+  it('grants both to service_role', () => {
+    for (const fn of ['public.engram_recall_cache_get(text, text[])', 'public.engram_recall_cache_put(text, text, text, jsonb, public.vector)']) {
+      expect(schema).toContain(`GRANT EXECUTE ON FUNCTION ${fn} TO service_role;`)
+    }
+  })
+})
+
 describe('the store version', () => {
   it('reads the sequence and is 0 before the first change', () => {
     expect(squash(functionDefinition('engram_store_version'))).toContain(

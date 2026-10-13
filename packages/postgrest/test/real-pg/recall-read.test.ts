@@ -504,4 +504,73 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
       TEST_TIMEOUT_MS,
     )
   })
+
+  describe('the step cache', () => {
+    const key = (n: number) => n.toString(16).padStart(64, '0')
+
+    async function put(step: string, k: string, text: string | null, vector: string | null): Promise<unknown> {
+      const out = await pg.psqlAs(
+        'service_role',
+        `SELECT json_agg(json_build_array(c.cache_key, c.version, c.text_output, c.vector_output::text))
+           FROM public.engram_recall_cache_put(${lit(step)}, ${lit(k)}, 'tst-version',
+                ${text === null ? 'NULL' : `${lit(text)}::jsonb`}, ${vector === null ? 'NULL' : `${lit(vector)}::public.vector`}) AS c;`,
+      )
+      return JSON.parse(out)
+    }
+
+    beforeEach(async () => {
+      await pg.psql('TRUNCATE public.memory_recall_step_cache;')
+    }, TEST_TIMEOUT_MS)
+
+    it(
+      'returns the first stored value to every later writer of the key',
+      async () => {
+        expect(await put('expand', key(1), '["first"]', null)).toEqual([[key(1), 'tst-version', ['first'], null]])
+        expect(await put('expand', key(1), '["second"]', null)).toEqual([[key(1), 'tst-version', ['first'], null]])
+        const got = await pg.psqlAs(
+          'service_role',
+          `SELECT json_agg(c.text_output) FROM public.engram_recall_cache_get('expand', ARRAY[${lit(key(1))}, ${lit(key(2))}]) AS c;`,
+        )
+        expect(JSON.parse(got)).toEqual([['first']])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'keeps a vector at single precision and keys each step apart',
+      async () => {
+        const vector = `[${['0.1', ...Array.from({ length: 1535 }, () => '0')].join(',')}]`
+        const stored = (await put('embed_query', key(3), null, vector)) as Array<[string, string, null, string]>
+        // A single prints in its shortest form; read back and rounded, it is the single sent.
+        expect(Math.fround(Number(JSON.parse(stored[0]![3])[0]))).toBe(Math.fround(0.1))
+        expect(await put('hyde', key(3), '"a passage"', null)).toEqual([[key(3), 'tst-version', 'a passage', null]])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'refuses an output of the wrong kind, a malformed key and an unknown step',
+      async () => {
+        await expect(put('expand', key(4), '"not a list"', null)).rejects.toThrow(/memory_recall_step_cache_output_check/)
+        await expect(put('embed_query', key(4), '["text"]', null)).rejects.toThrow(/memory_recall_step_cache_output_check/)
+        await expect(put('expand', 'not-a-key', '["x"]', null)).rejects.toThrow(/memory_recall_step_cache_key_check/)
+        await expect(put('rerank', key(4), '"x"', null)).rejects.toThrow(/memory_recall_step_cache_step_check/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'gives service_role SELECT on the table and no write',
+      async () => {
+        await expect(
+          pg.psqlAs('service_role', `INSERT INTO public.memory_recall_step_cache (step, cache_key, version, text_output) VALUES ('hyde', ${lit(key(5))}, 'v', '"x"');`),
+        ).rejects.toThrow(/permission denied/)
+        expect(await pg.psqlAs('service_role', 'SELECT count(*) FROM public.memory_recall_step_cache;')).toBe('0')
+        await expect(pg.psqlAs('anon', "SELECT * FROM public.engram_recall_cache_get('hyde', ARRAY['x']);")).rejects.toThrow(
+          /permission denied for function/,
+        )
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
 })

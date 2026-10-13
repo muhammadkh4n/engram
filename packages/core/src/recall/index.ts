@@ -1,4 +1,4 @@
-export { RECALL_CHANNELS } from './types.js'
+export { RECALL_CHANNELS, RECALL_STEPS } from './types.js'
 export type {
   RecallChannel,
   RecallScope,
@@ -15,4 +15,16 @@ export type {
   RecallProject,
   RecallItemsOptions,
   RecallStore,
+  RecallStep,
+  CachedStepOutput,
+  StepOutput,
 } from './types.js'
+export {
+  ModelSteps,
+  embeddingStepVersion,
+  chatStepVersion,
+  normalizeStepInput,
+  stepKey,
+} from './model-steps.js'
+export type { ModelStepDeps, ModelStepVersions } from './model-steps.js'
+export { isTemporal, isMultiHop, isLookupQuestion, lexicalTerms } from './query-signals.js'

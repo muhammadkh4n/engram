@@ -130,6 +130,42 @@ describe('PostgRestRecallStore', () => {
     expect(mock.calls).toHaveLength(1)
   })
 
+  it('reads cached outputs per step and refuses a malformed key before any call', async () => {
+    const key = 'a'.repeat(64)
+    const mock = mockClient([{ data: [{ cache_key: key, version: 'tst-v', text_output: null, vector_output: '[0.5,0.25]' }], error: null }])
+    const store = storeWith(mock.client)
+    expect(await store.cacheGet('embed_query', [key, key])).toEqual([
+      { key, version: 'tst-v', vector: [0.5, 0.25], phrases: null, passage: null },
+    ])
+    expect(mock.calls).toEqual([{ fn: 'engram_recall_cache_get', args: { p_step: 'embed_query', p_keys: [key] } }])
+    await expect(store.cacheGet('hyde', ['nope'])).rejects.toThrow(/not a sha256 hex digest/)
+    expect(mock.calls).toHaveLength(1)
+  })
+
+  it('stores an output as the column its step uses and returns the stored row', async () => {
+    const key = 'b'.repeat(64)
+    const mock = mockClient([{ data: [{ cache_key: key, version: 'tst-v', text_output: ['first'], vector_output: null }], error: null }])
+    const stored = await storeWith(mock.client).cachePut('expand', key, 'tst-v', { phrases: ['second'] })
+    expect(stored.phrases).toEqual(['first'])
+    expect(mock.calls[0]).toEqual({
+      fn: 'engram_recall_cache_put',
+      args: { p_step: 'expand', p_key: key, p_version: 'tst-v', p_text_output: ['second'], p_vector_output: null },
+    })
+
+    const vec = mockClient([{ data: [{ cache_key: key, version: 'tst-v', text_output: null, vector_output: '[0.5]' }], error: null }])
+    await storeWith(vec.client).cachePut('embed_hyde', key, 'tst-v', { vector: [0.5] })
+    expect(vec.calls[0]!.args).toMatchObject({ p_text_output: null, p_vector_output: '[0.5]' })
+  })
+
+  it('refuses to store an output of the wrong kind and does not repeat a failed put', async () => {
+    const key = 'c'.repeat(64)
+    const failing = mockClient([{ data: null, error: { code: '23514', message: 'check' } }])
+    const store = storeWith(failing.client)
+    await expect(store.cachePut('hyde', key, 'tst-v', { vector: [1] })).rejects.toThrow(/no output of the kind hyde stores/)
+    await expect(store.cachePut('hyde', key, 'tst-v', { passage: 'p' })).rejects.toThrow(/returned 23514/)
+    expect(failing.calls).toHaveLength(1)
+  })
+
   it('reads item states, a project workspace and the projects', async () => {
     const mock = mockClient([
       { data: [{ id: ID_B, forgotten_at: '2026-02-03T04:00:00+00:00', retired_at: null }], error: null },

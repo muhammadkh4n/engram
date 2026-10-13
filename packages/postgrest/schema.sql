@@ -8443,6 +8443,81 @@ $$;
 
 
 --
+-- Name: memory_recall_step_cache; Type: TABLE; Schema: public; Owner: -
+--
+-- The outputs of recall's model steps, kept so the same input gets the same
+-- output across calls and restarts: a query or HyDE embedding (vector_output)
+-- and an expansion or a HyDE passage (text_output: a JSON array of strings or
+-- a JSON string). cache_key is the sha256 hex of the step's version, its
+-- reference date and its normalised input, so a new model or prompt version
+-- never reads an old output. The first writer's value is the one every caller
+-- reads (engram_recall_cache_put). Rows are never updated.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_recall_step_cache (
+    step text NOT NULL,
+    cache_key text NOT NULL,
+    version text NOT NULL,
+    text_output jsonb,
+    vector_output public.vector(1536),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (step, cache_key),
+    CONSTRAINT memory_recall_step_cache_step_check CHECK (step IN ('embed_query', 'embed_hyde', 'expand', 'hyde')),
+    CONSTRAINT memory_recall_step_cache_key_check CHECK (cache_key ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT memory_recall_step_cache_version_check CHECK (version ~ '\S' AND char_length(version) <= 200),
+    CONSTRAINT memory_recall_step_cache_output_check CHECK (CASE
+        WHEN step IN ('embed_query', 'embed_hyde') THEN vector_output IS NOT NULL AND text_output IS NULL
+        WHEN step = 'expand' THEN text_output IS NOT NULL AND vector_output IS NULL AND jsonb_typeof(text_output) = 'array'
+        ELSE text_output IS NOT NULL AND vector_output IS NULL AND jsonb_typeof(text_output) = 'string' END)
+);
+
+
+--
+-- Name: engram_recall_cache_get(text, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The stored outputs of one step for the given keys; a key with no row is
+-- absent from the result.
+CREATE OR REPLACE FUNCTION public.engram_recall_cache_get(p_step text, p_keys text[])
+    RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT c.cache_key, c.version, c.text_output, c.vector_output
+    FROM public.memory_recall_step_cache c
+   WHERE c.step = p_step AND c.cache_key = ANY (p_keys)
+   ORDER BY c.cache_key
+$$;
+
+
+--
+-- Name: engram_recall_cache_put(text, text, text, jsonb, public.vector); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores one step output unless the key is already stored, then returns the
+-- stored row: with two writers of one key, both get the first writer's value.
+-- RETURNING gives nothing on a conflict, so the row is read back.
+CREATE OR REPLACE FUNCTION public.engram_recall_cache_put(p_step text, p_key text, p_version text, p_text_output jsonb, p_vector_output public.vector)
+    RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector)
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_step IS NULL OR p_key IS NULL OR p_version IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_recall_cache_put: p_step, p_key and p_version are required';
+  END IF;
+  INSERT INTO public.memory_recall_step_cache AS c (step, cache_key, version, text_output, vector_output)
+  VALUES (p_step, p_key, p_version, p_text_output, p_vector_output)
+  ON CONFLICT ON CONSTRAINT memory_recall_step_cache_pkey DO NOTHING;
+  RETURN QUERY
+  SELECT c.cache_key, c.version, c.text_output, c.vector_output
+    FROM public.memory_recall_step_cache c
+   WHERE c.step = p_step AND c.cache_key = p_key;
+END; $$;
+
+
+--
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -8561,6 +8636,13 @@ ALTER TABLE public.memory_item_actions ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.memory_document_notes ENABLE ROW LEVEL SECURITY;
+
+
+--
+-- Name: memory_recall_step_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_recall_step_cache ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
@@ -8714,6 +8796,14 @@ CREATE POLICY service_role_all ON public.memory_document_notes TO service_role U
 
 
 --
+-- Name: memory_recall_step_cache service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_recall_step_cache;
+CREATE POLICY service_role_all ON public.memory_recall_step_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Item store table privileges, identical on every database.
 --
 -- A fresh database grants a new table to no role but its owner, while the
@@ -8731,7 +8821,7 @@ CREATE POLICY service_role_all ON public.memory_document_notes TO service_role U
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes, public.memory_recall_step_cache FROM PUBLIC, service_role;
 REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
@@ -8743,7 +8833,7 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes, public.memory_recall_step_cache FROM %I', role_name);
       EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
@@ -8762,6 +8852,7 @@ GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 GRANT SELECT ON TABLE public.memory_session_state TO service_role;
 GRANT SELECT ON TABLE public.memory_item_actions TO service_role;
 GRANT SELECT ON TABLE public.memory_document_notes TO service_role;
+GRANT SELECT ON TABLE public.memory_recall_step_cache TO service_role;
 
 
 --
@@ -8804,6 +8895,7 @@ BEGIN
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM public.engram_project_workspace('smoke');
   PERFORM * FROM public.engram_recall_projects();
+  PERFORM * FROM public.engram_recall_cache_get('expand', ARRAY[repeat('0', 64)]);
   RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire, their audited forms, invariant counts and the recall read side callable';
 END;
 $smoke$;
@@ -8920,6 +9012,8 @@ REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
@@ -9019,6 +9113,8 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM %I', role_name);
     END IF;
   END LOOP;
@@ -9098,6 +9194,8 @@ GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_project_workspace(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_projects() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) TO service_role;
 
 
 --

@@ -225,6 +225,7 @@ export type {
   SalienceClassification,
   SalienceOpts,
   ExpandQueryOpts,
+  HypotheticalDocOpts,
   EvidenceItem,
   EvidenceSelection,
   SupersessionFact,

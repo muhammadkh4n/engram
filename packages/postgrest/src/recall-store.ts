@@ -1,6 +1,7 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
 import { ITEM_CLASSES, ITEM_KINDS, SPEAKERS, withRetry } from '@engram-mem/core'
 import type {
+  CachedStepOutput,
   Candidate,
   CandidateRequest,
   ItemClass,
@@ -11,11 +12,14 @@ import type {
   RecallItemState,
   RecallItemsOptions,
   RecallProject,
+  RecallStep,
   RecallStore,
   RegisterToken,
   Speaker,
+  StepOutput,
 } from '@engram-mem/core'
 import { PostgRestItemStore } from './items.js'
+import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
 /** engram_recall_items refuses more ids than this in one call. */
@@ -26,6 +30,8 @@ const CHAINS: ReadonlySet<string> = new Set<RecallChain>(['current', 'superseded
 const CLASSES: ReadonlySet<string> = new Set(ITEM_CLASSES)
 const KINDS: ReadonlySet<string> = new Set(Object.values(ITEM_KINDS).flat())
 const SPEAKER_SET: ReadonlySet<string> = new Set(SPEAKERS)
+const CACHE_KEY = /^[0-9a-f]{64}$/
+const VECTOR_STEPS: ReadonlySet<RecallStep> = new Set<RecallStep>(['embed_query', 'embed_hyde'])
 
 export interface PostgRestRecallStoreOptions {
   url: string
@@ -128,6 +134,38 @@ export class PostgRestRecallStore implements RecallStore {
     }))
   }
 
+  async cacheGet(step: RecallStep, keys: readonly string[]): Promise<CachedStepOutput[]> {
+    const wanted = [...new Set(keys)]
+    for (const key of wanted) if (!CACHE_KEY.test(key)) throw new Error('cacheGet failed: a key is not a sha256 hex digest')
+    if (wanted.length === 0) return []
+    const rows = await this.read('cacheGet', 'engram_recall_cache_get', { p_step: step, p_keys: wanted })
+    return rows.map((row, i) => toCachedOutput(step, row, 'cacheGet', i + 1))
+  }
+
+  /**
+   * Not retried: the insert is idempotent, but a failure here only means the
+   * output is not kept, which the caller decides how to weigh.
+   */
+  async cachePut(step: RecallStep, key: string, version: string, output: StepOutput): Promise<CachedStepOutput> {
+    if (!CACHE_KEY.test(key)) throw new Error('cachePut failed: the key is not a sha256 hex digest')
+    const isVector = VECTOR_STEPS.has(step)
+    const vector = isVector ? output.vector : undefined
+    const text = step === 'expand' ? output.phrases : step === 'hyde' ? output.passage : undefined
+    if (isVector ? vector === undefined || vector.length === 0 : text === undefined) {
+      throw new Error(`cachePut failed: no output of the kind ${step} stores`)
+    }
+    const { data, error } = (await this.client.rpc('engram_recall_cache_put', {
+      p_step: step,
+      p_key: key,
+      p_version: version,
+      p_text_output: text === undefined ? null : text,
+      p_vector_output: vector === undefined ? null : JSON.stringify(vector),
+    })) as RpcResult
+    if (error) throw new Error(`cachePut failed: engram_recall_cache_put returned ${error.code || 'an error'}`)
+    if (!Array.isArray(data) || data.length !== 1) throw new Error('cachePut failed: the stored row did not come back')
+    return toCachedOutput(step, data[0] as Row, 'cachePut', 1)
+  }
+
   private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {
     return withRetry(async () => {
       const { data, error } = (await this.client.rpc(fn, args)) as RpcResult
@@ -188,6 +226,24 @@ function bool(row: Row, column: string, id: string): boolean {
   const value = row[column]
   if (typeof value !== 'boolean') throw new Error(`items failed: item ${id}: ${column} is not a boolean`)
   return value
+}
+
+function toCachedOutput(step: RecallStep, row: Row, operation: string, position: number): CachedStepOutput {
+  const key = requiredText(row, 'cache_key', operation, position)
+  const version = requiredText(row, 'version', operation, position)
+  const fail = (what: string) => new Error(`${operation} failed: row ${position}: ${what}`)
+  if (VECTOR_STEPS.has(step)) {
+    const vector = parseVector(row.vector_output)
+    if (vector === null || vector.length === 0) throw fail('has no vector')
+    return { key, version, vector, phrases: null, passage: null }
+  }
+  const text = row.text_output
+  if (step === 'expand') {
+    if (!Array.isArray(text) || !text.every((p) => typeof p === 'string')) throw fail('has no phrase list')
+    return { key, version, vector: null, phrases: text as string[], passage: null }
+  }
+  if (typeof text !== 'string') throw fail('has no passage')
+  return { key, version, vector: null, phrases: null, passage: text }
 }
 
 /** A row outside the function's contract is an error, never a guess. */

@@ -151,6 +151,29 @@ export interface RecallProject {
   kind: string
 }
 
+/** A model step whose output recall keeps, so the same input gets the same output. */
+export const RECALL_STEPS = ['embed_query', 'embed_hyde', 'expand', 'hyde'] as const
+export type RecallStep = (typeof RECALL_STEPS)[number]
+
+/**
+ * One stored step output: a vector for the embedding steps, the expansion's
+ * phrases or the HyDE passage for the others.
+ */
+export interface CachedStepOutput {
+  key: string
+  version: string
+  vector: number[] | null
+  phrases: string[] | null
+  passage: string | null
+}
+
+/** What a step produced; exactly one field is set, the one its step stores. */
+export interface StepOutput {
+  vector?: readonly number[]
+  phrases?: readonly string[]
+  passage?: string
+}
+
 export interface RecallItemsOptions {
   asOf?: Date
   excludeSessionId?: string
@@ -175,4 +198,8 @@ export interface RecallStore {
   projectWorkspace(projectId: string): Promise<string | null>
   /** Every registered project and workspace. */
   projects(): Promise<RecallProject[]>
+  /** The stored outputs of one step for the given keys; a key with none is absent. */
+  cacheGet(step: RecallStep, keys: readonly string[]): Promise<CachedStepOutput[]>
+  /** Stores an output unless the key is stored, and returns the stored one: the first writer's value wins. */
+  cachePut(step: RecallStep, key: string, version: string, output: StepOutput): Promise<CachedStepOutput>
 }

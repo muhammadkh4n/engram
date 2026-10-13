@@ -37,6 +37,7 @@ const ITEM_TABLES = [
   'memory_capture_event_counts',
   'memory_secret_hits',
   'memory_item_actions',
+  'memory_recall_step_cache',
 ] as const
 
 function squash(sql: string): string {
