@@ -210,6 +210,29 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     )
 
     it(
+      'resolves a chain of 25 versions to the last one, as a vault section edited 24 times becomes',
+      async () => {
+        const versions = Array.from({ length: 25 }, (_, k) => note(`tst version ${k}`, k))
+        await insert(versions)
+        for (let k = 0; k < versions.length - 1; k += 1) await supersede(versions[k]!.id, versions[k + 1]!.id)
+
+        const last = versions[24]!
+        const rows = await recallItems([versions[0]!.id])
+        expect(rows.map((r) => [r.id, r.chain, r.current_id])).toEqual([
+          [versions[0]!.id, 'superseded', last.id],
+          [last.id, 'current', last.id],
+        ])
+        expect(rows[1]!.superseded_by).toBeNull()
+        const asOf = await recallItems([versions[0]!.id], at(22.5))
+        expect(asOf.map((r) => [r.id, r.chain])).toEqual([
+          [versions[0]!.id, 'superseded'],
+          [versions[22]!.id, 'current'],
+        ])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
       'stops a chain at a successor that occurred after p_as_of',
       async () => {
         const [a, b, c] = [note('tst asof one', 0), note('tst asof two', 10), note('tst asof three', 20)]

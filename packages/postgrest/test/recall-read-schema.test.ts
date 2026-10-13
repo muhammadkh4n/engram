@@ -76,9 +76,10 @@ describe('recall read functions', () => {
     expect(functionDefinition('engram_recall_items')).not.toMatch(/embedding/)
   })
 
-  it('follows a chain at most 20 hops and has no forgotten-successor state', () => {
+  it('follows a chain to its end with no hop cap, failing on a cycle, and has no forgotten-successor state', () => {
     const body = functionDefinition('engram_recall_items')
-    expect(body).toContain('c_max_hops constant integer := 20;')
+    expect(body).not.toMatch(/FOR v_hop|max_hops/)
+    expect(body).toContain("MESSAGE = 'engram_recall_items: a supersession chain returns to an item it passed'")
     expect(body).not.toContain('successor_forgotten')
   })
 

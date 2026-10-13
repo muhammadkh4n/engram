@@ -397,7 +397,7 @@ Order: band, scope tier (project or plan, workspace, the rest), trust ascending,
 
 **Flags** (sorted): `as_of:<date>` and, at trust 3, `verify_live` on observations and legacy rows; `contradicted_by:<register id>` on a document section naming an active register entry's token; `restated:<n>`; `source_truncated`; `supersedes:<id>`; `successor_retired`; `legacy_superseded`.
 
-**Floor.** `FLOOR_CALIBRATIONS` holds one measured `{ reranker, floor, strong, calibratedAt, dataset, neededInSlate, neededBelowFloor }` per reranker id; a rerank score means something only for the model and dtype that produced it. The table is empty until a floor is measured on real memory, and until then every recall refuses.
+**Floor.** `FLOOR_CALIBRATIONS` holds one measured `{ reranker, floor, strong, calibratedAt, dataset, neededInSlate, neededBelowFloor }` per reranker id; a rerank score means something only for the model and dtype that produced it. The table is empty until a floor is measured on real memory, and until then every recall refuses; so does a recall whose floor was recorded for another reranker than the one serving it.
 
 ## Memory Systems Explained
 

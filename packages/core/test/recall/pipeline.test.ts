@@ -122,6 +122,12 @@ describe('runRecall', () => {
     expect(store.candidates).not.toHaveBeenCalled()
   })
 
+  it('refuses a floor measured for another reranker before any store call', async () => {
+    const { deps, store } = setup({}, { floor: { ...FLOOR, reranker: 'tst-other-reranker' } })
+    await expect(runRecall(deps, req())).rejects.toThrow('recall is not calibrated for reranker tst-reranker')
+    expect(store.storeVersion).not.toHaveBeenCalled()
+  })
+
   it('refuses a request its filters cannot answer before any store call', async () => {
     const { deps, store } = setup()
     await expect(runRecall(deps, req({ kinds: ['commit'] }))).rejects.toBeInstanceOf(RecallRequestError)

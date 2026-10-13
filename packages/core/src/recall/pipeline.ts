@@ -36,7 +36,7 @@ export interface RecallDeps {
   hyde?: ModelStepDeps['hyde']
   /** The calendar date the expansion prompt states for an instant. */
   referenceDate(now: Date): string
-  /** The measured floor for `rerank.id`; null when none is recorded. */
+  /** The measured floor for `rerank.id`; null when none is recorded. A floor recorded for another reranker is refused. */
   floor: FloorCalibration | null
   versions: ModelStepVersions
   now(): Date
@@ -145,7 +145,9 @@ interface Inputs {
 export async function runRecall(deps: RecallDeps, request: RecallRequest): Promise<{ response: RecallResponse; trace: RecallTrace }> {
   const started = performance.now()
   const floor = deps.floor
-  if (floor === null) throw new RecallNotCalibratedError(deps.rerank.id)
+  // A floor measured on another reranker's scores is no floor at all: the
+  // server may fall back to a different reranker than the one calibrated.
+  if (floor === null || floor.reranker !== deps.rerank.id) throw new RecallNotCalibratedError(deps.rerank.id)
   const filters = effectiveFilters(request)
   if ('error' in filters) throw new RecallRequestError(filters.error)
 

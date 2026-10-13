@@ -8164,7 +8164,11 @@ $$;
 
 -- One row per requested id that is not forgotten, in p_ids order, then one row
 -- per chain end that was not requested, by id. A chain follows superseded_by
--- for at most 20 hops; a successor counts only when it occurred at or before
+-- to its end, however long: a vault section gains one link per edit, so a cap
+-- would show a superseded version as current. The walk always ends, because a
+-- successor must occur strictly later than the item it replaces
+-- (memory_items_before_update, engram_supersede_item); an item met twice
+-- would break that rule and fails the call. A successor counts only when it occurred at or before
 -- p_as_of (when set), and one retired as of p_as_of ends the chain as
 -- successor_retired, with no current item. A forgotten successor never ends a
 -- chain: forgetting an item re-points every live predecessor past it
@@ -8186,8 +8190,8 @@ CREATE OR REPLACE FUNCTION public.engram_recall_items(p_ids uuid[], p_as_of time
     AS $$
 DECLARE
   c_max_ids constant integer := 500;
-  c_max_hops constant integer := 20;
   v_ids uuid[];
+  v_seen uuid[];
   v_ends uuid[] := '{}';
   v_chains text[] := '{}';
   v_id uuid;
@@ -8223,9 +8227,15 @@ BEGIN
     v_cur := v_id;
     v_chain := 'current';
     v_end := v_id;
-    FOR v_hop IN 1 .. c_max_hops LOOP
+    v_seen := ARRAY[v_id];
+    LOOP
       SELECT i.superseded_by INTO v_next FROM public.memory_items i WHERE i.id = v_cur;
       EXIT WHEN v_next IS NULL;
+      IF v_next = ANY (v_seen) THEN
+        RAISE EXCEPTION USING ERRCODE = 'internal_error',
+          MESSAGE = 'engram_recall_items: a supersession chain returns to an item it passed';
+      END IF;
+      v_seen := v_seen || v_next;
       SELECT i.occurred_at, i.retired_at, i.forgotten_at INTO v_step FROM public.memory_items i WHERE i.id = v_next;
       EXIT WHEN NOT FOUND OR v_step.forgotten_at IS NOT NULL;
       EXIT WHEN p_as_of IS NOT NULL AND v_step.occurred_at > p_as_of;
