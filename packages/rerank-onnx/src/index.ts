@@ -36,7 +36,10 @@ export interface OnnxRerankerOptions {
    *   - 'mixedbread-ai/mxbai-rerank-xsmall-v1': fastest mxbai, further quality drop
    *
    * Scores are not comparable across models: each model's sigmoid output sits
-   * on its own scale, so nothing may gate on an absolute rerank score.
+   * on its own scale, so nothing may gate on an absolute rerank score. A gate
+   * on a rerank score holds only for the model and dtype it was calibrated
+   * on: the recall floor is measured and recorded per reranker id, which
+   * names both.
    */
   model?: string
   /** ONNX weight dtype. 'q8' is ~4x smaller than fp32 with small quality loss. Default: 'q8'. */

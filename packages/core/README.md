@@ -376,6 +376,29 @@ Release resources. Conversation priming state is in-process only and is discarde
 await memory.dispose()
 ```
 
+## Recall core
+
+`runRecall(deps, request)` answers one recall over the typed item store and returns `{ response, trace }`. It is a separate path from `Memory.recall`, which keeps the old engine.
+
+**Request.** `{ query, channel, scope, classes?, kinds?, excludeSessionId?, asOf?, limit?, maxChars?, budgetChars?, includeHistory? }`. `channel` is one of `prompt`, `agent_dispatch`, `executor_start`, `hand_recall`, `session_start`, `mcp`, `replay`, `calibration`; `scope` holds `projectId`, `workspaceId`, `planSlugs` or `atRoot` and orders results without removing any.
+
+**Channel defaults** (`effectiveFilters`). Without `classes`: utterances, MK statements, observations, artifacts and document sections. The history kinds (`assistant_turn`, `commit`, `pr`, `plan_ledger_log`, `session`) and the `session_index` class come only with `includeHistory`, and naming one without it is an error; `legacy` comes only when named. A kind filter is one flat list across the classes searched; a kind no searched class has is an error. The `prompt` channel shows observations only up to `PROMPT_OBSERVATION_MAX_TRUST`: `2`, so verified observations (every evidence pointer checked) appear and unverified ones never do. Every other channel takes observations of any trust.
+
+**Pipeline.**
+1. Refuse with `RecallNotCalibratedError`, before any store call, when no floor is recorded for the reranker in use.
+2. In parallel, through `ModelSteps`: the query embedding; expansion for a temporal, multi-hop or lookup question; HyDE for a temporal or multi-hop one. Each runs at temperature 0 behind a persistent cache (`RecallStore.cacheGet` and `cachePut`), keyed by the step version, the expansion's reference date and the normalised input; vectors are rounded to single precision on both the fresh and the cached path, so every call searches with the same numbers.
+3. One candidate call with the effective filters, every input that is set, the lexical terms of the query and expansion (identifiers such as `index.ts` stay whole) and the entities the extraction rules find in the query.
+4. Reciprocal rank fusion (k = 60) with a full tie-break; the slate is the first 50.
+5. The reranker scores subject plus search text against the query; items below the floor are dropped; band A is at or above the strong score.
+6. If nothing passed and HyDE did not run: HyDE's vector alone gets one more candidate call and the next 50 unscored items are reranked.
+7. Supersession as of `asOf`: a replaced item gives its place to its current successor, which names what it replaced. Superseded, retired and legacy-superseded items appear only with `includeHistory`. A chain end is checked against the same filters, and one from the excluded session hides its predecessors.
+
+Order: band, scope tier (project or plan, workspace, the rest), trust ascending, score, newest, id. A failed embedding, expansion, HyDE or reranker degrades the recall and names it in `degraded`; a failed store read fails it. A recall writes no item state.
+
+**Flags** (sorted): `as_of:<date>` and, at trust 3, `verify_live` on observations and legacy rows; `contradicted_by:<register id>` on a document section naming an active register entry's token; `restated:<n>`; `source_truncated`; `supersedes:<id>`; `successor_retired`; `legacy_superseded`.
+
+**Floor.** `FLOOR_CALIBRATIONS` holds one measured `{ reranker, floor, strong, calibratedAt, dataset, neededInSlate, neededBelowFloor }` per reranker id; a rerank score means something only for the model and dtype that produced it. The table is empty until a floor is measured on real memory, and until then every recall refuses.
+
 ## Memory Systems Explained
 
 ### Sensory Buffer (Working Memory)
