@@ -8165,10 +8165,12 @@ $$;
 -- One row per requested id that is not forgotten, in p_ids order, then one row
 -- per chain end that was not requested, by id. A chain follows superseded_by
 -- to its end, however long: a vault section gains one link per edit, so a cap
--- would show a superseded version as current. The walk always ends, because a
--- successor must occur strictly later than the item it replaces
--- (memory_items_before_update, engram_supersede_item); an item met twice
--- would break that rule and fails the call. A successor counts only when it occurred at or before
+-- would show a superseded version as current. Every chain is walked in one
+-- recursive statement, one index lookup per hop. The walk always ends, because
+-- a successor must occur strictly later than the item it replaces
+-- (memory_items_before_insert, memory_items_before_update, the deferred
+-- memory_items_supersession check); a hop to a successor that does not fails
+-- the call, so a broken chain can never loop. A successor counts only when it occurred at or before
 -- p_as_of (when set), and one retired as of p_as_of ends the chain as
 -- successor_retired, with no current item. A forgotten successor never ends a
 -- chain: forgetting an item re-points every live predecessor past it
@@ -8191,15 +8193,9 @@ CREATE OR REPLACE FUNCTION public.engram_recall_items(p_ids uuid[], p_as_of time
 DECLARE
   c_max_ids constant integer := 500;
   v_ids uuid[];
-  v_seen uuid[];
-  v_ends uuid[] := '{}';
-  v_chains text[] := '{}';
-  v_id uuid;
-  v_cur uuid;
-  v_next uuid;
-  v_step record;
-  v_chain text;
-  v_end uuid;
+  v_ends uuid[];
+  v_chains text[];
+  v_broken boolean;
 BEGIN
   IF p_ids IS NULL THEN
     RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
@@ -8223,34 +8219,51 @@ BEGIN
       JOIN public.memory_items i ON i.id = r.id AND i.forgotten_at IS NULL
      ORDER BY r.ord);
 
-  FOREACH v_id IN ARRAY v_ids LOOP
-    v_cur := v_id;
-    v_chain := 'current';
-    v_end := v_id;
-    v_seen := ARRAY[v_id];
-    LOOP
-      SELECT i.superseded_by INTO v_next FROM public.memory_items i WHERE i.id = v_cur;
-      EXIT WHEN v_next IS NULL;
-      IF v_next = ANY (v_seen) THEN
-        RAISE EXCEPTION USING ERRCODE = 'internal_error',
-          MESSAGE = 'engram_recall_items: a supersession chain returns to an item it passed';
-      END IF;
-      v_seen := v_seen || v_next;
-      SELECT i.occurred_at, i.retired_at, i.forgotten_at INTO v_step FROM public.memory_items i WHERE i.id = v_next;
-      EXIT WHEN NOT FOUND OR v_step.forgotten_at IS NOT NULL;
-      EXIT WHEN p_as_of IS NOT NULL AND v_step.occurred_at > p_as_of;
-      IF v_step.retired_at IS NOT NULL AND (p_as_of IS NULL OR v_step.retired_at <= p_as_of) THEN
-        v_chain := 'successor_retired';
-        v_end := NULL;
-        EXIT;
-      END IF;
-      v_cur := v_next;
-      v_chain := 'superseded';
-      v_end := v_next;
-    END LOOP;
-    v_ends := v_ends || v_end;
-    v_chains := v_chains || v_chain;
-  END LOOP;
+  -- A hop is taken only to a successor that counts as of p_as_of and occurred
+  -- strictly later; each walk's last row then says why it stopped.
+  WITH RECURSIVE walk(start_id, node_id, node_at, next_id, depth) AS (
+    SELECT i.id, i.id, i.occurred_at, i.superseded_by, 0
+      FROM public.memory_items i
+     WHERE i.id = ANY (v_ids)
+    UNION ALL
+    SELECT w.start_id, s.id, s.occurred_at, s.superseded_by, w.depth + 1
+      FROM walk w
+      JOIN public.memory_items s ON s.id = w.next_id
+     WHERE s.forgotten_at IS NULL
+       AND (p_as_of IS NULL OR s.occurred_at <= p_as_of)
+       AND (s.retired_at IS NULL OR (p_as_of IS NOT NULL AND s.retired_at > p_as_of))
+       AND s.occurred_at > w.node_at
+  ), last AS (
+    SELECT DISTINCT ON (w.start_id) w.start_id, w.node_id, w.node_at, w.next_id, w.depth
+      FROM walk w
+     ORDER BY w.start_id, w.depth DESC
+  ), stopped AS (
+    SELECT l.start_id,
+           CASE
+             WHEN s.id IS NULL OR s.forgotten_at IS NOT NULL THEN 'end'
+             WHEN p_as_of IS NOT NULL AND s.occurred_at > p_as_of THEN 'end'
+             WHEN s.retired_at IS NOT NULL AND (p_as_of IS NULL OR s.retired_at <= p_as_of) THEN 'retired'
+             ELSE 'broken'
+           END AS why,
+           l.node_id,
+           l.depth
+      FROM last l
+      LEFT JOIN public.memory_items s ON s.id = l.next_id
+  )
+  SELECT array_agg(CASE WHEN st.why = 'end' THEN st.node_id END ORDER BY u.ord),
+         array_agg(CASE WHEN st.why = 'retired' THEN 'successor_retired'
+                        WHEN st.depth = 0 THEN 'current'
+                        ELSE 'superseded' END ORDER BY u.ord),
+         coalesce(bool_or(st.why = 'broken'), false)
+    INTO v_ends, v_chains, v_broken
+    FROM unnest(v_ids) WITH ORDINALITY AS u(id, ord)
+    JOIN stopped st ON st.start_id = u.id;
+  IF v_broken THEN
+    RAISE EXCEPTION USING ERRCODE = 'internal_error',
+      MESSAGE = 'engram_recall_items: a supersession chain names a successor that did not occur later';
+  END IF;
+  v_ends := coalesce(v_ends, '{}');
+  v_chains := coalesce(v_chains, '{}');
 
   RETURN QUERY
   WITH st AS (

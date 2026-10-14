@@ -76,10 +76,12 @@ describe('recall read functions', () => {
     expect(functionDefinition('engram_recall_items')).not.toMatch(/embedding/)
   })
 
-  it('follows a chain to its end with no hop cap, failing on a cycle, and has no forgotten-successor state', () => {
+  it('walks every chain in one recursive statement with no hop cap, failing on a successor not later, and has no forgotten-successor state', () => {
     const body = functionDefinition('engram_recall_items')
-    expect(body).not.toMatch(/FOR v_hop|max_hops/)
-    expect(body).toContain("MESSAGE = 'engram_recall_items: a supersession chain returns to an item it passed'")
+    expect(body).not.toMatch(/FOR v_hop|max_hops|FOREACH|v_seen/)
+    expect(squash(body)).toContain('WITH RECURSIVE walk(start_id, node_id, node_at, next_id, depth) AS (')
+    expect(squash(body)).toContain('AND s.occurred_at > w.node_at')
+    expect(body).toContain("MESSAGE = 'engram_recall_items: a supersession chain names a successor that did not occur later'")
     expect(body).not.toContain('successor_forgotten')
   })
 

@@ -233,6 +233,59 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     )
 
     it(
+      'resolves 500 requested ids along one 600-version chain in one call, each to the version current as of the call',
+      async () => {
+        const versions = Array.from({ length: 600 }, (_, k) => note(`tst long chain ${k}`, k))
+        await insert(versions)
+        await pg.psql(
+          versions
+            .slice(1)
+            .map((v, k) => `SELECT public.engram_supersede_item(${lit(versions[k]!.id)}, ${lit(v.id)});`)
+            .join('\n'),
+        )
+        const last = versions[599]!
+        const requested = versions.slice(0, 500).map((v) => v.id)
+
+        const rows = await recallItems(requested)
+        expect(rows.map((r) => [r.id, r.requested, r.chain, r.current_id])).toEqual([
+          ...requested.map((id) => [id, true, 'superseded', last.id]),
+          [last.id, false, 'current', last.id],
+        ])
+
+        const cut = versions[299]!
+        const asOf = await recallItems(requested, at(299.5))
+        expect(asOf.map((r) => [r.id, r.chain, r.current_id])).toEqual(
+          requested.map((id, k) => (k < 299 ? [id, 'superseded', cut.id] : [id, 'current', id])),
+        )
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'fails rather than loops on a chain whose successor did not occur later, and only on a hop it takes',
+      async () => {
+        const [a, b, c] = [note('tst loop one', 0), note('tst loop two', 1), note('tst loop free', 2)]
+        const [d, e] = [note('tst same time one', 5), note('tst same time two', 5)]
+        await insert([a, b, c, d, e])
+        await supersede(a.id, b.id)
+        // Every write path refuses these pointers, so they are stored with triggers off; valid_to keeps the row CHECK.
+        await pg.psql(`SET session_replication_role = replica;
+          UPDATE public.memory_items SET superseded_by = ${lit(a.id)}, valid_to = occurred_at WHERE id = ${lit(b.id)};
+          UPDATE public.memory_items SET superseded_by = ${lit(e.id)}, valid_to = occurred_at WHERE id = ${lit(d.id)};`)
+
+        for (const ids of [[a.id], [b.id], [c.id, a.id], [d.id]]) {
+          await expect(recallItems(ids)).rejects.toThrow(/a supersession chain names a successor that did not occur later/)
+        }
+        expect((await recallItems([c.id, e.id])).map((r) => [r.id, r.chain])).toEqual([
+          [c.id, 'current'],
+          [e.id, 'current'],
+        ])
+        expect((await recallItems([a.id], at(0.5))).map((r) => [r.id, r.chain, r.current_id])).toEqual([[a.id, 'current', a.id]])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
       'stops a chain at a successor that occurred after p_as_of',
       async () => {
         const [a, b, c] = [note('tst asof one', 0), note('tst asof two', 10), note('tst asof three', 20)]
