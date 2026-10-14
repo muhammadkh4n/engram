@@ -145,11 +145,11 @@ describe('resolveItems', () => {
 })
 
 describe('itemFlags', () => {
-  const tokens: RegisterToken[] = [{ registerId: 'R-TST-1', token: 'tst-legacy-db' }]
+  const tokens: RegisterToken[] = [{ registerId: 'R-TST-0', token: 'tst-legacy-db' }]
 
   it('flags a section naming an active register token, even one that agrees with the ruling', () => {
-    expect(itemFlags(row('s', { contentHead: 'We still run tst-legacy-db for exports.' }), tokens)).toEqual(['contradicted_by:R-TST-1'])
-    expect(itemFlags(row('s', { contentHead: 'We removed tst-legacy-db last week.' }), tokens)).toEqual(['contradicted_by:R-TST-1'])
+    expect(itemFlags(row('s', { contentHead: 'We still run tst-legacy-db for exports.' }), tokens)).toEqual(['contradicted_by:R-TST-0'])
+    expect(itemFlags(row('s', { contentHead: 'We removed tst-legacy-db last week.' }), tokens)).toEqual(['contradicted_by:R-TST-0'])
     expect(itemFlags(row('s', { contentHead: 'Nothing about it here.' }), tokens)).toEqual([])
     expect(itemFlags(row('s', { contentHead: 'tst-legacy-db' }), [])).toEqual([])
   })
@@ -201,7 +201,7 @@ describe('sourceRef', () => {
     [{ type: 'git', repo: 'tst-repo', sha: 'abc1234' }, 'tst-repo abc1234'],
     [{ type: 'ledger', plan: 'tst-plan', decision_id: 'TST-D1', class: 'A' }, 'tst-plan TST-D1'],
     [{ type: 'ledger', plan: 'tst-plan', phase: '02', task: '2.1' }, 'tst-plan 02 2.1'],
-    [{ type: 'register', id: 'R-TST-1', file: 'Tst/Rulings.md', status: 'active' }, 'Tst/Rulings.md R-TST-1'],
+    [{ type: 'register', id: 'R-TST-0', file: 'Tst/Rulings.md', status: 'active' }, 'Tst/Rulings.md R-TST-0'],
     [{ type: 'register', id: 'R-TST-2' }, 'R-TST-2'],
     [{ type: 'vault', path: 'Tst/Note.md', heading_path: ['Top', 'Sub'], ordinal: 0 }, 'Tst/Note.md Top > Sub'],
     [{ type: 'vault', path: 'Tst/Note.md', heading_path: ['Top'], ordinal: 2 }, 'Tst/Note.md Top #2'],

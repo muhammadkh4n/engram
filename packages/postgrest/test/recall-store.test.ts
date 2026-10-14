@@ -101,9 +101,9 @@ describe('PostgRestRecallStore', () => {
   it('repeats a failed read once', async () => {
     const mock = mockClient([
       { data: null, error: { code: '08006', message: 'connection failure' } },
-      { data: [{ register_id: 'R-TST-1', token: 'tst-token' }], error: null },
+      { data: [{ register_id: 'R-TST-0', token: 'tst-token' }], error: null },
     ])
-    expect(await storeWith(mock.client).registerTokens()).toEqual([{ registerId: 'R-TST-1', token: 'tst-token' }])
+    expect(await storeWith(mock.client).registerTokens()).toEqual([{ registerId: 'R-TST-0', token: 'tst-token' }])
     expect(mock.calls.map((c) => c.fn)).toEqual(['engram_active_register_tokens', 'engram_active_register_tokens'])
   })
 

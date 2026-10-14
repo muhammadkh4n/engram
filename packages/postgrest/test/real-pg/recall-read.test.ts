@@ -429,7 +429,7 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     it(
       'gives each applies_to string of the entries in force as of a time',
       async () => {
-        const active = registerEntry('R-TST-1', 'active', ['tst-legacy-db', 'tst/path'], 0)
+        const active = registerEntry('R-TST-0', 'active', ['tst-legacy-db', 'tst/path'], 0)
         const empty = registerEntry('R-TST-2', 'active', [], 0)
         const missing = registerEntry('R-TST-3', 'active', null, 0)
         const withdrawn = registerEntry('R-TST-4', 'withdrawn', ['tst-withdrawn'], 0)
@@ -440,13 +440,13 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
 
         // R-TST-2 and R-TST-3 have no token; R-TST-4 is not active.
         expect(await tokens()).toEqual([
-          ['R-TST-1', 'tst-legacy-db'],
-          ['R-TST-1', 'tst/path'],
+          ['R-TST-0', 'tst-legacy-db'],
+          ['R-TST-0', 'tst/path'],
           ['R-TST-5', 'tst-new-token'],
         ])
         expect(await tokens(at(10))).toEqual([
-          ['R-TST-1', 'tst-legacy-db'],
-          ['R-TST-1', 'tst/path'],
+          ['R-TST-0', 'tst-legacy-db'],
+          ['R-TST-0', 'tst/path'],
           ['R-TST-5', 'tst-old-token'],
         ])
       },

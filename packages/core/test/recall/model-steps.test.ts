@@ -65,7 +65,7 @@ describe('step keys', () => {
 
   it('formats the versions', () => {
     expect(embeddingStepVersion('text-embedding-3-small', 1536)).toBe('openai:text-embedding-3-small:1536')
-    expect(chatStepVersion('gpt-4o-mini', 1)).toBe('gpt-4o-mini:1')
+    expect(chatStepVersion('tst-chat-model', 1)).toBe('tst-chat-model:1')
   })
 })
 
