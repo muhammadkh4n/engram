@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CandidateQueryError, type Candidate, type CandidateRequest } from '../../src/items/item-store.js'
 import type { FloorCalibration } from '../../src/recall/floor-calibration.js'
-import { RecallNotCalibratedError, RecallRequestError, runRecall, type RecallDeps } from '../../src/recall/pipeline.js'
-import type { RecallItemRow, RecallRequest, RecallStore } from '../../src/recall/types.js'
+import { RecallNotCalibratedError, RecallRequestError, runRecall, scoreSlate, type RecallDeps } from '../../src/recall/pipeline.js'
+import type { AssociationLink, AssociationRequest, RecallItemRow, RecallRequest, RecallStore } from '../../src/recall/types.js'
 
 const FLOOR: FloorCalibration = {
   reranker: 'tst-reranker',
@@ -51,6 +51,7 @@ interface Fixture {
   scores?: Record<string, number>
   projects?: Array<{ id: string; kind: string }>
   workspaces?: Record<string, string>
+  links?: AssociationLink[]
 }
 
 const cand = (itemId: string, leg: Candidate['leg'], rank: number): Candidate => ({ itemId, leg, rank, rawScore: 0, path: null })
@@ -60,6 +61,7 @@ function setup(fx: Fixture = {}, overrides: Partial<RecallDeps> = {}) {
   const candidateCalls: CandidateRequest[] = []
   const itemCalls: string[][] = []
   const rerankCalls: string[][] = []
+  const associationCalls: AssociationRequest[] = []
   let version = 7
   const store: RecallStore = {
     candidates: vi.fn(async (req: CandidateRequest) => {
@@ -70,6 +72,10 @@ function setup(fx: Fixture = {}, overrides: Partial<RecallDeps> = {}) {
     items: vi.fn(async (ids: readonly string[]) => {
       itemCalls.push([...ids])
       return ids.flatMap((id) => (rows.has(id) ? [rows.get(id)!] : []))
+    }),
+    associations: vi.fn(async (a: AssociationRequest) => {
+      associationCalls.push(a)
+      return fx.links ?? []
     }),
     registerTokens: vi.fn(async () => []),
     storeVersion: vi.fn(async () => version++),
@@ -103,7 +109,7 @@ function setup(fx: Fixture = {}, overrides: Partial<RecallDeps> = {}) {
     now: () => T0,
     ...overrides,
   }
-  return { deps, store, candidateCalls, itemCalls, rerankCalls }
+  return { deps, store, candidateCalls, itemCalls, rerankCalls, associationCalls }
 }
 
 const req = (overrides: Partial<RecallRequest> = {}): RecallRequest => ({
@@ -185,7 +191,7 @@ describe('runRecall', () => {
     expect(rerankCalls[0]).toEqual(rows.slice(0, 50).map((r) => r.id))
     expect(response.items).toHaveLength(25)
     expect(response.items.every((i) => Number(i.id.slice(5)) % 2 === 0)).toBe(true)
-    expect(trace.counts).toEqual({ candidates: 60, slate: 50, scored: 50, passed: 25 })
+    expect(trace.counts).toEqual({ candidates: 60, slate: 50, scored: 50, passed: 25, associations: 0 })
   })
 
   it('reranks the subject label and the search text', async () => {
@@ -329,5 +335,111 @@ describe('runRecall', () => {
     expect(byId.get('stmt')!.question).toBe('tst question?')
     expect(byId.get('note')!.question).toBeUndefined()
     expect(byId.get('note')!.text).toBe('text of note')
+  })
+})
+
+describe('runRecall associations', () => {
+  const link = (itemId: string, source: AssociationLink['source'], seedId: string, rank = 1): AssociationLink => ({ itemId, source, seedId, rank })
+  const queryRows = ['q1', 'q2', 'q3', 'q4'].map((id) => row(id))
+
+  it('follows the first three shown query items and shows new linked items at or above the floor after them', async () => {
+    const assoc = [row('a1'), row('a2'), row('a3')]
+    const { deps, associationCalls, itemCalls, rerankCalls } = setup({
+      rows: [...queryRows, ...assoc],
+      candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))],
+      scores: { a1: 0.8, a2: 0.1, a3: 0.5 },
+      links: [link('a2', 'subject', 'q1'), link('a1', 'entity', 'q1'), link('q2', 'lineage', 'q1'), link('a3', 'subject', 'q2')],
+    })
+    const { response, trace } = await runRecall(deps, req())
+    expect(associationCalls).toEqual([
+      {
+        seedIds: ['q1', 'q2', 'q3'],
+        classes: ['utterance', 'mk_statement', 'observation', 'artifact', 'document_section'],
+        kinds: associationCalls[0]!.kinds,
+        includeHistory: false,
+        perSource: 2,
+      },
+    ])
+    expect(itemCalls.at(-1)).toEqual(['a2', 'a1', 'a3'])
+    expect(rerankCalls.at(-1)).toEqual(['a2', 'a1', 'a3'])
+    expect(response.items.map((i) => [i.id, i.via])).toEqual([
+      ['q1', 'query'],
+      ['q2', 'query'],
+      ['q3', 'query'],
+      ['q4', 'query'],
+      ['a1', 'association'],
+      ['a3', 'association'],
+    ])
+    expect(trace.counts.associations).toBe(2)
+  })
+
+  it('gives the association call the same filters as the candidate call', async () => {
+    const { deps, associationCalls, candidateCalls } = setup({ rows: queryRows, candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))] })
+    await runRecall(deps, req({ channel: 'prompt', excludeSessionId: 'tst-session', asOf: T0, includeHistory: false }))
+    const a = associationCalls[0]!
+    const c = candidateCalls[0]!
+    expect([a.classes, a.kinds, a.maxObservationTrust, a.excludeSessionId, a.asOf]).toEqual([c.classes, c.kinds, 2, 'tst-session', T0])
+  })
+
+  it('follows no link when the reranker failed on the query items', async () => {
+    const { deps, store } = setup({ rows: queryRows, candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))] })
+    vi.mocked(deps.rerank.rerank).mockRejectedValue(new Error('tst reranker down'))
+    const { response } = await runRecall(deps, req())
+    expect(store.associations).not.toHaveBeenCalled()
+    expect(response.degraded?.rerank).toBeDefined()
+  })
+
+  it('drops the associations, keeping the query items, when their rerank fails', async () => {
+    const { deps } = setup({
+      rows: [...queryRows, row('a1')],
+      candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))],
+      links: [link('a1', 'subject', 'q1')],
+    })
+    const rerank = vi.mocked(deps.rerank.rerank)
+    const first = rerank.getMockImplementation()!
+    rerank.mockImplementationOnce(first).mockRejectedValueOnce(new Error('tst reranker down'))
+    const { response } = await runRecall(deps, req())
+    expect(response.items.map((i) => i.id)).toEqual(['q1', 'q2', 'q3', 'q4'])
+    expect(response.degraded?.rerank).toBeDefined()
+  })
+
+  it('follows no link when the limit is already filled, and counts the rest as over the limit', async () => {
+    const { deps, store } = setup({ rows: queryRows, candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))] })
+    const { response } = await runRecall(deps, req({ limit: 2 }))
+    expect(store.associations).not.toHaveBeenCalled()
+    expect(response.omitted).toEqual({ limit: 2, budget: 0, uncuttable: 0 })
+  })
+
+  it('gives byte-identical JSON for the same inputs twice', async () => {
+    const run = async () => {
+      const { deps } = setup({
+        rows: [...queryRows, row('a1'), row('a3')],
+        candidates: [queryRows.map((r, i) => cand(r.id, 'bm25', i + 1))],
+        scores: { a1: 0.8, a3: 0.5 },
+        links: [link('a1', 'entity', 'q1'), link('a3', 'subject', 'q2')],
+      })
+      return JSON.stringify((await runRecall(deps, req())).response)
+    }
+    expect(await run()).toBe(await run())
+  })
+})
+
+describe('scoreSlate', () => {
+  it('scores the whole slate with no floor, below-floor items included, and runs no rescue', async () => {
+    const rows = [row('a'), row('b')]
+    const { deps, candidateCalls } = setup({ rows, candidates: [rows.map((r, i) => cand(r.id, 'bm25', i + 1))], scores: { a: 0.9, b: 0.01 } }, { floor: null })
+    const { items } = await scoreSlate(deps, req())
+    expect(items.map((s) => [s.row.id, s.score])).toEqual([
+      ['a', 0.9],
+      ['b', 0.01],
+    ])
+    expect(candidateCalls).toHaveLength(1)
+  })
+
+  it('fails when the reranker fails, since a slate with no scores measures nothing', async () => {
+    const rows = [row('a')]
+    const { deps } = setup({ rows, candidates: [[cand('a', 'bm25', 1)]] })
+    vi.mocked(deps.rerank.rerank).mockRejectedValue(new Error('tst reranker down'))
+    await expect(scoreSlate(deps, req())).rejects.toThrow(/^the reranker failed/)
   })
 })

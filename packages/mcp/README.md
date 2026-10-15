@@ -220,6 +220,64 @@ Its schema has no capture options. Hook and CLI captures go through the HTTP ser
 - Status: 200 for every other pipeline outcome, rejections included; 400 invalid JSON or body (`retryable: false`); 413 body above 1 MiB (`retryable: false`); 422 unclassifiable (`retryable: false`); 500 any other failure after validation, or a request body that could not be read (`retryable: true`, generic message, detail in the server log); 405 for methods other than POST.
 - The local `engram-ingest` CLI exits 1 on an unclassifiable turn, as on any other failure. It needs `OPENAI_API_KEY` whenever it calls a model or the store; `--raw --dry-run` calls neither and needs no credentials.
 
+## Recall route (HTTP server)
+
+`POST /recall` on `engram-mcp-http` runs one recall over the typed item store and returns current, attributed items. It sits behind the MCP bearer (`Authorization: Bearer $BEARER_TOKEN`); the capture and documents tokens get 401. Body at most 64 KiB.
+
+**Request** (JSON object; any unknown key, at the top or in `scope`, is a 400; values out of range are a 400, never clamped):
+
+| Field | Type | Notes |
+|---|---|---|
+| `query` | string, required | 1 to 2,000 characters after trimming |
+| `channel` | string, required | `prompt`, `agent_dispatch`, `executor_start`, `hand_recall`, `session_start`, `mcp`, `replay` or `calibration` |
+| `scope` | object, required (may be `{}`) | `project_id` (a repository id; `global`, `none` and `shared` mean none), `workspace_id`, `plan_slugs` (1 to 10 kebab-case slugs), `at_root` (with `project_id` it is a 400). Scope orders results and never removes one |
+| `classes` | string list | Non-empty, known classes, no repeats. Default: every class but `legacy`, which comes only when named, and `session_index`, which needs history |
+| `kinds` | string list | Non-empty; each a kind of a searched class |
+| `exclude_session_id` | string | 1 to 256 characters; that session's items, and items built from them, are left out |
+| `as_of` | string | ISO 8601 with an offset, at most 5 minutes ahead of the server clock |
+| `limit` | integer | 1 to 30, default 12 |
+| `max_chars` | integer | 200 to 4,000, default 1,500: characters per item text |
+| `budget_chars` | integer | 1,000 to 12,000, default 9,000: text plus question characters across all items |
+| `include_history` | boolean | Default `false`; needed for commits, PRs, assistant turns, ledger work logs and session indexes, and to see retired and replaced items |
+
+The `prompt` channel shows only observations whose every evidence pointer was verified (trust 2).
+
+**Response 200:**
+
+```json
+{ "items": [ { "id": "…", "class": "mk_statement", "kind": "ruling", "speaker": "mk", "trust": 0,
+               "occurred_at": "…", "project_id": "engram", "session_id": "…", "subject": "…",
+               "text": "…", "question": "…", "source": { "type": "transcript", "ref": "…" },
+               "status": "current", "flags": [], "via": "query" } ],
+  "omitted": { "limit": 0, "budget": 0, "uncuttable": 0 },
+  "degraded": { "rerank": "…" } }
+```
+
+- Items are current by construction: a matched item a later live item replaced gives its place to that item (flagged `supersedes:<id>`), and the replaced one follows it only with `include_history`. Absent optional fields are left out, never null.
+- `text` is verbatim. Over `max_chars` it is cut at the last sentence boundary outside a quote and flagged `cut`; an MK statement, register entry or plan decision is never cut: it shows whole or is counted in `omitted.uncuttable`. A question keeps its last 600 characters.
+- `via: "association"` marks an item linked to one of the first three shown (same subject, a shared entity, lineage), reranked and kept above the floor like any other; associations take at most 30% of the budget.
+- `omitted` counts the items that passed the floor and were not shown: past the limit, past the budget, or uncuttable.
+- Flags: `as_of:<date>`, `verify_live`, `contradicted_by:<register id>`, `restated:<n>`, `cut`, `source_truncated`, `successor_retired`, `legacy_superseded`, `supersedes:<id>`.
+- `degraded` names a stage that failed and was skipped (`vector`, `rerank`, `expansion`, `hyde`).
+
+**Other statuses:** 400 `{"error"}` (invalid JSON, a rule broken; the message names it); 401; 405 (not POST); 413; 500 `{"error":"recall failed"}` with the cause, scrubbed, on stderr only; 503 `{"error":"recall is not calibrated for reranker <id>"}`.
+
+**The floor.** Rerank scores are on each model's own scale, so recall keeps an item only above a floor measured for the reranker in use (`onnx:<model>:q8` with `ENGRAM_RERANK_LOCAL=true`, else `openai:<chat model>`). Until a measured entry for that id is in the floor table (`packages/core/src/recall/floor-calibration.ts`), every call answers 503. `engram-recall-calibrate` measures it.
+
+**The log.** With `ENGRAM_RECALL_LOG` set, each call appends one JSON line (`v: 2`) through the recall log's queue, rotation and secret scrub: `ts`, `channel`, `request_fp`, `query`, `scope`, the effective `classes` and `kinds`, `include_history`, `as_of`, `exclude_session` (a boolean; the session id is never written), `limit`, `max_chars`, `budget_chars`, `reference_date`, `server`, `reranker`, `floor`, `strong`, `store_version` (before and after), `items` (`id`, `rank`, `via`, `status`, `chars`), `total_chars`, `omitted`, `degraded` (keys), `steps` (`expansion`, `hyde`, `rescue`), `project_known`, `timings` and `output_fp`. `request_fp` is the sha256 of the request with sorted keys and defaults applied (the excluded session only as its hash), the reference date, server version, reranker and floor; `output_fp` the sha256 of the shown `(id, text, question, status, flags)`.
+
+**`engram-recall-invariants --log <file> [--log <file>]...`** counts, over the v2 lines, what a recall must never do: `forgotten_or_retired_shown` (an item shown after it was forgotten, or retired when the call did not ask for history; read now through the item states), `over_budget` (`total_chars` above `budget_chars`) and `nondeterministic_pairs` (one request on one unchanged store, with no degraded stage, giving more than one output). It prints JSON with each count and up to 10 `file:line` places, no query text, writes nothing, and exits 1 when any count is above 0. Needs `SUPABASE_URL` and `SUPABASE_KEY`.
+
+**`engram-recall-calibrate`** measures the floor on a database copy on this machine (it refuses a `SUPABASE_URL` whose host is not `127.0.0.1` or `localhost`):
+
+```
+engram-recall-calibrate --replay cases.jsonl --channels profile.json \
+  [--calibration-before 2026-09-29T19:00:00Z] [--split calibration|check|all] \
+  [--gold gold.jsonl] --report report.json
+```
+
+It scores each request as recall would, with no floor: reviewed cases on a query-lane channel, each on its own channel with the profile's fields, its scope and its decision time; gold rows on the `calibration` channel with `legacy` added to the classes. A slate item is needed when the case names its id or legacy id, or holds every phrase of one of its phrase groups; a gold row's stale ids count as neither needed nor noise. Then: n = the needed items that reached a slate; F = the largest value on the 0.005 grid at which at most max(1, ⌊0.01·n⌋) needed items score below it; S = the median needed score rounded down to the grid, or F when lower. It prints n, F, S and a ready floor entry, and the report holds ids and scores only, never text.
+
 ## Capture clients (hooks and ingest CLIs)
 
 `engram-ingest` (git post-commit, the Stop and UserPromptSubmit hooks), `engram-session-summary` (SessionEnd) and the pre-compact hook run in one of two modes.

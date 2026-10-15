@@ -1,4 +1,5 @@
 import { extractEntities } from '../extraction/entities.js'
+import { ASSOCIATION_SEEDS, findAssociations, type Associated } from './associations.js'
 import type { Candidate, CandidateRequest } from '../items/item-store.js'
 import { effectiveFilters, type EffectiveFilters } from './channels.js'
 import { failureReason } from './failure-reason.js'
@@ -6,7 +7,8 @@ import type { FloorCalibration } from './floor-calibration.js'
 import { ModelSteps, type ModelStepDeps, type ModelStepVersions } from './model-steps.js'
 import { isLookupQuestion, isMultiHop, isTemporal, lexicalTerms } from './query-signals.js'
 import { compareShown, fuse, scopeTier, SLATE_SIZE, type Band, type FusedCandidate, type ScopeContext } from './rank.js'
-import { resolveItems } from './resolve.js'
+import { DEFAULT_BUDGET_CHARS, DEFAULT_LIMIT, DEFAULT_MAX_CHARS, Packer } from './pack.js'
+import { resolveItems, type ResolvedItem } from './resolve.js'
 import type {
   RecallDegraded,
   RecallItemRow,
@@ -14,12 +16,12 @@ import type {
   RecallRequest,
   RecallResponse,
   RecallStore,
+  RegisterToken,
 } from './types.js'
 
 /** Candidates per leg asked of the candidate statement. */
 const CANDIDATES_PER_LEG = 50
 const MAX_TERMS = 64
-const DEFAULT_LIMIT = 12
 
 /** The reranker in use, with the id its floor is recorded under. */
 export interface RecallReranker {
@@ -60,10 +62,12 @@ export interface RecallTrace {
   floor: number | null
   strong: number | null
   storeVersion: [before: number, after: number]
+  /** Text plus question characters across the shown items. */
+  totalChars: number
   steps: { expansion: boolean; hyde: boolean; rescue: boolean }
   projectKnown: boolean
   cacheFailures: number
-  counts: { candidates: number; slate: number; scored: number; passed: number }
+  counts: { candidates: number; slate: number; scored: number; passed: number; associations: number }
   timings: RecallTimings
 }
 
@@ -107,7 +111,7 @@ export interface ScoredItem {
 
 /** Shared state of one recall while its stages run. */
 interface RecallRun {
-  deps: RecallDeps
+  deps: SlateDeps
   request: RecallRequest
   steps: ModelSteps
   base: CandidateRequest
@@ -139,8 +143,10 @@ interface Inputs {
  *    alone, fuse again and rerank the next 50 unscored. At most once.
  * 7. Resolve supersession as of the recall's time: a replaced item gives its
  *    place to its current successor; status and flags.
- * Then apply the limit and read the store version again. A recall writes no
- * item state.
+ * 8. Pack the query items; then, while room is left, the items the store
+ *    links to the first 3 shown (subject, entity, lineage), reranked and kept
+ *    at or above the floor like query items. None when the reranker failed.
+ * Then read the store version again. A recall writes no item state.
  */
 export async function runRecall(deps: RecallDeps, request: RecallRequest): Promise<{ response: RecallResponse; trace: RecallTrace }> {
   const started = performance.now()
@@ -166,15 +172,28 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
 
   const scope = scopeOf(request, inputs)
   const ordered = order(passed, floor, slate.rerankFailed, scope)
-  const tokens = needsTokens(ordered, slate.rows) ? await deps.store.registerTokens(request.asOf) : []
-  const items = resolveItems(ordered, slate.rows, { includeHistory: request.includeHistory === true, filters, tokens }).map((r) => r.item)
-  const shown = items.slice(0, request.limit ?? DEFAULT_LIMIT)
+  const resolve = resolver(deps.store, request, filters)
+  const packer = new Packer({
+    limit: request.limit ?? DEFAULT_LIMIT,
+    maxChars: request.maxChars ?? DEFAULT_MAX_CHARS,
+    budgetChars: request.budgetChars ?? DEFAULT_BUDGET_CHARS,
+  })
+  packer.addQuery(await resolve(ordered, slate.rows, 'query'))
+  let associationCount = 0
+  if (!slate.rerankFailed && packer.hasRoomForAssociations()) {
+    const associated = await associate(run, slate, floor, scope, filters, packer.seeds(ASSOCIATION_SEEDS))
+    if (associated !== null) {
+      associationCount = associated.ordered.length
+      packer.addAssociations(await resolve(associated.ordered, associated.rows, 'association'))
+    }
+  }
+  const packed = packer.result()
   const versionAfter = await deps.store.storeVersion()
   run.timings.total = performance.now() - started
 
   const response: RecallResponse = {
-    items: shown,
-    omitted: { limit: items.length - shown.length, budget: 0, uncuttable: 0 },
+    items: packed.items,
+    omitted: packed.omitted,
     ...(Object.keys(run.degraded).length > 0 ? { degraded: run.degraded } : {}),
   }
   const trace: RecallTrace = {
@@ -183,16 +202,47 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
     floor: floor.floor,
     strong: floor.strong,
     storeVersion: [versionBefore, versionAfter],
+    totalChars: packed.totalChars,
     steps: { expansion: inputs.expansionRan, hyde: inputs.hydeRan || rescue, rescue },
     projectKnown: scope.projectKnown,
     cacheFailures: run.steps.cacheFailures,
-    counts: { candidates: slate.candidates.length, slate: Math.min(slate.fused.length, SLATE_SIZE), scored: slate.scored.size, passed: passed.length },
+    counts: { candidates: slate.candidates.length, slate: Math.min(slate.fused.length, SLATE_SIZE), scored: slate.scored.size, passed: passed.length, associations: associationCount },
     timings: run.timings,
   }
   return { response, trace }
 }
 
-function startRun(deps: RecallDeps, request: RecallRequest, filters: EffectiveFilters): RecallRun {
+/** What scoring a slate needs: every recall dependency but the floor. */
+export type SlateDeps = Omit<RecallDeps, 'floor'>
+
+/** One slate item as the reranker scored it, for measuring the floor. */
+export interface SlateScore {
+  row: RecallItemRow
+  /** The rerank score; never null, since a failed reranker fails the measurement. */
+  score: number
+}
+
+/**
+ * The slate of a request as recall would score it, before any floor: the
+ * model steps, one candidate call, fusion and the rerank of the first 50.
+ * The HyDE rescue does not run, since what triggers it is nothing passing
+ * the floor being measured. A failed reranker throws: a slate with no scores
+ * measures nothing. For the floor-calibration CLI only; recall itself runs
+ * `runRecall`.
+ */
+export async function scoreSlate(deps: SlateDeps, request: RecallRequest): Promise<{ items: SlateScore[]; degraded: RecallDegraded }> {
+  const filters = effectiveFilters(request)
+  if ('error' in filters) throw new RecallRequestError(filters.error)
+  const run = startRun(deps, request, filters)
+  const inputs = await gatherInputs(run, request.asOf ?? deps.now())
+  const slate = new Slate(run)
+  await slate.add(await firstCandidates(run, inputs))
+  if (slate.rerankFailed) throw new Error(`the reranker failed: ${run.degraded.rerank ?? 'no reason'}`)
+  const items = [...slate.scored.values()].map((s) => ({ row: s.row, score: s.score ?? Number.NEGATIVE_INFINITY }))
+  return { items, degraded: run.degraded }
+}
+
+function startRun(deps: SlateDeps, request: RecallRequest, filters: EffectiveFilters): RecallRun {
   const steps = new ModelSteps({
     cache: deps.store,
     embed: deps.embed,
@@ -395,6 +445,54 @@ function order(passed: ScoredItem[], floor: FloorCalibration, rerankFailed: bool
     .map((s) => ({ row: s.row, key: { id: s.row.id, band: band(s), tier: scopeTier(s.row, scope), trust: s.row.trust, score: s.score, fusedPosition: s.fusedPosition, occurredAt: s.row.occurredAt } }))
     .sort((a, b) => compareShown(a.key, b.key))
     .map((x) => x.row)
+}
+
+/**
+ * Resolves ordered rows into shown items, reading the register tokens once,
+ * and only when a document section can be shown.
+ */
+function resolver(store: RecallStore, request: RecallRequest, filters: EffectiveFilters) {
+  let tokens: Promise<RegisterToken[]> | null = null
+  return async (ordered: RecallItemRow[], rows: ReadonlyMap<string, RecallItemRow>, via: 'query' | 'association'): Promise<ResolvedItem[]> => {
+    if (tokens === null && needsTokens(ordered, rows)) tokens = store.registerTokens(request.asOf)
+    const resolved = resolveItems(ordered, rows, { includeHistory: request.includeHistory === true, filters, tokens: tokens === null ? [] : await tokens })
+    return via === 'query' ? resolved : resolved.map((r) => ({ row: r.row, item: { ...r.item, via } }))
+  }
+}
+
+/** Step 8: the linked items, timed as one stage; scored by the reranker in use. */
+async function associate(
+  run: RecallRun,
+  slate: Slate,
+  floor: FloorCalibration,
+  scope: ScopeContext,
+  filters: EffectiveFilters,
+  seeds: string[],
+): Promise<Associated | null> {
+  const { deps, request, degraded } = run
+  const result = await timed(() =>
+    findAssociations(
+      {
+        store: deps.store,
+        request,
+        filters,
+        floor,
+        scope,
+        known: new Set(slate.rows.keys()),
+        score: async (rows) => {
+          if (rows.length === 0) return new Map()
+          const scored = await timed(() => deps.rerank.rerank(request.query, rows.map((row) => ({ id: row.id, content: rerankDocument(row) }))))
+          if (scored.ok) return new Map(scored.value.map((r) => [r.id, r.score]))
+          degraded.rerank = await failureReason(scored.error, 'rerank error')
+          return null
+        },
+      },
+      seeds,
+    ),
+  )
+  run.timings.associations += result.ms
+  if (!result.ok) throw result.error
+  return result.value
 }
 
 /** Register tokens matter only when a document section can be shown: matched, or the end of a matched chain. */

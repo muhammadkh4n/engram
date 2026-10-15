@@ -1,5 +1,8 @@
-export { RECALL_CHANNELS, RECALL_STEPS } from './types.js'
+export { ASSOCIATION_SOURCES, RECALL_CHANNELS, RECALL_STEPS } from './types.js'
 export type {
+  AssociationSource,
+  AssociationRequest,
+  AssociationLink,
   RecallChannel,
   RecallScope,
   RecallRequest,
@@ -41,7 +44,19 @@ export type { FusedCandidate, Band, ScopeTier, ScopeContext, OrderFields } from 
 export { FLOOR_CALIBRATIONS, floorFor } from './floor-calibration.js'
 export type { FloorCalibration } from './floor-calibration.js'
 export { failureReason } from './failure-reason.js'
-export { runRecall, rerankDocument, RecallNotCalibratedError, RecallRequestError } from './pipeline.js'
-export type { RecallDeps, RecallReranker, RecallTrace, RecallTimings, ScoredItem } from './pipeline.js'
+export { runRecall, scoreSlate, rerankDocument, RecallNotCalibratedError, RecallRequestError } from './pipeline.js'
+export type { RecallDeps, RecallReranker, RecallTrace, RecallTimings, ScoredItem, SlateDeps, SlateScore } from './pipeline.js'
 export { resolveItems, itemFlags, holdsToken, sourceRef } from './resolve.js'
 export type { ResolveOptions, ResolvedItem } from './resolve.js'
+export {
+  Packer,
+  cutAtSentence,
+  cutQuestion,
+  DEFAULT_LIMIT,
+  DEFAULT_MAX_CHARS,
+  DEFAULT_BUDGET_CHARS,
+  QUESTION_MAX_CHARS,
+  ASSOCIATION_BUDGET_SHARE,
+} from './pack.js'
+export type { PackOptions, PackResult } from './pack.js'
+export { ASSOCIATION_SEEDS, ASSOCIATIONS_PER_SOURCE } from './associations.js'

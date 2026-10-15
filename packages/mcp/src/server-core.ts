@@ -34,10 +34,18 @@ import type {
   RecallOutputPolicy,
   SupersessionSettings,
 } from '@engram-mem/core'
-import { PostgRestCaptureStore, PostgRestItemStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
-import { openaiIntelligence, assertTimeZone, DEFAULT_CHAT_MODEL, type OpenAIIntelligenceOptions } from '@engram-mem/openai'
-import { defaultSecretRegistry } from '@engram-mem/core'
-import type { ItemIngestStore, ItemStore, Memory } from '@engram-mem/core'
+import { PostgRestCaptureStore, PostgRestItemStore, PostgRestRecallStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
+import {
+  openaiIntelligence,
+  assertTimeZone,
+  calendarDateIn,
+  DEFAULT_CHAT_MODEL,
+  DEFAULT_EMBEDDING_MODEL,
+  RECALL_STEP_PROMPT_VERSION,
+  type OpenAIIntelligenceOptions,
+} from '@engram-mem/openai'
+import { chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
+import type { ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
 import {
@@ -75,7 +83,7 @@ function readPackageVersion(): string {
   }
 }
 
-const PACKAGE_VERSION = readPackageVersion()
+export const PACKAGE_VERSION = readPackageVersion()
 
 function requireEnv(name: string): string {
   const val = process.env[name]
@@ -115,11 +123,18 @@ function requireEnv(name: string): string {
  * Falls back to the input adapter unchanged if the env flag is off or the
  * package fails to load (e.g. not installed). Errors during load are logged
  * but do not abort server startup.
+ *
+ * Returns the id of the reranker in use with it: `onnx:<model>:q8` for the
+ * local model, `openai:<chat model>` for the chat model's pointwise scores.
+ * Recall's floor is recorded per id, so a fallback to another reranker meets
+ * no floor and recall refuses instead of judging its scores by the wrong scale.
  */
-async function maybeWithLocalRerank(
+export async function maybeWithLocalRerank(
   intelligence: IntelligenceAdapter,
-): Promise<IntelligenceAdapter> {
-  if (process.env.ENGRAM_RERANK_LOCAL !== 'true') return intelligence
+  chatModel: string,
+): Promise<{ intelligence: IntelligenceAdapter; rerankerId: string }> {
+  const fallback = { intelligence, rerankerId: `openai:${chatModel}` }
+  if (process.env.ENGRAM_RERANK_LOCAL !== 'true') return fallback
   try {
     const mod = await import('@engram-mem/rerank-onnx')
     const model = process.env.ENGRAM_RERANK_LOCAL_MODEL?.trim() || undefined
@@ -133,15 +148,15 @@ async function maybeWithLocalRerank(
     const modelLabel = model ?? `${mod.DEFAULT_RERANK_MODEL} (default)`
     console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
-      ...intelligence,
-      rerank: (query, documents) => onnx.rerank(query, documents),
+      intelligence: { ...intelligence, rerank: (query, documents) => onnx.rerank(query, documents) },
+      rerankerId: `onnx:${model ?? mod.DEFAULT_RERANK_MODEL}:q8`,
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     console.warn(
       `[engram-mcp] ENGRAM_RERANK_LOCAL=true but @engram-mem/rerank-onnx could not be loaded — falling back to OpenAI rerank: ${msg}`,
     )
-    return intelligence
+    return fallback
   }
 }
 
@@ -415,6 +430,11 @@ interface MemoryStack {
   itemStore: ItemStore
   /** Neo4j, when configured and reachable at startup; a forget stamps its old-table ids there. */
   graph: GraphPort | null
+  /** The reranker in use (maybeWithLocalRerank), the id recall's floor is recorded under. */
+  rerankerId: string
+  /** The chat model of every LLM call, query expansion and HyDE included. */
+  chatModel: string
+  timeZone: string
 }
 
 const getMemoryStack = sharedInit(buildMemoryStack)
@@ -492,9 +512,11 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // quantized recall engine. See maybeWithRecallEngine's doc comment for why
   // exactRescore is always forced true here regardless of ENGRAM_ENGINE_EXACT.
   const storage: StorageAdapter = await maybeWithRecallEngine(rawStorage, supabaseUrl)
+  const chatOptions = chatIntelligenceOptionsFromEnv()
+  const chatModel = chatOptions.summarizationModel ?? DEFAULT_CHAT_MODEL
   const baseIntelligence: IntelligenceAdapter = openaiIntelligence({
     apiKey: openaiApiKey,
-    ...chatIntelligenceOptionsFromEnv(),
+    ...chatOptions,
     timeZone,
   })
   // v0.4.3: when ENGRAM_RERANK_LOCAL=true, spread the local ONNX
@@ -503,7 +525,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // Dynamic import keeps the 113MB ONNX dep out of the cold-start path for
   // users who don't opt in. Failure to load logs a warning and falls back
   // to the OpenAI reranker.
-  const intelligence: IntelligenceAdapter = await maybeWithLocalRerank(baseIntelligence)
+  const { intelligence, rerankerId } = await maybeWithLocalRerank(baseIntelligence, chatModel)
   const graph: GraphPort | null = await tryCreateGraph('[engram-mcp]')
 
   // Wave 5: the server is intentionally UNSCOPED. A single server (especially
@@ -548,8 +570,43 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   // in the same database.
   const items = new PostgRestCaptureStore({ url: supabaseUrl, key: supabaseKey })
   const itemStore = new PostgRestItemStore({ url: supabaseUrl, key: supabaseKey })
-  return { memory, storage, intelligence, recallLog, items, itemStore, graph }
+  return { memory, storage, intelligence, recallLog, items, itemStore, graph, rerankerId, chatModel, timeZone }
 }
+
+/** The recall log the memory stack writes to, or null when ENGRAM_RECALL_LOG is unset. */
+export async function getRecallLog(): Promise<RecallLog | null> {
+  return (await getMemoryStack()).recallLog
+}
+
+/**
+ * What /recall runs on: the item store on SUPABASE_URL, and the memory
+ * stack's own intelligence, so one ONNX model stays in memory for both read
+ * paths. The floor is the one recorded for the reranker in use; with none,
+ * every recall answers 503 until one is measured.
+ */
+export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
+  const stack = await getMemoryStack()
+  const { intelligence } = stack
+  const { embed, rerank, expandQuery, generateHypotheticalDoc, dimensions } = intelligence
+  if (!embed || !rerank || !dimensions) throw new Error('recall needs an intelligence adapter that embeds and reranks')
+  const store = new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
+  return {
+    store,
+    embed: (text) => embed.call(intelligence, text),
+    rerank: { id: stack.rerankerId, rerank: (query, documents) => rerank.call(intelligence, query, documents) },
+    ...(expandQuery ? { expand: (query: string, opts: { now: Date; temperature: number }) => expandQuery.call(intelligence, query, opts) } : {}),
+    ...(generateHypotheticalDoc
+      ? { hyde: (query: string, opts: { temperature: number }) => generateHypotheticalDoc.call(intelligence, query, opts) }
+      : {}),
+    referenceDate: (now) => intelligence.expansionReferenceDate?.(now) ?? calendarDateIn(now, stack.timeZone),
+    floor: floorFor(stack.rerankerId),
+    versions: {
+      embedding: embeddingStepVersion(DEFAULT_EMBEDDING_MODEL, dimensions.call(intelligence)),
+      chat: chatStepVersion(stack.chatModel, RECALL_STEP_PROMPT_VERSION),
+    },
+    now: () => new Date(),
+  }
+})
 
 const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
 

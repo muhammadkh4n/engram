@@ -41,6 +41,16 @@ const READ_FUNCTIONS = [
   ],
   ['engram_project_workspace', '(p_project_id text) RETURNS text LANGUAGE sql STABLE', 'public.engram_project_workspace(text)'],
   ['engram_recall_projects', '() RETURNS TABLE(id text, kind text) LANGUAGE sql STABLE', 'public.engram_recall_projects()'],
+  [
+    'engram_item_associations',
+    '(p_seed_ids uuid[], p_classes text[], p_kinds text[], p_exclude_session text DEFAULT NULL, p_as_of timestamp with time zone DEFAULT NULL, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL, p_per_source integer DEFAULT 2) RETURNS TABLE(item_id uuid, source text, seed_id uuid, rank integer) LANGUAGE plpgsql STABLE',
+    'public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer)',
+  ],
+  [
+    'engram_items_by_legacy_ids',
+    '(p_ids text[]) RETURNS TABLE(legacy_id text, item_id uuid) LANGUAGE plpgsql STABLE',
+    'public.engram_items_by_legacy_ids(text[])',
+  ],
 ] as const
 
 describe('recall read functions', () => {

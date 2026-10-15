@@ -10,6 +10,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
   createEngramServer,
   getCaptureDeps,
+  getRecallDeps,
+  getRecallLog,
+  PACKAGE_VERSION,
   recallOutputPolicyAtStartup,
   consolidationAtStartup,
   extractionHeldFromEnv,
@@ -260,6 +263,18 @@ export async function main(): Promise<void> {
       },
       captureEvents,
       documents,
+      recall: {
+        getDeps: getRecallDeps,
+        // The memory stack's own log, so one queue and one rotation own the file.
+        log: {
+          recordLine: (line) =>
+            void getRecallLog()
+              .then((recallLog) => recallLog?.recordLine(line))
+              .catch((err: unknown) => log(`recall log unavailable: ${err instanceof Error ? err.message : String(err)}`)),
+        },
+        server: PACKAGE_VERSION,
+        logError: (line) => process.stderr.write(`${line}\n`),
+      },
     }),
   )
 

@@ -20,6 +20,8 @@
   "bin": {
     "engram-mcp": "dist/index.js",
     "engram-mcp-http": "dist/index-http.js",
+    "engram-recall-calibrate": "dist/recall-calibrate-cli.js",
+    "engram-recall-invariants": "dist/recall-invariants-cli.js",
     "engram-dream-cycle": "dist/dream-cycle-cli.js",
     "engram-backfill-graph": "dist/backfill-graph.js",
     "engram-graph-reconcile": "dist/graph-reconcile-cli.js",
