@@ -506,6 +506,23 @@ describe('the MCP server', () => {
     return client
   }
 
+  it('lists exactly the read tools over typed items and the four item-action tools', async () => {
+    const client = await connect()
+    const names = (await client.listTools()).tools.map((t) => t.name).sort()
+    expect(names).toEqual([
+      'memory_capture_status',
+      'memory_forget',
+      'memory_get',
+      'memory_ingest',
+      'memory_overview',
+      'memory_recall',
+      'memory_retire',
+      'memory_timeline',
+      'memory_unretire',
+    ])
+    await client.close()
+  })
+
   it('lists neither memory_bridges nor memory_consolidation_status, and answers them as unknown tools', async () => {
     const client = await connect()
     const names = (await client.listTools()).tools.map((t) => t.name)
