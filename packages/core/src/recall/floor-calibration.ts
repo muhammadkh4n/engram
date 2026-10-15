@@ -22,7 +22,17 @@ export interface FloorCalibration {
   neededBelowFloor: number
 }
 
-export const FLOOR_CALIBRATIONS: readonly FloorCalibration[] = []
+export const FLOOR_CALIBRATIONS: readonly FloorCalibration[] = [
+  {
+    reranker: 'onnx:Alibaba-NLP/gte-reranker-modernbert-base:q8',
+    floor: 0.685,
+    strong: 0.85,
+    calibratedAt: '2026-10-15T09:42:36.113Z',
+    dataset: 'gold:gold-v1-merged.jsonl',
+    neededInSlate: 362,
+    neededBelowFloor: 3,
+  },
+]
 
 /** The measured floor for a reranker, or null when none is recorded. */
 export function floorFor(rerankerId: string, table: readonly FloorCalibration[] = FLOOR_CALIBRATIONS): FloorCalibration | null {
