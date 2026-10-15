@@ -67,6 +67,11 @@ const READ_FUNCTIONS = [
     'public.engram_item_overview(text, integer)',
   ],
   ['engram_capture_status', '() RETURNS TABLE(metric text, value text) LANGUAGE sql STABLE', 'public.engram_capture_status()'],
+  [
+    'engram_review_candidates',
+    '(p_project_id text DEFAULT NULL, p_workspace_id text DEFAULT NULL, p_ids uuid[] DEFAULT NULL, p_limit integer DEFAULT 4) RETURNS TABLE(id uuid, kind text, quote text, question text, occurred_at timestamp with time zone, session_id text, project_id text, workspace_id text, subject text, proposed_scope text, status text, register_status text, restated_count integer, targets jsonb, total bigint) LANGUAGE plpgsql STABLE',
+    'public.engram_review_candidates(text, text, uuid[], integer)',
+  ],
 ] as const
 
 describe('recall read functions', () => {
@@ -109,6 +114,15 @@ describe('recall read functions', () => {
     expect(body).toContain('e.error IS NOT NULL')
     // The error column is only tested for presence; no text column is selected.
     expect(body.replace('e.error IS NOT NULL', '')).not.toMatch(/\b(e|i|r)\.(payload|content|error|context|scrub|search_text)\b/)
+  })
+
+  it('counts the review total with a window over the same rows, before the limit, and maps the scope with no ELSE', () => {
+    const body = squash(functionDefinition('engram_review_candidates'))
+    expect(body).toContain('count(*) OVER ()')
+    expect(body).toContain('LIMIT CASE WHEN p_ids IS NULL THEN p_limit END')
+    expect(body.match(/RETURN QUERY/g)).toHaveLength(1)
+    const scope = body.slice(body.indexOf("CASE i.source ->> 'scope'"), body.indexOf('END', body.indexOf("CASE i.source ->> 'scope'")))
+    expect(scope).not.toContain('ELSE')
   })
 
   it('returns no embedding from engram_recall_items', () => {

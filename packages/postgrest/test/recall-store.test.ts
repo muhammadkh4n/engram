@@ -264,6 +264,29 @@ describe('PostgRestRecallStore', () => {
     ])
   })
 
+  it('reads review candidates with only the arguments set, and refuses ids out of range or a row outside the contract', async () => {
+    const row = {
+      id: ID_A, kind: 'correction', quote: 'tst that is wrong', question: null, occurred_at: '2026-02-03T04:00:00+00:00',
+      session_id: 'tst-session-1', project_id: 'tst-repo', workspace_id: null, subject: 'tst subject', proposed_scope: 'project:tst-repo',
+      status: 'current', register_status: null, restated_count: 0,
+      targets: [{ id: ID_B, class: 'document_section', text: 'tst claim', status: 'retired' }], total: '3',
+    }
+    const mock = mockClient([{ data: [row], error: null }])
+    const rows = await storeWith(mock.client).reviewCandidates({ scope: { projectId: 'tst-repo' }, limit: 4 })
+    expect(mock.calls).toEqual([{ fn: 'engram_review_candidates', args: { p_limit: 4, p_project_id: 'tst-repo' } }])
+    expect(rows[0]).toMatchObject({ id: ID_A, kind: 'correction', total: 3, proposedScope: 'project:tst-repo', targets: [{ id: ID_B, status: 'retired' }] })
+
+    const byId = mockClient([{ data: [], error: null }])
+    await storeWith(byId.client).reviewCandidates({ scope: {}, ids: [ID_B], limit: 4 })
+    expect(byId.calls).toEqual([{ fn: 'engram_review_candidates', args: { p_limit: 4, p_ids: [ID_B] } }])
+    await expect(storeWith(byId.client).reviewCandidates({ scope: {}, ids: [], limit: 4 })).rejects.toThrow('1 to 8 per call')
+    await expect(storeWith(byId.client).reviewCandidates({ scope: {}, ids: ['tst'], limit: 4 })).rejects.toThrow('is not a uuid')
+    for (const bad of [{ ...row, kind: 'note' }, { ...row, status: 'gone' }, { ...row, targets: [{ id: 'x', class: 'note', text: 't', status: 'current' }] }]) {
+      const m = mockClient([{ data: [bad], error: null }])
+      await expect(storeWith(m.client).reviewCandidates({ scope: {}, limit: 1 })).rejects.toThrow('reviewCandidates failed')
+    }
+  })
+
   it('reads item states, a project workspace and the projects', async () => {
     const mock = mockClient([
       { data: [{ id: ID_B, forgotten_at: '2026-02-03T04:00:00+00:00', retired_at: null }], error: null },

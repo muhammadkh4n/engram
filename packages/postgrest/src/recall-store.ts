@@ -18,11 +18,14 @@ import type {
   RecallChain,
   RecallItemRow,
   RecallItemState,
+  RecallItemStatus,
   RecallItemsOptions,
   RecallProject,
   RecallStep,
   RecallStore,
   RegisterToken,
+  ReviewCandidateRow,
+  ReviewCandidatesRequest,
   SessionTimelineEntry,
   SessionTimelineRequest,
   Speaker,
@@ -36,6 +39,8 @@ import { isUuid, onlyUuids } from './uuid.js'
 const MAX_RECALL_IDS = 500
 /** engram_get_items refuses more ids than this in one call. */
 const MAX_GET_IDS = 20
+/** engram_review_candidates takes at most this many ids. */
+const MAX_REVIEW_IDS = 8
 /** Reads are repeated once after a short pause: a dropped connection or a restart rarely lasts longer. */
 const READ_RETRY = { maxRetries: 1, baseDelayMs: 200 } as const
 const CHAINS: ReadonlySet<string> = new Set<RecallChain>(['current', 'superseded', 'successor_retired'])
@@ -287,6 +292,22 @@ export class PostgRestRecallStore implements RecallStore, ItemReadStore {
     }))
   }
 
+  async reviewCandidates(req: ReviewCandidatesRequest): Promise<ReviewCandidateRow[]> {
+    const args: Record<string, unknown> = { p_limit: req.limit }
+    if (req.scope.projectId !== undefined) args.p_project_id = req.scope.projectId
+    if (req.scope.workspaceId !== undefined) args.p_workspace_id = req.scope.workspaceId
+    if (req.ids !== undefined) {
+      if (req.ids.length === 0 || req.ids.length > MAX_REVIEW_IDS) {
+        throw new Error(`reviewCandidates failed: ${req.ids.length} ids, 1 to ${MAX_REVIEW_IDS} per call`)
+      }
+      const malformed = req.ids.find((id) => !isUuid(id))
+      if (malformed !== undefined) throw new Error(`reviewCandidates failed: ${JSON.stringify(malformed)} is not a uuid`)
+      args.p_ids = req.ids
+    }
+    const rows = await this.read('reviewCandidates', 'engram_review_candidates', args)
+    return rows.map((row, i) => toReviewCandidate(row, i + 1))
+  }
+
   private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {
     return withRetry(async () => {
       const { data, error } = (await this.client.rpc(fn, args)) as RpcResult
@@ -466,5 +487,48 @@ function toItemRecord(row: Row, position: number): ItemRecord {
     contentHash: requiredText(row, 'content_hash', 'getItems', position),
     extractionRunId: optionalText(row, 'extraction_run_id'),
     createdAt: time(row.created_at, 'created_at', 'getItems', id),
+  }
+}
+
+function status(value: unknown, fail: (what: string) => Error): RecallItemStatus {
+  if (value !== 'current' && value !== 'superseded' && value !== 'retired') throw fail('unknown status')
+  return value
+}
+
+/** A row outside engram_review_candidates' contract is an error, never a guess. */
+function toReviewCandidate(row: Row, position: number): ReviewCandidateRow {
+  const id = requiredText(row, 'id', 'reviewCandidates', position)
+  const fail = (what: string) => new Error(`reviewCandidates failed: item ${id}: ${what}`)
+  const kind = row.kind
+  if (kind !== 'ruling' && kind !== 'fact' && kind !== 'correction' && kind !== 'retraction') throw fail('unknown kind')
+  if (typeof row.quote !== 'string') throw fail('has no quote')
+  if (!Array.isArray(row.targets)) throw fail('targets is not a list')
+  const targets = (row.targets as unknown[]).map((t) => {
+    if (t === null || typeof t !== 'object') throw fail('a target is not an object')
+    const target = t as Row
+    const cls = target.class
+    if (typeof target.id !== 'string' || !isUuid(target.id)) throw fail('a target has no id')
+    if (typeof cls !== 'string' || !CLASSES.has(cls)) throw fail('a target has an unknown class')
+    if (typeof target.text !== 'string') throw fail('a target has no text')
+    return { id: target.id, class: cls as ItemClass, text: target.text, status: status(target.status, fail) }
+  })
+  const total = typeof row.total === 'string' ? Number(row.total) : row.total
+  if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0) throw fail('has no total')
+  return {
+    id,
+    kind,
+    quote: row.quote,
+    question: optionalText(row, 'question'),
+    occurredAt: time(row.occurred_at, 'occurred_at', 'reviewCandidates', id),
+    sessionId: optionalText(row, 'session_id'),
+    projectId: optionalText(row, 'project_id'),
+    workspaceId: optionalText(row, 'workspace_id'),
+    subject: optionalText(row, 'subject'),
+    proposedScope: optionalText(row, 'proposed_scope'),
+    status: status(row.status, fail),
+    registerStatus: optionalText(row, 'register_status'),
+    restatedCount: integer(row, 'restated_count', id),
+    targets,
+    total,
   }
 }

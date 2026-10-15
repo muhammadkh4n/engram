@@ -8771,6 +8771,112 @@ $$;
 
 
 --
+-- Name: engram_review_candidates(text, text, uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- What waits for MK's review at session start, newest first, each item once:
+-- a current standing MK statement whose register_status is candidate; a
+-- current MK correction not yet recorded or dismissed with at least one
+-- corrects target neither retired nor forgotten; a current assistant turn
+-- with at least one retracts target neither retired nor forgotten. An item
+-- is in scope when its project_id equals p_project_id, or its workspace_id
+-- equals p_workspace_id, or both are NULL (said outside any repository and
+-- workspace). With p_ids, exactly the named items in the order given,
+-- whatever their review state: each one not forgotten that is a standing MK
+-- statement, an MK correction, or an assistant turn with a retracts link;
+-- scope does not apply and p_limit, still range-checked, is not used.
+-- kind is the statement's kind, or retraction for an assistant turn. quote
+-- is the content whole (the caller cuts a retraction's text, never a
+-- statement's); question is the context's last 2,000 characters, NULL for
+-- a retraction. proposed_scope follows the level extraction stored in
+-- source->>'scope', NULL for session, for no level and when the level's
+-- column is NULL. status is retired, superseded or current, for the item
+-- and for each target; targets are the items its corrects, retracts and
+-- changes links point to that are not forgotten, by occurred_at, with the
+-- first 2,000 characters of their content. total is the number of rows
+-- before p_limit, counted in the same statement.
+CREATE OR REPLACE FUNCTION public.engram_review_candidates(p_project_id text DEFAULT NULL, p_workspace_id text DEFAULT NULL, p_ids uuid[] DEFAULT NULL, p_limit integer DEFAULT 4)
+    RETURNS TABLE(id uuid, kind text, quote text, question text, occurred_at timestamp with time zone, session_id text,
+                  project_id text, workspace_id text, subject text, proposed_scope text, status text,
+                  register_status text, restated_count integer, targets jsonb, total bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 8 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_review_candidates: p_limit must be between 1 and 8';
+  END IF;
+  IF p_ids IS NOT NULL AND (cardinality(p_ids) = 0 OR cardinality(p_ids) > 8) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_review_candidates: p_ids must hold 1 to 8 ids';
+  END IF;
+  RETURN QUERY
+  WITH requested AS (
+    SELECT u.item_id, min(u.ord) AS ord
+      FROM unnest(p_ids) WITH ORDINALITY AS u(item_id, ord)
+     GROUP BY u.item_id
+  ),
+  picked AS (
+    SELECT i.id AS item_id, r.ord
+      FROM requested r
+      JOIN public.memory_items i ON i.id = r.item_id
+     WHERE p_ids IS NOT NULL
+       AND i.forgotten_at IS NULL
+       AND ((i.class = 'mk_statement' AND (i.standing IS TRUE OR i.kind = 'correction'))
+            OR (i.class = 'utterance' AND i.kind = 'assistant_turn'
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l WHERE l.from_item = i.id AND l.rel = 'retracts')))
+    UNION ALL
+    SELECT i.id, NULL::bigint
+      FROM public.memory_items i
+     WHERE p_ids IS NULL
+       AND i.forgotten_at IS NULL AND i.superseded_by IS NULL AND i.retired_at IS NULL
+       AND (i.project_id = p_project_id OR i.workspace_id = p_workspace_id
+            OR (i.project_id IS NULL AND i.workspace_id IS NULL))
+       AND ((i.class = 'mk_statement' AND i.standing IS TRUE AND i.register_status = 'candidate')
+            OR (i.class = 'mk_statement' AND i.kind = 'correction'
+                AND (i.register_status IS NULL OR i.register_status = 'candidate')
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l JOIN public.memory_items t ON t.id = l.to_item
+                             WHERE l.from_item = i.id AND l.rel = 'corrects'
+                               AND t.retired_at IS NULL AND t.forgotten_at IS NULL))
+            OR (i.class = 'utterance' AND i.kind = 'assistant_turn'
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l JOIN public.memory_items t ON t.id = l.to_item
+                             WHERE l.from_item = i.id AND l.rel = 'retracts'
+                               AND t.retired_at IS NULL AND t.forgotten_at IS NULL)))
+  )
+  SELECT i.id,
+         CASE WHEN i.class = 'utterance' THEN 'retraction' ELSE i.kind END,
+         i.content,
+         CASE WHEN i.class = 'mk_statement' THEN right(i.context, 2000) END,
+         i.occurred_at, i.session_id, i.project_id, i.workspace_id, sj.label,
+         CASE i.source ->> 'scope'
+           WHEN 'global' THEN 'global'
+           WHEN 'project' THEN 'project:' || i.project_id
+           WHEN 'workspace' THEN 'workspace:' || i.workspace_id
+           WHEN 'plan' THEN 'plan:' || i.plan_slug
+         END,
+         CASE WHEN i.retired_at IS NOT NULL THEN 'retired' WHEN i.superseded_by IS NOT NULL THEN 'superseded' ELSE 'current' END,
+         CASE WHEN i.class = 'mk_statement' THEN i.register_status END,
+         coalesce(cardinality(i.restated_at), 0),
+         (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'id', t.id, 'class', t.class, 'text', left(t.content, 2000),
+                    'status', CASE WHEN t.retired_at IS NOT NULL THEN 'retired'
+                                   WHEN t.superseded_by IS NOT NULL THEN 'superseded' ELSE 'current' END)
+                  ORDER BY t.occurred_at, t.id), '[]'::jsonb)
+            FROM (SELECT DISTINCT l.to_item FROM public.memory_item_links l
+                   WHERE l.from_item = i.id AND l.rel IN ('corrects', 'retracts', 'changes')) lt
+            JOIN public.memory_items t ON t.id = lt.to_item
+           WHERE t.forgotten_at IS NULL),
+         count(*) OVER ()
+    FROM picked p
+    JOIN public.memory_items i ON i.id = p.item_id
+    LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
+   ORDER BY p.ord, i.occurred_at DESC, i.id
+   LIMIT CASE WHEN p_ids IS NULL THEN p_limit END;
+END; $$;
+
+
+--
 -- Name: engram_project_workspace(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9252,6 +9358,7 @@ BEGIN
   PERFORM * FROM public.engram_item_associations(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], ARRAY['utterance'], ARRAY['user_prompt'], 'smoke', now(), false, 2::smallint, 2);
   PERFORM public.engram_store_version();
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  PERFORM * FROM public.engram_review_candidates('smoke', 'smoke', NULL, 1);
   PERFORM * FROM public.engram_capture_status();
   PERFORM * FROM public.engram_item_overview('smoke', 1);
   PERFORM * FROM public.engram_session_timeline('smoke', now() - interval '1 day', now(), 1);
@@ -9375,6 +9482,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_capture_status() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_overview(text, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) FROM PUBLIC;
@@ -9482,6 +9590,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_status() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_overview(text, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) FROM %I', role_name);
@@ -9569,6 +9678,7 @@ GRANT EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) TO service_r
 GRANT EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_capture_status() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_overview(text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) TO service_role;

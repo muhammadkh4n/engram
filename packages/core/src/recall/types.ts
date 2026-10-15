@@ -277,6 +277,8 @@ export interface ItemReadStore {
   itemOverview(req: ItemOverviewRequest): Promise<ItemOverviewRow[]>
   /** The capture path's health as named counts and times. */
   captureStatus(): Promise<CaptureStatusRow[]>
+  /** What waits for MK's review: without ids the pending items in scope, newest first; with ids those items in order. */
+  reviewCandidates(req: ReviewCandidatesRequest): Promise<ReviewCandidateRow[]>
 }
 
 export interface SessionTimelineRequest {
@@ -316,4 +318,43 @@ export interface CaptureStatusRow {
   metric: string
   /** A count or a UTC time; null when there is none. */
   value: string | null
+}
+
+export interface ReviewCandidatesRequest {
+  scope: { projectId?: string; workspaceId?: string }
+  /** 1 to 8 lower-case uuids; when set, scope and limit do not apply. */
+  ids?: string[]
+  /** 1 to 8. */
+  limit: number
+}
+
+export type ReviewCandidateKind = 'ruling' | 'fact' | 'correction' | 'retraction'
+
+export interface ReviewTarget {
+  id: string
+  class: ItemClass
+  /** The first 2,000 characters of the target's content. */
+  text: string
+  status: RecallItemStatus
+}
+
+export interface ReviewCandidateRow {
+  id: string
+  kind: ReviewCandidateKind
+  /** The content whole. */
+  quote: string
+  /** The context's last 2,000 characters; null for a retraction. */
+  question: string | null
+  occurredAt: Date
+  sessionId: string | null
+  projectId: string | null
+  workspaceId: string | null
+  subject: string | null
+  proposedScope: string | null
+  status: RecallItemStatus
+  registerStatus: string | null
+  restatedCount: number
+  targets: ReviewTarget[]
+  /** Rows before the limit; with ids, the rows returned. */
+  total: number
 }
