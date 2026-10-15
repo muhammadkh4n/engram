@@ -34,7 +34,12 @@ export type {
   ItemActionResult,
   InvariantCounts,
 } from './items/types.js'
-export { ItemConstraintError, isItemConstraintError } from './items/item-store.js'
+export {
+  ItemConstraintError,
+  isItemConstraintError,
+  CandidateQueryError,
+  isCandidateQueryError,
+} from './items/item-store.js'
 export {
   DOCUMENT_SECTION_KINDS,
   DOCUMENT_SECTIONS_MAX,
@@ -49,7 +54,7 @@ export type {
   DocumentSectionCounts,
   DocumentNoteSyncResult,
 } from './items/documents.js'
-export type { ItemStore } from './items/item-store.js'
+export type { ItemStore, CandidateLeg, AccessPath, CandidateRequest, Candidate } from './items/item-store.js'
 export {
   EMBEDDING_ATTEMPTS_MAX,
   EMBEDDING_BATCH_MAX,
@@ -367,9 +372,12 @@ export {
   SUBJECT_LABEL_MAX_CHARS,
   MIN_SHARED_SHA_CHARS,
 } from './extraction/gate.js'
-// The root already exports the older ingestion extractEntities; these two
+// The root already exports the older ingestion extractEntities; these
 // names are free, and typed writes extract entities the way extraction does.
-export { statementEntities, observationEntities } from './extraction/entities.js'
+// extractItemEntities is extraction's rule set for one text, under a name
+// that does not collide with the ingestion extractor.
+export { statementEntities, observationEntities, extractEntities as extractItemEntities } from './extraction/entities.js'
+export type { EntityProject } from './extraction/entities.js'
 export type { GateResult, GatedStatement, GatedObservation, GatedSubject } from './extraction/gate.js'
 export { buildCommitPayload, draftCommit, draftLinks, finishCommit } from './extraction/persist.js'
 export type { ExtractionItemClass, CommitDraft, CommitDecisions } from './extraction/persist.js'
