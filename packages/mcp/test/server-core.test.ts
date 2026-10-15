@@ -34,6 +34,7 @@ import {
   rerankerIdFromEnv,
   getMemory,
   createEngramServer,
+  INSTRUCTIONS,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -516,6 +517,40 @@ describe('the MCP server', () => {
         isError: true,
       })
     }
+    await client.close()
+  })
+
+  it('serves instructions that describe typed memory items, word for word', async () => {
+    const expected = [
+      "Engram is MK's memory store. It holds typed items, each with who said it, when, and where it came from:",
+      "- MK's own words: utterances (speaker mk) and mk_statement items (an exact quote with the question it answered);",
+      "- durable records: commits, plan decisions, register entries, vault document sections;",
+      "- assistant observations, labelled with trust and date;",
+      "- one record per session.",
+      "",
+      "Memory reaches a Claude Code session through hooks: standing rulings by scope, and a briefing on each prompt. Call memory_recall when a task needs memory the briefing did not cover. Its result lands in the caller's context, so call it from a subagent where you can. memory_get returns full records by id.",
+      "",
+      "Reading results:",
+      "- trust 0 is MK's own words: quote them exactly; never restate them as a rule of your own.",
+      "- An item with status superseded or retired is not current. A superseded item is shown only next to its successor.",
+      "- An observation states what an assistant found on its date. Check live state before relying on it, above all when it is flagged verify_live.",
+      "- Plan state lives in the plan's LEDGER.md, not in memory.",
+      "",
+      "Writing: memory_ingest stores one typed item. memory_retire and memory_forget take explicit ids and a reason; nothing is removed in bulk.",
+    ].join('\n')
+    expect(INSTRUCTIONS).toBe(expected)
+    const client = await connect()
+    expect(client.getInstructions()).toBe(expected)
+    await client.close()
+  })
+
+  it('tells no client to always recall or check memory first, and names only registered tools', async () => {
+    expect(INSTRUCTIONS).not.toMatch(/ALWAYS|CHECK MEMORY FIRST/)
+    const client = await connect()
+    const names = new Set((await client.listTools()).tools.map((t) => t.name))
+    const mentioned = [...new Set(INSTRUCTIONS.match(/\bmemory_[a-z_]+\b/g) ?? [])]
+    expect(mentioned.sort()).toEqual(['memory_forget', 'memory_get', 'memory_ingest', 'memory_recall', 'memory_retire'])
+    for (const name of mentioned) expect(names.has(name), name).toBe(true)
     await client.close()
   })
 

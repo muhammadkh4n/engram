@@ -663,21 +663,21 @@ export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   }
 })
 
-const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
+export const INSTRUCTIONS = `Engram is MK's memory store. It holds typed items, each with who said it, when, and where it came from:
+- MK's own words: utterances (speaker mk) and mk_statement items (an exact quote with the question it answered);
+- durable records: commits, plan decisions, register entries, vault document sections;
+- assistant observations, labelled with trust and date;
+- one record per session.
 
-IMPORTANT — When to use memory_recall:
-- Before answering questions about past work, decisions, preferences, or architecture
-- When the user references something from a previous session ("remember when...", "what did we decide about...", "last time we...")
-- When you're about to say "I don't have information about that" or "I can't recall" — CHECK MEMORY FIRST
-- When context from previous conversations would help answer the current question
-- When the user asks about their own preferences, tools, or workflow
+Memory reaches a Claude Code session through hooks: standing rulings by scope, and a briefing on each prompt. Call memory_recall when a task needs memory the briefing did not cover. Its result lands in the caller's context, so call it from a subagent where you can. memory_get returns full records by id.
 
-IMPORTANT — When NOT to search memory:
-- Routine file reads, test outputs, build commands
-- Questions about general programming knowledge (use your training data)
-- When the user explicitly says not to use memory
+Reading results:
+- trust 0 is MK's own words: quote them exactly; never restate them as a rule of your own.
+- An item with status superseded or retired is not current. A superseded item is shown only next to its successor.
+- An observation states what an assistant found on its date. Check live state before relying on it, above all when it is flagged verify_live.
+- Plan state lives in the plan's LEDGER.md, not in memory.
 
-If memory_recall returns relevant results, USE THEM directly in your response. Do not say "I don't have this information" if it appears in recalled memories.`
+Writing: memory_ingest stores one typed item. memory_retire and memory_forget take explicit ids and a reason; nothing is removed in bulk.`
 
 const TOOLS = [
   MEMORY_RECALL_TOOL,
