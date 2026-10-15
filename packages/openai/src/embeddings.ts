@@ -57,6 +57,9 @@ function valueOf<T>(answer: Answer<T>): T {
   return answer.value
 }
 
+/** The embedding model when none is configured; recall keys its cached query vectors by it. */
+export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
+
 export class OpenAIEmbeddingService {
   private readonly client: OpenAI
   private readonly model: string
@@ -66,7 +69,7 @@ export class OpenAIEmbeddingService {
 
   constructor(opts: OpenAIEmbeddingServiceOptions) {
     this.client = new OpenAI({ apiKey: opts.apiKey })
-    this.model = opts.model ?? 'text-embedding-3-small'
+    this.model = opts.model ?? DEFAULT_EMBEDDING_MODEL
     this._dimensions = opts.dimensions ?? 1536
     this.timeoutMs = opts.timeoutMs ?? TIMEOUTS.EMBEDDING_STORAGE
     this.breaker = new CircuitBreaker({ threshold: 5, cooldownMs: 30_000 })

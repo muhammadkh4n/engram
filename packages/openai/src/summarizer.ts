@@ -11,6 +11,7 @@ import type {
   SalienceCategory,
   SalienceOpts,
   ExpandQueryOpts,
+  HypotheticalDocOpts,
   EvidenceItem,
   EvidenceSelection,
   SupersessionFact,
@@ -245,6 +246,36 @@ function buildSalienceUserMessage(content: string, opts: SalienceOpts): string {
 export const DEFAULT_CHAT_MODEL = 'gpt-4o-mini'
 
 /**
+ * The version of the HyDE and expansion prompts. Recall caches what they
+ * return under a key that includes it, so any change to either prompt's text
+ * must raise it, or a cached output written under the old prompt would be read
+ * as if the new one had produced it.
+ */
+export const RECALL_STEP_PROMPT_VERSION = 1
+
+/**
+ * HyDE (Hypothetical Document Embeddings): the model writes a passage that
+ * WOULD appear in the stored text if it answered the query. Embedding that
+ * passage retrieves better than embedding the question, because stored
+ * conversation holds declarative sentences, not interrogatives. The rules keep
+ * entities and temporal markers verbatim, so the lexical search overlaps the
+ * source text exactly, and ask for dialogue, not an encyclopedia entry.
+ */
+export const HYDE_SYSTEM_PROMPT = [
+  'You generate hypothetical conversation excerpts for retrieval.',
+  '',
+  'Given a question about a past conversation, write a 2-3 sentence excerpt',
+  'that would appear VERBATIM in the stored turn if it answered the question.',
+  '',
+  'Rules:',
+  '1. Include ALL proper nouns from the question verbatim (names, places, products).',
+  '2. Preserve temporal phrases verbatim ("last week", "on Monday", "2023").',
+  '3. Write in conversational first/second person — this is dialogue, not an article.',
+  '4. Do not explain or answer — write what the stored turn would literally say.',
+  '5. If the question has multiple entities, have them appear together in the excerpt.',
+].join('\n')
+
+/**
  * Docs scored per rerank call. At least the largest slate the recall engine
  * sends (30 fused candidates plus a 15-row lexical reserve): a doc past the
  * cap gets no score and ranks after every scored one.
@@ -455,7 +486,7 @@ export class OpenAISummarizer {
     return { memory: output.trim(), context: '' }
   }
 
-  async generateHypotheticalDoc(query: string): Promise<string> {
+  async generateHypotheticalDoc(query: string, opts?: HypotheticalDocOpts): Promise<string> {
     // HyDE (Hypothetical Document Embeddings): generate a passage
     // that WOULD appear in the stored text if it answered the query.
     // Embedding that passage gives better retrieval than embedding the
@@ -471,27 +502,11 @@ export class OpenAISummarizer {
     const response = await this.chatCreate('generateHypotheticalDoc', {
       model: this.model,
       messages: [
-        {
-          role: 'system',
-          content:
-            [
-              'You generate hypothetical conversation excerpts for retrieval.',
-              '',
-              'Given a question about a past conversation, write a 2-3 sentence excerpt',
-              'that would appear VERBATIM in the stored turn if it answered the question.',
-              '',
-              'Rules:',
-              '1. Include ALL proper nouns from the question verbatim (names, places, products).',
-              '2. Preserve temporal phrases verbatim ("last week", "on Monday", "2023").',
-              '3. Write in conversational first/second person — this is dialogue, not an article.',
-              '4. Do not explain or answer — write what the stored turn would literally say.',
-              '5. If the question has multiple entities, have them appear together in the excerpt.',
-            ].join('\n'),
-        },
+        { role: 'system', content: HYDE_SYSTEM_PROMPT },
         { role: 'user', content: query },
       ],
       max_tokens: 180,
-      temperature: 0.7,
+      temperature: opts?.temperature ?? 0.7,
     })
     const doc = response.choices[0]?.message?.content ?? ''
     // An empty reply or a restated question is not a hypothetical document:
@@ -532,7 +547,7 @@ export class OpenAISummarizer {
         { role: 'user', content: query },
       ],
       max_tokens: 100,
-      temperature: 0.5,
+      temperature: opts?.temperature ?? 0.5,
     })
 
     return parseExpansionTerms(response.choices[0]?.message?.content ?? '')
@@ -1228,7 +1243,7 @@ const MAX_EXPANSION_TERMS = 5
  * concrete dates relative phrases resolve to; without one it forbids concrete
  * dates, since any date the model produced would be invented.
  */
-function expansionSystemPrompt(now: Date | undefined, timeZone: string): string {
+export function expansionSystemPrompt(now: Date | undefined, timeZone: string): string {
   const today = now !== undefined && !Number.isNaN(now.getTime())
     ? `${weekdayIn(now, timeZone)}, ${calendarDateIn(now, timeZone)}`
     : null

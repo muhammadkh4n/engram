@@ -104,7 +104,9 @@ function requireEnv(name: string): string {
  *   - `mixedbread-ai/mxbai-rerank-xsmall-v1` — fastest mxbai, further drop.
  *
  * Rerank scores are not comparable across models (each sits on its own
- * sigmoid scale), so nothing may gate on an absolute rerank score.
+ * sigmoid scale), so nothing may gate on an absolute rerank score. A gate on a
+ * rerank score holds only for the model and dtype it was calibrated on: the
+ * recall floor is measured and recorded per reranker id, which names both.
  *
  * Weights are downloaded on first use and cached under the HF cache dir.
  * `.load()` is fired fire-and-forget at startup so the cache warm-up

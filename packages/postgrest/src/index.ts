@@ -18,6 +18,8 @@ export { getSchemaSQL, getMigrationSQL } from './migrations.js'
 export { PostgRestItemStore } from './items.js'
 export type { PostgRestItemStoreOptions } from './items.js'
 export { PostgRestCaptureStore } from './capture-store.js'
+export { PostgRestRecallStore } from './recall-store.js'
+export type { PostgRestRecallStoreOptions } from './recall-store.js'
 export type { PostgRestCaptureStoreOptions, SalvageBegin } from './capture-store.js'
 
 import { PostgRestStorageAdapter } from './adapter.js'

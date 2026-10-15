@@ -3,9 +3,16 @@ import { OpenAIEmbeddingService } from './embeddings.js'
 import { OpenAISummarizer } from './summarizer.js'
 import type { ChatReasoningMode } from './summarizer.js'
 
-export { OpenAIEmbeddingService } from './embeddings.js'
+export { OpenAIEmbeddingService, DEFAULT_EMBEDDING_MODEL } from './embeddings.js'
 export type { OpenAIEmbeddingServiceOptions } from './embeddings.js'
-export { OpenAISummarizer, DEFAULT_REASONING_HEADROOM, DEFAULT_CHAT_MODEL } from './summarizer.js'
+export {
+  OpenAISummarizer,
+  DEFAULT_REASONING_HEADROOM,
+  DEFAULT_CHAT_MODEL,
+  HYDE_SYSTEM_PROMPT,
+  RECALL_STEP_PROMPT_VERSION,
+  expansionSystemPrompt,
+} from './summarizer.js'
 export type { OpenAISummarizerOptions, ChatReasoningMode, TranscriptDigestKind } from './summarizer.js'
 export { assertTimeZone, calendarDateIn, weekdayIn } from './time-zone.js'
 
@@ -88,8 +95,8 @@ export function openaiIntelligence(opts: OpenAIIntelligenceOptions): Intelligenc
     extractSalience(content, opts) {
       return summarizer.extractSalience(content, opts)
     },
-    generateHypotheticalDoc(query) {
-      return summarizer.generateHypotheticalDoc(query)
+    generateHypotheticalDoc(query, hydeOpts) {
+      return summarizer.generateHypotheticalDoc(query, hydeOpts)
     },
     expandQuery(query, expandOpts) {
       return summarizer.expandQuery(query, expandOpts)

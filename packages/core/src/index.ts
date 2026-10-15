@@ -225,6 +225,7 @@ export type {
   SalienceClassification,
   SalienceOpts,
   ExpandQueryOpts,
+  HypotheticalDocOpts,
   EvidenceItem,
   EvidenceSelection,
   SupersessionFact,
@@ -491,3 +492,6 @@ export type {
   EvidenceType,
   ItemSide,
 } from './extraction/reply.js'
+
+// The recall core over the typed item store.
+export * from './recall/index.js'

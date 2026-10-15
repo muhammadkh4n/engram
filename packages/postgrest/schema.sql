@@ -8149,6 +8149,398 @@ $$;
 
 
 --
+-- Recall read side: what the recall pipeline reads after the candidate call.
+--
+-- Recall asks engram_item_candidates (bm25.sql) for ids, then reads the items
+-- themselves, their supersession chains, the active register tokens and a
+-- store version through the functions below. They only read; every one is
+-- SECURITY DEFINER with a fixed search_path and EXECUTE for service_role only
+-- (the function privileges section at the end of this file).
+--
+
+--
+-- Name: engram_recall_items(uuid[], timestamp with time zone, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- One row per requested id that is not forgotten, in p_ids order, then one row
+-- per chain end that was not requested, by id. A chain follows superseded_by
+-- to its end, however long: a vault section gains one link per edit, so a cap
+-- would show a superseded version as current. Every chain is walked in one
+-- recursive statement, one index lookup per hop. The walk always ends, because
+-- a successor must occur strictly later than the item it replaces
+-- (memory_items_before_insert, memory_items_before_update, the deferred
+-- memory_items_supersession check); a hop to a successor that does not fails
+-- the call, so a broken chain can never loop. A successor counts only when it occurred at or before
+-- p_as_of (when set), and one retired as of p_as_of ends the chain as
+-- successor_retired, with no current item. A forgotten successor never ends a
+-- chain: forgetting an item re-points every live predecessor past it
+-- (memory_items_forget_cascade), and the deferred supersession check refuses
+-- a pointer to a forgotten item. chain is the state of the row's own item:
+-- current (current_id is the item itself), superseded (current_id is the
+-- chain end, returned as a row too) or successor_retired (current_id NULL).
+-- end_excluded says the row's current item is of p_exclude_session by the
+-- candidate statement's rule: its session_id, or a lineage item of that
+-- session. retired and restated are read as of p_as_of. No embedding.
+CREATE OR REPLACE FUNCTION public.engram_recall_items(p_ids uuid[], p_as_of timestamp with time zone DEFAULT NULL, p_exclude_session text DEFAULT NULL)
+    RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text,
+                  plan_slug text, session_id text, subject_label text, content_head text, content_length integer,
+                  question text, search_head text, occurred_at timestamp with time zone, superseded_by uuid,
+                  retired boolean, restated integer, source jsonb, requested boolean, current_id uuid, chain text,
+                  end_excluded boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  c_max_ids constant integer := 500;
+  v_ids uuid[];
+  v_ends uuid[];
+  v_chains text[];
+  v_broken boolean;
+BEGIN
+  IF p_ids IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_recall_items: p_ids is required';
+  END IF;
+  IF cardinality(p_ids) > c_max_ids THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_recall_items: p_ids holds more than %s ids', c_max_ids);
+  END IF;
+  IF p_exclude_session IS NOT NULL AND char_length(p_exclude_session) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_recall_items: p_exclude_session must be 1 to 256 characters';
+  END IF;
+
+  v_ids := ARRAY(
+    SELECT r.id
+      FROM (SELECT u.id, min(u.ord) AS ord
+              FROM unnest(p_ids) WITH ORDINALITY AS u(id, ord)
+             WHERE u.id IS NOT NULL
+             GROUP BY u.id) r
+      JOIN public.memory_items i ON i.id = r.id AND i.forgotten_at IS NULL
+     ORDER BY r.ord);
+
+  -- A hop is taken only to a successor that counts as of p_as_of and occurred
+  -- strictly later; each walk's last row then says why it stopped.
+  WITH RECURSIVE walk(start_id, node_id, node_at, next_id, depth) AS (
+    SELECT i.id, i.id, i.occurred_at, i.superseded_by, 0
+      FROM public.memory_items i
+     WHERE i.id = ANY (v_ids)
+    UNION ALL
+    SELECT w.start_id, s.id, s.occurred_at, s.superseded_by, w.depth + 1
+      FROM walk w
+      JOIN public.memory_items s ON s.id = w.next_id
+     WHERE s.forgotten_at IS NULL
+       AND (p_as_of IS NULL OR s.occurred_at <= p_as_of)
+       AND (s.retired_at IS NULL OR (p_as_of IS NOT NULL AND s.retired_at > p_as_of))
+       AND s.occurred_at > w.node_at
+  ), last AS (
+    SELECT DISTINCT ON (w.start_id) w.start_id, w.node_id, w.node_at, w.next_id, w.depth
+      FROM walk w
+     ORDER BY w.start_id, w.depth DESC
+  ), stopped AS (
+    SELECT l.start_id,
+           CASE
+             WHEN s.id IS NULL OR s.forgotten_at IS NOT NULL THEN 'end'
+             WHEN p_as_of IS NOT NULL AND s.occurred_at > p_as_of THEN 'end'
+             WHEN s.retired_at IS NOT NULL AND (p_as_of IS NULL OR s.retired_at <= p_as_of) THEN 'retired'
+             ELSE 'broken'
+           END AS why,
+           l.node_id,
+           l.depth
+      FROM last l
+      LEFT JOIN public.memory_items s ON s.id = l.next_id
+  )
+  SELECT array_agg(CASE WHEN st.why = 'end' THEN st.node_id END ORDER BY u.ord),
+         array_agg(CASE WHEN st.why = 'retired' THEN 'successor_retired'
+                        WHEN st.depth = 0 THEN 'current'
+                        ELSE 'superseded' END ORDER BY u.ord),
+         coalesce(bool_or(st.why = 'broken'), false)
+    INTO v_ends, v_chains, v_broken
+    FROM unnest(v_ids) WITH ORDINALITY AS u(id, ord)
+    JOIN stopped st ON st.start_id = u.id;
+  IF v_broken THEN
+    RAISE EXCEPTION USING ERRCODE = 'internal_error',
+      MESSAGE = 'engram_recall_items: a supersession chain names a successor that did not occur later';
+  END IF;
+  v_ends := coalesce(v_ends, '{}');
+  v_chains := coalesce(v_chains, '{}');
+
+  RETURN QUERY
+  WITH st AS (
+    SELECT s.rid, s.end_id, s.chain, s.ord
+      FROM unnest(v_ids, v_ends, v_chains) WITH ORDINALITY AS s(rid, end_id, chain, ord)
+  ), wanted AS (
+    SELECT st.rid AS item_id, true AS is_requested, st.end_id AS cur_id, st.chain AS chain_state, st.ord AS ord
+      FROM st
+    UNION ALL
+    SELECT DISTINCT st.end_id, false, st.end_id, 'current', NULL::bigint
+      FROM st
+     WHERE st.end_id IS NOT NULL AND st.end_id <> ALL (v_ids)
+  ), excluded AS (
+    SELECT ARRAY(SELECT x.id FROM public.memory_items x
+                  WHERE p_exclude_session IS NOT NULL AND x.session_id = p_exclude_session) AS ids
+  )
+  SELECT i.id, i.class, i.kind, i.speaker, i.trust, i.project_id, i.workspace_id, i.plan_slug, i.session_id,
+         sj.label,
+         left(i.content, 12000),
+         char_length(i.content),
+         left(i.context, 2000),
+         left(i.search_text, 2000),
+         i.occurred_at,
+         i.superseded_by,
+         (i.retired_at IS NOT NULL AND (p_as_of IS NULL OR i.retired_at <= p_as_of)),
+         (SELECT count(*)::integer FROM unnest(i.restated_at) AS ra(t) WHERE p_as_of IS NULL OR ra.t <= p_as_of),
+         i.source,
+         w.is_requested,
+         w.cur_id,
+         w.chain_state,
+         (p_exclude_session IS NOT NULL AND e.id IS NOT NULL
+          AND (e.session_id IS NOT DISTINCT FROM p_exclude_session OR e.lineage && ex.ids))
+    FROM wanted w
+    JOIN public.memory_items i ON i.id = w.item_id
+    LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
+    LEFT JOIN public.memory_items e ON e.id = w.cur_id
+   CROSS JOIN excluded ex
+   ORDER BY w.is_requested DESC, w.ord, i.id;
+END; $$;
+
+
+--
+-- Name: engram_active_register_tokens(timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The tokens of the register entries in force as of p_as_of (now when NULL):
+-- ruling_entry items that occurred by then, were neither superseded nor
+-- retired by then, are not forgotten and carry status active. register_id is
+-- the entry's id; each token is one string of its applies_to array, so an
+-- entry with an empty or missing applies_to gives none. A register entry with
+-- another status is retired when its event is materialized, not at its event
+-- time, so for an entry that left the active state the "as of" holds from
+-- that processing time on.
+CREATE OR REPLACE FUNCTION public.engram_active_register_tokens(p_as_of timestamp with time zone DEFAULT NULL)
+    RETURNS TABLE(register_id text, token text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT DISTINCT i.source ->> 'id', t.token
+    FROM public.memory_items i
+   CROSS JOIN LATERAL jsonb_array_elements_text(
+           CASE WHEN jsonb_typeof(i.source -> 'applies_to') = 'array' THEN i.source -> 'applies_to' ELSE '[]'::jsonb END
+         ) AS t(token)
+   WHERE i.class = 'artifact'
+     AND i.kind = 'ruling_entry'
+     AND i.forgotten_at IS NULL
+     AND (i.source ->> 'status') = 'active'
+     AND (i.source ->> 'id') ~ '\S'
+     AND t.token ~ '\S'
+     AND (p_as_of IS NULL OR i.occurred_at <= p_as_of)
+     AND (i.retired_at IS NULL OR (p_as_of IS NOT NULL AND i.retired_at > p_as_of))
+     AND (i.superseded_by IS NULL OR (p_as_of IS NOT NULL AND i.valid_to > p_as_of))
+   ORDER BY 1, 2
+$$;
+
+
+--
+-- Name: memory_store_version_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+-- The store version: a number that changes whenever an item, subject, entity
+-- or project row changes, read before and after a recall to tell whether the
+-- store moved under it. A sequence, not a counter row: a row updated by every
+-- writer would hold its lock to commit, serialise every writer and deadlock
+-- two that touch the same items in opposite orders, while nextval takes no
+-- row lock. The row triggers are deferred, so a transaction bumps the version
+-- at commit, just before its changes become visible; a rolled-back write may
+-- still have bumped it, which only reads as a change. TRUNCATE (tests, never
+-- the service) bumps it at once.
+--
+
+CREATE SEQUENCE IF NOT EXISTS public.memory_store_version_seq;
+REVOKE ALL ON SEQUENCE public.memory_store_version_seq FROM PUBLIC, service_role;
+DO $$
+DECLARE
+  role_name name;
+BEGIN
+  FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+      EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_store_version_seq FROM %I', role_name);
+    END IF;
+  END LOOP;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION public.engram_store_version_bump() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  PERFORM nextval('public.memory_store_version_seq');
+  RETURN NULL;
+END; $$;
+
+DROP TRIGGER IF EXISTS engram_store_version_items ON public.memory_items;
+CREATE CONSTRAINT TRIGGER engram_store_version_items AFTER INSERT OR UPDATE OR DELETE ON public.memory_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_subjects ON public.memory_subjects;
+CREATE CONSTRAINT TRIGGER engram_store_version_subjects AFTER INSERT OR UPDATE OR DELETE ON public.memory_subjects DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_entities ON public.memory_item_entities;
+CREATE CONSTRAINT TRIGGER engram_store_version_entities AFTER INSERT OR UPDATE OR DELETE ON public.memory_item_entities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_projects ON public.memory_projects;
+CREATE CONSTRAINT TRIGGER engram_store_version_projects AFTER INSERT OR UPDATE OR DELETE ON public.memory_projects DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_items_truncate ON public.memory_items;
+CREATE TRIGGER engram_store_version_items_truncate AFTER TRUNCATE ON public.memory_items FOR EACH STATEMENT EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_subjects_truncate ON public.memory_subjects;
+CREATE TRIGGER engram_store_version_subjects_truncate AFTER TRUNCATE ON public.memory_subjects FOR EACH STATEMENT EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_entities_truncate ON public.memory_item_entities;
+CREATE TRIGGER engram_store_version_entities_truncate AFTER TRUNCATE ON public.memory_item_entities FOR EACH STATEMENT EXECUTE FUNCTION public.engram_store_version_bump();
+
+DROP TRIGGER IF EXISTS engram_store_version_projects_truncate ON public.memory_projects;
+CREATE TRIGGER engram_store_version_projects_truncate AFTER TRUNCATE ON public.memory_projects FOR EACH STATEMENT EXECUTE FUNCTION public.engram_store_version_bump();
+
+
+--
+-- Name: engram_store_version(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The current store version: 0 until the first change, then the last value
+-- the sequence handed out.
+CREATE OR REPLACE FUNCTION public.engram_store_version() RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT CASE WHEN s.is_called THEN s.last_value ELSE 0 END FROM public.memory_store_version_seq s
+$$;
+
+
+--
+-- Name: engram_recall_item_states(uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The forget and retire times of the given ids, forgotten rows included, in
+-- p_ids order: what an audit of past recalls needs to tell whether a shown
+-- item was already forgotten or retired when it was shown.
+CREATE OR REPLACE FUNCTION public.engram_recall_item_states(p_ids uuid[])
+    RETURNS TABLE(id uuid, forgotten_at timestamp with time zone, retired_at timestamp with time zone)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT i.id, i.forgotten_at, i.retired_at
+    FROM (SELECT u.id, min(u.ord) AS ord FROM unnest(p_ids) WITH ORDINALITY AS u(id, ord) GROUP BY u.id) r
+    JOIN public.memory_items i ON i.id = r.id
+   ORDER BY r.ord
+$$;
+
+
+--
+-- Name: engram_project_workspace(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The workspace of a registered project; NULL for an unknown project, a
+-- workspace, or a project without one.
+CREATE OR REPLACE FUNCTION public.engram_project_workspace(p_project_id text) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT p.workspace_id FROM public.memory_projects p WHERE p.id = p_project_id
+$$;
+
+
+--
+-- Name: engram_recall_projects(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Every registered project and workspace id with its kind, by id: what the
+-- deterministic entity extractor needs to recognise repository names in a
+-- recall query.
+CREATE OR REPLACE FUNCTION public.engram_recall_projects() RETURNS TABLE(id text, kind text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT p.id, p.kind FROM public.memory_projects p ORDER BY p.id
+$$;
+
+
+--
+-- Name: memory_recall_step_cache; Type: TABLE; Schema: public; Owner: -
+--
+-- The outputs of recall's model steps, kept so the same input gets the same
+-- output across calls and restarts: a query or HyDE embedding (vector_output)
+-- and an expansion or a HyDE passage (text_output: a JSON array of strings or
+-- a JSON string). cache_key is the sha256 hex of the step's version, its
+-- reference date and its normalised input, so a new model or prompt version
+-- never reads an old output. The first writer's value is the one every caller
+-- reads (engram_recall_cache_put). Rows are never updated.
+--
+
+CREATE TABLE IF NOT EXISTS public.memory_recall_step_cache (
+    step text NOT NULL,
+    cache_key text NOT NULL,
+    version text NOT NULL,
+    text_output jsonb,
+    vector_output public.vector(1536),
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    PRIMARY KEY (step, cache_key),
+    CONSTRAINT memory_recall_step_cache_step_check CHECK (step IN ('embed_query', 'embed_hyde', 'expand', 'hyde')),
+    CONSTRAINT memory_recall_step_cache_key_check CHECK (cache_key ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT memory_recall_step_cache_version_check CHECK (version ~ '\S' AND char_length(version) <= 200),
+    CONSTRAINT memory_recall_step_cache_output_check CHECK (CASE
+        WHEN step IN ('embed_query', 'embed_hyde') THEN vector_output IS NOT NULL AND text_output IS NULL
+        WHEN step = 'expand' THEN text_output IS NOT NULL AND vector_output IS NULL AND jsonb_typeof(text_output) = 'array'
+        ELSE text_output IS NOT NULL AND vector_output IS NULL AND jsonb_typeof(text_output) = 'string' END)
+);
+
+
+--
+-- Name: engram_recall_cache_get(text, text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The stored outputs of one step for the given keys; a key with no row is
+-- absent from the result.
+CREATE OR REPLACE FUNCTION public.engram_recall_cache_get(p_step text, p_keys text[])
+    RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  SELECT c.cache_key, c.version, c.text_output, c.vector_output
+    FROM public.memory_recall_step_cache c
+   WHERE c.step = p_step AND c.cache_key = ANY (p_keys)
+   ORDER BY c.cache_key
+$$;
+
+
+--
+-- Name: engram_recall_cache_put(text, text, text, jsonb, public.vector); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Stores one step output unless the key is already stored, then returns the
+-- stored row: with two writers of one key, both get the first writer's value.
+-- RETURNING gives nothing on a conflict, so the row is read back.
+CREATE OR REPLACE FUNCTION public.engram_recall_cache_put(p_step text, p_key text, p_version text, p_text_output jsonb, p_vector_output public.vector)
+    RETURNS TABLE(cache_key text, version text, text_output jsonb, vector_output public.vector)
+    LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_step IS NULL OR p_key IS NULL OR p_version IS NULL THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_recall_cache_put: p_step, p_key and p_version are required';
+  END IF;
+  INSERT INTO public.memory_recall_step_cache AS c (step, cache_key, version, text_output, vector_output)
+  VALUES (p_step, p_key, p_version, p_text_output, p_vector_output)
+  ON CONFLICT ON CONSTRAINT memory_recall_step_cache_pkey DO NOTHING;
+  RETURN QUERY
+  SELECT c.cache_key, c.version, c.text_output, c.vector_output
+    FROM public.memory_recall_step_cache c
+   WHERE c.step = p_step AND c.cache_key = p_key;
+END; $$;
+
+
+--
 -- Name: memories; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -8267,6 +8659,13 @@ ALTER TABLE public.memory_item_actions ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.memory_document_notes ENABLE ROW LEVEL SECURITY;
+
+
+--
+-- Name: memory_recall_step_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.memory_recall_step_cache ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: memories service_role_all; Type: POLICY; Schema: public; Owner: -
@@ -8420,6 +8819,14 @@ CREATE POLICY service_role_all ON public.memory_document_notes TO service_role U
 
 
 --
+-- Name: memory_recall_step_cache service_role_all; Type: POLICY; Schema: public; Owner: -
+--
+
+DROP POLICY IF EXISTS service_role_all ON public.memory_recall_step_cache;
+CREATE POLICY service_role_all ON public.memory_recall_step_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Item store table privileges, identical on every database.
 --
 -- A fresh database grants a new table to no role but its owner, while the
@@ -8437,7 +8844,7 @@ CREATE POLICY service_role_all ON public.memory_document_notes TO service_role U
 -- apply.
 --
 
-REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM PUBLIC, service_role;
+REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes, public.memory_recall_step_cache FROM PUBLIC, service_role;
 REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM PUBLIC, service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
@@ -8449,7 +8856,7 @@ BEGIN
   FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated']::name[]
   LOOP
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes FROM %I', role_name);
+      EXECUTE format('REVOKE ALL ON TABLE public.memory_subjects, public.memory_extraction_runs, public.memory_projects, public.memory_items, public.memory_item_entities, public.memory_item_links, public.memory_session_state, public.memory_capture_events, public.memory_capture_event_counts, public.memory_secret_hits, public.memory_item_actions, public.memory_document_notes, public.memory_recall_step_cache FROM %I', role_name);
       EXECUTE format('REVOKE ALL ON SEQUENCE public.memory_capture_events_id_seq, public.memory_capture_event_counts_id_seq, public.memory_secret_hits_id_seq, public.memory_item_links_id_seq, public.memory_item_actions_id_seq FROM %I', role_name);
     END IF;
   END LOOP;
@@ -8468,6 +8875,7 @@ GRANT SELECT ON TABLE public.memory_secret_hits TO service_role;
 GRANT SELECT ON TABLE public.memory_session_state TO service_role;
 GRANT SELECT ON TABLE public.memory_item_actions TO service_role;
 GRANT SELECT ON TABLE public.memory_document_notes TO service_role;
+GRANT SELECT ON TABLE public.memory_recall_step_cache TO service_role;
 
 
 --
@@ -8504,7 +8912,14 @@ BEGIN
   PERFORM * FROM public.engram_forget_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
   PERFORM * FROM public.engram_retire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
   PERFORM * FROM public.engram_unretire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
-  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire, their audited forms and invariant counts callable';
+  PERFORM * FROM public.engram_recall_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], now(), 'smoke');
+  PERFORM * FROM public.engram_active_register_tokens(now());
+  PERFORM public.engram_store_version();
+  PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  PERFORM public.engram_project_workspace('smoke');
+  PERFORM * FROM public.engram_recall_projects();
+  PERFORM * FROM public.engram_recall_cache_get('expand', ARRAY[repeat('0', 64)]);
+  RAISE NOTICE 'engram schema smoke OK: 5 recall RPCs + engram_mark_forgotten callable; forgotten_at gate live; item forget, retire, unretire, their audited forms, invariant counts and the recall read side callable';
 END;
 $smoke$;
 
@@ -8614,6 +9029,15 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_insert() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_before_update() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_forget_cascade() FROM service_role;
@@ -8621,6 +9045,7 @@ REVOKE EXECUTE ON FUNCTION public.memory_items_lineage() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM service_role;
 REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM service_role;
+REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM service_role;
 
 -- anon and authenticated exist on Supabase and on installs that followed the
 -- self-host runbook; a database without them has nothing to revoke.
@@ -8705,6 +9130,15 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_items_supersession() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version_bump() FROM %I', role_name);
     END IF;
   END LOOP;
 END
@@ -8777,6 +9211,14 @@ GRANT EXECUTE ON FUNCTION public.engram_upsert_co_recalled(uuid, text, uuid, tex
 GRANT EXECUTE ON FUNCTION public.engram_vector_search(public.vector, integer, text, text, text[], text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) TO service_role;
 GRANT EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_project_workspace(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_projects() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_recall_cache_put(text, text, text, jsonb, public.vector) TO service_role;
 
 
 --
