@@ -4,9 +4,9 @@
  * behind PostgREST.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { ForgetPreview, ForgottenMemory, ItemActionResult, NewItem } from '@engram-mem/core'
+import type { ForgottenMemory, ItemActionResult, NewItem } from '@engram-mem/core'
 import { PostgRestItemStore } from '@engram-mem/postgrest'
-import { runMemoryForget, runMemoryRetire, type ForgetToolDeps } from '../src/item-action-tools.js'
+import { FORGET_QUERY_REMOVED, MEMORY_FORGET_TOOL, runMemoryForget, runMemoryRetire, type ForgetToolDeps } from '../src/item-action-tools.js'
 import { postgrestImage, realPgImage, startRealPg, type RealPg } from '../../postgrest/test/real-pg/harness.js'
 
 const ID_A = '01960000-0000-7000-8000-00000000000a'
@@ -14,28 +14,13 @@ const ID_B = '01960000-0000-7000-8000-00000000000b'
 const ID_C = '01960000-0000-7000-8000-00000000000c'
 const ID_D = '01960000-0000-7000-8000-00000000000d'
 
-const PREVIEW: ForgetPreview = {
-  count: 2,
-  candidates: [
-    {
-      id: 'ep-1', type: 'episode', relevance: 0.8234, projectId: null, date: '2026-09-28',
-      content: 'the staging deploy key\nrotates every monday   ' + 'x'.repeat(300),
-    },
-    { id: 'dig-2', type: 'digest', relevance: 0.4, projectId: 'engram', date: null, content: 'billing runs monthly' },
-  ],
-}
-
 function textOf(r: { content: Array<{ text: string }> }): string {
   return r.content.map((c) => c.text).join('\n')
 }
 
 function forgetDeps(rows: ForgottenMemory[] = [], graph: ForgetToolDeps['graph'] = null) {
-  const calls = { preview: [] as string[], forget: [] as unknown[][] }
+  const calls = { forget: [] as unknown[][] }
   const deps: ForgetToolDeps = {
-    preview: async (query) => {
-      calls.preview.push(query)
-      return PREVIEW
-    },
     store: {
       forgetMemories: async (...a) => {
         calls.forget.push(a)
@@ -52,26 +37,26 @@ function row(id: string, overrides: Partial<ForgottenMemory> = {}): ForgottenMem
 }
 
 describe('memory_forget', () => {
-  it('previews a query with one line per candidate, digests included, and forgets nothing', async () => {
-    const { deps, calls } = forgetDeps()
-    const text = textOf(await runMemoryForget(deps, { query: '  staging deploy key  ' }))
-
-    expect(calls.preview).toEqual(['staging deploy key'])
-    expect(calls.forget).toHaveLength(0)
-    const lines = text.split('\n')
-    const first = lines.find((l) => l.includes('ep-1'))!
-    expect(first.startsWith('- [episode · 2026-09-28] ep-1 · relevance 0.82 · the staging deploy key rotates every monday x')).toBe(true)
-    expect(first.slice(first.indexOf('· the staging') + 2)).toHaveLength(160)
-    expect(lines).toContain('- [digest] dig-2 · relevance 0.40 · billing runs monthly')
-    expect(lines[lines.length - 1]).toBe('To forget, call memory_forget again with ids set to the ones to remove and a reason.')
+  it('answers a call that passes query by saying it was removed, and forgets nothing', async () => {
+    for (const args of [{ query: 'staging deploy key' }, { query: 'q', ids: [ID_A], reason: 'r' }]) {
+      const { deps, calls } = forgetDeps()
+      expect(await runMemoryForget(deps, args)).toEqual({ content: [{ type: 'text', text: `Error: ${FORGET_QUERY_REMOVED}` }], isError: true })
+      expect(calls.forget).toHaveLength(0)
+    }
+    expect(FORGET_QUERY_REMOVED).toBe(
+      'query was removed: forget takes explicit ids and a reason. Find ids with memory_recall (include_history: true; add "legacy" to classes for old rows).',
+    )
   })
 
-  it('refuses a reason passed with a query, both or neither of query and ids, and bad ids or reasons', async () => {
+  it('takes only ids and a reason, both required', () => {
+    expect(MEMORY_FORGET_TOOL.inputSchema.required).toEqual(['ids', 'reason'])
+    expect(Object.keys(MEMORY_FORGET_TOOL.inputSchema.properties).sort()).toEqual(['ids', 'reason'])
+    expect(MEMORY_FORGET_TOOL.description).not.toMatch(/preview/i)
+  })
+
+  it('refuses missing or bad ids and reasons', async () => {
     const bad: Array<[Record<string, unknown>, RegExp]> = [
-      [{ query: 'q', reason: 'why' }, /a reason goes with ids/],
-      [{ query: 'q', ids: [ID_A], reason: 'r' }, /pass exactly one of query or ids/],
-      [{}, /pass exactly one of query or ids/],
-      [{ query: '   ' }, /query must be a non-empty string/],
+      [{}, /ids must be a non-empty array/],
       [{ ids: [], reason: 'r' }, /ids must be a non-empty array/],
       [{ ids: [ID_A, 7], reason: 'r' }, /every id must be a non-empty string/],
       [{ ids: [ID_A] }, /reason must be a non-blank string/],
@@ -85,7 +70,6 @@ describe('memory_forget', () => {
       expect(r.isError, JSON.stringify(args).slice(0, 80)).toBe(true)
       expect(textOf(r)).toMatch(message)
       expect(calls.forget).toHaveLength(0)
-      expect(calls.preview).toHaveLength(0)
     }
   })
 
@@ -221,7 +205,7 @@ describe.skipIf(!realPgImage || !postgrestImage)('forget, retire and unretire on
     const graph = { forgetMemories: vi.fn(async () => Promise.reject(new Error('graph down'))) }
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     try {
-      const r = await runMemoryForget({ preview: async () => PREVIEW, store, graph }, { ids: [e, newId()], reason: 'imported by mistake' })
+      const r = await runMemoryForget({ store, graph }, { ids: [e, newId()], reason: 'imported by mistake' })
       const text = textOf(r)
       expect(r.isError).toBeUndefined()
       expect(text).toContain(`Forgotten (1): ${e} (episode)`)

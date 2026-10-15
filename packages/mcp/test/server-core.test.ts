@@ -12,6 +12,8 @@
  * `packages/recall-engine/test/decorator.test.ts` instead).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
 import {
@@ -30,6 +32,7 @@ import {
   extractionHeldFromEnv,
   recallOutputPolicyAtStartup,
   getMemory,
+  createEngramServer,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -511,5 +514,38 @@ describe('consolidationAtStartup', () => {
       if (saved === undefined) delete process.env.ENGRAM_CONSOLIDATION
       else process.env.ENGRAM_CONSOLIDATION = saved
     }
+  })
+})
+
+describe('the MCP server', () => {
+  async function connect(): Promise<Client> {
+    const server = createEngramServer()
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverSide)
+    const client = new Client({ name: 'tst-client', version: '0.0.0' })
+    await client.connect(clientSide)
+    return client
+  }
+
+  it('lists neither memory_bridges nor memory_consolidation_status, and answers them as unknown tools', async () => {
+    const client = await connect()
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    expect(names).not.toContain('memory_bridges')
+    expect(names).not.toContain('memory_consolidation_status')
+    for (const name of ['memory_bridges', 'memory_consolidation_status']) {
+      expect(await client.callTool({ name, arguments: {} })).toEqual({
+        content: [{ type: 'text', text: `Error: unknown tool "${name}"` }],
+        isError: true,
+      })
+    }
+    await client.close()
+  })
+
+  it('lists memory_forget with ids and reason required and no query', async () => {
+    const client = await connect()
+    const forget = (await client.listTools()).tools.find((t) => t.name === 'memory_forget')!
+    expect(forget.inputSchema.required).toEqual(['ids', 'reason'])
+    expect(Object.keys(forget.inputSchema.properties ?? {}).sort()).toEqual(['ids', 'reason'])
+    await client.close()
   })
 })

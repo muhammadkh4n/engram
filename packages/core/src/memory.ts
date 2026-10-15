@@ -1,4 +1,4 @@
-import type { Message, Episode, SemanticMemory, ConsolidateResult, RecallResult, RecallStrategy, SynthesizeOpts, TypedMemory, ForgettableType, ForgetCandidate, ForgetPreview, ForgetByIdsResult } from './types.js'
+import type { Message, Episode, ConsolidateResult, RecallResult, RecallStrategy, SynthesizeOpts, TypedMemory, ForgettableType, ForgetCandidate, ForgetPreview, ForgetByIdsResult } from './types.js'
 import type { StorageAdapter } from './adapters/storage.js'
 import type { IntelligenceAdapter } from './adapters/intelligence.js'
 // Wave 2: The graph backend is accessed via a structural port, not a
@@ -34,16 +34,6 @@ import { resolveEventDate, isoDate } from './utils/event-date.js'
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export interface BridgeResult {
-  nodeId: string
-  nodeType: 'person' | 'entity'
-  label: string
-  projectACount: number
-  projectBCount: number
-  projectALabels: string[]
-  projectBLabels: string[]
-}
 
 export interface MemoryOptions {
   storage: StorageAdapter
@@ -777,90 +767,6 @@ export class Memory {
     const episodes = await this.storage.episodes.getByIds(digest.sourceEpisodeIds)
 
     return { episodes }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Community Intelligence (Wave 5)
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Return community summaries (knowledge domain clusters) from Neo4j or SQL cache.
-   * When a topic filter is provided, only communities whose label or top entities/topics
-   * contain the needle are returned.
-   */
-  async getCommunitySummaries(opts?: {
-    topic?: string
-    limit?: number
-    projectId?: string
-  }): Promise<Array<{
-    communityId: string
-    label: string
-    memberCount: number
-    topEntities: string[]
-    topTopics: string[]
-    topPersons: string[]
-    dominantEmotion: string | null
-  }>> {
-    this.assertInitialized()
-
-    // Prefer Neo4j direct query when graph is available
-    if (this._graph && typeof this._graph.queryCommunities === 'function') {
-      const communities = await this._graph.queryCommunities!({
-        projectId: opts?.projectId,
-        limit: opts?.limit ?? 5,
-      })
-
-      if (!opts?.topic) return communities
-
-      const needle = opts.topic.toLowerCase()
-      return communities.filter(c =>
-        c.label.toLowerCase().includes(needle) ||
-        c.topTopics.some(t => t.toLowerCase().includes(needle)) ||
-        c.topEntities.some(e => e.toLowerCase().includes(needle))
-      )
-    }
-
-    // Fallback: SQL cache
-    if (this.storage.getCommunitySummaries) {
-      const all = await this.storage.getCommunitySummaries({
-        projectId: opts?.projectId,
-        limit: opts?.limit ?? 5,
-      })
-
-      if (!opts?.topic) return all
-
-      const needle = opts.topic.toLowerCase()
-      return all.filter(c =>
-        c.label.toLowerCase().includes(needle) ||
-        c.topTopics.some(t => t.toLowerCase().includes(needle)) ||
-        c.topEntities.some(e => e.toLowerCase().includes(needle))
-      )
-    }
-
-    return []
-  }
-
-  /**
-   * Find shared Person/Entity nodes that bridge two project namespaces.
-   * Only available when Neo4j graph is configured.
-   */
-  async findBridges(projectA: string, projectB: string): Promise<BridgeResult[]> {
-    this.assertInitialized()
-    if (!this._graph || typeof this._graph.findProjectBridges !== 'function') return []
-    return this._graph.findProjectBridges!(projectA, projectB)
-  }
-
-  // ---------------------------------------------------------------------------
-  // Temporal Queries
-  // ---------------------------------------------------------------------------
-
-  /** Get the full timeline of a topic — all semantic memories including superseded ones. */
-  async getTimeline(
-    topic: string,
-    opts?: { fromDate?: Date; toDate?: Date },
-  ): Promise<SemanticMemory[]> {
-    this.assertInitialized()
-    return this.storage.semantic.getTopicTimeline(topic, opts)
   }
 
   // ---------------------------------------------------------------------------

@@ -217,18 +217,4 @@ export interface GraphPort {
     persons: string[]
     topics: string[]
   }): Promise<Array<{ attributeType: string; nodeIds: string[] }>>
-
-  /**
-   * Wave 5: Find shared Person/Entity nodes that bridge two project namespaces.
-   * Returns connection metadata — no cross-project memory content.
-   */
-  findProjectBridges?(projectA: string, projectB: string): Promise<Array<{
-    nodeId: string
-    nodeType: 'person' | 'entity'
-    label: string
-    projectACount: number
-    projectBCount: number
-    projectALabels: string[]
-    projectBLabels: string[]
-  }>>
 }

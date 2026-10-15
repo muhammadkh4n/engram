@@ -192,13 +192,4 @@ describe('PostgREST session and recent reads exclude forgotten rows', () => {
 
     expect(isNullFilters(calls)).toEqual(['consolidated_at', 'forgotten_at'])
   })
-
-  it('semantic.getTopicTimeline filters forgotten_at and keeps superseded rows', async () => {
-    const { client, calls } = recordingClient()
-
-    await new PostgRestSemanticStorage(client).getTopicTimeline('deploys')
-
-    expect(calls[0]).toEqual(['from', 'memory_semantic'])
-    expect(isNullFilters(calls)).toEqual(['forgotten_at'])
-  })
 })

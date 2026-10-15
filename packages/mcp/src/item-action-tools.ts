@@ -6,7 +6,7 @@
  * also writes its audit row. Argument text is never logged.
  */
 import { MAX_FORGET_IDS } from '@engram-mem/core'
-import type { ForgetPreview, ForgottenMemory, ItemActionResult, ItemStore } from '@engram-mem/core'
+import type { ForgottenMemory, ItemActionResult, ItemStore } from '@engram-mem/core'
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
 
@@ -14,7 +14,6 @@ type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?
 export const MCP_CHANNEL = 'mcp'
 export const ITEM_ACTION_REASON_MAX_CHARS = 2000
 const ID_MAX_CHARS = 200
-const FORGET_PREVIEW_TEXT_CHARS = 160
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const IDS_SCHEMA = {
@@ -28,9 +27,8 @@ const REASON_SCHEMA = { type: 'string', minLength: 1, maxLength: ITEM_ACTION_REA
 export const MEMORY_FORGET_TOOL = {
   name: 'memory_forget',
   description:
-    'Forget memories in two steps. Call with query to preview: it lists the matching memories (id, tier, date, ' +
-    'relevance, text), digests included, and never forgets anything. Then call with ids and a reason: those memories ' +
-    'and everything derived from them are forgotten in one step. A forget cascades: an utterance takes the statements ' +
+    'Forget memories by id, with a reason: those memories and everything derived from them are forgotten in one ' +
+    'step. Find ids with memory_recall (include_history: true; add "legacy" to classes for old rows). A forget cascades: an utterance takes the statements ' +
     "and session index built on it, an episode its digests and the facts and procedures citing it, a digest the facts " +
     'and procedures built from it, and an old row and its legacy copy take each other. A forgotten memory is hidden ' +
     'from every recall path. The answer lists the requested ids, every cascaded id with the id that pulled it in, ' +
@@ -38,10 +36,10 @@ export const MEMORY_FORGET_TOOL = {
   inputSchema: {
     type: 'object' as const,
     properties: {
-      query: { type: 'string', description: 'Describes what to forget. Previews candidates only; takes no reason.' },
-      ids: { ...IDS_SCHEMA, description: 'Memory or item ids to forget, taken from a preview or a recall.' },
-      reason: { ...REASON_SCHEMA, description: 'Required with ids: why these are forgotten. Stored with the forget.' },
+      ids: { ...IDS_SCHEMA, description: 'Memory or item ids to forget, as memory_recall or memory_get shows them.' },
+      reason: { ...REASON_SCHEMA, description: 'Why these are forgotten. Stored with the forget.' },
     },
+    required: ['ids', 'reason'],
   },
 }
 
@@ -70,24 +68,19 @@ function retireTool(action: 'retire' | 'unretire') {
 export const MEMORY_RETIRE_TOOL = retireTool('retire')
 export const MEMORY_UNRETIRE_TOOL = retireTool('unretire')
 
+/** The answer to a call that still passes query: forgetting never ranks or searches. */
+export const FORGET_QUERY_REMOVED =
+  'query was removed: forget takes explicit ids and a reason. Find ids with memory_recall (include_history: true; ' +
+  'add "legacy" to classes for old rows).'
+
 export interface ForgetToolDeps {
-  /** The read-only preview of what a query matches. */
-  preview(query: string): Promise<ForgetPreview>
   store: Pick<ItemStore, 'forgetMemories'>
   /** Neo4j, when configured: forgotten old-table ids are stamped there too. */
   graph: { forgetMemories?(ids: string[]): Promise<number> } | null
 }
 
 export async function runMemoryForget(deps: ForgetToolDeps, args: Record<string, unknown>): Promise<ToolTextResult> {
-  const query = args['query']
-  const hasQuery = query !== undefined && query !== null
-  const hasIds = args['ids'] !== undefined && args['ids'] !== null
-  if (hasQuery === hasIds) return toolError('pass exactly one of query or ids (query previews, ids forget)')
-  if (hasQuery) {
-    if (args['reason'] !== undefined) return toolError('a reason goes with ids: a query only previews')
-    if (typeof query !== 'string' || query.trim().length === 0) return toolError('query must be a non-empty string')
-    return toolText(formatForgetPreview(await deps.preview(query.trim())))
-  }
+  if (args['query'] !== undefined) return toolError(FORGET_QUERY_REMOVED)
   const request = parseIdsAndReason(args)
   if ('error' in request) return toolError(request.error)
   const rows = await deps.store.forgetMemories(request.ids, request.reason, MCP_CHANNEL)
@@ -145,21 +138,6 @@ function parseIdsAndReason(args: Record<string, unknown>): IdsRequest {
     return { error: `reason must be at most ${ITEM_ACTION_REASON_MAX_CHARS} characters` }
   }
   return { ids: distinct, reason }
-}
-
-export function formatForgetPreview(preview: ForgetPreview): string {
-  if (preview.candidates.length === 0) return 'No matching memories found.'
-  const lines = preview.candidates.map((c) => {
-    const tag = c.date ? `${c.type} · ${c.date}` : c.type
-    const text = c.content.replace(/\s+/g, ' ').trim().slice(0, FORGET_PREVIEW_TEXT_CHARS)
-    return `- [${tag}] ${c.id} · relevance ${c.relevance.toFixed(2)} · ${text}`
-  })
-  const n = preview.candidates.length
-  return [
-    `Preview: ${n} matching memor${n === 1 ? 'y' : 'ies'}. Nothing was forgotten.`,
-    ...lines,
-    'To forget, call memory_forget again with ids set to the ones to remove and a reason.',
-  ].join('\n')
 }
 
 export function formatForgetResult(requestedIds: readonly string[], rows: readonly ForgottenMemory[]): string {

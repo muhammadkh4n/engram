@@ -157,13 +157,14 @@ describe.skipIf(!realPgImage)('forgotten digests on real Postgres', () => {
       expect(tombstones).not.toContainEqual({ id: LIVE_DIGEST, type: 'digest' })
     }, TEST_TIMEOUT_MS)
 
-    it('episode session reads and the topic timeline skip forgotten rows', async () => {
+    it('episode session reads and the unaccessed-fact read skip forgotten rows', async () => {
       const episodeIds = (rows: Array<{ id: string }>) =>
         rows.map((r) => r.id).filter((id) => id === LIVE_EPISODE || id === GONE_EPISODE)
 
       expect(episodeIds(await adapter.episodes.getBySession(SESSION))).toEqual([LIVE_EPISODE])
       expect(episodeIds(await adapter.episodes.getUnconsolidated(SESSION))).toEqual([LIVE_EPISODE])
-      expect((await adapter.semantic.getTopicTimeline(TOPIC)).map((m) => m.id)).toEqual([LIVE_FACT])
+      const facts = (await adapter.semantic.getUnaccessed(0)).map((m) => m.id).filter((id) => id === LIVE_FACT || id === GONE_FACT)
+      expect(facts).toEqual([LIVE_FACT])
     }, TEST_TIMEOUT_MS)
 
     it('digests.markForgotten tombstones through PostgREST and counts only new tombstones', async () => {

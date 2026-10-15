@@ -452,8 +452,8 @@ const getMemoryStack = sharedInit(buildMemoryStack)
 
 /**
  * Capture pipeline deps on the server's own stores and chat model. Builds the
- * memory stack on first use; the pipeline gets getMemory itself, so it is the
- * same instance the recall and forget tools use.
+ * memory stack on first use; the pipeline gets getMemory itself, so every
+ * capture shares one memory instance and one model configuration.
  */
 export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
   const stack = await getMemoryStack()
@@ -650,28 +650,6 @@ const TOOLS = [
   MEMORY_TIMELINE_TOOL,
   MEMORY_OVERVIEW_TOOL,
   MEMORY_CAPTURE_STATUS_TOOL,
-  {
-    name: 'memory_bridges',
-    description:
-      'Find shared people or entities that bridge two different projects. Returns cross-project connections — useful for understanding what or who connects two workstreams. Returns labels and counts only, not full memory content from other projects.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        project_a: { type: 'string', description: 'First project ID.' },
-        project_b: { type: 'string', description: 'Second project ID.' },
-      },
-      required: ['project_a', 'project_b'],
-    },
-  },
-  {
-    name: 'memory_consolidation_status',
-    description:
-      'Return when each Engram consolidation cycle last ran and its result. Use this to verify auto-consolidation is healthy, see whether dream cycle has produced community summaries recently, or diagnose why memory_overview returns no clusters. Reads from the consolidation_runs table — no compute, just lookups.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {},
-    },
-  },
 ]
 
 /** What the recall tools run on: the server's recall deps, its recall log, and stderr for failures. */
@@ -701,8 +679,6 @@ export function createEngramServer(): Server {
     }
 
     try {
-      const mem = await getMemory()
-
       if (name === 'memory_recall') {
         const { recallLog } = await getMemoryStack()
         return await runMemoryRecall(recallToolDeps(recallLog), args)
@@ -719,7 +695,7 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_forget') {
         const { itemStore, graph } = await getMemoryStack()
-        return await runMemoryForget({ preview: (query) => mem.forget(query), store: itemStore, graph }, args)
+        return await runMemoryForget({ store: itemStore, graph }, args)
       }
 
       if (name === 'memory_retire' || name === 'memory_unretire') {
@@ -738,85 +714,6 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_capture_status') {
         return await runMemoryCaptureStatus({ store: await getRecallStore() }, args)
-      }
-
-      if (name === 'memory_bridges') {
-        const projectA = args['project_a']
-        const projectB = args['project_b']
-
-        if (typeof projectA !== 'string' || typeof projectB !== 'string') {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: project_a and project_b are required.' }],
-            isError: true,
-          }
-        }
-
-        const bridges = await mem.findBridges(projectA, projectB)
-
-        if (bridges.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: `No shared entities or people found between ${projectA} and ${projectB}.` }],
-          }
-        }
-
-        const lines = [`## Cross-Project Bridges: ${projectA} ↔ ${projectB}`, '']
-        for (const b of bridges) {
-          lines.push(`### ${b.nodeType === 'person' ? 'Person' : 'Entity'}: ${b.label}`)
-          lines.push(`  - ${projectA}: ${b.projectACount} memories`)
-          lines.push(`  - ${projectB}: ${b.projectBCount} memories`)
-          lines.push('')
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
-      }
-
-      if (name === 'memory_consolidation_status') {
-        // Pull recent runs from the SQL tracker. Storage adapters that
-        // haven't implemented consolidationRuns yet (e.g. Supabase as of
-        // v0.3.12) just return "tracker unavailable" — the tool still
-        // serves the diagnostic intent of "tell me whether consolidation
-        // is happening" by saying clearly that no records are kept.
-        const storage = (mem as unknown as { storage: StorageAdapter }).storage
-        const tracker = storage?.consolidationRuns
-        if (!tracker) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: '## Engram — Consolidation Status\n\nThe storage adapter does not implement consolidation_runs tracking, so no per-cycle history is available. The in-process Phase 2 worker (lightSleep / deepSleep / decay) may still be running — check journalctl for the engram-mcp process. Dream cycle status is visible via the engram-dream-cycle systemd timer logs on the host.',
-            }],
-          }
-        }
-        const cycles: Array<'light' | 'deep' | 'dream' | 'decay'> = ['light', 'deep', 'dream', 'decay']
-        const lines = ['## Engram — Consolidation Status', '']
-        for (const cycle of cycles) {
-          const last = await tracker.getLastRun(cycle).catch(() => null)
-          if (!last) {
-            lines.push(`- **${cycle}**: never run`)
-            continue
-          }
-          const status = last.status
-          const when = last.completedAt ? last.completedAt.toISOString() : last.startedAt.toISOString()
-          const dur = last.durationMs !== null ? ` in ${last.durationMs}ms` : ''
-          lines.push(`- **${cycle}**: ${status} at ${when}${dur}`)
-          if (last.result) {
-            const r = last.result
-            const detail: string[] = []
-            if (r.digestsCreated !== undefined) detail.push(`digests=${r.digestsCreated}`)
-            if (r.promoted !== undefined) detail.push(`promoted=${r.promoted}`)
-            if (r.associationsCreated !== undefined) detail.push(`associations=${r.associationsCreated}`)
-            if (r.communitiesDetected !== undefined) detail.push(`communities=${r.communitiesDetected}`)
-            if (r.communitySummariesGenerated !== undefined) detail.push(`summaries=${r.communitySummariesGenerated}`)
-            if (r.llmCallsCount !== undefined) detail.push(`llmCalls=${r.llmCallsCount}`)
-            if (r.llmCallsUsdEstimate !== undefined) detail.push(`~$${r.llmCallsUsdEstimate.toFixed(4)}`)
-            if (r.episodeCount !== undefined) detail.push(`episodeCount=${r.episodeCount}`)
-            if (r.cappedAt !== undefined) detail.push(`cappedAt=${r.cappedAt}`)
-            if (detail.length > 0) lines.push(`  - ${detail.join(', ')}`)
-          }
-          if (last.error) lines.push(`  - error: ${last.error}`)
-        }
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
       }
 
       return {
