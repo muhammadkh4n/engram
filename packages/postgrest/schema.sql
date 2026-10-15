@@ -8180,7 +8180,8 @@ $$;
 -- chain end, returned as a row too) or successor_retired (current_id NULL).
 -- end_excluded says the row's current item is of p_exclude_session by the
 -- candidate statement's rule: its session_id, or a lineage item of that
--- session. retired and restated are read as of p_as_of. No embedding.
+-- session. retired and restated are read as of p_as_of. question is the
+-- context's last 2,000 characters, where a long question asks. No embedding.
 CREATE OR REPLACE FUNCTION public.engram_recall_items(p_ids uuid[], p_as_of timestamp with time zone DEFAULT NULL, p_exclude_session text DEFAULT NULL)
     RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text,
                   plan_slug text, session_id text, subject_label text, content_head text, content_length integer,
@@ -8284,7 +8285,7 @@ BEGIN
          sj.label,
          left(i.content, 12000),
          char_length(i.content),
-         left(i.context, 2000),
+         right(i.context, 2000),
          left(i.search_text, 2000),
          i.occurred_at,
          i.superseded_by,
@@ -8302,6 +8303,112 @@ BEGIN
     LEFT JOIN public.memory_items e ON e.id = w.cur_id
    CROSS JOIN excluded ex
    ORDER BY w.is_requested DESC, w.ord, i.id;
+END; $$;
+
+
+--
+-- Name: engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- Items the store itself links to each seed, with no model involved:
+-- subject (the seed's subject), entity (an entity the seed holds, matched
+-- ignoring case, of any type but repo: a repository name is held by nearly
+-- every item of its project, so it relates nothing) and lineage (an item in
+-- the seed's lineage, or one with the seed in its own). Every source sees
+-- only what the recall may show, and that filter comes before each source is
+-- ranked and cut to p_per_source, so an item the caller may not see never
+-- takes a place: the classes and kinds given, not forgotten, occurred at or
+-- before p_as_of, current as of p_as_of (no successor yet), retired only with
+-- p_include_history, an observation only up to p_max_observation_trust, and
+-- nothing of p_exclude_session by the candidate statement's rule (its
+-- session_id, or a lineage item of that session). A seed is never returned,
+-- and a forgotten or unknown seed relates nothing. Per seed and source the
+-- items rank newest first (entity: most shared entities first), from 1; rows
+-- come in seed order, then subject, entity, lineage, then rank.
+CREATE OR REPLACE FUNCTION public.engram_item_associations(p_seed_ids uuid[], p_classes text[], p_kinds text[], p_exclude_session text DEFAULT NULL, p_as_of timestamp with time zone DEFAULT NULL, p_include_history boolean DEFAULT false, p_max_observation_trust smallint DEFAULT NULL, p_per_source integer DEFAULT 2)
+    RETURNS TABLE(item_id uuid, source text, seed_id uuid, rank integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+DECLARE
+  c_max_seeds constant integer := 10;
+  c_max_per_source constant integer := 20;
+  v_history boolean := coalesce(p_include_history, false);
+  v_seeds uuid[];
+  v_excluded uuid[] := '{}';
+BEGIN
+  IF p_seed_ids IS NULL OR cardinality(p_seed_ids) > c_max_seeds THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_item_associations: p_seed_ids must hold at most %s ids', c_max_seeds);
+  END IF;
+  IF p_classes IS NULL OR cardinality(p_classes) = 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_associations: p_classes must name at least one class';
+  END IF;
+  IF p_kinds IS NULL OR cardinality(p_kinds) = 0 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_associations: p_kinds must name at least one kind';
+  END IF;
+  IF p_per_source IS NULL OR p_per_source NOT BETWEEN 1 AND c_max_per_source THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = format('engram_item_associations: p_per_source must be between 1 and %s', c_max_per_source);
+  END IF;
+  IF p_max_observation_trust NOT BETWEEN 0 AND 3 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_associations: p_max_observation_trust must be between 0 and 3';
+  END IF;
+  IF p_exclude_session IS NOT NULL AND char_length(p_exclude_session) NOT BETWEEN 1 AND 256 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_associations: p_exclude_session must be 1 to 256 characters';
+  END IF;
+
+  v_seeds := ARRAY(SELECT DISTINCT u.id FROM unnest(p_seed_ids) AS u(id) WHERE u.id IS NOT NULL);
+  IF p_exclude_session IS NOT NULL THEN
+    v_excluded := ARRAY(SELECT x.id FROM public.memory_items x WHERE x.session_id = p_exclude_session);
+  END IF;
+
+  RETURN QUERY
+  WITH seeds AS (
+    SELECT s.id, s.subject_id, s.lineage
+      FROM public.memory_items s
+     WHERE s.id = ANY (v_seeds) AND s.forgotten_at IS NULL
+  ), linked AS (
+    SELECT sd.id AS seed, 'subject'::text AS src, i.id AS item, 0::bigint AS shared
+      FROM seeds sd
+      JOIN public.memory_items i ON i.subject_id = sd.subject_id
+     WHERE sd.subject_id IS NOT NULL
+    UNION ALL
+    SELECT sd.id, 'entity', ie.item_id, count(DISTINCT lower(ie.entity))
+      FROM seeds sd
+      JOIN public.memory_item_entities se ON se.item_id = sd.id AND se.entity_type <> 'repo'
+      JOIN public.memory_item_entities ie ON lower(ie.entity) = lower(se.entity) AND ie.entity_type <> 'repo'
+     GROUP BY sd.id, ie.item_id
+    UNION ALL
+    SELECT DISTINCT sd.id, 'lineage', i.id, 0::bigint
+      FROM seeds sd
+      JOIN public.memory_items i ON i.id = ANY (sd.lineage) OR i.lineage @> ARRAY[sd.id]
+  ), shown AS (
+    SELECT l.seed, l.src, l.item,
+           row_number() OVER (PARTITION BY l.seed, l.src ORDER BY l.shared DESC, i.occurred_at DESC, i.id) AS n
+      FROM linked l
+      JOIN public.memory_items i ON i.id = l.item
+     WHERE i.id <> ALL (v_seeds)
+       AND i.forgotten_at IS NULL
+       AND i.class = ANY (p_classes)
+       AND i.kind = ANY (p_kinds)
+       AND (p_as_of IS NULL OR i.occurred_at <= p_as_of)
+       AND (i.valid_to IS NULL OR (p_as_of IS NOT NULL AND i.valid_to > p_as_of))
+       AND (v_history OR i.retired_at IS NULL OR (p_as_of IS NOT NULL AND i.retired_at > p_as_of))
+       AND (p_max_observation_trust IS NULL OR i.class <> 'observation' OR i.trust <= p_max_observation_trust)
+       AND (p_exclude_session IS NULL
+            OR (i.session_id IS DISTINCT FROM p_exclude_session AND NOT (i.lineage && v_excluded)))
+  )
+  SELECT sh.item, sh.src, sh.seed, sh.n::integer
+    FROM shown sh
+   WHERE sh.n <= p_per_source
+   ORDER BY array_position(p_seed_ids, sh.seed),
+            array_position(ARRAY['subject', 'entity', 'lineage'], sh.src),
+            sh.n;
 END; $$;
 
 
@@ -8914,6 +9021,7 @@ BEGIN
   PERFORM * FROM public.engram_unretire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
   PERFORM * FROM public.engram_recall_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], now(), 'smoke');
   PERFORM * FROM public.engram_active_register_tokens(now());
+  PERFORM * FROM public.engram_item_associations(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], ARRAY['utterance'], ARRAY['user_prompt'], 'smoke', now(), false, 2::smallint, 2);
   PERFORM public.engram_store_version();
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM public.engram_project_workspace('smoke');
@@ -9031,6 +9139,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM PUBLIC;
@@ -9132,6 +9241,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM %I', role_name);
@@ -9213,6 +9323,7 @@ GRANT EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) 
 GRANT EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_project_workspace(text) TO service_role;

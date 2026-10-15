@@ -1,6 +1,9 @@
 import { PostgrestClient } from '@supabase/postgrest-js'
-import { ITEM_CLASSES, ITEM_KINDS, SPEAKERS, withRetry } from '@engram-mem/core'
+import { ASSOCIATION_SOURCES, ITEM_CLASSES, ITEM_KINDS, SPEAKERS, withRetry } from '@engram-mem/core'
 import type {
+  AssociationLink,
+  AssociationRequest,
+  AssociationSource,
   CachedStepOutput,
   Candidate,
   CandidateRequest,
@@ -31,6 +34,9 @@ const CLASSES: ReadonlySet<string> = new Set(ITEM_CLASSES)
 const KINDS: ReadonlySet<string> = new Set(Object.values(ITEM_KINDS).flat())
 const SPEAKER_SET: ReadonlySet<string> = new Set(SPEAKERS)
 const CACHE_KEY = /^[0-9a-f]{64}$/
+const SOURCES: ReadonlySet<string> = new Set(ASSOCIATION_SOURCES)
+/** engram_item_associations refuses more seeds than this. */
+const MAX_SEEDS = 10
 const VECTOR_STEPS: ReadonlySet<RecallStep> = new Set<RecallStep>(['embed_query', 'embed_hyde'])
 
 export interface PostgRestRecallStoreOptions {
@@ -85,6 +91,37 @@ export class PostgRestRecallStore implements RecallStore {
     if (opts.excludeSessionId !== undefined) args.p_exclude_session = opts.excludeSessionId
     const rows = await this.read('items', 'engram_recall_items', args)
     return rows.map((row, i) => toItemRow(row, i + 1))
+  }
+
+  async associations(req: AssociationRequest): Promise<AssociationLink[]> {
+    const seeds = [...new Set(onlyUuids(req.seedIds))]
+    if (seeds.length === 0) return []
+    if (seeds.length > MAX_SEEDS) throw new Error(`associations failed: ${seeds.length} seeds, at most ${MAX_SEEDS} per call`)
+    const args: Record<string, unknown> = {
+      p_seed_ids: seeds,
+      p_classes: [...req.classes],
+      p_kinds: [...req.kinds],
+      p_include_history: req.includeHistory,
+      p_per_source: req.perSource,
+    }
+    if (req.excludeSessionId !== undefined) args.p_exclude_session = req.excludeSessionId
+    if (req.asOf !== undefined) args.p_as_of = isoTime(req.asOf, 'associations', 'asOf')
+    if (req.maxObservationTrust !== undefined) args.p_max_observation_trust = req.maxObservationTrust
+    const rows = await this.read('associations', 'engram_item_associations', args)
+    return rows.map((row, i) => {
+      const source = requiredText(row, 'source', 'associations', i + 1)
+      if (!SOURCES.has(source)) throw new Error(`associations failed: row ${i + 1} has an unknown source`)
+      const rank = row.rank
+      if (typeof rank !== 'number' || !Number.isInteger(rank) || rank < 1) {
+        throw new Error(`associations failed: row ${i + 1} has no rank`)
+      }
+      return {
+        itemId: requiredText(row, 'item_id', 'associations', i + 1),
+        source: source as AssociationSource,
+        seedId: requiredText(row, 'seed_id', 'associations', i + 1),
+        rank,
+      }
+    })
   }
 
   async registerTokens(asOf?: Date): Promise<RegisterToken[]> {

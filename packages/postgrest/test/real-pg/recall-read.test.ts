@@ -409,6 +409,18 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     )
 
     it(
+      'returns a long question as its last 2,000 characters, where it asks',
+      async () => {
+        const asked = note('tst answered', 0, { context: `${'background '.repeat(300)}so which one do we keep?` })
+        await insert([asked])
+        const [r] = await recallItems([asked.id])
+        expect(r!.question).toHaveLength(2000)
+        expect(r!.question!.endsWith('so which one do we keep?')).toBe(true)
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
       'refuses a missing id list and more than 500 ids',
       async () => {
         await expect(pg.psqlAs('service_role', 'SELECT * FROM public.engram_recall_items(NULL);')).rejects.toThrow(
@@ -420,6 +432,177 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
             `SELECT * FROM public.engram_recall_items(ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 501)));`,
           ),
         ).rejects.toThrow(/more than 500 ids/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
+
+  describe('engram_item_associations', () => {
+    const CLASSES = ['utterance', 'mk_statement', 'observation', 'artifact', 'document_section']
+    const KINDS = ['user_prompt', 'user_answer', 'ruling', 'fact', 'correction', 'procedure', 'finding', 'ledger_decision',
+      'ledger_ruling', 'ruling_entry', 'note', 'plan_readme', 'plan_phase', 'plan_ledger', 'audit', 'research']
+
+    interface AssocOptions {
+      excludeSession?: string
+      asOf?: string
+      history?: boolean
+      maxTrust?: number
+      perSource?: number
+    }
+
+    async function associations(seeds: readonly string[], o: AssocOptions = {}): Promise<Array<[string, string, string, number]>> {
+      const args = [
+        uuidArray(seeds),
+        `ARRAY[${CLASSES.map(lit).join(', ')}]`,
+        `ARRAY[${KINDS.map(lit).join(', ')}]`,
+        o.excludeSession ? lit(o.excludeSession) : 'NULL',
+        o.asOf ? `${lit(o.asOf)}::timestamptz` : 'NULL',
+        o.history ? 'true' : 'false',
+        o.maxTrust === undefined ? 'NULL' : `${o.maxTrust}::smallint`,
+        String(o.perSource ?? 2),
+      ]
+      const out = await pg.psqlAs(
+        'service_role',
+        `SELECT coalesce(json_agg(json_build_array(a.item_id, a.source, a.seed_id, a.rank) ORDER BY a.k), '[]'::json)
+           FROM public.engram_item_associations(${args.join(', ')}) WITH ORDINALITY AS a(item_id, source, seed_id, rank, k);`,
+      )
+      return JSON.parse(out) as Array<[string, string, string, number]>
+    }
+
+    async function subject(label: string): Promise<string> {
+      const id = newId()
+      await pg.psql(`INSERT INTO public.memory_subjects (id, label) VALUES (${lit(id)}, ${lit(label)});`)
+      return id
+    }
+
+    async function entities(itemId: string, list: Array<[string, string]>): Promise<void> {
+      await pg.psql(
+        `INSERT INTO public.memory_item_entities (item_id, entity, entity_type) VALUES ${list
+          .map(([entity, type]) => `(${lit(itemId)}, ${lit(entity)}, ${lit(type)})`)
+          .join(', ')};`,
+      )
+    }
+
+    it(
+      'filters inside the source before its cap: four same-subject items of the excluded session leave room for the other',
+      async () => {
+        const subjectId = await subject('tst shared subject')
+        const seed = note('tst seed', 0, { subjectId })
+        const live = Array.from({ length: 4 }, (_, k) => ({ ...utterance(`tst live ${k}`, 10 + k, 'tst-live-session'), subjectId }))
+        const viaLineage = note('tst built on the live session', 20, { subjectId, lineage: [live[0]!.id] })
+        const other = note('tst other session', 1, { subjectId })
+        await insert([seed, ...live, viaLineage, other])
+
+        expect(await associations([seed.id], { excludeSession: 'tst-live-session' })).toEqual([[other.id, 'subject', seed.id, 1]])
+        const unfiltered = await associations([seed.id])
+        expect(unfiltered.map((r) => r[0])).toEqual([viaLineage.id, live[3]!.id])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'never returns a forgotten, superseded or later item, and a retired one only with history',
+      async () => {
+        const subjectId = await subject('tst states subject')
+        const seed = note('tst state seed', 0, { subjectId })
+        const [forgotten, retired, old, successor, later] = [
+          note('tst forgotten', 1, { subjectId }),
+          note('tst retired', 2, { subjectId }),
+          note('tst old version', 3, { subjectId }),
+          note('tst new version', 4),
+          note('tst later', 40, { subjectId }),
+        ]
+        await insert([seed, forgotten, retired, old, successor, later])
+        await supersede(old.id, successor.id)
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([forgotten.id])}, 'tst forget');`)
+        await pg.psql(`SELECT count(*) FROM public.engram_retire_items(${uuidArray([retired.id])}, 'tst retire');`)
+
+        expect((await associations([seed.id], { perSource: 10 })).map((r) => r[0])).toEqual([later.id])
+        expect((await associations([seed.id], { history: true, perSource: 10 })).map((r) => r[0])).toEqual([later.id, retired.id])
+        // Retired now, so not yet retired as of a past time; the old version was current until its successor occurred.
+        expect((await associations([seed.id], { asOf: at(3.5), perSource: 10 })).map((r) => r[0])).toEqual([old.id, retired.id])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'keeps a trust-3 observation out under a trust cap of 2, and a verified one in',
+      async () => {
+        const subjectId = await subject('tst observed subject')
+        const seed = note('tst observed seed', 0, { subjectId })
+        const unverified: Item = { ...note('tst unverified claim', 1, { subjectId }), class: 'observation', kind: 'fact', speaker: 'assistant', trust: 3 }
+        const verified: Item = {
+          ...note('tst verified claim', 2, { subjectId }),
+          class: 'observation',
+          kind: 'fact',
+          speaker: 'assistant',
+          trust: 2,
+          source: { type: 'ingest_tool', evidence: [{ type: 'commit', ref: 'abc1234' }] },
+        }
+        await insert([seed, unverified, verified])
+
+        expect((await associations([seed.id], { maxTrust: 2 })).map((r) => r[0])).toEqual([verified.id])
+        expect((await associations([seed.id])).map((r) => r[0])).toEqual([verified.id, unverified.id])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'links by shared entities other than repository names, most shared first, and by lineage either way',
+      async () => {
+        const seed = note('tst entity seed', 0)
+        const [two, one, repoOnly, parent, child] = [
+          note('tst shares two', 1),
+          note('tst shares one', 2),
+          note('tst shares the repo', 3),
+          note('tst parent', -5),
+          note('tst child', 5),
+        ]
+        await insert([parent])
+        await insert([{ ...seed, lineage: [parent.id] }, two, one, repoOnly])
+        await insert([{ ...child, lineage: [seed.id] }])
+        await entities(seed.id, [['src/a.ts', 'path'], ['TST-41', 'ticket'], ['tst-repo', 'repo']])
+        await entities(two.id, [['SRC/A.TS', 'path'], ['tst-41', 'ticket']])
+        await entities(one.id, [['src/a.ts', 'path']])
+        await entities(repoOnly.id, [['tst-repo', 'repo']])
+
+        expect(await associations([seed.id], { perSource: 5 })).toEqual([
+          [two.id, 'entity', seed.id, 1],
+          [one.id, 'entity', seed.id, 2],
+          [child.id, 'lineage', seed.id, 1],
+          [parent.id, 'lineage', seed.id, 2],
+        ])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'returns rows in seed order, never a seed, and nothing for a forgotten or unknown seed',
+      async () => {
+        const subjectId = await subject('tst two seeds')
+        const [a, b, c] = [note('tst seed a', 0, { subjectId }), note('tst seed b', 1, { subjectId }), note('tst linked', 2, { subjectId })]
+        await insert([a, b, c])
+        expect(await associations([b.id, a.id])).toEqual([
+          [c.id, 'subject', b.id, 1],
+          [c.id, 'subject', a.id, 1],
+        ])
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([b.id])}, 'tst forget');`)
+        expect(await associations([b.id, newId()])).toEqual([])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'refuses missing or too many seeds, an empty class or kind list and a cap out of range',
+      async () => {
+        const call = (seeds: string, classes: string, kinds: string, per: number) =>
+          pg.psqlAs('service_role', `SELECT * FROM public.engram_item_associations(${seeds}, ${classes}, ${kinds}, NULL, NULL, false, NULL, ${per});`)
+        const ok = `ARRAY['note']`
+        await expect(call('NULL', `ARRAY['document_section']`, ok, 2)).rejects.toThrow(/p_seed_ids must hold at most 10 ids/)
+        await expect(call(uuidArray(Array.from({ length: 11 }, () => newId())), `ARRAY['document_section']`, ok, 2)).rejects.toThrow(/at most 10 ids/)
+        await expect(call(uuidArray([newId()]), `ARRAY[]::text[]`, ok, 2)).rejects.toThrow(/p_classes must name at least one class/)
+        await expect(call(uuidArray([newId()]), `ARRAY['document_section']`, `ARRAY[]::text[]`, 2)).rejects.toThrow(/p_kinds must name at least one kind/)
+        await expect(call(uuidArray([newId()]), `ARRAY['document_section']`, ok, 0)).rejects.toThrow(/p_per_source must be between 1 and 20/)
       },
       TEST_TIMEOUT_MS,
     )

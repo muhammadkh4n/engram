@@ -116,7 +116,7 @@ export interface RecallItemRow {
   /** The first 12,000 characters of the content. */
   contentHead: string
   contentLength: number
-  /** The first 2,000 characters of the context (the question an MK statement answered). */
+  /** The last 2,000 characters of the context (the question an MK statement answered): a long question ends with what was asked. */
   question: string | null
   /** The first 2,000 characters of the search text. */
   searchHead: string
@@ -174,6 +174,32 @@ export interface StepOutput {
   passage?: string
 }
 
+/** How an associated item relates to its seed, in the order the store returns them. */
+export const ASSOCIATION_SOURCES = ['subject', 'entity', 'lineage'] as const
+export type AssociationSource = (typeof ASSOCIATION_SOURCES)[number]
+
+/** The items the store links to shown items, under the recall's own filters. */
+export interface AssociationRequest {
+  seedIds: readonly string[]
+  classes: readonly ItemClass[]
+  kinds: readonly ItemKind[]
+  excludeSessionId?: string
+  asOf?: Date
+  includeHistory: boolean
+  /** Unset: observations of any trust. */
+  maxObservationTrust?: number
+  /** Items kept per seed and source. */
+  perSource: number
+}
+
+export interface AssociationLink {
+  itemId: string
+  source: AssociationSource
+  seedId: string
+  /** From 1, per seed and source. */
+  rank: number
+}
+
 export interface RecallItemsOptions {
   asOf?: Date
   excludeSessionId?: string
@@ -188,6 +214,8 @@ export interface RecallStore {
   candidates(req: CandidateRequest): Promise<Candidate[]>
   /** The requested items that are not forgotten, in the order given, then the chain ends not requested. */
   items(ids: readonly string[], opts?: RecallItemsOptions): Promise<RecallItemRow[]>
+  /** Items linked to the seeds by subject, entity or lineage; each source filtered before it is cut to `perSource`. */
+  associations(req: AssociationRequest): Promise<AssociationLink[]>
   /** Tokens of the register entries in force as of `asOf` (now when unset). */
   registerTokens(asOf?: Date): Promise<RegisterToken[]>
   /** A number that changes whenever an item, subject, entity or project changes. */

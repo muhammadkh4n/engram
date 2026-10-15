@@ -1,5 +1,8 @@
-export { RECALL_CHANNELS, RECALL_STEPS } from './types.js'
+export { ASSOCIATION_SOURCES, RECALL_CHANNELS, RECALL_STEPS } from './types.js'
 export type {
+  AssociationSource,
+  AssociationRequest,
+  AssociationLink,
   RecallChannel,
   RecallScope,
   RecallRequest,
@@ -45,3 +48,15 @@ export { runRecall, rerankDocument, RecallNotCalibratedError, RecallRequestError
 export type { RecallDeps, RecallReranker, RecallTrace, RecallTimings, ScoredItem } from './pipeline.js'
 export { resolveItems, itemFlags, holdsToken, sourceRef } from './resolve.js'
 export type { ResolveOptions, ResolvedItem } from './resolve.js'
+export {
+  Packer,
+  cutAtSentence,
+  cutQuestion,
+  DEFAULT_LIMIT,
+  DEFAULT_MAX_CHARS,
+  DEFAULT_BUDGET_CHARS,
+  QUESTION_MAX_CHARS,
+  ASSOCIATION_BUDGET_SHARE,
+} from './pack.js'
+export type { PackOptions, PackResult } from './pack.js'
+export { ASSOCIATION_SEEDS, ASSOCIATIONS_PER_SOURCE } from './associations.js'

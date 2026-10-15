@@ -107,6 +107,46 @@ describe('PostgRestRecallStore', () => {
     expect(mock.calls.map((c) => c.fn)).toEqual(['engram_active_register_tokens', 'engram_active_register_tokens'])
   })
 
+  it('sends the association filters and reads each link', async () => {
+    const mock = mockClient([{ data: [{ item_id: ID_B, source: 'entity', seed_id: ID_A, rank: 1 }], error: null }])
+    const links = await storeWith(mock.client).associations({
+      seedIds: [ID_A, 'not-a-uuid', ID_A],
+      classes: ['document_section'],
+      kinds: ['note'],
+      excludeSessionId: 'tst-session',
+      asOf: new Date('2026-02-03T04:00:00Z'),
+      includeHistory: false,
+      maxObservationTrust: 2,
+      perSource: 2,
+    })
+    expect(links).toEqual([{ itemId: ID_B, source: 'entity', seedId: ID_A, rank: 1 }])
+    expect(mock.calls).toEqual([
+      {
+        fn: 'engram_item_associations',
+        args: {
+          p_seed_ids: [ID_A],
+          p_classes: ['document_section'],
+          p_kinds: ['note'],
+          p_include_history: false,
+          p_per_source: 2,
+          p_exclude_session: 'tst-session',
+          p_as_of: '2026-02-03T04:00:00.000Z',
+          p_max_observation_trust: 2,
+        },
+      },
+    ])
+  })
+
+  it('makes no association call without a seed, and refuses a link of an unknown source', async () => {
+    const empty = mockClient([{ data: [], error: null }])
+    expect(await storeWith(empty.client).associations({ seedIds: [], classes: ['note' as never], kinds: ['note'], includeHistory: false, perSource: 2 })).toEqual([])
+    expect(empty.calls).toHaveLength(0)
+    const bad = mockClient([{ data: [{ item_id: ID_B, source: 'neo4j', seed_id: ID_A, rank: 1 }], error: null }])
+    await expect(
+      storeWith(bad.client).associations({ seedIds: [ID_A], classes: ['document_section'], kinds: ['note'], includeHistory: false, perSource: 2 }),
+    ).rejects.toThrow('associations failed: row 1 has an unknown source')
+  })
+
   it('gives up after the second failure without quoting the server message', async () => {
     const mock = mockClient([{ data: null, error: { code: '08006', message: 'tst server detail' } }])
     const err = await storeWith(mock.client)
