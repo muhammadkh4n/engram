@@ -230,8 +230,26 @@ export async function runGold(deps: {
 
 // --- meta -----------------------------------------------------------------
 
-/** Env names that may hold a credential; their values never enter a result. */
-export const SECRET_NAME = /KEY|SECRET|TOKEN|PASSWORD/i
+/** Last words of an env name that hold a credential (`OPENAI_API_KEY`, `BEARER_TOKEN`, `GITHUB_APIKEY`). */
+const SECRET_LAST_WORDS = ['KEY', 'SECRET', 'PASSWORD', 'PASSPHRASE', 'TOKEN', 'JWT', 'CREDENTIALS'] as const
+/** Words that mark a credential wherever they sit in the name (`CLIENT_SECRET_ID`, `DB_PASSWORD_HASH`). */
+const SECRET_ANYWHERE = ['SECRET', 'PASSWORD'] as const
+const FILE_SUFFIX = '_FILE'
+
+/**
+ * An env name that may hold a credential; its value never enters a result.
+ * The test is on the name's last word, after a trailing `_FILE` (a path to
+ * the credential) is dropped, so a setting that only mentions tokens, such as
+ * `ENGRAM_RECALL_TOKEN_BUDGET` or `ENGRAM_RECALL_ITEM_MAX_TOKENS`, keeps its
+ * value in the meta: a budget arm must record its own budget.
+ */
+export function isSecretName(name: string): boolean {
+  const upper = name.toUpperCase()
+  if (SECRET_ANYWHERE.some((word) => upper.includes(word))) return true
+  const base = upper.endsWith(FILE_SUFFIX) ? upper.slice(0, -FILE_SUFFIX.length) : upper
+  const lastWord = base.split(/[^A-Z0-9]+/).filter((w) => w !== '').pop() ?? ''
+  return SECRET_LAST_WORDS.some((word) => lastWord.endsWith(word))
+}
 
 /** Env names that identify a model or which reranker runs. */
 const MODEL_NAME = /MODEL/i
@@ -240,7 +258,7 @@ const MODEL_SWITCHES: ReadonlySet<string> = new Set(['ENGRAM_RERANK_LOCAL'])
 /** The model ids the env file selects, sorted by name; secret-looking names are dropped. */
 export function envModelIds(vars: Readonly<Record<string, string>>): Record<string, string> {
   const picked = Object.entries(vars)
-    .filter(([name]) => (MODEL_NAME.test(name) || MODEL_SWITCHES.has(name)) && !SECRET_NAME.test(name))
+    .filter(([name]) => (MODEL_NAME.test(name) || MODEL_SWITCHES.has(name)) && !isSecretName(name))
     .sort(([a], [b]) => a.localeCompare(b))
   return Object.fromEntries(picked)
 }
@@ -252,7 +270,7 @@ export function envModelIds(vars: Readonly<Record<string, string>>): Record<stri
 export function engramEnvForMeta(engramEnv: Readonly<Record<string, string>>): Record<string, string | null> {
   const listed = Object.entries(engramEnv)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, value]): [string, string | null] => [name, SECRET_NAME.test(name) ? null : value])
+    .map(([name, value]): [string, string | null] => [name, isSecretName(name) ? null : value])
   return Object.fromEntries(listed)
 }
 

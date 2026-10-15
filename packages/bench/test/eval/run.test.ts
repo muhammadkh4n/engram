@@ -5,7 +5,6 @@ import type { GoldEntry } from '../../src/eval/gold.js'
 import type { PinStats } from '../../src/eval/pins.js'
 import {
   DEFAULT_RUNS,
-  SECRET_NAME,
   buildRunMeta,
   envModelIds,
   FailedLegError,
@@ -13,6 +12,7 @@ import {
   formatRunSummary,
   goldRecallArgs,
   isRunStop,
+  isSecretName,
   parseRunArgs,
   runGold,
   type RunArgs,
@@ -179,6 +179,24 @@ describe('failed retrieval legs', () => {
   })
 })
 
+describe('isSecretName', () => {
+  it('reads the last word after a trailing _FILE, and SECRET or PASSWORD anywhere', () => {
+    for (const name of [
+      'OPENAI_API_KEY', 'SUPABASE_KEY', 'BEARER_TOKEN', 'NEO4J_PASSWORD', 'ENGRAM_SERVER_TOKEN_FILE', 'HF_TOKEN',
+      'SIGNING_JWT', 'GPG_PASSPHRASE', 'GCP_CREDENTIALS', 'CLIENT_SECRET_ID', 'DB_PASSWORD_HASH', 'GITHUB_APIKEY',
+      'openai_api_key',
+    ]) {
+      expect(isSecretName(name), name).toBe(true)
+    }
+    for (const name of [
+      'ENGRAM_RECALL_TOKEN_BUDGET', 'ENGRAM_RECALL_ITEM_MAX_TOKENS', 'ENGRAM_KEY_ROTATION_DAYS', 'SUPABASE_URL',
+      'ENGRAM_CHAT_MODEL', 'ENGRAM_PROFILE_FILE',
+    ]) {
+      expect(isSecretName(name), name).toBe(false)
+    }
+  })
+})
+
 describe('run meta', () => {
   const envVars = {
     OPENAI_API_KEY: 'sk-synthetic-openai-value',
@@ -202,7 +220,7 @@ describe('run meta', () => {
     })
   })
 
-  it('holds no env value whose name contains KEY, SECRET, TOKEN or PASSWORD', async () => {
+  it('holds no env value whose name is secret-shaped', async () => {
     const body = await runGold({ gold: [gold('a')], runs: 2, recall: async (e) => recall(e.query, ['a-gold']) })
     const args: RunArgs = parseRunArgs(REQUIRED)
     const pinStats: PinStats = { hits: 4, fills: 0, misses: [], blocked: {}, fetchBlocked: {} }
@@ -225,7 +243,7 @@ describe('run meta', () => {
     })
     const text = JSON.stringify(meta)
     for (const [name, value] of Object.entries(envVars)) {
-      if (SECRET_NAME.test(name)) {
+      if (isSecretName(name)) {
         expect(text).not.toContain(value)
         // An ENGRAM_* secret is listed by name only; any other secret name is never copied.
         if (!name.startsWith('ENGRAM_')) expect(text).not.toContain(name)
@@ -245,7 +263,46 @@ describe('run meta', () => {
     expect(summary).toContain('# Recall eval: control')
     expect(summary).toContain('0 of 1 queries returned different text between runs.')
     for (const [name, value] of Object.entries(envVars)) {
-      if (SECRET_NAME.test(name)) expect(summary).not.toContain(value)
+      if (isSecretName(name)) expect(summary).not.toContain(value)
     }
+  })
+
+  it('keeps the recall budget settings and nulls every secret-named value', async () => {
+    const body = await runGold({ gold: [gold('a')], runs: 2, recall: async (e) => recall(e.query, ['a-gold']) })
+    const pinStats: PinStats = { hits: 0, fills: 0, misses: [], blocked: {}, fetchBlocked: {} }
+    const meta = buildRunMeta({
+      args: parseRunArgs(REQUIRED),
+      envVars: {},
+      engramEnv: {
+        ENGRAM_RECALL_TOKEN_BUDGET: '6000',
+        ENGRAM_RECALL_ITEM_MAX_TOKENS: '400',
+        OPENAI_API_KEY: 'sk-synthetic-openai-value',
+        SUPABASE_KEY: 'synthetic-service-role-value',
+        BEARER_TOKEN: 'synthetic-bearer-value',
+        NEO4J_PASSWORD: 'synthetic-neo4j-value',
+        ENGRAM_SERVER_TOKEN_FILE: '/run/synthetic/token',
+      },
+      recallEngine: false,
+      distSha: null,
+      goldSha: 'b'.repeat(64),
+      pinsShaAtStart: 'c'.repeat(64),
+      pinsSha: 'c'.repeat(64),
+      pinStats,
+      guards: createGuardStats(),
+      graph: false,
+      started: NOW,
+      finished: NOW,
+      referenceDate: NOW,
+      body,
+    })
+    expect(meta.engram_env).toEqual({
+      BEARER_TOKEN: null,
+      ENGRAM_RECALL_ITEM_MAX_TOKENS: '400',
+      ENGRAM_RECALL_TOKEN_BUDGET: '6000',
+      ENGRAM_SERVER_TOKEN_FILE: null,
+      NEO4J_PASSWORD: null,
+      OPENAI_API_KEY: null,
+      SUPABASE_KEY: null,
+    })
   })
 })
