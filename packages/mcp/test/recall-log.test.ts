@@ -215,3 +215,20 @@ describe('runMemoryRecall with a recall log', () => {
     expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 })
+
+describe('RecallLog.recordLine', () => {
+  it('writes a v2 line through the same queue, scrubbing its query, and rotates at the cap', async () => {
+    const path = join(freshDir(), 'recall.jsonl')
+    const log = new RecallLog(path, { maxBytes: 400 })
+    const line = { v: 2, query: 'deploy with Authorization: Bearer Zq7madeupNotReal91xAbc now', items: [] as unknown[] }
+    log.recordLine(line)
+    await log.flush()
+    const written = readLines(path)
+    expect(written).toHaveLength(1)
+    expect(written[0]!.v).toBe(2)
+    expect(String(written[0]!.query)).not.toContain('Zq7madeupNotReal91xAbc')
+    for (let i = 0; i < 5; i += 1) log.recordLine({ v: 2, query: `tst ${i} ${'x'.repeat(100)}` })
+    await log.flush()
+    expect(existsSync(`${path}.1`)).toBe(true)
+  })
+})

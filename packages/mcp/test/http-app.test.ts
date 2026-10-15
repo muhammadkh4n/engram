@@ -10,6 +10,9 @@ import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-event
 import type { CaptureEventsRouteDeps } from '../src/capture-events/route.js'
 import type { DocumentsRouteDeps } from '../src/documents-route.js'
 import { RECEIVED_AT, envelope, validEvent } from './capture-events/fixtures.js'
+import type { RecallDeps } from '@engram-mem/core'
+import type { RecallRouteDeps } from '../src/recall-route.js'
+import { TST_ITEM_ID, stubRecallDeps } from './recall-fixtures.js'
 
 const TOKEN = 'test-bearer-token'
 const CAPTURE_TOKEN = 'test-capture-token-0123456789abcdef'
@@ -17,6 +20,7 @@ const DOCUMENTS_TOKEN = 'test-documents-token-0123456789abcdef'
 const BODY_CAP = 2048
 const EVENTS_BODY_CAP = 4096
 const DOCUMENTS_BODY_CAP = 4096
+const RECALL_BODY_CAP = 1024
 
 const REGISTRY: ProjectRegistry = parseProjectRegistry({
   version: 1,
@@ -31,6 +35,8 @@ interface Harness {
   ingestEvents: ReturnType<typeof vi.fn>
   syncDocumentNote: ReturnType<typeof vi.fn>
   logError: ReturnType<typeof vi.fn>
+  recallLogError: ReturnType<typeof vi.fn>
+  recordLine: ReturnType<typeof vi.fn>
   port: number
   close: () => Promise<void>
 }
@@ -40,6 +46,7 @@ interface ServerOptions {
   documentsToken?: string | null
   ready?: () => ProjectRegistry | null
   status?: () => SecretRegistryStatus
+  recallDeps?: () => Promise<RecallDeps>
 }
 
 async function startServer(opts: ServerOptions = {}): Promise<Harness> {
@@ -83,6 +90,15 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     now: () => RECEIVED_AT,
   }
   const logError = vi.fn()
+  const recallLogError = vi.fn()
+  const recordLine = vi.fn()
+  const recall: RecallRouteDeps = {
+    getDeps: opts.recallDeps ?? (async () => stubRecallDeps()),
+    log: { recordLine },
+    server: 'tst-server',
+    logError: recallLogError,
+    now: () => RECEIVED_AT,
+  }
   const server = http.createServer(
     createRequestListener(config, {
       mcp,
@@ -92,6 +108,8 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
       captureEventsBodyMaxBytes: EVENTS_BODY_CAP,
       documents,
       documentsBodyMaxBytes: DOCUMENTS_BODY_CAP,
+      recall,
+      recallBodyMaxBytes: RECALL_BODY_CAP,
       logError,
     }),
   )
@@ -104,6 +122,8 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     ingestEvents,
     syncDocumentNote,
     logError,
+    recallLogError,
+    recordLine,
     port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
@@ -438,6 +458,69 @@ describe('POST /capture/events', () => {
     expect(res.status).toBe(503)
     expect(await res.json()).toMatchObject({ retryable: true })
     expect(h.ingestEvents).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /recall', () => {
+  const body = JSON.stringify({ query: 'what is the tst floor?', channel: 'hand_recall', scope: {} })
+
+  it('answers a recall on the MCP bearer, with snake_case keys in contract order, and logs one line', async () => {
+    const res = await post(`${h.url}/recall`, body)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { items: Array<Record<string, unknown>>; omitted: unknown }
+    expect(json.items.map((i) => i.id)).toEqual([TST_ITEM_ID])
+    expect(Object.keys(json.items[0]!)).toEqual(['id', 'class', 'kind', 'speaker', 'trust', 'occurred_at', 'project_id', 'text', 'source', 'status', 'flags', 'via'])
+    expect(json.omitted).toEqual({ limit: 0, budget: 0, uncuttable: 0 })
+    expect(h.recordLine).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses no token, the capture token and the documents token with 401', async () => {
+    const none = await fetch(`${h.url}/recall`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    expect(none.status).toBe(401)
+    expect((await post(`${h.url}/recall`, body, { authorization: `Bearer ${CAPTURE_TOKEN}` })).status).toBe(401)
+    expect((await post(`${h.url}/recall`, body, { authorization: `Bearer ${DOCUMENTS_TOKEN}` })).status).toBe(401)
+    expect(h.recordLine).not.toHaveBeenCalled()
+  })
+
+  it('answers 405 to any method but POST, 404 to a path under it, and 413 over the body cap', async () => {
+    const get = await fetch(`${h.url}/recall`, { headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(get.status).toBe(405)
+    expect(get.headers.get('allow')).toBe('POST')
+    expect((await post(`${h.url}/recall/x`, body)).status).toBe(404)
+    const big = JSON.stringify({ query: 'x'.repeat(RECALL_BODY_CAP), channel: 'mcp', scope: {} })
+    expect((await post(`${h.url}/recall`, big)).status).toBe(413)
+  })
+
+  it('answers 400 to a body that is not JSON and to a request that breaks a rule', async () => {
+    const bad = await post(`${h.url}/recall`, '{not json')
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toEqual({ error: 'the body is not valid JSON' })
+    const unknown = await post(`${h.url}/recall`, JSON.stringify({ query: 'q', channel: 'mcp', scope: {}, top_k: 5 }))
+    expect(unknown.status).toBe(400)
+    expect(await unknown.json()).toEqual({ error: 'the request has an unknown key: top_k' })
+  })
+
+  it('answers 503 while the reranker in use has no floor', async () => {
+    await h.close()
+    h = await startServer({ recallDeps: async () => stubRecallDeps({ floor: null }) })
+    const res = await post(`${h.url}/recall`, body)
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({ error: 'recall is not calibrated for reranker tst-reranker' })
+  })
+
+  it('answers 500 with no cause, and logs the cause scrubbed', async () => {
+    await h.close()
+    h = await startServer({
+      recallDeps: async () => {
+        throw new Error('store unreachable: Authorization: Bearer Zq7madeupNotReal91xAbc')
+      },
+    })
+    const res = await post(`${h.url}/recall`, body)
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual({ error: 'recall failed' })
+    const logged = String(h.recallLogError.mock.calls[0]?.[0])
+    expect(logged).toContain('recall failed: store unreachable')
+    expect(logged).not.toContain('Zq7madeupNotReal91xAbc')
   })
 })
 

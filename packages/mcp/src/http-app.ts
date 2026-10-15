@@ -7,6 +7,7 @@
  *   GET  /health, /healthz — liveness, no auth
  *   *    /mcp              — MCP Streamable HTTP, BEARER_TOKEN auth
  *   POST /capture          — the capture pipeline (hooks and CLIs), BEARER_TOKEN auth
+ *   POST /recall           — recall over the typed item store, BEARER_TOKEN auth
  *   POST /capture/events   — raw capture events, ENGRAM_CAPTURE_TOKEN auth; 503
  *                            while that token is unset
  *   POST /documents/sync   — vault notes, ENGRAM_DOCUMENTS_TOKEN auth; 503 while
@@ -46,6 +47,7 @@ import {
   type DocumentsResponse,
   type DocumentsRouteDeps,
 } from './documents-route.js'
+import { RECALL_BODY_MAX_BYTES, RECALL_FAILED_MESSAGE, runRecallRequest, type RecallRouteDeps, type RecallRouteResponse } from './recall-route.js'
 
 /**
  * A capture carries at most 100,000 content chars plus small metadata. JSON
@@ -81,6 +83,8 @@ export interface HttpHandlers {
   /** Wired when the documents token is set; absent, /documents/sync answers 503. */
   documents?: DocumentsRouteDeps
   documentsBodyMaxBytes?: number
+  recall: RecallRouteDeps
+  recallBodyMaxBytes?: number
   logError?: (line: string) => void
 }
 
@@ -332,6 +336,54 @@ async function handleDocuments(
   sendDocuments(res, await runDocumentsRequest(handlers.documents, parsed))
 }
 
+function sendRecall(res: http.ServerResponse, response: RecallRouteResponse): void {
+  res.writeHead(response.status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(response.body))
+}
+
+async function handleRecall(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: HttpConfig,
+  handlers: HttpHandlers,
+  logError: (line: string) => void,
+): Promise<void> {
+  // The MCP bearer: recall reads memory, which the capture and documents tokens never may.
+  if (!checkAuth(req, config.bearerToken)) {
+    req.resume()
+    res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="engram-mcp"' })
+    res.end(JSON.stringify({ error: 'unauthorized' }))
+    return
+  }
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+  const maxBytes = handlers.recallBodyMaxBytes ?? RECALL_BODY_MAX_BYTES
+  let read: BodyRead
+  try {
+    read = await readBody(req, maxBytes)
+  } catch (err) {
+    logError(`[engram-mcp-http] recall body read failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (!res.headersSent && !res.destroyed) sendRecall(res, { status: 500, body: { error: RECALL_FAILED_MESSAGE } })
+    return
+  }
+  if ('tooLarge' in read) {
+    sendRecall(res, { status: 413, body: { error: `body exceeds ${maxBytes} bytes` } })
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(read.body.toString('utf8'))
+  } catch {
+    sendRecall(res, { status: 400, body: { error: 'the body is not valid JSON' } })
+    return
+  }
+  sendRecall(res, await runRecallRequest(handlers.recall, parsed))
+}
+
 async function route(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -360,6 +412,11 @@ async function route(
   }
   if (path === '/documents/sync') {
     await handleDocuments(req, res, config, handlers, logError)
+    return
+  }
+
+  if (path === '/recall') {
+    await handleRecall(req, res, config, handlers, logError)
     return
   }
 

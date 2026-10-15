@@ -114,12 +114,20 @@ export class RecallLog {
     this.queue = this.queue.then(() => this.write(line)).catch((err: unknown) => this.reportError(err))
   }
 
+  /**
+   * Queues a line built elsewhere (POST /recall's v2 line) through the same
+   * queue, rotation and scrub; returns at once.
+   */
+  recordLine(line: { query: string }): void {
+    this.queue = this.queue.then(() => this.write(line)).catch((err: unknown) => this.reportError(err))
+  }
+
   /** Resolves once every queued line has been written or has failed. */
   flush(): Promise<void> {
     return this.queue
   }
 
-  private async write(line: RecallLogLine): Promise<void> {
+  private async write(line: { query: string }): Promise<void> {
     // The query is caller text; credentials in it never reach the file.
     const { text } = await scrubSecrets(line.query)
     const data = `${JSON.stringify({ ...line, query: text })}\n`
