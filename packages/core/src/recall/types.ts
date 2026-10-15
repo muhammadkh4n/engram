@@ -231,3 +231,44 @@ export interface RecallStore {
   /** Stores an output unless the key is stored, and returns the stored one: the first writer's value wins. */
   cachePut(step: RecallStep, key: string, version: string, output: StepOutput): Promise<CachedStepOutput>
 }
+
+/** One stored item as memory_get shows it: every column but the embedding and the search index. */
+export interface ItemRecord {
+  id: string
+  class: ItemClass
+  kind: ItemKind
+  speaker: Speaker
+  trust: number
+  projectId: string | null
+  workspaceId: string | null
+  planSlug: string | null
+  sessionId: string | null
+  subjectLabel: string | null
+  /** The content's first 8,001 characters. */
+  contentHead: string
+  /** The whole content's length in characters. */
+  contentLength: number
+  /** The context's last 2,000 characters. */
+  question: string | null
+  occurredAt: Date
+  validTo: Date | null
+  supersededBy: string | null
+  restated: number
+  retiredAt: Date | null
+  retiredReason: string | null
+  standing: boolean | null
+  registerStatus: string | null
+  registerRef: string | null
+  source: ItemSource
+  lineage: string[]
+  embeddingModel: string | null
+  contentHash: string
+  extractionRunId: string | null
+  createdAt: Date
+}
+
+/** The reads the MCP tools make besides recall itself. Every method only reads. */
+export interface ItemReadStore {
+  /** The records of the ids that are not forgotten, in the order given, each once; at most 20 ids. */
+  getItems(ids: readonly string[]): Promise<ItemRecord[]>
+}

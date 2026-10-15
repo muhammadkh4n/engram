@@ -735,6 +735,58 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     )
   })
 
+  describe('engram_get_items', () => {
+    async function getItems(ids: readonly string[]): Promise<Array<Record<string, unknown>>> {
+      const out = await pg.psqlAs(
+        'service_role',
+        `SELECT coalesce(json_agg(to_jsonb(g) ORDER BY g.k), '[]'::json)
+           FROM public.engram_get_items(${uuidArray(ids)}) WITH ORDINALITY AS g(id, class, kind, speaker, trust,
+                project_id, workspace_id, plan_slug, session_id, subject_label, content_head, content_length, question,
+                occurred_at, valid_to, superseded_by, restated, retired_at, retired_reason, standing, register_status,
+                register_ref, source, lineage, embedding_model, content_hash, extraction_run_id, created_at, k);`,
+      )
+      return JSON.parse(out) as Array<Record<string, unknown>>
+    }
+
+    it(
+      'returns each record once in the order asked, with its state, and never a forgotten one',
+      async () => {
+        const old = note('tst old version', 0)
+        const current = note(`tst current ${'x'.repeat(9000)}`, 5, { context: `q${'y'.repeat(2500)}` })
+        const retired = note('tst retired', 0)
+        const forgotten = note('tst forgotten', 0)
+        await insert([old, current, retired, forgotten])
+        await supersede(old.id, current.id)
+        await pg.psql(`SELECT count(*) FROM public.engram_retire_items(${uuidArray([retired.id])}, 'tst retire reason');`)
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([forgotten.id])}, 'tst forget');`)
+
+        const rows = await getItems([forgotten.id, retired.id, old.id, current.id, newId(), current.id])
+        expect(rows.map((r) => r.id)).toEqual([retired.id, old.id, current.id])
+        expect(rows[0]).toMatchObject({ retired_reason: 'tst retire reason', superseded_by: null })
+        expect(rows[0]!.retired_at).not.toBeNull()
+        expect(rows[1]).toMatchObject({ superseded_by: current.id, retired_at: null })
+        const head = rows[2]!.content_head as string
+        expect([head.length, rows[2]!.content_length]).toEqual([8001, current.content.length])
+        expect((rows[2]!.question as string).length).toBe(2000)
+        expect(rows[2]).toMatchObject({ restated: 0, lineage: [], source: { type: 'vault' } })
+        expect(Object.keys(rows[2]!)).not.toContain('embedding')
+        expect(await getItems([forgotten.id])).toEqual([])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'refuses no ids and more than 20, and is not callable by anon',
+      async () => {
+        await expect(pg.psqlAs('service_role', "SELECT * FROM public.engram_get_items('{}'::uuid[]);")).rejects.toThrow(/p_ids must hold 1 to 20 ids/)
+        const many = Array.from({ length: 21 }, () => newId())
+        await expect(pg.psqlAs('service_role', `SELECT * FROM public.engram_get_items(${uuidArray(many)});`)).rejects.toThrow(/p_ids must hold 1 to 20 ids/)
+        await expect(pg.psqlAs('anon', `SELECT * FROM public.engram_get_items(${uuidArray([newId()])});`)).rejects.toThrow(/permission denied for function/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
+
   describe('the other reads', () => {
     it(
       'reads forget and retire times, forgotten rows included, in the order asked',

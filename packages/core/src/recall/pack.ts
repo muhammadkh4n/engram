@@ -102,8 +102,13 @@ function codePoints(text: string): number {
   return n
 }
 
+/** An MK statement, register entry or plan decision is shown whole or not at all: an exact quote is never cut. */
+export function isUncuttableText(cls: string, kind: string): boolean {
+  return UNCUTTABLE_CLASSES.has(cls) || UNCUTTABLE_KINDS.has(kind)
+}
+
 function isUncuttable(entry: ResolvedItem): boolean {
-  return UNCUTTABLE_CLASSES.has(entry.row.class) || UNCUTTABLE_KINDS.has(entry.row.kind)
+  return isUncuttableText(entry.row.class, entry.row.kind)
 }
 
 /** The shown form of an item: its text cut or whole, or null when only the whole text may show and it is not all here. */

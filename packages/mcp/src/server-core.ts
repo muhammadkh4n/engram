@@ -21,7 +21,6 @@ import {
   startConsolidationWorker,
   recallOutputPolicyFromEnv,
   DEFAULT_RELATED_SHARE,
-  degradedRecallNotice,
   supersessionSettingsFromEnv,
   EXTRACTION_WINDOWS_PER_TICK,
   EXTRACTION_WINDOWS_PER_TICK_MAX,
@@ -48,6 +47,7 @@ import { chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor 
 import type { ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
+import { MEMORY_GET_TOOL, MEMORY_RECALL_TOOL, runMemoryGet, runMemoryRecall } from './recall-tools.js'
 import {
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
@@ -584,12 +584,17 @@ export async function getRecallLog(): Promise<RecallLog | null> {
  * paths. The floor is the one recorded for the reranker in use; with none,
  * every recall answers 503 until one is measured.
  */
+/** The read side of the item store on SUPABASE_URL: recall, memory_get and the other read tools share it. */
+export const getRecallStore = sharedInit(async (): Promise<PostgRestRecallStore> => {
+  return new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
+})
+
 export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   const stack = await getMemoryStack()
   const { intelligence } = stack
   const { embed, rerank, expandQuery, generateHypotheticalDoc, dimensions } = intelligence
   if (!embed || !rerank || !dimensions) throw new Error('recall needs an intelligence adapter that embeds and reranks')
-  const store = new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
+  const store = await getRecallStore()
   return {
     store,
     embed: (text) => embed.call(intelligence, text),
@@ -625,49 +630,8 @@ IMPORTANT — When NOT to search memory:
 If memory_recall returns relevant results, USE THEM directly in your response. Do not say "I don't have this information" if it appears in recalled memories.`
 
 const TOOLS = [
-  {
-    name: 'memory_recall',
-    description:
-      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first. Pass synthesize=true when the question touches the user\'s stated preferences, habits, or requirements, or when making a recommendation: the result then appends a deterministic constraint block quoting stated preferences verbatim with citations. Constraints in that block must be APPLIED to your answer, not merely mentioned.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        query: {
-          type: 'string',
-          description: 'The search query to find relevant memories.',
-        },
-        session_id: {
-          type: 'string',
-          description:
-            'Optional session ID to scope the search to a specific conversation.',
-        },
-        conversation_id: {
-          type: 'string',
-          maxLength: 200,
-          description:
-            'Optional id of the caller\'s current conversation (at most 200 characters). Scopes priming to this conversation: topics this conversation\'s earlier recalls surfaced rank slightly higher in its later recalls. It does NOT filter results, unlike session_id. Omit it and the recall gets no priming.',
-        },
-        project_id: {
-          type: 'string',
-          description:
-            'Optional current project (typically the git repository name, e.g. "engram"). Memories of this project, then of its product group, rank higher; shared memories and other projects\' memories are still returned. Omit for no project preference.',
-        },
-        synthesize: {
-          type: 'boolean',
-          description:
-            'Opt-in: append a deterministic stated-preference constraint block (verbatim quotes with session/date citations) computed from the recalled memories. Code-only, no LLM call at recall time; no effect when the recalled memories contain no stated preferences.',
-        },
-        token_budget: {
-          type: 'integer',
-          minimum: 256,
-          maximum: 32000,
-          description:
-            'Optional cap on the returned text in estimated tokens (256-32000). Raises or lowers the server default for this call only. Items are emitted in rank order and the result stops at the first item that does not fit; the top memory is always returned whole.',
-        },
-      },
-      required: ['query'],
-    },
-  },
+  MEMORY_RECALL_TOOL,
+  MEMORY_GET_TOOL,
   MEMORY_INGEST_TOOL,
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
@@ -742,165 +706,6 @@ const TOOLS = [
   },
 ]
 
-const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'pattern', 'mmr', 'rerank', 'graph'] as const
-
-/** Per-call token_budget bounds on memory_recall. Below the floor the header
- *  lines alone use most of the budget; the ceiling stays well inside a tool
- *  result a client will accept. */
-export const RECALL_TOKEN_BUDGET_MIN = 256
-export const RECALL_TOKEN_BUDGET_MAX = 32000
-
-/** Longest conversation_id memory_recall accepts. */
-export const RECALL_CONVERSATION_ID_MAX = 200
-
-export interface RecallArgOptions {
-  projectId?: string
-  synthesize?: true
-  tokenBudget?: number
-  conversationKey?: string
-}
-
-/**
- * Recall options from memory_recall arguments. The project id is normalised
- * with normalizeProjectId, the rule the stored project tags were written
- * under, so a padded id or a shared alias (blank/global/none/shared) ranks
- * against the same tag. An
- * out-of-range or non-integer token_budget is an error, not ignored, so a
- * caller never silently gets an unbounded payload. conversation_id becomes the
- * priming key; session_id is not, because it filters the search to one
- * session and a priming key must never narrow results. A blank, non-string or
- * over-long conversation_id is an error rather than a silent loss of priming.
- */
-export function recallOptionsFromArgs(args: Record<string, unknown>): RecallArgOptions | { error: string } {
-  const projectId = normalizeProjectId(args['project_id'])
-  const rawBudget = args['token_budget']
-  if (
-    rawBudget !== undefined &&
-    (typeof rawBudget !== 'number' ||
-      !Number.isInteger(rawBudget) ||
-      rawBudget < RECALL_TOKEN_BUDGET_MIN ||
-      rawBudget > RECALL_TOKEN_BUDGET_MAX)
-  ) {
-    return {
-      error: `token_budget must be an integer from ${RECALL_TOKEN_BUDGET_MIN} to ${RECALL_TOKEN_BUDGET_MAX}, got ${JSON.stringify(rawBudget)}`,
-    }
-  }
-  const rawConversation = args['conversation_id']
-  const conversationKey = typeof rawConversation === 'string' ? rawConversation.trim() : undefined
-  if (
-    rawConversation !== undefined &&
-    (conversationKey === undefined || conversationKey.length === 0 || conversationKey.length > RECALL_CONVERSATION_ID_MAX)
-  ) {
-    return {
-      error: `conversation_id must be a non-blank string of at most ${RECALL_CONVERSATION_ID_MAX} characters, got ${JSON.stringify(rawConversation)?.slice(0, 60)}`,
-    }
-  }
-  return {
-    ...(projectId ? { projectId } : {}),
-    ...(args['synthesize'] === true ? { synthesize: true as const } : {}),
-    ...(rawBudget !== undefined ? { tokenBudget: rawBudget } : {}),
-    ...(conversationKey ? { conversationKey } : {}),
-  }
-}
-
-/** Size of the payload a recall returned. */
-export interface RecallPayloadSize {
-  /** Recalled memories written into the text. */
-  emitted: number
-  /** Estimated tokens of the text. */
-  tokens: number
-  /** The token budget cut the payload short. */
-  truncated: boolean
-}
-
-/** One-line recall latency summary. Stages print in a fixed order, then any
- *  graph.* sub-stages sorted by name. Absent stages are omitted, not zeroed,
- *  so a missing key means the stage never ran for that query. A failed
- *  lexical leg (vector-only recall) is printed as lexical=error, a failed
- *  query embedding (keyword-only recall) as degraded=vector. `items` is
- *  the ranked pool; `emitted` is how much of it the payload carried. */
-export function formatRecallTimingLine(
-  timings: Record<string, number>,
-  items: number,
-  chars: number,
-  size?: RecallPayloadSize,
-): string {
-  const subStages = Object.keys(timings).filter(key => key.startsWith('graph.')).sort()
-  const parts = [...RECALL_TIMING_STAGES, ...subStages]
-    .filter(stage => timings[stage] !== undefined)
-    .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
-  const lexical = timings['lexicalError'] !== undefined ? ['lexical=error'] : []
-  const degraded = timings['vectorError'] !== undefined ? ['degraded=vector'] : []
-  const sizeParts = size
-    ? [`emitted=${size.emitted}`, `tokens=${size.tokens}`, ...(size.truncated ? ['truncated=1'] : [])]
-    : []
-  return ['[recall]', ...parts, ...lexical, ...degraded, `items=${items}`, `chars=${chars}`, ...sizeParts].join(' ')
-}
-
-type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
-
-function toolText(text: string): ToolTextResult {
-  return { content: [{ type: 'text' as const, text }] }
-}
-
-function toolError(message: string): ToolTextResult {
-  return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
-}
-
-export const RECALL_BUDGET_TOO_SMALL =
-  'Memories matched, but the token budget is too small to show one. Raise token_budget or ENGRAM_RECALL_TOKEN_BUDGET.'
-
-/** A degraded recall is still an answer: the reader gets the reason and the
- *  keyword results, never a tool error that hides both. */
-export async function runMemoryRecall(
-  mem: Pick<Memory, 'recall'>,
-  args: Record<string, unknown>,
-  recallLog: RecallLog | null = null,
-): Promise<ToolTextResult> {
-  const query = args['query']
-  if (typeof query !== 'string' || query.trim().length === 0) {
-    return toolError('query must be a non-empty string')
-  }
-
-  const recallOpts = recallOptionsFromArgs(args)
-  if ('error' in recallOpts) return toolError(recallOpts.error)
-
-  // The request time is the reference date for relative time phrases
-  // ("last week") in query expansion and in the opt-in synthesis block.
-  const result = await mem.recall(query.trim(), { ...recallOpts, now: new Date() })
-  recallLog?.record(query.trim(), args, recallOpts.projectId, result)
-
-  if (result.timings) {
-    // stderr: stdout carries the stdio JSON-RPC stream.
-    console.error(
-      formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length, {
-        emitted: result.payload?.emittedMemories ?? result.memories.length,
-        tokens: result.estimatedTokens,
-        truncated: result.payload?.truncated === true,
-      }),
-    )
-  }
-
-  if (!result.formatted && result.memories.length > 0) {
-    // Memories matched but none could be shown: the budget left no section
-    // the minimum room after the header and notice, or no first item fit its
-    // room with its tag and minimum content. Saying none matched would be
-    // false.
-    const notice = result.degraded ? `${degradedRecallNotice(result.degraded)}\n` : ''
-    return toolText(`${notice}${RECALL_BUDGET_TOO_SMALL}`)
-  }
-
-  if (!result.formatted || result.memories.length === 0) {
-    if (!result.degraded) return toolText('No relevant memories found.')
-    // After a failed keyword search only the plain text match ran, so "no
-    // keyword matches" would be a claim nothing checked.
-    const emptyLine = result.degraded.lexical === undefined ? 'No keyword matches.' : 'No text matches.'
-    return toolText(`${degradedRecallNotice(result.degraded)}\n${emptyLine}`)
-  }
-
-  return toolText(result.formatted)
-}
-
 export function createEngramServer(): Server {
   const server = new Server(
     { name: 'engram-memory', version: PACKAGE_VERSION },
@@ -927,7 +732,14 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_recall') {
         const { recallLog } = await getMemoryStack()
-        return await runMemoryRecall(mem, args, recallLog)
+        return await runMemoryRecall(
+          { getDeps: getRecallDeps, log: recallLog, server: PACKAGE_VERSION, logError: (line) => console.error(line) },
+          args,
+        )
+      }
+
+      if (name === 'memory_get') {
+        return await runMemoryGet({ store: await getRecallStore() }, args)
       }
 
       if (name === 'memory_ingest') {

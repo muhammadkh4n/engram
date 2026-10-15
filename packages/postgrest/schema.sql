@@ -8573,6 +8573,46 @@ $$;
 
 
 --
+-- Name: engram_get_items(uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The stored record of each requested id that is not forgotten, in p_ids
+-- order, each id once. Every column but the embedding and the search index
+-- (search_text and fts hold what retrieval matches, not what was recorded).
+-- content_head is the first 8,001 characters and content_length the whole
+-- length, so a reader can tell a head from the whole; question is the
+-- context's last 2,000 characters, where a long question asks. Superseded
+-- and retired items come back with superseded_by, retired_at and
+-- retired_reason set. At most 20 ids per call.
+CREATE OR REPLACE FUNCTION public.engram_get_items(p_ids uuid[])
+    RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text,
+                  plan_slug text, session_id text, subject_label text, content_head text, content_length integer,
+                  question text, occurred_at timestamp with time zone, valid_to timestamp with time zone,
+                  superseded_by uuid, restated integer, retired_at timestamp with time zone, retired_reason text,
+                  standing boolean, register_status text, register_ref text, source jsonb, lineage uuid[],
+                  embedding_model text, content_hash text, extraction_run_id uuid, created_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) = 0 OR cardinality(p_ids) > 20 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_get_items: p_ids must hold 1 to 20 ids';
+  END IF;
+  RETURN QUERY
+  SELECT i.id, i.class, i.kind, i.speaker, i.trust, i.project_id, i.workspace_id, i.plan_slug, i.session_id,
+         sj.label, left(i.content, 8001), length(i.content), right(i.context, 2000), i.occurred_at, i.valid_to,
+         i.superseded_by, cardinality(i.restated_at), i.retired_at, i.retired_reason, i.standing, i.register_status,
+         i.register_ref, i.source, i.lineage, i.embedding_model, i.content_hash, i.extraction_run_id, i.created_at
+    FROM (SELECT u.item_id, min(u.ord) AS ord FROM unnest(p_ids) WITH ORDINALITY AS u(item_id, ord) GROUP BY u.item_id) r
+    JOIN public.memory_items i ON i.id = r.item_id
+    LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
+   WHERE i.forgotten_at IS NULL
+   ORDER BY r.ord;
+END; $$;
+
+
+--
 -- Name: engram_project_workspace(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9054,6 +9094,7 @@ BEGIN
   PERFORM * FROM public.engram_item_associations(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], ARRAY['utterance'], ARRAY['user_prompt'], 'smoke', now(), false, 2::smallint, 2);
   PERFORM public.engram_store_version();
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  PERFORM * FROM public.engram_get_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM public.engram_project_workspace('smoke');
   PERFORM * FROM public.engram_recall_projects();
   PERFORM * FROM public.engram_recall_cache_get('expand', ARRAY[repeat('0', 64)]);
@@ -9173,6 +9214,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_get_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM PUBLIC;
@@ -9276,6 +9318,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_get_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM %I', role_name);
@@ -9359,6 +9402,7 @@ GRANT EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) TO service_r
 GRANT EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_get_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_project_workspace(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_projects() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) TO service_role;

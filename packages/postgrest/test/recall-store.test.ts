@@ -217,6 +217,30 @@ describe('PostgRestRecallStore', () => {
     expect(failing.calls).toHaveLength(1)
   })
 
+  it('reads full records by id, lower-cased and once each, and refuses a malformed id or more than 20 before any call', async () => {
+    const row = {
+      id: ID_A, class: 'observation', kind: 'fact', speaker: 'assistant', trust: 2, project_id: 'tst-repo', workspace_id: null,
+      plan_slug: null, session_id: 'tst-session-1', subject_label: 'tst floor', content_head: 'tst text', content_length: 8,
+      question: null, occurred_at: '2026-02-03T04:00:00+00:00', valid_to: null, superseded_by: ID_B, restated: 2,
+      retired_at: '2026-02-04T04:00:00+00:00', retired_reason: 'tst reason', standing: null, register_status: null,
+      register_ref: null, source: { type: 'ingest_tool' }, lineage: [ID_B], embedding_model: 'tst-embedder',
+      content_hash: 'f'.repeat(64), extraction_run_id: null, created_at: '2026-02-03T04:01:00+00:00',
+    }
+    const mock = mockClient([{ data: [row], error: null }])
+    const records = await storeWith(mock.client).getItems([ID_A.toUpperCase(), ID_A, ID_B])
+    expect(mock.calls).toEqual([{ fn: 'engram_get_items', args: { p_ids: [ID_A, ID_B] } }])
+    expect(records[0]).toMatchObject({ id: ID_A, supersededBy: ID_B, restated: 2, retiredReason: 'tst reason', lineage: [ID_B], standing: null })
+    expect(records[0]!.retiredAt?.toISOString()).toBe('2026-02-04T04:00:00.000Z')
+
+    const none = mockClient([{ data: [], error: null }])
+    await expect(storeWith(none.client).getItems(['tst-not-a-uuid'])).rejects.toThrow('getItems failed: "tst-not-a-uuid" is not a uuid')
+    const ids = Array.from({ length: 21 }, (_, i) => `01970000-0000-7000-8000-${String(i).padStart(12, '0')}`)
+    await expect(storeWith(none.client).getItems(ids)).rejects.toThrow('at most 20 per call')
+    expect(none.calls).toEqual([])
+    const bad = mockClient([{ data: [{ ...row, lineage: ['tst'] }], error: null }])
+    await expect(storeWith(bad.client).getItems([ID_A])).rejects.toThrow('lineage is not a list of uuids')
+  })
+
   it('reads item states, a project workspace and the projects', async () => {
     const mock = mockClient([
       { data: [{ id: ID_B, forgotten_at: '2026-02-03T04:00:00+00:00', retired_at: null }], error: null },

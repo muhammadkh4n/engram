@@ -9,6 +9,8 @@ import type {
   CandidateRequest,
   ItemClass,
   ItemKind,
+  ItemReadStore,
+  ItemRecord,
   ItemSource,
   RecallChain,
   RecallItemRow,
@@ -23,10 +25,12 @@ import type {
 } from '@engram-mem/core'
 import { PostgRestItemStore } from './items.js'
 import { parseVector } from './parse-vector.js'
-import { onlyUuids } from './uuid.js'
+import { isUuid, onlyUuids } from './uuid.js'
 
 /** engram_recall_items refuses more ids than this in one call. */
 const MAX_RECALL_IDS = 500
+/** engram_get_items refuses more ids than this in one call. */
+const MAX_GET_IDS = 20
 /** Reads are repeated once after a short pause: a dropped connection or a restart rarely lasts longer. */
 const READ_RETRY = { maxRetries: 1, baseDelayMs: 200 } as const
 const CHAINS: ReadonlySet<string> = new Set<RecallChain>(['current', 'superseded', 'successor_retired'])
@@ -64,7 +68,7 @@ type Row = Record<string, unknown>
  * to weigh); the other reads are repeated once on any failure, since a read
  * repeated changes nothing.
  */
-export class PostgRestRecallStore implements RecallStore {
+export class PostgRestRecallStore implements RecallStore, ItemReadStore {
   private readonly client: PostgrestClient
   private readonly itemStore: PostgRestItemStore
 
@@ -224,6 +228,16 @@ export class PostgRestRecallStore implements RecallStore {
     return toCachedOutput(step, data[0] as Row, 'cachePut', 1)
   }
 
+  async getItems(ids: readonly string[]): Promise<ItemRecord[]> {
+    const wanted = [...new Set(ids.map((id) => id.toLowerCase()))]
+    if (wanted.length === 0) return []
+    const malformed = wanted.find((id) => !isUuid(id))
+    if (malformed !== undefined) throw new Error(`getItems failed: ${JSON.stringify(malformed)} is not a uuid`)
+    if (wanted.length > MAX_GET_IDS) throw new Error(`getItems failed: ${wanted.length} ids, at most ${MAX_GET_IDS} per call`)
+    const rows = await this.read('getItems', 'engram_get_items', { p_ids: wanted })
+    return rows.map((row, i) => toItemRecord(row, i + 1))
+  }
+
   private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {
     return withRetry(async () => {
       const { data, error } = (await this.client.rpc(fn, args)) as RpcResult
@@ -343,5 +357,65 @@ function toItemRow(row: Row, position: number): RecallItemRow {
     currentId: optionalText(row, 'current_id'),
     chain: chain as RecallChain,
     endExcluded: bool(row, 'end_excluded', id),
+  }
+}
+
+function optionalBool(row: Row, column: string, operation: string, id: string): boolean | null {
+  const value = row[column]
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'boolean') throw new Error(`${operation} failed: item ${id}: ${column} is not a boolean`)
+  return value
+}
+
+function uuidList(row: Row, column: string, operation: string, id: string): string[] {
+  const value = row[column]
+  if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && isUuid(v))) {
+    throw new Error(`${operation} failed: item ${id}: ${column} is not a list of uuids`)
+  }
+  return value as string[]
+}
+
+/** A row outside engram_get_items' contract is an error, never a guess. */
+function toItemRecord(row: Row, position: number): ItemRecord {
+  const id = requiredText(row, 'id', 'getItems', position)
+  const fail = (what: string) => new Error(`getItems failed: item ${id}: ${what}`)
+  const cls = row.class
+  const kind = row.kind
+  const speaker = row.speaker
+  if (typeof cls !== 'string' || !CLASSES.has(cls)) throw fail('unknown class')
+  if (typeof kind !== 'string' || !KINDS.has(kind)) throw fail('unknown kind')
+  if (typeof speaker !== 'string' || !SPEAKER_SET.has(speaker)) throw fail('unknown speaker')
+  if (typeof row.content_head !== 'string') throw fail('has no text')
+  const source = row.source
+  if (source === null || typeof source !== 'object' || Array.isArray(source)) throw fail('source is not an object')
+  return {
+    id,
+    class: cls as ItemClass,
+    kind: kind as ItemKind,
+    speaker: speaker as Speaker,
+    trust: integer(row, 'trust', id),
+    projectId: optionalText(row, 'project_id'),
+    workspaceId: optionalText(row, 'workspace_id'),
+    planSlug: optionalText(row, 'plan_slug'),
+    sessionId: optionalText(row, 'session_id'),
+    subjectLabel: optionalText(row, 'subject_label'),
+    contentHead: row.content_head,
+    contentLength: integer(row, 'content_length', id),
+    question: optionalText(row, 'question'),
+    occurredAt: time(row.occurred_at, 'occurred_at', 'getItems', id),
+    validTo: optionalTime(row, 'valid_to', 'getItems', id),
+    supersededBy: optionalText(row, 'superseded_by'),
+    restated: integer(row, 'restated', id),
+    retiredAt: optionalTime(row, 'retired_at', 'getItems', id),
+    retiredReason: optionalText(row, 'retired_reason'),
+    standing: optionalBool(row, 'standing', 'getItems', id),
+    registerStatus: optionalText(row, 'register_status'),
+    registerRef: optionalText(row, 'register_ref'),
+    source: source as ItemSource,
+    lineage: uuidList(row, 'lineage', 'getItems', id),
+    embeddingModel: optionalText(row, 'embedding_model'),
+    contentHash: requiredText(row, 'content_hash', 'getItems', position),
+    extractionRunId: optionalText(row, 'extraction_run_id'),
+    createdAt: time(row.created_at, 'created_at', 'getItems', id),
   }
 }

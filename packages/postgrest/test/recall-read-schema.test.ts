@@ -51,6 +51,11 @@ const READ_FUNCTIONS = [
     '(p_ids text[]) RETURNS TABLE(legacy_id text, item_id uuid) LANGUAGE plpgsql STABLE',
     'public.engram_items_by_legacy_ids(text[])',
   ],
+  [
+    'engram_get_items',
+    '(p_ids uuid[]) RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text, plan_slug text, session_id text, subject_label text, content_head text, content_length integer, question text, occurred_at timestamp with time zone, valid_to timestamp with time zone, superseded_by uuid, restated integer, retired_at timestamp with time zone, retired_reason text, standing boolean, register_status text, register_ref text, source jsonb, lineage uuid[], embedding_model text, content_hash text, extraction_run_id uuid, created_at timestamp with time zone) LANGUAGE plpgsql STABLE',
+    'public.engram_get_items(uuid[])',
+  ],
 ] as const
 
 describe('recall read functions', () => {
@@ -80,6 +85,12 @@ describe('recall read functions', () => {
     const offsets = READ_FUNCTIONS.map(([name]) => schema.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`))
     expect(Math.min(...offsets)).toBeGreaterThan(lastItemTrigger)
     expect(schema.indexOf('ENABLE ROW LEVEL SECURITY;')).toBeGreaterThan(Math.max(...offsets))
+  })
+
+  it('returns no embedding, search text or forgotten row from engram_get_items', () => {
+    const body = functionDefinition('engram_get_items')
+    expect(body).not.toMatch(/embedding,|i\.embedding\b|search_text|\bfts\b/)
+    expect(body).toContain('WHERE i.forgotten_at IS NULL')
   })
 
   it('returns no embedding from engram_recall_items', () => {
