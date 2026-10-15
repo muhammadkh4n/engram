@@ -19,8 +19,6 @@ import {
 import {
   createMemory,
   startConsolidationWorker,
-  recallOutputPolicyFromEnv,
-  DEFAULT_RELATED_SHARE,
   supersessionSettingsFromEnv,
   EXTRACTION_WINDOWS_PER_TICK,
   EXTRACTION_WINDOWS_PER_TICK_MAX,
@@ -30,7 +28,6 @@ import type {
   StorageAdapter,
   IntelligenceAdapter,
   GraphPort,
-  RecallOutputPolicy,
   SupersessionSettings,
 } from '@engram-mem/core'
 import { PostgRestCaptureStore, PostgRestItemStore, PostgRestRecallStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
@@ -43,8 +40,8 @@ import {
   RECALL_STEP_PROMPT_VERSION,
   type OpenAIIntelligenceOptions,
 } from '@engram-mem/openai'
-import { chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
-import type { ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
+import { FLOOR_CALIBRATIONS, chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
+import type { FloorCalibration, ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
 import {
@@ -160,7 +157,7 @@ export async function maybeWithLocalRerank(
     console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
       intelligence: { ...intelligence, rerank: (query, documents) => onnx.rerank(query, documents) },
-      rerankerId: `onnx:${model ?? mod.DEFAULT_RERANK_MODEL}:q8`,
+      rerankerId: rerankerIdFromEnv(process.env, chatModel, mod.DEFAULT_RERANK_MODEL),
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -472,27 +469,70 @@ export async function getMemory(): Promise<Memory> {
   return (await getMemoryStack()).memory
 }
 
+/** The ENGRAM_RECALL_* keys something reads; any other one set fails startup. */
+export const RECALL_ENV_KEYS: readonly string[] = ['ENGRAM_RECALL_LOG', 'ENGRAM_RECALL_LOG_MAX_MB', 'ENGRAM_RECALL_ENGINE']
+
 /**
- * Resolve the recall output policy from the environment and log it. The
- * server entry points call it before they serve anything, because the memory
- * stack is built lazily: validating only there would let the HTTP server pass
- * /health while every recall fails on a malformed ENGRAM_RECALL_* value. The
- * stack build re-validates without logging, for callers that skip the entry
- * points. The log line
- * carries numbers only: the effective Related share and item cap, where the
- * cap defaults to a quarter of the budget and is unbounded without one.
+ * The id of the reranker recall will use: `onnx:<model>:q8` when
+ * ENGRAM_RERANK_LOCAL=true and the local package loads (`defaultLocalModel`
+ * is its default model, null when it cannot load), else `openai:<chat
+ * model>`. The recall floor is recorded per id.
  */
-export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
-  const policy = recallOutputPolicyFromEnv(env)
-  const itemMaxTokens =
-    policy.itemMaxTokens ??
-    (policy.tokenBudget !== undefined ? Math.max(1, Math.floor(policy.tokenBudget / 4)) : 'unbounded')
+export function rerankerIdFromEnv(env: NodeJS.ProcessEnv, chatModel: string, defaultLocalModel: string | null): string {
+  if (env['ENGRAM_RERANK_LOCAL'] !== 'true' || defaultLocalModel === null) return `openai:${chatModel}`
+  const model = env['ENGRAM_RERANK_LOCAL_MODEL']?.trim() || defaultLocalModel
+  return `onnx:${model}:q8`
+}
+
+async function defaultLocalRerankModel(): Promise<string | null> {
+  try {
+    return (await import('@engram-mem/rerank-onnx')).DEFAULT_RERANK_MODEL
+  } catch {
+    return null
+  }
+}
+
+export interface RecallConfig {
+  rerankerId: string
+  /** The floor measured for that reranker; null means /recall and memory_recall refuse. */
+  calibration: FloorCalibration | null
+}
+
+/**
+ * The recall configuration, checked once before the server serves, so a
+ * bad value stops startup instead of failing the first recall: the recall
+ * log path and size, ENGRAM_TIMEZONE, the ENGRAM_CHAT_* options and the
+ * reranker id. An ENGRAM_RECALL_* key that nothing reads also stops it, all
+ * such keys named in one message: a key left over from the old recall
+ * engine would otherwise look like it still tunes recall. Logs one line
+ * with the reranker and its floor, and no secret or credential value.
+ */
+export async function recallConfigAtStartup(
+  env: NodeJS.ProcessEnv = process.env,
+  loadDefaultLocalModel: () => Promise<string | null> = defaultLocalRerankModel,
+  floors: readonly FloorCalibration[] = FLOOR_CALIBRATIONS,
+): Promise<RecallConfig> {
+  const unread = Object.keys(env)
+    .filter((key) => key.startsWith('ENGRAM_RECALL_') && !RECALL_ENV_KEYS.includes(key) && env[key] !== undefined)
+    .sort()
+  if (unread.length > 0) {
+    throw new Error(
+      `${unread.join(', ')} ${unread.length === 1 ? 'is' : 'are'} set, and nothing reads ${unread.length === 1 ? 'it' : 'them'}: ` +
+        `remove ${unread.length === 1 ? 'it' : 'them'} from the server environment (recall reads only ${RECALL_ENV_KEYS.join(', ')})`,
+    )
+  }
+  recallLogFromEnv(env)
+  parseTimeZoneEnv(env)
+  const chatModel = chatIntelligenceOptionsFromEnv(env).summarizationModel ?? DEFAULT_CHAT_MODEL
+  const localModel = env['ENGRAM_RERANK_LOCAL'] === 'true' ? await loadDefaultLocalModel() : null
+  const rerankerId = rerankerIdFromEnv(env, chatModel, localModel)
+  const calibration = floorFor(rerankerId, floors)
   console.error(
-    `[engram-mcp] recall output policy: emitK=${policy.emitK ?? 'unbounded'} ` +
-      `tokenBudget=${policy.tokenBudget ?? 'unbounded'} faint=${policy.faint ? 'on' : 'off'} ` +
-      `relatedShare=${policy.relatedShare ?? DEFAULT_RELATED_SHARE} itemMaxTokens=${itemMaxTokens}`,
+    calibration === null
+      ? `[engram-mcp] recall: reranker=${rerankerId} not calibrated; /recall and memory_recall refuse`
+      : `[engram-mcp] recall: reranker=${rerankerId} floor=${calibration.floor} strong=${calibration.strong}`,
   )
-  return policy
+  return { rerankerId, calibration }
 }
 
 /**
@@ -507,7 +547,6 @@ export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.e
 }
 
 async function buildMemoryStack(): Promise<MemoryStack> {
-  recallOutputPolicyFromEnv(process.env)
   const { timeZone } = parseTimeZoneEnv()
   const supersession = supersessionSettingsAtStartup()
   const consolidation = consolidationEnabledFromEnv()

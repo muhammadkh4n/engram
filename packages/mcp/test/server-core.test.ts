@@ -30,7 +30,8 @@ import {
   consolidationAtStartup,
   consolidationEnabledFromEnv,
   extractionHeldFromEnv,
-  recallOutputPolicyAtStartup,
+  recallConfigAtStartup,
+  rerankerIdFromEnv,
   getMemory,
   createEngramServer,
 } from '../src/server-core.js'
@@ -124,87 +125,64 @@ describe('maybeWithRecallEngine', () => {
   })
 })
 
-describe('recallOutputPolicyAtStartup', () => {
+describe('recallConfigAtStartup', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('resolves the unbounded policy when nothing is set and logs numbers only', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const noLocalModel = async () => null
+  const TST_FLOORS = [
+    { reranker: 'onnx:tst-org/tst-reranker:q8', floor: 0.3, strong: 0.7, calibratedAt: '2026-02-03T04:00:00Z', dataset: 'tst', neededInSlate: 0, neededBelowFloor: 0 },
+  ]
 
-    expect(recallOutputPolicyAtStartup({})).toEqual({ faint: true })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=unbounded faint=on ' +
-        'relatedShare=0.3 itemMaxTokens=unbounded',
-    )
+  it('passes the three keys recall reads and logs that recall refuses without a floor', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_RECALL_LOG: '/tmp/tst-recall.jsonl', ENGRAM_RECALL_LOG_MAX_MB: '5', ENGRAM_RECALL_ENGINE: 'false', ENGRAM_CHAT_MODEL: 'tst-chat-model' }
+    expect(await recallConfigAtStartup(env, noLocalModel)).toEqual({ rerankerId: 'openai:tst-chat-model', calibration: null })
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall: reranker=openai:tst-chat-model not calibrated; /recall and memory_recall refuse')
   })
 
-  it('resolves and logs a configured policy', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const env = { ENGRAM_RECALL_EMIT_K: '12', ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_FAINT: 'off' }
-
-    expect(recallOutputPolicyAtStartup(env)).toEqual({ emitK: 12, tokenBudget: 4000, faint: false })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=12 tokenBudget=4000 faint=off relatedShare=0.3 itemMaxTokens=1000',
-    )
-  })
-
-  it('logs a configured Related share and item cap', () => {
+  it('logs the floor and strong line of a calibrated reranker, and no secret', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const env = {
-      ENGRAM_RECALL_TOKEN_BUDGET: '4000',
-      ENGRAM_RECALL_RELATED_SHARE: '0.45',
-      ENGRAM_RECALL_ITEM_MAX_TOKENS: '700',
+      ENGRAM_RERANK_LOCAL: 'true',
+      ENGRAM_RERANK_LOCAL_MODEL: 'tst-org/tst-reranker',
+      ENGRAM_CHAT_API_KEY: 'tst-secret-chat-key-value',
     }
+    const config = await recallConfigAtStartup(env, async () => 'tst-org/tst-default', TST_FLOORS)
+    expect(config.rerankerId).toBe('onnx:tst-org/tst-reranker:q8')
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall: reranker=onnx:tst-org/tst-reranker:q8 floor=0.3 strong=0.7')
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('tst-secret-chat-key-value')
+  })
 
-    expect(recallOutputPolicyAtStartup(env)).toEqual({
-      tokenBudget: 4000,
-      relatedShare: 0.45,
-      itemMaxTokens: 700,
-      faint: true,
-    })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=4000 faint=on relatedShare=0.45 itemMaxTokens=700',
+  it('names the reranker the server will use: the local default model, or the chat model when the local package cannot load', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect((await recallConfigAtStartup({ ENGRAM_RERANK_LOCAL: 'true' }, async () => 'tst-org/tst-default')).rerankerId).toBe('onnx:tst-org/tst-default:q8')
+    expect((await recallConfigAtStartup({ ENGRAM_RERANK_LOCAL: 'true', ENGRAM_CHAT_MODEL: 'tst-chat-model' }, noLocalModel)).rerankerId).toBe('openai:tst-chat-model')
+    expect(rerankerIdFromEnv({ ENGRAM_RERANK_LOCAL: 'false' }, 'tst-chat-model', 'tst-org/tst-default')).toBe('openai:tst-chat-model')
+  })
+
+  it('fails on an ENGRAM_RECALL_* key nothing reads, naming it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(recallConfigAtStartup({ ENGRAM_RECALL_FAN: 'on' }, noLocalModel)).rejects.toThrow(
+      'ENGRAM_RECALL_FAN is set, and nothing reads it: remove it from the server environment',
     )
+  })
+
+  it('names every unread key in one message, an empty value included', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(
+      recallConfigAtStartup({ ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_TIMING: '', ENGRAM_RECALL_LOG: '/tmp/x' }, noLocalModel),
+    ).rejects.toThrow(/^ENGRAM_RECALL_TIMING, ENGRAM_RECALL_TOKEN_BUDGET are set, and nothing reads them/)
   })
 
   it.each([
-    ['ENGRAM_RECALL_RELATED_SHARE', '0.95'],
-    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', 'lots'],
-  ])('throws at startup naming %s for %j', (name, value) => {
+    [{ ENGRAM_TIMEZONE: 'Asia/Nowhere_City' }, /ENGRAM_TIMEZONE/],
+    [{ ENGRAM_CHAT_PROVIDER_PREFS: '[1,2]' }, /ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object/],
+    [{ ENGRAM_RECALL_LOG: '/tmp/x.jsonl', ENGRAM_RECALL_LOG_MAX_MB: '0' }, /ENGRAM_RECALL_LOG_MAX_MB/],
+  ])('fails on a bad value %j', async (env, message) => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    expect(() => recallOutputPolicyAtStartup({ [name]: value })).toThrow(name)
-  })
-
-  it('fails startup when the item cap is larger than the token budget', () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '1000', ENGRAM_RECALL_ITEM_MAX_TOKENS: '1200' }
-
-    expect(() => recallOutputPolicyAtStartup(env)).toThrow(
-      'ENGRAM_RECALL_ITEM_MAX_TOKENS (1200) must not exceed ENGRAM_RECALL_TOKEN_BUDGET (1000)',
-    )
-    expect(() => recallOutputPolicyAtStartup({ ...env, ENGRAM_RECALL_ITEM_MAX_TOKENS: '1000' })).not.toThrow()
-  })
-
-  it('fails startup on a malformed budget before any backend is contacted', async () => {
-    const saved = process.env['ENGRAM_RECALL_TOKEN_BUDGET']
-    process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = 'abc'
-    try {
-      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_TOKEN_BUDGET must be a positive integer, got "abc"/)
-    } finally {
-      if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
-      else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
-    }
-  })
-  it('fails startup on a malformed item cap before any backend is contacted', async () => {
-    const saved = process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
-    process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = '-5'
-    try {
-      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_ITEM_MAX_TOKENS must be a positive integer, got "-5"/)
-    } finally {
-      if (saved === undefined) delete process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
-      else process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = saved
-    }
+    await expect(recallConfigAtStartup(env, noLocalModel)).rejects.toThrow(message)
   })
 })
 

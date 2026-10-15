@@ -14,7 +14,7 @@ import {
   getRecallStore,
   getRecallLog,
   PACKAGE_VERSION,
-  recallOutputPolicyAtStartup,
+  recallConfigAtStartup,
   consolidationAtStartup,
   extractionHeldFromEnv,
   captureModelFromEnv,
@@ -194,7 +194,7 @@ export async function main(): Promise<void> {
   const threshold = parseSalienceThresholdEnv()
   const captureModel = captureModelFromEnv()
   const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
-  recallOutputPolicyAtStartup()
+  await recallConfigAtStartup()
   consolidationAtStartup()
   const extractionHeld = extractionHeldFromEnv()
   const log = (line: string): void => {
