@@ -396,6 +396,9 @@ const TIMELINE_ENTRY_CHARS = 1500
 const TIMELINE_ARGS: ReadonlySet<string> = new Set(['project_id', 'from_date', 'to_date', 'query', 'limit'])
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})$/
+/** A date alone covers a whole UTC day, to PostgreSQL's microsecond precision. */
+const DAY_FIRST_INSTANT = '00:00:00Z'
+const DAY_LAST_INSTANT = '23:59:59.999999Z'
 const OVERVIEW_SUBJECTS = { min: 1, max: 50, default: 20 } as const
 const OVERVIEW_ARGS: ReadonlySet<string> = new Set(['project_id', 'subjects'])
 
@@ -486,8 +489,8 @@ function dateArg(raw: unknown, name: 'from_date' | 'to_date'): { iso: string; at
   const fail = { error: `${name} must be an ISO 8601 date (YYYY-MM-DD) or a time with an offset` }
   if (typeof raw !== 'string') return fail
   if (DATE_ONLY.test(raw)) {
-    const iso = name === 'from_date' ? `${raw}T00:00:00Z` : `${raw}T23:59:59.999999Z`
-    const at = Date.parse(`${raw}T00:00:00Z`)
+    const iso = `${raw}T${name === 'from_date' ? DAY_FIRST_INSTANT : DAY_LAST_INSTANT}`
+    const at = Date.parse(`${raw}T${DAY_FIRST_INSTANT}`)
     if (Number.isNaN(at) || new Date(at).toISOString().slice(0, 10) !== raw) return fail
     return { iso, at: name === 'from_date' ? at : at + 86_400_000 - 1 }
   }
