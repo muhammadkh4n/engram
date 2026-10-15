@@ -35,6 +35,8 @@ const KINDS: ReadonlySet<string> = new Set(Object.values(ITEM_KINDS).flat())
 const SPEAKER_SET: ReadonlySet<string> = new Set(SPEAKERS)
 const CACHE_KEY = /^[0-9a-f]{64}$/
 const SOURCES: ReadonlySet<string> = new Set(ASSOCIATION_SOURCES)
+/** engram_items_by_legacy_ids reads at most this many ids per call. */
+const LEGACY_ID_BATCH = 5000
 /** engram_item_associations refuses more seeds than this. */
 const MAX_SEEDS = 10
 const VECTOR_STEPS: ReadonlySet<RecallStep> = new Set<RecallStep>(['embed_query', 'embed_hyde'])
@@ -122,6 +124,25 @@ export class PostgRestRecallStore implements RecallStore {
         rank,
       }
     })
+  }
+
+  /**
+   * The live legacy item copied from each old-table row id, for the floor
+   * measurement; ids that name no live copy are absent. Read 5,000 ids per call.
+   */
+  async itemsByLegacyIds(ids: readonly string[]): Promise<Array<{ legacyId: string; itemId: string }>> {
+    const wanted = [...new Set(ids)]
+    const out: Array<{ legacyId: string; itemId: string }> = []
+    for (let i = 0; i < wanted.length; i += LEGACY_ID_BATCH) {
+      const rows = await this.read('itemsByLegacyIds', 'engram_items_by_legacy_ids', { p_ids: wanted.slice(i, i + LEGACY_ID_BATCH) })
+      rows.forEach((row, n) => {
+        out.push({
+          legacyId: requiredText(row, 'legacy_id', 'itemsByLegacyIds', i + n + 1),
+          itemId: requiredText(row, 'item_id', 'itemsByLegacyIds', i + n + 1),
+        })
+      })
+    }
+    return out
   }
 
   async registerTokens(asOf?: Date): Promise<RegisterToken[]> {

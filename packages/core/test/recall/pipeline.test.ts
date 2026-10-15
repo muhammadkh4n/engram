@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CandidateQueryError, type Candidate, type CandidateRequest } from '../../src/items/item-store.js'
 import type { FloorCalibration } from '../../src/recall/floor-calibration.js'
-import { RecallNotCalibratedError, RecallRequestError, runRecall, type RecallDeps } from '../../src/recall/pipeline.js'
+import { RecallNotCalibratedError, RecallRequestError, runRecall, scoreSlate, type RecallDeps } from '../../src/recall/pipeline.js'
 import type { AssociationLink, AssociationRequest, RecallItemRow, RecallRequest, RecallStore } from '../../src/recall/types.js'
 
 const FLOOR: FloorCalibration = {
@@ -421,5 +421,25 @@ describe('runRecall associations', () => {
       return JSON.stringify((await runRecall(deps, req())).response)
     }
     expect(await run()).toBe(await run())
+  })
+})
+
+describe('scoreSlate', () => {
+  it('scores the whole slate with no floor, below-floor items included, and runs no rescue', async () => {
+    const rows = [row('a'), row('b')]
+    const { deps, candidateCalls } = setup({ rows, candidates: [rows.map((r, i) => cand(r.id, 'bm25', i + 1))], scores: { a: 0.9, b: 0.01 } }, { floor: null })
+    const { items } = await scoreSlate(deps, req())
+    expect(items.map((s) => [s.row.id, s.score])).toEqual([
+      ['a', 0.9],
+      ['b', 0.01],
+    ])
+    expect(candidateCalls).toHaveLength(1)
+  })
+
+  it('fails when the reranker fails, since a slate with no scores measures nothing', async () => {
+    const rows = [row('a')]
+    const { deps } = setup({ rows, candidates: [[cand('a', 'bm25', 1)]] })
+    vi.mocked(deps.rerank.rerank).mockRejectedValue(new Error('tst reranker down'))
+    await expect(scoreSlate(deps, req())).rejects.toThrow(/^the reranker failed/)
   })
 })

@@ -111,7 +111,7 @@ export interface ScoredItem {
 
 /** Shared state of one recall while its stages run. */
 interface RecallRun {
-  deps: RecallDeps
+  deps: SlateDeps
   request: RecallRequest
   steps: ModelSteps
   base: CandidateRequest
@@ -212,7 +212,37 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
   return { response, trace }
 }
 
-function startRun(deps: RecallDeps, request: RecallRequest, filters: EffectiveFilters): RecallRun {
+/** What scoring a slate needs: every recall dependency but the floor. */
+export type SlateDeps = Omit<RecallDeps, 'floor'>
+
+/** One slate item as the reranker scored it, for measuring the floor. */
+export interface SlateScore {
+  row: RecallItemRow
+  /** The rerank score; never null, since a failed reranker fails the measurement. */
+  score: number
+}
+
+/**
+ * The slate of a request as recall would score it, before any floor: the
+ * model steps, one candidate call, fusion and the rerank of the first 50.
+ * The HyDE rescue does not run, since what triggers it is nothing passing
+ * the floor being measured. A failed reranker throws: a slate with no scores
+ * measures nothing. For the floor-calibration CLI only; recall itself runs
+ * `runRecall`.
+ */
+export async function scoreSlate(deps: SlateDeps, request: RecallRequest): Promise<{ items: SlateScore[]; degraded: RecallDegraded }> {
+  const filters = effectiveFilters(request)
+  if ('error' in filters) throw new RecallRequestError(filters.error)
+  const run = startRun(deps, request, filters)
+  const inputs = await gatherInputs(run, request.asOf ?? deps.now())
+  const slate = new Slate(run)
+  await slate.add(await firstCandidates(run, inputs))
+  if (slate.rerankFailed) throw new Error(`the reranker failed: ${run.degraded.rerank ?? 'no reason'}`)
+  const items = [...slate.scored.values()].map((s) => ({ row: s.row, score: s.score ?? Number.NEGATIVE_INFINITY }))
+  return { items, degraded: run.degraded }
+}
+
+function startRun(deps: SlateDeps, request: RecallRequest, filters: EffectiveFilters): RecallRun {
   const steps = new ModelSteps({
     cache: deps.store,
     embed: deps.embed,

@@ -608,6 +608,37 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
     )
   })
 
+  describe('engram_items_by_legacy_ids', () => {
+    it(
+      'maps an old row id, in any letter case, to its live legacy copy, and nothing else',
+      async () => {
+        const oldA = '0aaaaaaa-0000-4000-8000-00000000000a'
+        const oldB = '0bbbbbbb-0000-4000-8000-00000000000b'
+        const legacyItem = (oldId: string, content: string): Item => ({
+          id: newId(),
+          class: 'legacy',
+          kind: 'legacy_episode',
+          speaker: 'system',
+          trust: 3,
+          content,
+          occurredAt: at(0),
+          source: { type: 'legacy', id: oldId, event_key: `legacy:${oldId}` },
+        })
+        const a = legacyItem(oldA, 'tst legacy a')
+        const b = legacyItem(oldB, 'tst legacy b')
+        await insert([a, b])
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([b.id])}, 'tst forget');`)
+        const out = await pg.psqlAs(
+          'service_role',
+          `SELECT coalesce(json_agg(json_build_array(m.legacy_id, m.item_id)), '[]'::json)
+             FROM public.engram_items_by_legacy_ids(ARRAY[${lit(oldA.toUpperCase())}, ${lit(oldB)}, 'not-a-uuid', ${lit(newId())}]) AS m;`,
+        )
+        expect(JSON.parse(out)).toEqual([[oldA.toUpperCase(), a.id]])
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
+
   describe('engram_active_register_tokens', () => {
     it(
       'gives each applies_to string of the entries in force as of a time',

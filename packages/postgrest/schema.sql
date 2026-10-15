@@ -8413,6 +8413,35 @@ END; $$;
 
 
 --
+-- Name: engram_items_by_legacy_ids(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The live legacy item copied from each old-table row id, for measuring the
+-- recall floor against case and gold files that name old rows. An id that is
+-- not a uuid, or whose row was never copied or was forgotten, gives nothing.
+-- Read through idx_items_legacy_source; at most 5,000 ids per call.
+CREATE OR REPLACE FUNCTION public.engram_items_by_legacy_ids(p_ids text[])
+    RETURNS TABLE(legacy_id text, item_id uuid)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) > 5000 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_items_by_legacy_ids: p_ids must hold at most 5000 ids';
+  END IF;
+  RETURN QUERY
+  SELECT w.raw, i.id
+    FROM (SELECT DISTINCT u.raw, lower(u.raw)::uuid AS row_id
+            FROM unnest(p_ids) AS u(raw)
+           WHERE u.raw ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') w
+    JOIN public.memory_items i
+      ON i.class = 'legacy' AND public.engram_legacy_row_id(i.source) = w.row_id AND i.forgotten_at IS NULL
+   ORDER BY w.raw, i.id;
+END; $$;
+
+
+--
 -- Name: engram_active_register_tokens(timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9021,6 +9050,7 @@ BEGIN
   PERFORM * FROM public.engram_unretire_memories(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], 'smoke', 'smoke');
   PERFORM * FROM public.engram_recall_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], now(), 'smoke');
   PERFORM * FROM public.engram_active_register_tokens(now());
+  PERFORM * FROM public.engram_items_by_legacy_ids(ARRAY['00000000-0000-0000-0000-000000000000']);
   PERFORM * FROM public.engram_item_associations(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], ARRAY['utterance'], ARRAY['user_prompt'], 'smoke', now(), false, 2::smallint, 2);
   PERFORM public.engram_store_version();
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
@@ -9139,6 +9169,7 @@ REVOKE EXECUTE ON FUNCTION public.engram_track_session_activity() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
@@ -9241,6 +9272,7 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.memory_capture_events_count() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
@@ -9323,6 +9355,7 @@ GRANT EXECUTE ON FUNCTION public.match_digests(text, integer, double precision) 
 GRANT EXECUTE ON FUNCTION public.match_episodes(text, integer, double precision, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_items(uuid[], timestamp with time zone, text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_active_register_tokens(timestamp with time zone) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;

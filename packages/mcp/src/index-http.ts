@@ -8,7 +8,7 @@
  *
  * Required env:
  *   SUPABASE_URL, SUPABASE_KEY, OPENAI_API_KEY
- *   BEARER_TOKEN          — required for all /mcp and /capture requests
+ *   BEARER_TOKEN          — required for all /mcp, /capture and /recall requests
  *
  * Optional env:
  *   PORT                  — default 3849

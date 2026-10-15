@@ -147,6 +147,17 @@ describe('PostgRestRecallStore', () => {
     ).rejects.toThrow('associations failed: row 1 has an unknown source')
   })
 
+  it('maps legacy ids in batches of 5,000', async () => {
+    const mock = mockClient([{ data: [{ legacy_id: 'old-1', item_id: ID_A }], error: null }])
+    const ids = Array.from({ length: 5001 }, (_, i) => `old-${i}`)
+    const rows = await storeWith(mock.client).itemsByLegacyIds([...ids, 'old-1'])
+    expect(mock.calls.map((c) => (c.args.p_ids as string[]).length)).toEqual([5000, 1])
+    expect(rows).toEqual([
+      { legacyId: 'old-1', itemId: ID_A },
+      { legacyId: 'old-1', itemId: ID_A },
+    ])
+  })
+
   it('gives up after the second failure without quoting the server message', async () => {
     const mock = mockClient([{ data: null, error: { code: '08006', message: 'tst server detail' } }])
     const err = await storeWith(mock.client)
