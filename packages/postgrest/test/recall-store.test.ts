@@ -241,6 +241,29 @@ describe('PostgRestRecallStore', () => {
     await expect(storeWith(bad.client).getItems([ID_A])).rejects.toThrow('lineage is not a list of uuids')
   })
 
+  it('reads the session timeline, the overview and the capture status with only the arguments set', async () => {
+    const timeline = mockClient([{ data: [{ id: ID_A, session_id: 'tst-session-1', project_id: null, occurred_at: '2026-02-03T04:00:00+00:00', content_head: 'Session tst', content_length: 11 }], error: null }])
+    const entries = await storeWith(timeline.client).sessionTimeline({ limit: 5, projectId: 'tst-repo', to: '2026-02-03T23:59:59.999999Z' })
+    expect(timeline.calls).toEqual([{ fn: 'engram_session_timeline', args: { p_limit: 5, p_project_id: 'tst-repo', p_to: '2026-02-03T23:59:59.999999Z' } }])
+    expect(entries).toEqual([{ id: ID_A, sessionId: 'tst-session-1', projectId: null, occurredAt: new Date('2026-02-03T04:00:00Z'), contentHead: 'Session tst', contentLength: 11 }])
+
+    const overview = mockClient([{ data: [{ section: 'state', key: 'retired', n: '0', latest: null }, { section: 'class', key: 'utterance/user_prompt', n: 3, latest: '2026-02-03T04:00:00+00:00' }], error: null }])
+    const rows = await storeWith(overview.client).itemOverview({ subjectLimit: 7 })
+    expect(overview.calls).toEqual([{ fn: 'engram_item_overview', args: { p_subject_limit: 7 } }])
+    expect(rows).toEqual([
+      { section: 'state', key: 'retired', n: 0, latest: null },
+      { section: 'class', key: 'utterance/user_prompt', n: 3, latest: new Date('2026-02-03T04:00:00Z') },
+    ])
+    const bad = mockClient([{ data: [{ section: 'cluster', key: 'x', n: 1, latest: null }], error: null }])
+    await expect(storeWith(bad.client).itemOverview({ subjectLimit: 1 })).rejects.toThrow('unknown section')
+
+    const status = mockClient([{ data: [{ metric: 'events_unprocessed', value: '2' }, { metric: 'last_processed_at', value: null }], error: null }])
+    expect(await storeWith(status.client).captureStatus()).toEqual([
+      { metric: 'events_unprocessed', value: '2' },
+      { metric: 'last_processed_at', value: null },
+    ])
+  })
+
   it('reads item states, a project workspace and the projects', async () => {
     const mock = mockClient([
       { data: [{ id: ID_B, forgotten_at: '2026-02-03T04:00:00+00:00', retired_at: null }], error: null },

@@ -7,7 +7,10 @@ import type {
   CachedStepOutput,
   Candidate,
   CandidateRequest,
+  CaptureStatusRow,
   ItemClass,
+  ItemOverviewRequest,
+  ItemOverviewRow,
   ItemKind,
   ItemReadStore,
   ItemRecord,
@@ -20,6 +23,8 @@ import type {
   RecallStep,
   RecallStore,
   RegisterToken,
+  SessionTimelineEntry,
+  SessionTimelineRequest,
   Speaker,
   StepOutput,
 } from '@engram-mem/core'
@@ -236,6 +241,50 @@ export class PostgRestRecallStore implements RecallStore, ItemReadStore {
     if (wanted.length > MAX_GET_IDS) throw new Error(`getItems failed: ${wanted.length} ids, at most ${MAX_GET_IDS} per call`)
     const rows = await this.read('getItems', 'engram_get_items', { p_ids: wanted })
     return rows.map((row, i) => toItemRecord(row, i + 1))
+  }
+
+  async sessionTimeline(req: SessionTimelineRequest): Promise<SessionTimelineEntry[]> {
+    const args: Record<string, unknown> = { p_limit: req.limit }
+    if (req.projectId !== undefined) args.p_project_id = req.projectId
+    if (req.from !== undefined) args.p_from = req.from
+    if (req.to !== undefined) args.p_to = req.to
+    const rows = await this.read('sessionTimeline', 'engram_session_timeline', args)
+    return rows.map((row, i) => {
+      const id = requiredText(row, 'id', 'sessionTimeline', i + 1)
+      if (typeof row.content_head !== 'string') throw new Error(`sessionTimeline failed: item ${id} has no text`)
+      return {
+        id,
+        sessionId: optionalText(row, 'session_id'),
+        projectId: optionalText(row, 'project_id'),
+        occurredAt: time(row.occurred_at, 'occurred_at', 'sessionTimeline', id),
+        contentHead: row.content_head,
+        contentLength: integer(row, 'content_length', id),
+      }
+    })
+  }
+
+  async itemOverview(req: ItemOverviewRequest): Promise<ItemOverviewRow[]> {
+    const args: Record<string, unknown> = { p_subject_limit: req.subjectLimit }
+    if (req.projectId !== undefined) args.p_project_id = req.projectId
+    const rows = await this.read('itemOverview', 'engram_item_overview', args)
+    return rows.map((row, i) => {
+      const section = row.section
+      if (section !== 'class' && section !== 'state' && section !== 'subject') {
+        throw new Error(`itemOverview failed: row ${i + 1} has an unknown section`)
+      }
+      const key = requiredText(row, 'key', 'itemOverview', i + 1)
+      const n = typeof row.n === 'string' ? Number(row.n) : row.n
+      if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) throw new Error(`itemOverview failed: row ${i + 1} has no count`)
+      return { section, key, n, latest: optionalTime(row, 'latest', 'itemOverview', key) }
+    })
+  }
+
+  async captureStatus(): Promise<CaptureStatusRow[]> {
+    const rows = await this.read('captureStatus', 'engram_capture_status', {})
+    return rows.map((row, i) => ({
+      metric: requiredText(row, 'metric', 'captureStatus', i + 1),
+      value: optionalText(row, 'value'),
+    }))
   }
 
   private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {

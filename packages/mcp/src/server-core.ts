@@ -47,7 +47,19 @@ import { chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor 
 import type { ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
-import { MEMORY_GET_TOOL, MEMORY_RECALL_TOOL, runMemoryGet, runMemoryRecall } from './recall-tools.js'
+import {
+  MEMORY_CAPTURE_STATUS_TOOL,
+  MEMORY_GET_TOOL,
+  MEMORY_OVERVIEW_TOOL,
+  MEMORY_RECALL_TOOL,
+  MEMORY_TIMELINE_TOOL,
+  runMemoryCaptureStatus,
+  runMemoryGet,
+  runMemoryOverview,
+  runMemoryRecall,
+  runMemoryTimeline,
+} from './recall-tools.js'
+import type { RecallRouteDeps } from './recall-route.js'
 import {
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
@@ -55,7 +67,6 @@ import {
   runMemoryForget,
   runMemoryRetire,
 } from './item-action-tools.js'
-import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
 import { recallLogFromEnv } from './recall-log.js'
 import type { RecallLog } from './recall-log.js'
@@ -636,52 +647,9 @@ const TOOLS = [
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
   MEMORY_UNRETIRE_TOOL,
-  {
-    name: 'memory_timeline',
-    description:
-      'Show how a topic evolved over time. Returns a chronological list of semantic memories for a topic, including superseded (expired) beliefs. Useful for understanding how knowledge changed.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        topic: {
-          type: 'string',
-          description: 'Topic to trace (e.g. "preference", "TypeScript", "auth architecture").',
-        },
-        from_date: {
-          type: 'string',
-          description: 'Optional ISO date string to filter from (inclusive).',
-        },
-        to_date: {
-          type: 'string',
-          description: 'Optional ISO date string to filter to (inclusive).',
-        },
-      },
-      required: ['topic'],
-    },
-  },
-  {
-    name: 'memory_overview',
-    description:
-      'Returns a high-level summary of what Engram knows, organized by knowledge clusters. Use this to understand what topics, projects, or domains are heavily represented in memory. Optionally filter by topic to find related clusters.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        topic: {
-          type: 'string',
-          description: 'Optional topic filter. If provided, returns clusters whose summary or top entities match this topic.',
-        },
-        max_communities: {
-          type: 'number',
-          description: 'Maximum number of communities to return. Default 5.',
-        },
-        project_id: {
-          type: 'string',
-          description: 'Optional project namespace to scope the query.',
-        },
-      },
-      required: [],
-    },
-  },
+  MEMORY_TIMELINE_TOOL,
+  MEMORY_OVERVIEW_TOOL,
+  MEMORY_CAPTURE_STATUS_TOOL,
   {
     name: 'memory_bridges',
     description:
@@ -705,6 +673,11 @@ const TOOLS = [
     },
   },
 ]
+
+/** What the recall tools run on: the server's recall deps, its recall log, and stderr for failures. */
+function recallToolDeps(recallLog: RecallLog | null): RecallRouteDeps {
+  return { getDeps: getRecallDeps, log: recallLog, server: PACKAGE_VERSION, logError: (line) => console.error(line) }
+}
 
 export function createEngramServer(): Server {
   const server = new Server(
@@ -732,10 +705,7 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_recall') {
         const { recallLog } = await getMemoryStack()
-        return await runMemoryRecall(
-          { getDeps: getRecallDeps, log: recallLog, server: PACKAGE_VERSION, logError: (line) => console.error(line) },
-          args,
-        )
+        return await runMemoryRecall(recallToolDeps(recallLog), args)
       }
 
       if (name === 'memory_get') {
@@ -758,67 +728,16 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_timeline') {
-        const topic = args['topic']
-        if (typeof topic !== 'string' || topic.trim().length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: topic must be a non-empty string' }],
-            isError: true,
-          }
-        }
-
-        const fromDate = typeof args['from_date'] === 'string' ? new Date(args['from_date']) : undefined
-        const toDate = typeof args['to_date'] === 'string' ? new Date(args['to_date']) : undefined
-
-        const timeline = await mem.getTimeline(topic.trim(), { fromDate, toDate })
-
-        if (timeline.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: `No semantic memories found for topic "${topic}".` }],
-          }
-        }
-
-        const lines = [`## Timeline: "${topic}" (${timeline.length} entries)\n`]
-        for (const m of timeline) {
-          const status = m.supersededBy ? '~~superseded~~' : '**current**'
-          const from = m.createdAt.toISOString().slice(0, 10)
-          lines.push(`- [${from}] ${status} — ${m.content}`)
-          if (m.supersededBy) lines.push(`  _superseded by: ${m.supersededBy}_`)
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
+        const { recallLog } = await getMemoryStack()
+        return await runMemoryTimeline({ store: await getRecallStore(), recall: recallToolDeps(recallLog) }, args)
       }
 
       if (name === 'memory_overview') {
-        const topic = typeof args['topic'] === 'string' ? args['topic'].trim() : undefined
-        const maxCommunities = typeof args['max_communities'] === 'number'
-          ? Math.min(args['max_communities'], 20)
-          : 5
-        const projectId = normalizeProjectId(args['project_id'])
+        return await runMemoryOverview({ store: await getRecallStore() }, args)
+      }
 
-        const communities = await mem.getCommunitySummaries({ topic, limit: maxCommunities, projectId })
-
-        if (communities.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'No knowledge clusters found. Run a dream cycle consolidation to generate community summaries.' }],
-          }
-        }
-
-        const lines = ['## Engram — Knowledge Domain Overview', '']
-        for (const c of communities) {
-          lines.push(`### ${c.label}`)
-          lines.push(`- Members: ${c.memberCount} memories`)
-          if (c.topTopics.length > 0) lines.push(`- Topics: ${c.topTopics.join(', ')}`)
-          if (c.topEntities.length > 0) lines.push(`- Entities: ${c.topEntities.join(', ')}`)
-          if (c.topPersons.length > 0) lines.push(`- People: ${c.topPersons.join(', ')}`)
-          if (c.dominantEmotion) lines.push(`- Dominant tone: ${c.dominantEmotion}`)
-          lines.push('')
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
+      if (name === 'memory_capture_status') {
+        return await runMemoryCaptureStatus({ store: await getRecallStore() }, args)
       }
 
       if (name === 'memory_bridges') {

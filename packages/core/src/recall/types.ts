@@ -271,4 +271,49 @@ export interface ItemRecord {
 export interface ItemReadStore {
   /** The records of the ids that are not forgotten, in the order given, each once; at most 20 ids. */
   getItems(ids: readonly string[]): Promise<ItemRecord[]>
+  /** The current record of each past session, newest first. */
+  sessionTimeline(req: SessionTimelineRequest): Promise<SessionTimelineEntry[]>
+  /** Counts of what the store holds: current items by class/kind, states, top subjects. */
+  itemOverview(req: ItemOverviewRequest): Promise<ItemOverviewRow[]>
+  /** The capture path's health as named counts and times. */
+  captureStatus(): Promise<CaptureStatusRow[]>
+}
+
+export interface SessionTimelineRequest {
+  projectId?: string
+  /** Inclusive bounds on occurred_at, as ISO 8601 times PostgreSQL reads at microsecond precision. */
+  from?: string
+  to?: string
+  /** 1 to 50. */
+  limit: number
+}
+
+export interface SessionTimelineEntry {
+  id: string
+  sessionId: string | null
+  projectId: string | null
+  occurredAt: Date
+  /** The first 1,501 characters. */
+  contentHead: string
+  contentLength: number
+}
+
+export interface ItemOverviewRequest {
+  projectId?: string
+  /** 1 to 50. */
+  subjectLimit: number
+}
+
+export interface ItemOverviewRow {
+  section: 'class' | 'state' | 'subject'
+  /** `class/kind`, a state (`superseded`, `retired`, `candidate`) or a subject label. */
+  key: string
+  n: number
+  latest: Date | null
+}
+
+export interface CaptureStatusRow {
+  metric: string
+  /** A count or a UTC time; null when there is none. */
+  value: string | null
 }

@@ -10,11 +10,14 @@ import {
   recordStatus,
   renderRecall,
   renderRecords,
+  runMemoryCaptureStatus,
   runMemoryGet,
+  runMemoryOverview,
   runMemoryRecall,
+  runMemoryTimeline,
 } from '../src/recall-tools.js'
 import type { RecallRouteDeps } from '../src/recall-route.js'
-import { TST_ITEM_ID, TST_T0, stubRecallDeps } from './recall-fixtures.js'
+import { TST_ITEM_ID, TST_T0, stubRecallDeps, tstRow } from './recall-fixtures.js'
 
 const NOW = new Date('2026-02-03T04:00:00Z')
 const ID_A = '01970000-0000-7000-8000-0000000000a1'
@@ -353,5 +356,154 @@ describe('memory_get', () => {
     const res = await runMemoryGet({ store: { getItems } }, { ids: ['tst-not-a-uuid'] })
     expect(res).toEqual({ content: [{ type: 'text', text: 'Error: ids holds a value that is not a uuid: "tst-not-a-uuid"' }], isError: true })
     expect(getItems).not.toHaveBeenCalled()
+  })
+})
+
+describe('memory_timeline', () => {
+  const entry = (id: string, minute: number, overrides: Record<string, unknown> = {}) => {
+    const contentHead = `Session tst-session-${minute}\nProject: tst-repo`
+    return {
+      id,
+      sessionId: `tst-session-${minute}`,
+      projectId: 'tst-repo' as string | null,
+      occurredAt: new Date(Date.parse('2026-02-01T10:00:00Z') + minute * 60_000),
+      contentHead,
+      contentLength: contentHead.length,
+      ...overrides,
+    }
+  }
+
+  function timelineDeps(rows: ReturnType<typeof entry>[], recall: Partial<RecallRouteDeps> = {}) {
+    const sessionTimeline = vi.fn(async () => rows)
+    return { deps: { store: { sessionTimeline }, recall: routeDeps(recall) }, sessionTimeline }
+  }
+
+  it('lists the session records newest first, each cut at a line boundary', async () => {
+    const long = `Session tst-session-5\n${Array.from({ length: 40 }, (_, k) => `${String(k).padStart(2, '0')} ${'p'.repeat(60)}`).join('\n')}`
+    const { deps, sessionTimeline } = timelineDeps([entry(ID_B, 5, { contentHead: long, contentLength: long.length, projectId: null }), entry(ID_A, 0)])
+    const res = await runMemoryTimeline(deps, { project_id: ' tst-repo ', from_date: '2026-02-01', to_date: '2026-02-01T12:00:00Z', limit: 5 })
+    expect(sessionTimeline).toHaveBeenCalledWith({ limit: 5, projectId: 'tst-repo', from: '2026-02-01T00:00:00Z', to: '2026-02-01T12:00:00Z' })
+    const text = textOf(res)
+    const lines = text.split('\n')
+    expect(lines[0]).toBe('## Engram timeline: 2 sessions · project tst-repo · from 2026-02-01T00:00:00Z · to 2026-02-01T12:00:00Z')
+    expect(lines[2]).toBe(`- 2026-02-01 10:05 UTC · no project · session tst-session-5 · item ${ID_B}`)
+    expect(text).toContain(`  [cut: memory_get ${ID_B} returns the whole record]`)
+    const shown = text.slice(text.indexOf('  Session tst-session-5'), text.indexOf('  [cut:'))
+    expect(shown.length).toBeLessThanOrEqual(1500 + 2 * 40)
+    expect(shown.trimEnd().endsWith('p'.repeat(60))).toBe(true)
+    expect(text.endsWith(`- 2026-02-01 10:00 UTC · tst-repo · session tst-session-0 · item ${ID_A}\n  Session tst-session-0\n  Project: tst-repo`)).toBe(true)
+  })
+
+  it('makes a date alone a whole UTC day', async () => {
+    const { deps, sessionTimeline } = timelineDeps([])
+    expect(textOf(await runMemoryTimeline(deps, { from_date: '2026-02-01', to_date: '2026-02-02' }))).toBe('No session record matches.')
+    expect(sessionTimeline).toHaveBeenCalledWith({ limit: 20, from: '2026-02-01T00:00:00Z', to: '2026-02-02T23:59:59.999999Z' })
+  })
+
+  it.each([
+    [{ from_date: 'last week' }, 'from_date must be an ISO 8601 date (YYYY-MM-DD) or a time with an offset'],
+    [{ from_date: '2026-02-30' }, 'from_date must be an ISO 8601 date (YYYY-MM-DD) or a time with an offset'],
+    [{ to_date: '2026-02-01T10:00:00' }, 'to_date must be an ISO 8601 date (YYYY-MM-DD) or a time with an offset'],
+    [{ from_date: '2026-02-02', to_date: '2026-02-01' }, 'from_date is after to_date'],
+    [{ limit: 51 }, 'limit must be an integer between 1 and 50'],
+    [{ query: 'q', limit: 31 }, 'limit with query must be between 1 and 30'],
+    [{ topic: 'tst' }, 'topic was replaced by query: it lists only the sessions relevant to it'],
+    [{ project_id: 'not a repo' }, 'project_id is not a project id'],
+  ])('refuses %o', async (args, message) => {
+    const { deps, sessionTimeline } = timelineDeps([])
+    expect(await runMemoryTimeline(deps, args)).toEqual({ content: [{ type: 'text', text: `Error: ${message}` }], isError: true })
+    expect(sessionTimeline).not.toHaveBeenCalled()
+  })
+
+  it('with a query, lists the current session records recall shows, filtered by project and dates, newest first', async () => {
+    const row = (id: string, minute: number, projectId: string) =>
+      tstRow({
+        id,
+        currentId: id,
+        class: 'session_index',
+        kind: 'session',
+        speaker: 'system',
+        projectId,
+        sessionId: `tst-session-${minute}`,
+        contentHead: `Session tst-session-${minute}\nProject: ${projectId}`,
+        contentLength: `Session tst-session-${minute}\nProject: ${projectId}`.length,
+        occurredAt: new Date(Date.parse('2026-02-01T10:00:00Z') + minute * 60_000),
+        source: { type: 'transcript', session_id: `tst-session-${minute}` },
+      })
+    const recordLine = vi.fn()
+    const { deps, sessionTimeline } = timelineDeps([], {
+      log: { recordLine },
+      getDeps: async () => stubRecallDeps({ rows: [row(ID_A, 0, 'tst-repo'), row(ID_B, 5, 'tst-repo'), row(ID_C, 9, 'tst-other')] }),
+    })
+    const text = textOf(await runMemoryTimeline(deps, { query: 'tst floor', project_id: 'tst-repo', limit: 10 }))
+    expect(sessionTimeline).not.toHaveBeenCalled()
+    expect(text.split('\n')[0]).toBe('## Engram timeline: 2 sessions · for "tst floor" · project tst-repo')
+    expect(text.indexOf(`item ${ID_B}`)).toBeLessThan(text.indexOf(`item ${ID_A}`))
+    expect(text).not.toContain(ID_C)
+    expect(recordLine.mock.calls[0]![0]).toMatchObject({ channel: 'mcp', classes: ['session_index'], include_history: true })
+  })
+
+  it('with a query, refuses when no floor is measured for the reranker', async () => {
+    const { deps } = timelineDeps([], { getDeps: async () => stubRecallDeps({ floor: null }) })
+    expect(textOf(await runMemoryTimeline(deps, { query: 'q' }))).toBe('Error: recall is not calibrated for reranker tst-reranker')
+  })
+})
+
+describe('memory_overview', () => {
+  it('lists counts by class and kind, the states and the top subjects', async () => {
+    const latest = new Date('2026-02-01T10:00:00Z')
+    const itemOverview = vi.fn(async () => [
+      { section: 'class' as const, key: 'mk_statement/ruling', n: 4, latest },
+      { section: 'class' as const, key: 'utterance/user_prompt', n: 30, latest },
+      { section: 'state' as const, key: 'superseded', n: 2, latest },
+      { section: 'state' as const, key: 'retired', n: 0, latest: null },
+      { section: 'state' as const, key: 'candidate', n: 1, latest },
+      { section: 'subject' as const, key: 'tst floor', n: 3, latest },
+    ])
+    const res = await runMemoryOverview({ store: { itemOverview } }, { project_id: 'tst-repo', subjects: 5 })
+    expect(itemOverview).toHaveBeenCalledWith({ subjectLimit: 5, projectId: 'tst-repo' })
+    expect(textOf(res)).toBe(
+      [
+        '## Engram overview: project tst-repo',
+        '',
+        '### Current items by class and kind',
+        '- mk_statement/ruling: 4 (latest 2026-02-01)',
+        '- utterance/user_prompt: 30 (latest 2026-02-01)',
+        '',
+        '### Not current, and waiting for review',
+        '- superseded: 2 (latest 2026-02-01)',
+        '- retired: 0',
+        '- candidate: 1 (latest 2026-02-01)',
+        '',
+        '### Subjects with the most current items',
+        '- tst floor: 3 (latest 2026-02-01)',
+      ].join('\n'),
+    )
+  })
+
+  it.each([
+    [{ max_communities: 3 }, 'max_communities was replaced by subjects: how many top subjects to list, 1 to 50'],
+    [{ topic: 'tst' }, 'topic was removed: memory_overview counts everything; pass project_id to narrow it, or search with memory_recall'],
+    [{ subjects: 0 }, 'subjects must be an integer between 1 and 50'],
+  ])('refuses %o', async (args, message) => {
+    const itemOverview = vi.fn(async () => [])
+    expect(await runMemoryOverview({ store: { itemOverview } }, args)).toEqual({ content: [{ type: 'text', text: `Error: ${message}` }], isError: true })
+    expect(itemOverview).not.toHaveBeenCalled()
+  })
+})
+
+describe('memory_capture_status', () => {
+  it('lists each metric with its value, none when there is no value', async () => {
+    const captureStatus = vi.fn(async () => [
+      { metric: 'events_received_24h', value: '12' },
+      { metric: 'oldest_unprocessed_received_at', value: null },
+    ])
+    expect(textOf(await runMemoryCaptureStatus({ store: { captureStatus } }, {}))).toBe(
+      '## Engram capture status\n- events_received_24h: 12\n- oldest_unprocessed_received_at: none',
+    )
+    expect(await runMemoryCaptureStatus({ store: { captureStatus } }, { verbose: true })).toEqual({
+      content: [{ type: 'text', text: 'Error: unknown argument: verbose' }],
+      isError: true,
+    })
   })
 })

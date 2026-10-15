@@ -57,7 +57,7 @@ const SCOPE_KEYS: ReadonlySet<string> = new Set(['project_id', 'workspace_id', '
 const CHANNELS: ReadonlySet<string> = new Set(RECALL_CHANNELS)
 const CLASSES: ReadonlySet<string> = new Set(ITEM_CLASSES)
 /** The id shape memory_items and memory_subjects accept for a project. */
-const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+export const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const PLAN_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 /** ISO 8601 with a date, a time and an explicit offset. */
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/

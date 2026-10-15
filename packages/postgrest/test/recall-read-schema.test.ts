@@ -56,6 +56,17 @@ const READ_FUNCTIONS = [
     '(p_ids uuid[]) RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text, plan_slug text, session_id text, subject_label text, content_head text, content_length integer, question text, occurred_at timestamp with time zone, valid_to timestamp with time zone, superseded_by uuid, restated integer, retired_at timestamp with time zone, retired_reason text, standing boolean, register_status text, register_ref text, source jsonb, lineage uuid[], embedding_model text, content_hash text, extraction_run_id uuid, created_at timestamp with time zone) LANGUAGE plpgsql STABLE',
     'public.engram_get_items(uuid[])',
   ],
+  [
+    'engram_session_timeline',
+    '(p_project_id text DEFAULT NULL, p_from timestamp with time zone DEFAULT NULL, p_to timestamp with time zone DEFAULT NULL, p_limit integer DEFAULT 20) RETURNS TABLE(id uuid, session_id text, project_id text, occurred_at timestamp with time zone, content_head text, content_length integer) LANGUAGE plpgsql STABLE',
+    'public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer)',
+  ],
+  [
+    'engram_item_overview',
+    '(p_project_id text DEFAULT NULL, p_subject_limit integer DEFAULT 20) RETURNS TABLE(section text, key text, n bigint, latest timestamp with time zone) LANGUAGE plpgsql STABLE',
+    'public.engram_item_overview(text, integer)',
+  ],
+  ['engram_capture_status', '() RETURNS TABLE(metric text, value text) LANGUAGE sql STABLE', 'public.engram_capture_status()'],
 ] as const
 
 describe('recall read functions', () => {
@@ -91,6 +102,13 @@ describe('recall read functions', () => {
     const body = functionDefinition('engram_get_items')
     expect(body).not.toMatch(/embedding,|i\.embedding\b|search_text|\bfts\b/)
     expect(body).toContain('WHERE i.forgotten_at IS NULL')
+  })
+
+  it('reads no event payload, item text or error message for capture status', () => {
+    const body = functionDefinition('engram_capture_status')
+    expect(body).toContain('e.error IS NOT NULL')
+    // The error column is only tested for presence; no text column is selected.
+    expect(body.replace('e.error IS NOT NULL', '')).not.toMatch(/\b(e|i|r)\.(payload|content|error|context|scrub|search_text)\b/)
   })
 
   it('returns no embedding from engram_recall_items', () => {
