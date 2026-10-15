@@ -10,7 +10,7 @@ import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-event
 import type { CaptureEventsRouteDeps } from '../src/capture-events/route.js'
 import type { DocumentsRouteDeps } from '../src/documents-route.js'
 import { RECEIVED_AT, envelope, validEvent } from './capture-events/fixtures.js'
-import type { RecallDeps } from '@engram-mem/core'
+import type { RecallDeps, ReviewCandidateRow } from '@engram-mem/core'
 import type { RecallRouteDeps } from '../src/recall-route.js'
 import { TST_ITEM_ID, stubRecallDeps } from './recall-fixtures.js'
 
@@ -37,6 +37,8 @@ interface Harness {
   logError: ReturnType<typeof vi.fn>
   recallLogError: ReturnType<typeof vi.fn>
   recordLine: ReturnType<typeof vi.fn>
+  reviewCandidates: ReturnType<typeof vi.fn>
+  candidatesLogError: ReturnType<typeof vi.fn>
   port: number
   close: () => Promise<void>
 }
@@ -47,6 +49,7 @@ interface ServerOptions {
   ready?: () => ProjectRegistry | null
   status?: () => SecretRegistryStatus
   recallDeps?: () => Promise<RecallDeps>
+  reviewRows?: () => Promise<ReviewCandidateRow[]>
 }
 
 async function startServer(opts: ServerOptions = {}): Promise<Harness> {
@@ -99,6 +102,8 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     logError: recallLogError,
     now: () => RECEIVED_AT,
   }
+  const reviewCandidates = vi.fn(opts.reviewRows ?? (async () => []))
+  const candidatesLogError = vi.fn()
   const server = http.createServer(
     createRequestListener(config, {
       mcp,
@@ -110,6 +115,7 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
       documentsBodyMaxBytes: DOCUMENTS_BODY_CAP,
       recall,
       recallBodyMaxBytes: RECALL_BODY_CAP,
+      candidates: { getStore: async () => ({ reviewCandidates }), logError: candidatesLogError },
       logError,
     }),
   )
@@ -124,6 +130,8 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     logError,
     recallLogError,
     recordLine,
+    reviewCandidates,
+    candidatesLogError,
     port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
@@ -520,6 +528,67 @@ describe('POST /recall', () => {
     expect(await res.json()).toEqual({ error: 'recall failed' })
     const logged = String(h.recallLogError.mock.calls[0]?.[0])
     expect(logged).toContain('recall failed: store unreachable')
+    expect(logged).not.toContain('Zq7madeupNotReal91xAbc')
+  })
+})
+
+describe('POST /candidates', () => {
+  const body = JSON.stringify({ scope: { project_id: 'tst-repo' } })
+
+  it('answers on the MCP bearer with the candidates, total and missing', async () => {
+    await h.close()
+    h = await startServer({
+      reviewRows: async () => [
+        {
+          id: TST_ITEM_ID, kind: 'ruling', quote: 'tst keep the floor', question: null, occurredAt: RECEIVED_AT, sessionId: null,
+          projectId: 'tst-repo', workspaceId: null, subject: null, proposedScope: null, status: 'current',
+          registerStatus: 'candidate', restatedCount: 0, targets: [], total: 1,
+        },
+      ],
+    })
+    const res = await post(`${h.url}/candidates`, body)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { candidates: Array<Record<string, unknown>>; total: number; missing: string[] }
+    expect(json.candidates.map((c) => c.id)).toEqual([TST_ITEM_ID])
+    expect(json.total).toBe(1)
+    expect(json.missing).toEqual([])
+    expect(h.reviewCandidates).toHaveBeenCalledWith({ scope: { projectId: 'tst-repo' }, limit: 4 })
+  })
+
+  it('refuses no token, the capture token and the documents token with 401', async () => {
+    const none = await fetch(`${h.url}/candidates`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    expect(none.status).toBe(401)
+    expect((await post(`${h.url}/candidates`, body, { authorization: `Bearer ${CAPTURE_TOKEN}` })).status).toBe(401)
+    expect((await post(`${h.url}/candidates`, body, { authorization: `Bearer ${DOCUMENTS_TOKEN}` })).status).toBe(401)
+    expect(h.reviewCandidates).not.toHaveBeenCalled()
+  })
+
+  it('answers 405 to any method but POST, 413 over 4 KiB, and 400 to a body that is not JSON or breaks a rule', async () => {
+    const get = await fetch(`${h.url}/candidates`, { headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(get.status).toBe(405)
+    expect(get.headers.get('allow')).toBe('POST')
+    const big = JSON.stringify({ scope: { project_id: 'x'.repeat(4096) } })
+    expect((await post(`${h.url}/candidates`, big)).status).toBe(413)
+    const notJson = await post(`${h.url}/candidates`, '{not json')
+    expect(notJson.status).toBe(400)
+    const broken = await post(`${h.url}/candidates`, JSON.stringify({ scope: {}, limit: 9 }))
+    expect(broken.status).toBe(400)
+    expect(await broken.json()).toEqual({ error: 'limit must be between 1 and 8' })
+    expect(h.reviewCandidates).not.toHaveBeenCalled()
+  })
+
+  it('answers 500 with no cause, and logs the cause scrubbed', async () => {
+    await h.close()
+    h = await startServer({
+      reviewRows: async () => {
+        throw new Error('store unreachable: Authorization: Bearer Zq7madeupNotReal91xAbc')
+      },
+    })
+    const res = await post(`${h.url}/candidates`, body)
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual({ error: 'candidates failed' })
+    const logged = String(h.candidatesLogError.mock.calls[0]?.[0])
+    expect(logged).toContain('candidates failed: store unreachable')
     expect(logged).not.toContain('Zq7madeupNotReal91xAbc')
   })
 })

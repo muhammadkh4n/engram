@@ -36,6 +36,9 @@ interface Item {
   context?: string
   lineage?: string[]
   standing?: boolean
+  projectId?: string
+  workspaceId?: string
+  registerStatus?: string
 }
 
 interface ItemRow {
@@ -133,6 +136,9 @@ function valuesRow(i: Item): string {
     `${lit(JSON.stringify(i.source))}::jsonb`,
     `ARRAY[${(i.lineage ?? []).map(lit).join(', ')}]::uuid[]`,
     i.standing === undefined ? 'NULL' : String(i.standing),
+    i.projectId ? lit(i.projectId) : 'NULL',
+    i.workspaceId ? lit(i.workspaceId) : 'NULL',
+    i.registerStatus ? lit(i.registerStatus) : 'NULL',
   ].join(', ')})`
 }
 
@@ -155,7 +161,7 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
   async function insert(items: readonly Item[]): Promise<void> {
     await pg.psql(
       `INSERT INTO public.memory_items (id, class, kind, speaker, trust, session_id, subject_id, content, search_text,
-         context, occurred_at, source, lineage, standing)
+         context, occurred_at, source, lineage, standing, project_id, workspace_id, register_status)
        VALUES ${items.map(valuesRow).join(',\n')};`,
     )
   }
@@ -730,6 +736,240 @@ describe.skipIf(!realPgImage)('the recall read side on real Postgres', () => {
         }
         const rows = await recallItems([a.id, b.id])
         expect(rows.map((r) => r.restated)).toEqual([1, 1])
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
+
+  describe('engram_get_items', () => {
+    async function getItems(ids: readonly string[]): Promise<Array<Record<string, unknown>>> {
+      const out = await pg.psqlAs(
+        'service_role',
+        `SELECT coalesce(json_agg(to_jsonb(g) ORDER BY g.k), '[]'::json)
+           FROM public.engram_get_items(${uuidArray(ids)}) WITH ORDINALITY AS g(id, class, kind, speaker, trust,
+                project_id, workspace_id, plan_slug, session_id, subject_label, content_head, content_length, question,
+                occurred_at, valid_to, superseded_by, restated, retired_at, retired_reason, standing, register_status,
+                register_ref, source, lineage, embedding_model, content_hash, extraction_run_id, created_at, k);`,
+      )
+      return JSON.parse(out) as Array<Record<string, unknown>>
+    }
+
+    it(
+      'returns each record once in the order asked, with its state, and never a forgotten one',
+      async () => {
+        const old = note('tst old version', 0)
+        const current = note(`tst current ${'x'.repeat(9000)}`, 5, { context: `q${'y'.repeat(2500)}` })
+        const retired = note('tst retired', 0)
+        const forgotten = note('tst forgotten', 0)
+        await insert([old, current, retired, forgotten])
+        await supersede(old.id, current.id)
+        await pg.psql(`SELECT count(*) FROM public.engram_retire_items(${uuidArray([retired.id])}, 'tst retire reason');`)
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([forgotten.id])}, 'tst forget');`)
+
+        const rows = await getItems([forgotten.id, retired.id, old.id, current.id, newId(), current.id])
+        expect(rows.map((r) => r.id)).toEqual([retired.id, old.id, current.id])
+        expect(rows[0]).toMatchObject({ retired_reason: 'tst retire reason', superseded_by: null })
+        expect(rows[0]!.retired_at).not.toBeNull()
+        expect(rows[1]).toMatchObject({ superseded_by: current.id, retired_at: null })
+        const head = rows[2]!.content_head as string
+        expect([head.length, rows[2]!.content_length]).toEqual([8001, current.content.length])
+        expect((rows[2]!.question as string).length).toBe(2000)
+        expect(rows[2]).toMatchObject({ restated: 0, lineage: [], source: { type: 'vault' } })
+        expect(Object.keys(rows[2]!)).not.toContain('embedding')
+        expect(await getItems([forgotten.id])).toEqual([])
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'refuses no ids and more than 20, and is not callable by anon',
+      async () => {
+        await expect(pg.psqlAs('service_role', "SELECT * FROM public.engram_get_items('{}'::uuid[]);")).rejects.toThrow(/p_ids must hold 1 to 20 ids/)
+        const many = Array.from({ length: 21 }, () => newId())
+        await expect(pg.psqlAs('service_role', `SELECT * FROM public.engram_get_items(${uuidArray(many)});`)).rejects.toThrow(/p_ids must hold 1 to 20 ids/)
+        await expect(pg.psqlAs('anon', `SELECT * FROM public.engram_get_items(${uuidArray([newId()])});`)).rejects.toThrow(/permission denied for function/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+  })
+
+  describe('the timeline, overview and capture status reads', () => {
+    function sessionIndex(sessionId: string, minute: number, options: Partial<Item> = {}): Item {
+      return {
+        id: newId(),
+        class: 'session_index',
+        kind: 'session',
+        speaker: 'system',
+        trust: 1,
+        content: `Session ${sessionId}\nProject: none`,
+        occurredAt: at(minute),
+        source: { type: 'transcript', session_id: sessionId },
+        sessionId,
+        ...options,
+      }
+    }
+
+    async function subjectRow(label: string, projectId?: string): Promise<string> {
+      const id = newId()
+      await pg.psql(
+        `INSERT INTO public.memory_subjects (id, project_id, label) VALUES (${lit(id)}, ${projectId ? lit(projectId) : 'NULL'}, ${lit(label)});`,
+      )
+      return id
+    }
+
+    async function rowsOf(sql: string): Promise<unknown[]> {
+      return JSON.parse(await pg.psqlAs('service_role', `SELECT coalesce(json_agg(to_jsonb(x)), '[]'::json) FROM (${sql}) x;`)) as unknown[]
+    }
+
+    it(
+      'lists the current record of each session, newest first, by project and inclusive dates, never a forgotten one',
+      async () => {
+        const old = sessionIndex('tst-session-a', 0, { projectId: 'tst-repo' })
+        const rebuilt = sessionIndex('tst-session-a', 30, { projectId: 'tst-repo', content: `Session tst-session-a\n${'x'.repeat(2000)}` })
+        const other = sessionIndex('tst-session-b', 20, { projectId: 'tst-other' })
+        const early = sessionIndex('tst-session-c', 10, { projectId: 'tst-repo' })
+        const forgotten = sessionIndex('tst-session-d', 40, { projectId: 'tst-repo' })
+        const retired = sessionIndex('tst-session-e', 50, { projectId: 'tst-repo' })
+        await insert([old, rebuilt, other, early, forgotten, retired])
+        await supersede(old.id, rebuilt.id)
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([forgotten.id])}, 'tst forget');`)
+        await pg.psql(`SELECT count(*) FROM public.engram_retire_items(${uuidArray([retired.id])}, 'tst retire');`)
+
+        const all = (await rowsOf('SELECT t.id, t.session_id, length(t.content_head) AS head, t.content_length FROM public.engram_session_timeline() t')) as Array<Record<string, unknown>>
+        expect(all.map((r) => r.id)).toEqual([rebuilt.id, other.id, early.id])
+        expect(all[0]).toMatchObject({ session_id: 'tst-session-a', head: 1501, content_length: rebuilt.content.length })
+
+        const scoped = await rowsOf(`SELECT t.id FROM public.engram_session_timeline('tst-repo', ${lit(at(10))}::timestamptz, ${lit(at(30))}::timestamptz, 1) t`)
+        expect(scoped).toEqual([{ id: rebuilt.id }])
+        const bounded = await rowsOf(`SELECT t.id FROM public.engram_session_timeline(NULL, ${lit(at(10))}::timestamptz, ${lit(at(20))}::timestamptz, 50) t`)
+        expect(bounded).toEqual([{ id: other.id }, { id: early.id }])
+        await expect(pg.psqlAs('service_role', 'SELECT * FROM public.engram_session_timeline(NULL, NULL, NULL, 51);')).rejects.toThrow(/p_limit must be between 1 and 50/)
+        await expect(
+          pg.psqlAs('service_role', `SELECT * FROM public.engram_session_timeline(NULL, ${lit(at(20))}::timestamptz, ${lit(at(10))}::timestamptz, 5);`),
+        ).rejects.toThrow(/p_from is after p_to/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'counts current items by class and kind, the states and the top subjects exactly, forgotten rows left out',
+      async () => {
+        const floor = await subjectRow('tst floor', 'tst-repo')
+        const deploy = await subjectRow('tst deploy', 'tst-repo')
+        const prompt = { ...utterance('tst ruling 1 and tst ruling 2', 0, 'tst-session-1'), projectId: 'tst-repo' }
+        const statement = (minute: number, registerStatus: string | undefined, subjectId: string): Item => ({
+          id: newId(),
+          class: 'mk_statement',
+          kind: 'ruling',
+          speaker: 'mk',
+          trust: 0,
+          content: `tst ruling ${minute}`,
+          occurredAt: at(minute),
+          source: { type: 'extraction' },
+          subjectId,
+          lineage: [prompt.id],
+          standing: true,
+          projectId: 'tst-repo',
+          ...(registerStatus ? { registerStatus } : {}),
+        })
+        const candidate = statement(1, 'candidate', floor)
+        const recorded = statement(2, 'recorded', floor)
+        const notes = [0, 1, 2].map((m) => note(`tst note ${m}`, m, { projectId: 'tst-repo', subjectId: deploy }))
+        const successor = note('tst note successor', 9, { projectId: 'tst-repo', subjectId: deploy })
+        const retired = note('tst retired note', 3, { projectId: 'tst-repo', subjectId: floor })
+        const forgotten = note('tst forgotten note', 4, { projectId: 'tst-repo', subjectId: floor })
+        const elsewhere = note('tst other project', 5, { projectId: 'tst-other', subjectId: floor })
+        await insert([prompt, candidate, { ...recorded, registerStatus: undefined }, ...notes, successor, retired, forgotten, elsewhere])
+        await pg.psql(`UPDATE public.memory_items SET register_status = 'recorded', register_ref = 'R-TST-0' WHERE id = ${lit(recorded.id)};`)
+        await supersede(notes[0]!.id, successor.id)
+        await pg.psql(`SELECT count(*) FROM public.engram_retire_items(${uuidArray([retired.id])}, 'tst retire');`)
+        await pg.psql(`SELECT count(*) FROM public.engram_forget_items(${uuidArray([forgotten.id])}, 'tst forget');`)
+
+        const rows = (await rowsOf("SELECT o.section, o.key, o.n, o.latest IS NOT NULL AS dated FROM public.engram_item_overview('tst-repo', 20) o")) as Array<Record<string, unknown>>
+        expect(rows).toEqual([
+          { section: 'class', key: 'document_section/note', n: 3, dated: true },
+          { section: 'class', key: 'mk_statement/ruling', n: 2, dated: true },
+          { section: 'class', key: 'utterance/user_prompt', n: 1, dated: true },
+          { section: 'state', key: 'superseded', n: 1, dated: true },
+          { section: 'state', key: 'retired', n: 1, dated: true },
+          { section: 'state', key: 'candidate', n: 1, dated: true },
+          { section: 'subject', key: 'tst deploy', n: 3, dated: true },
+          { section: 'subject', key: 'tst floor', n: 2, dated: true },
+        ])
+        const top = await rowsOf("SELECT o.key, o.n FROM public.engram_item_overview(NULL, 1) o WHERE o.section = 'subject'")
+        expect(top).toEqual([{ key: 'tst deploy', n: 3 }])
+        const empty = await rowsOf("SELECT o.section, o.key, o.n FROM public.engram_item_overview('tst-unknown', 5) o")
+        expect(empty).toEqual([
+          { section: 'state', key: 'superseded', n: 0 },
+          { section: 'state', key: 'retired', n: 0 },
+          { section: 'state', key: 'candidate', n: 0 },
+        ])
+        await expect(pg.psqlAs('service_role', 'SELECT * FROM public.engram_item_overview(NULL, 0);')).rejects.toThrow(/p_subject_limit must be between 1 and 50/)
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'reports capture health in counts and times only',
+      async () => {
+        await pg.psql('TRUNCATE public.memory_capture_events, public.memory_extraction_runs CASCADE;')
+        const event = (uuid: string, receivedAgo: string, processed: boolean, attempts: number, error: string | null) =>
+          `('tst-session-1', ${lit(uuid)}, 'user_prompt', now(), '{"text":"tst secret payload"}'::jsonb, now() - interval ${lit(receivedAgo)},
+            ${attempts}, ${processed ? "now() - interval '1 minute'" : 'NULL'}, ${error ? lit(error) : 'NULL'})`
+        await pg.psql(`INSERT INTO public.memory_capture_events (session_id, event_uuid, type, occurred_at, payload, received_at, attempts, processed_at, error)
+          VALUES ${[
+            event('tst-e1', '1 hour', true, 1, null),
+            event('tst-e2', '2 hours', false, 0, null),
+            event('tst-e3', '30 hours', false, 3, 'tst secret error text'),
+          ].join(', ')};`)
+        await pg.psql(`INSERT INTO public.memory_extraction_runs (extractor_version, status, started_at, finished_at)
+          VALUES ('tst-v1', 'succeeded', now() - interval '1 hour', now() - interval '59 minutes'),
+                 ('tst-v1', 'failed', now() - interval '2 hours', now() - interval '119 minutes'),
+                 ('tst-v1', 'succeeded', now() - interval '3 days', now() - interval '3 days');`)
+        await insert([note('tst section', 0), utterance('tst prompt', 1, 'tst-session-1'), { ...utterance('tst reply', 2, 'tst-session-1'), kind: 'assistant_turn', speaker: 'assistant', trust: 3 }])
+
+        const out = await pg.psqlAs('service_role', 'SELECT json_agg(json_build_array(s.metric, s.value)) FROM public.engram_capture_status() s;')
+        expect(out).not.toMatch(/tst secret/)
+        const status = new Map(JSON.parse(out) as Array<[string, string | null]>)
+        expect([...status.keys()]).toEqual([
+          'events_received_24h',
+          'events_unprocessed',
+          'events_dead',
+          'oldest_unprocessed_received_at',
+          'events_with_error',
+          'last_processed_at',
+          'items_created_24h:document_section',
+          'items_created_24h:utterance',
+          'extraction_runs_24h:failed',
+          'extraction_runs_24h:succeeded',
+          'extraction_last_finished_at',
+          'items_without_embedding:document_section',
+          'items_without_embedding:utterance',
+          'newest_document_section_created_at',
+        ])
+        expect(status.get('events_received_24h')).toBe('2')
+        expect(status.get('events_unprocessed')).toBe('2')
+        expect(status.get('events_dead')).toBe('1')
+        expect(status.get('events_with_error')).toBe('1')
+        expect(status.get('oldest_unprocessed_received_at')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+        expect(status.get('items_created_24h:utterance')).toBe('2')
+        expect(status.get('extraction_runs_24h:succeeded')).toBe('1')
+        expect(status.get('extraction_runs_24h:failed')).toBe('1')
+        expect(status.get('items_without_embedding:utterance')).toBe('1')
+      },
+      TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'lets anon call none of them',
+      async () => {
+        for (const call of [
+          'SELECT * FROM public.engram_session_timeline();',
+          'SELECT * FROM public.engram_item_overview();',
+          'SELECT * FROM public.engram_capture_status();',
+        ]) {
+          await expect(pg.psqlAs('anon', call)).rejects.toThrow(/permission denied for function/)
+        }
       },
       TEST_TIMEOUT_MS,
     )

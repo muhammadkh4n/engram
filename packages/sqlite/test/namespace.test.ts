@@ -169,38 +169,4 @@ describe('Project namespace isolation', () => {
     // Alpha-scoped row should NOT be returned
     expect(betaContents.every(c => !c.includes('Alpha scoped'))).toBe(true)
   })
-
-  it('community cache can store and retrieve summaries by project', async () => {
-    if (!storage.saveCommunityCache || !storage.getCommunitySummaries) return
-
-    await storage.saveCommunityCache({
-      communityId: 'community:alpha:1',
-      projectId: 'alpha',
-      label: 'Auth cluster',
-      memberCount: 10,
-      topEntities: ['JWT'],
-      topTopics: ['authentication'],
-      topPersons: [],
-      dominantEmotion: null,
-    })
-
-    await storage.saveCommunityCache({
-      communityId: 'community:beta:1',
-      projectId: 'beta',
-      label: 'DB cluster',
-      memberCount: 5,
-      topEntities: ['PostgreSQL'],
-      topTopics: ['database'],
-      topPersons: [],
-      dominantEmotion: null,
-    })
-
-    const alphaSummaries = await storage.getCommunitySummaries({ projectId: 'alpha' })
-    expect(alphaSummaries.length).toBe(1)
-    expect(alphaSummaries[0].label).toBe('Auth cluster')
-
-    const betaSummaries = await storage.getCommunitySummaries({ projectId: 'beta' })
-    expect(betaSummaries.length).toBe(1)
-    expect(betaSummaries[0].label).toBe('DB cluster')
-  })
 })

@@ -8573,6 +8573,310 @@ $$;
 
 
 --
+-- Name: engram_get_items(uuid[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The stored record of each requested id that is not forgotten, in p_ids
+-- order, each id once. Every column but the embedding and the search index
+-- (search_text and fts hold what retrieval matches, not what was recorded).
+-- content_head is the first 8,001 characters and content_length the whole
+-- length, so a reader can tell a head from the whole; question is the
+-- context's last 2,000 characters, where a long question asks. Superseded
+-- and retired items come back with superseded_by, retired_at and
+-- retired_reason set. At most 20 ids per call.
+CREATE OR REPLACE FUNCTION public.engram_get_items(p_ids uuid[])
+    RETURNS TABLE(id uuid, class text, kind text, speaker text, trust smallint, project_id text, workspace_id text,
+                  plan_slug text, session_id text, subject_label text, content_head text, content_length integer,
+                  question text, occurred_at timestamp with time zone, valid_to timestamp with time zone,
+                  superseded_by uuid, restated integer, retired_at timestamp with time zone, retired_reason text,
+                  standing boolean, register_status text, register_ref text, source jsonb, lineage uuid[],
+                  embedding_model text, content_hash text, extraction_run_id uuid, created_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_ids IS NULL OR cardinality(p_ids) = 0 OR cardinality(p_ids) > 20 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_get_items: p_ids must hold 1 to 20 ids';
+  END IF;
+  RETURN QUERY
+  SELECT i.id, i.class, i.kind, i.speaker, i.trust, i.project_id, i.workspace_id, i.plan_slug, i.session_id,
+         sj.label, left(i.content, 8001), length(i.content), right(i.context, 2000), i.occurred_at, i.valid_to,
+         i.superseded_by, cardinality(i.restated_at), i.retired_at, i.retired_reason, i.standing, i.register_status,
+         i.register_ref, i.source, i.lineage, i.embedding_model, i.content_hash, i.extraction_run_id, i.created_at
+    FROM (SELECT u.item_id, min(u.ord) AS ord FROM unnest(p_ids) WITH ORDINALITY AS u(item_id, ord) GROUP BY u.item_id) r
+    JOIN public.memory_items i ON i.id = r.item_id
+    LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
+   WHERE i.forgotten_at IS NULL
+   ORDER BY r.ord;
+END; $$;
+
+
+--
+-- Name: engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The current record of each past session, newest first: one session_index
+-- item per session (a rebuilt index supersedes the one before it, so only
+-- items neither superseded, retired nor forgotten are listed), filtered to
+-- one project when p_project_id is set and to occurred_at between p_from and
+-- p_to, both inclusive. content_head is the first 1,501 characters, one more
+-- than a timeline entry shows, and content_length the whole length.
+CREATE OR REPLACE FUNCTION public.engram_session_timeline(p_project_id text DEFAULT NULL, p_from timestamp with time zone DEFAULT NULL, p_to timestamp with time zone DEFAULT NULL, p_limit integer DEFAULT 20)
+    RETURNS TABLE(id uuid, session_id text, project_id text, occurred_at timestamp with time zone, content_head text, content_length integer)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 50 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_timeline: p_limit must be between 1 and 50';
+  END IF;
+  IF p_from IS NOT NULL AND p_to IS NOT NULL AND p_from > p_to THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_session_timeline: p_from is after p_to';
+  END IF;
+  RETURN QUERY
+  SELECT i.id, i.session_id, i.project_id, i.occurred_at, left(i.content, 1501), length(i.content)
+    FROM public.memory_items i
+   WHERE i.class = 'session_index'
+     AND i.forgotten_at IS NULL AND i.superseded_by IS NULL AND i.retired_at IS NULL
+     AND (p_project_id IS NULL OR i.project_id = p_project_id)
+     AND (p_from IS NULL OR i.occurred_at >= p_from)
+     AND (p_to IS NULL OR i.occurred_at <= p_to)
+   ORDER BY i.occurred_at DESC, i.id
+   LIMIT p_limit;
+END; $$;
+
+
+--
+-- Name: engram_item_overview(text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- What the store holds, in three sections, of one project when p_project_id
+-- is set. class: current items (neither superseded, retired nor forgotten)
+-- by class/kind, by key. state: superseded and retired items that are not
+-- forgotten, and the current standing MK statements waiting for the
+-- register (candidate), in that order. subject: the p_subject_limit subject
+-- labels with the most current items, most first, then by label. latest is
+-- the newest occurred_at of each row's items; a state row with no item has
+-- n 0 and latest NULL. No content is read.
+CREATE OR REPLACE FUNCTION public.engram_item_overview(p_project_id text DEFAULT NULL, p_subject_limit integer DEFAULT 20)
+    RETURNS TABLE(section text, key text, n bigint, latest timestamp with time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_subject_limit IS NULL OR p_subject_limit < 1 OR p_subject_limit > 50 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_item_overview: p_subject_limit must be between 1 and 50';
+  END IF;
+  RETURN QUERY
+  WITH scoped AS (
+    SELECT i.class, i.kind, i.subject_id, i.occurred_at,
+           (i.superseded_by IS NULL AND i.retired_at IS NULL) AS is_current,
+           (i.superseded_by IS NOT NULL AND i.retired_at IS NULL) AS is_superseded,
+           i.retired_at IS NOT NULL AS is_retired,
+           (i.superseded_by IS NULL AND i.retired_at IS NULL AND i.class = 'mk_statement' AND i.standing IS TRUE
+            AND i.register_status = 'candidate') AS is_candidate
+      FROM public.memory_items i
+     WHERE i.forgotten_at IS NULL
+       AND (p_project_id IS NULL OR i.project_id = p_project_id)
+  ),
+  classes AS (
+    SELECT 'class'::text AS section, s.class || '/' || s.kind AS key, count(*) AS n, max(s.occurred_at) AS latest, 1 AS sec, 0 AS ord
+      FROM scoped s WHERE s.is_current GROUP BY s.class, s.kind
+  ),
+  counts AS (
+    SELECT count(*) FILTER (WHERE s.is_superseded) AS superseded_n,
+           max(s.occurred_at) FILTER (WHERE s.is_superseded) AS superseded_latest,
+           count(*) FILTER (WHERE s.is_retired) AS retired_n,
+           max(s.occurred_at) FILTER (WHERE s.is_retired) AS retired_latest,
+           count(*) FILTER (WHERE s.is_candidate) AS candidate_n,
+           max(s.occurred_at) FILTER (WHERE s.is_candidate) AS candidate_latest
+      FROM scoped s
+  ),
+  states AS (
+    SELECT 'state'::text, v.key, v.n, v.latest, 2, v.ord
+      FROM counts c
+     CROSS JOIN LATERAL (VALUES ('superseded', c.superseded_n, c.superseded_latest, 1),
+                                ('retired', c.retired_n, c.retired_latest, 2),
+                                ('candidate', c.candidate_n, c.candidate_latest, 3)) AS v(key, n, latest, ord)
+  ),
+  subjects AS (
+    SELECT 'subject'::text, sj.label, count(*), max(s.occurred_at), 3,
+           row_number() OVER (ORDER BY count(*) DESC, sj.label)::integer
+      FROM scoped s JOIN public.memory_subjects sj ON sj.id = s.subject_id
+     WHERE s.is_current
+     GROUP BY sj.label
+  )
+  SELECT u.section, u.key, u.n, u.latest
+    FROM (SELECT * FROM classes UNION ALL SELECT * FROM states UNION ALL SELECT * FROM subjects) u
+   WHERE u.section <> 'subject' OR u.ord <= p_subject_limit
+   ORDER BY u.sec, u.ord, u.key;
+END; $$;
+
+
+--
+-- Name: engram_capture_status(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- The health of the capture path as (metric, value) rows, in a fixed order:
+-- events received in the last 24 hours; events not yet processed, those of
+-- them given up after 3 attempts (dead), and the oldest one's received_at;
+-- events with an error; the last processed_at; items created in the last 24
+-- hours per class; extraction runs started in the last 24 hours per status
+-- and the last finished_at; items the embedding pass covers (every class but
+-- assistant turns, which are never embedded) still without an embedding, per
+-- class; the newest document_section's created_at. Values are counts or UTC
+-- times, NULL when there is none; never a payload, a text or an error message.
+CREATE OR REPLACE FUNCTION public.engram_capture_status()
+    RETURNS TABLE(metric text, value text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  WITH t AS (SELECT now() - interval '24 hours' AS since),
+  m(ord, metric, value) AS (
+    SELECT 1, 'events_received_24h', count(*)::text FROM public.memory_capture_events e, t WHERE e.received_at >= t.since
+    UNION ALL
+    SELECT 2, 'events_unprocessed', count(*)::text FROM public.memory_capture_events e WHERE e.processed_at IS NULL
+    UNION ALL
+    SELECT 3, 'events_dead', count(*)::text FROM public.memory_capture_events e WHERE e.processed_at IS NULL AND e.attempts >= 3
+    UNION ALL
+    SELECT 4, 'oldest_unprocessed_received_at', to_char(min(e.received_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      FROM public.memory_capture_events e WHERE e.processed_at IS NULL
+    UNION ALL
+    SELECT 5, 'events_with_error', count(*)::text FROM public.memory_capture_events e WHERE e.error IS NOT NULL
+    UNION ALL
+    SELECT 6, 'last_processed_at', to_char(max(e.processed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM public.memory_capture_events e
+    UNION ALL
+    SELECT 7, 'items_created_24h:' || i.class, count(*)::text
+      FROM public.memory_items i, t WHERE i.created_at >= t.since GROUP BY i.class
+    UNION ALL
+    SELECT 8, 'extraction_runs_24h:' || r.status, count(*)::text
+      FROM public.memory_extraction_runs r, t WHERE r.started_at >= t.since GROUP BY r.status
+    UNION ALL
+    SELECT 9, 'extraction_last_finished_at', to_char(max(r.finished_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM public.memory_extraction_runs r
+    UNION ALL
+    SELECT 10, 'items_without_embedding:' || i.class, count(*)::text
+      FROM public.memory_items i
+     WHERE i.embedding IS NULL AND i.forgotten_at IS NULL AND NOT (i.class = 'utterance' AND i.speaker = 'assistant')
+     GROUP BY i.class
+    UNION ALL
+    SELECT 11, 'newest_document_section_created_at', to_char(max(i.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      FROM public.memory_items i WHERE i.class = 'document_section'
+  )
+  SELECT m.metric, m.value FROM m ORDER BY m.ord, m.metric
+$$;
+
+
+--
+-- Name: engram_review_candidates(text, text, uuid[], integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+-- What waits for MK's review at session start, newest first, each item once:
+-- a current standing MK statement whose register_status is candidate; a
+-- current MK correction not yet recorded or dismissed with at least one
+-- corrects target neither retired nor forgotten; a current assistant turn
+-- with at least one retracts target neither retired nor forgotten. An item
+-- is in scope when its project_id equals p_project_id, or its workspace_id
+-- equals p_workspace_id, or both are NULL (said outside any repository and
+-- workspace). With p_ids, exactly the named items in the order given,
+-- whatever their review state: each one not forgotten that is a standing MK
+-- statement, an MK correction, or an assistant turn with a retracts link;
+-- scope does not apply and p_limit, still range-checked, is not used.
+-- kind is the statement's kind, or retraction for an assistant turn. quote
+-- is the content whole (the caller cuts a retraction's text, never a
+-- statement's); question is the context's last 2,000 characters, NULL for
+-- a retraction. proposed_scope follows the level extraction stored in
+-- source->>'scope', NULL for session, for no level and when the level's
+-- column is NULL. status is retired, superseded or current, for the item
+-- and for each target; targets are the items its corrects, retracts and
+-- changes links point to that are not forgotten, by occurred_at, with the
+-- first 2,000 characters of their content. total is the number of rows
+-- before p_limit, counted in the same statement.
+CREATE OR REPLACE FUNCTION public.engram_review_candidates(p_project_id text DEFAULT NULL, p_workspace_id text DEFAULT NULL, p_ids uuid[] DEFAULT NULL, p_limit integer DEFAULT 4)
+    RETURNS TABLE(id uuid, kind text, quote text, question text, occurred_at timestamp with time zone, session_id text,
+                  project_id text, workspace_id text, subject text, proposed_scope text, status text,
+                  register_status text, restated_count integer, targets jsonb, total bigint)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+BEGIN
+  IF p_limit IS NULL OR p_limit < 1 OR p_limit > 8 THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_review_candidates: p_limit must be between 1 and 8';
+  END IF;
+  IF p_ids IS NOT NULL AND (cardinality(p_ids) = 0 OR cardinality(p_ids) > 8) THEN
+    RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+      MESSAGE = 'engram_review_candidates: p_ids must hold 1 to 8 ids';
+  END IF;
+  RETURN QUERY
+  WITH requested AS (
+    SELECT u.item_id, min(u.ord) AS ord
+      FROM unnest(p_ids) WITH ORDINALITY AS u(item_id, ord)
+     GROUP BY u.item_id
+  ),
+  picked AS (
+    SELECT i.id AS item_id, r.ord
+      FROM requested r
+      JOIN public.memory_items i ON i.id = r.item_id
+     WHERE p_ids IS NOT NULL
+       AND i.forgotten_at IS NULL
+       AND ((i.class = 'mk_statement' AND (i.standing IS TRUE OR i.kind = 'correction'))
+            OR (i.class = 'utterance' AND i.kind = 'assistant_turn'
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l WHERE l.from_item = i.id AND l.rel = 'retracts')))
+    UNION ALL
+    SELECT i.id, NULL::bigint
+      FROM public.memory_items i
+     WHERE p_ids IS NULL
+       AND i.forgotten_at IS NULL AND i.superseded_by IS NULL AND i.retired_at IS NULL
+       AND (i.project_id = p_project_id OR i.workspace_id = p_workspace_id
+            OR (i.project_id IS NULL AND i.workspace_id IS NULL))
+       AND ((i.class = 'mk_statement' AND i.standing IS TRUE AND i.register_status = 'candidate')
+            OR (i.class = 'mk_statement' AND i.kind = 'correction'
+                AND (i.register_status IS NULL OR i.register_status = 'candidate')
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l JOIN public.memory_items t ON t.id = l.to_item
+                             WHERE l.from_item = i.id AND l.rel = 'corrects'
+                               AND t.retired_at IS NULL AND t.forgotten_at IS NULL))
+            OR (i.class = 'utterance' AND i.kind = 'assistant_turn'
+                AND EXISTS (SELECT 1 FROM public.memory_item_links l JOIN public.memory_items t ON t.id = l.to_item
+                             WHERE l.from_item = i.id AND l.rel = 'retracts'
+                               AND t.retired_at IS NULL AND t.forgotten_at IS NULL)))
+  )
+  SELECT i.id,
+         CASE WHEN i.class = 'utterance' THEN 'retraction' ELSE i.kind END,
+         i.content,
+         CASE WHEN i.class = 'mk_statement' THEN right(i.context, 2000) END,
+         i.occurred_at, i.session_id, i.project_id, i.workspace_id, sj.label,
+         CASE i.source ->> 'scope'
+           WHEN 'global' THEN 'global'
+           WHEN 'project' THEN 'project:' || i.project_id
+           WHEN 'workspace' THEN 'workspace:' || i.workspace_id
+           WHEN 'plan' THEN 'plan:' || i.plan_slug
+         END,
+         CASE WHEN i.retired_at IS NOT NULL THEN 'retired' WHEN i.superseded_by IS NOT NULL THEN 'superseded' ELSE 'current' END,
+         CASE WHEN i.class = 'mk_statement' THEN i.register_status END,
+         coalesce(cardinality(i.restated_at), 0),
+         (SELECT coalesce(jsonb_agg(jsonb_build_object(
+                    'id', t.id, 'class', t.class, 'text', left(t.content, 2000),
+                    'status', CASE WHEN t.retired_at IS NOT NULL THEN 'retired'
+                                   WHEN t.superseded_by IS NOT NULL THEN 'superseded' ELSE 'current' END)
+                  ORDER BY t.occurred_at, t.id), '[]'::jsonb)
+            FROM (SELECT DISTINCT l.to_item FROM public.memory_item_links l
+                   WHERE l.from_item = i.id AND l.rel IN ('corrects', 'retracts', 'changes')) lt
+            JOIN public.memory_items t ON t.id = lt.to_item
+           WHERE t.forgotten_at IS NULL),
+         count(*) OVER ()
+    FROM picked p
+    JOIN public.memory_items i ON i.id = p.item_id
+    LEFT JOIN public.memory_subjects sj ON sj.id = i.subject_id
+   ORDER BY p.ord, i.occurred_at DESC, i.id
+   LIMIT CASE WHEN p_ids IS NULL THEN p_limit END;
+END; $$;
+
+
+--
 -- Name: engram_project_workspace(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9054,6 +9358,11 @@ BEGIN
   PERFORM * FROM public.engram_item_associations(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[], ARRAY['utterance'], ARRAY['user_prompt'], 'smoke', now(), false, 2::smallint, 2);
   PERFORM public.engram_store_version();
   PERFORM * FROM public.engram_recall_item_states(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
+  PERFORM * FROM public.engram_review_candidates('smoke', 'smoke', NULL, 1);
+  PERFORM * FROM public.engram_capture_status();
+  PERFORM * FROM public.engram_item_overview('smoke', 1);
+  PERFORM * FROM public.engram_session_timeline('smoke', now() - interval '1 day', now(), 1);
+  PERFORM * FROM public.engram_get_items(ARRAY['00000000-0000-0000-0000-000000000000']::uuid[]);
   PERFORM public.engram_project_workspace('smoke');
   PERFORM * FROM public.engram_recall_projects();
   PERFORM * FROM public.engram_recall_cache_get('expand', ARRAY[repeat('0', 64)]);
@@ -9173,6 +9482,11 @@ REVOKE EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_capture_status() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_item_overview(text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.engram_get_items(uuid[]) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM PUBLIC;
@@ -9276,6 +9590,11 @@ BEGIN
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_store_version() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_capture_status() FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_item_overview(text, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) FROM %I', role_name);
+      EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_get_items(uuid[]) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_project_workspace(text) FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_projects() FROM %I', role_name);
       EXECUTE format('REVOKE EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) FROM %I', role_name);
@@ -9359,6 +9678,11 @@ GRANT EXECUTE ON FUNCTION public.engram_items_by_legacy_ids(text[]) TO service_r
 GRANT EXECUTE ON FUNCTION public.engram_item_associations(uuid[], text[], text[], text, timestamp with time zone, boolean, smallint, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_store_version() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_item_states(uuid[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_review_candidates(text, text, uuid[], integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_capture_status() TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_item_overview(text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_session_timeline(text, timestamp with time zone, timestamp with time zone, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.engram_get_items(uuid[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_project_workspace(text) TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_projects() TO service_role;
 GRANT EXECUTE ON FUNCTION public.engram_recall_cache_get(text, text[]) TO service_role;

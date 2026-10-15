@@ -253,28 +253,6 @@ export class SqliteSemanticStorage implements SemanticStorage {
     }).slice(0, opts?.limit ?? 10)
   }
 
-  async getTopicTimeline(
-    topic: string,
-    opts?: { fromDate?: Date; toDate?: Date },
-  ): Promise<SemanticMemory[]> {
-    let sql = `SELECT * FROM semantic WHERE (topic = ? OR topic LIKE ? OR content LIKE ?)`
-    const params: unknown[] = [topic, `%${topic}%`, `%${topic}%`]
-
-    if (opts?.fromDate) {
-      sql += ' AND COALESCE(valid_from, created_at) >= ?'
-      params.push(dateToJulian(opts.fromDate))
-    }
-    if (opts?.toDate) {
-      sql += ' AND COALESCE(valid_from, created_at) <= ?'
-      params.push(dateToJulian(opts.toDate))
-    }
-
-    sql += ' ORDER BY COALESCE(valid_from, created_at) ASC'
-
-    const rows = this.db.prepare(sql).all(...params) as SemanticRow[]
-    return rows.map(r => this.rowToSemantic(r))
-  }
-
   private rowToSemantic(row: SemanticRow): SemanticMemory {
     return {
       id: row.id,

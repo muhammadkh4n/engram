@@ -37,6 +37,27 @@ function fakeClient(rows: Array<Record<string, unknown>> = [], rpcResult: RpcRes
   return { client: client as unknown as PostgrestClient, rpc }
 }
 
+/** A client whose query chain returns the rows on the first page and none after, as a paged read expects. */
+function pagedClient(rows: Array<Record<string, unknown>>) {
+  let served = false
+  const chain: Record<string, unknown> = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        if (prop === 'then') {
+          return (resolve: (v: unknown) => unknown) => {
+            const data = served ? [] : rows
+            served = true
+            return resolve({ data, error: null })
+          }
+        }
+        return () => chain
+      },
+    },
+  )
+  return { client: { rpc: vi.fn(), from: vi.fn(() => chain) } as unknown as PostgrestClient }
+}
+
 function functionBody(name: string): string {
   const re = new RegExp(`CREATE OR REPLACE FUNCTION public\\.${name}\\([\\s\\S]*?AS \\$\\$([\\s\\S]*?)\\$\\$;`)
   const m = schema.match(re)
@@ -121,7 +142,7 @@ describe('row mapping of exposure columns', () => {
   })
 
   it('maps shown_count and last_shown on semantic memories', async () => {
-    const { client } = fakeClient([
+    const { client } = pagedClient([
       {
         id: ID_A, topic: 't', content: 'synthetic', confidence: 0.8, source_digest_ids: [],
         source_episode_ids: [], access_count: 1, last_accessed: null, decay_rate: 0.02,
@@ -129,7 +150,7 @@ describe('row mapping of exposure columns', () => {
         created_at: SHOWN_AT, updated_at: SHOWN_AT, shown_count: 4, last_shown: SHOWN_AT,
       },
     ])
-    const [mem] = await new PostgRestSemanticStorage(client).getTopicTimeline('t')
+    const [mem] = await new PostgRestSemanticStorage(client).getUnaccessed(0)
 
     expect(mem!.shownCount).toBe(4)
     expect(mem!.lastShown).toEqual(new Date(SHOWN_AT))

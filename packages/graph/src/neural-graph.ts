@@ -1496,49 +1496,6 @@ export class NeuralGraph {
     })
   }
 
-  /**
-   * Find shared Person/Entity nodes bridging two projects.
-   * Returns labels and snippet counts only — no cross-project memory content.
-   */
-  async findProjectBridges(projectA: string, projectB: string): Promise<Array<{
-    nodeId: string
-    nodeType: 'person' | 'entity'
-    label: string
-    projectACount: number
-    projectBCount: number
-    projectALabels: string[]
-    projectBLabels: string[]
-  }>> {
-    const result = await this.runCypher(`
-      MATCH (shared)--(memA:Memory {projectId: $projectA})
-      WHERE shared:Person OR shared:Entity
-      WITH shared, collect(DISTINCT memA.label)[0..3] AS memALabels, count(DISTINCT memA) AS memACount
-      MATCH (shared)--(memB:Memory {projectId: $projectB})
-      WITH shared, memALabels, memACount,
-           collect(DISTINCT memB.label)[0..3] AS memBLabels, count(DISTINCT memB) AS memBCount
-      WHERE memACount > 0 AND memBCount > 0
-      RETURN shared.id AS nodeId,
-             CASE WHEN shared:Person THEN 'person' ELSE 'entity' END AS nodeType,
-             shared.label AS label,
-             memACount, memBCount, memALabels, memBLabels
-      ORDER BY memACount + memBCount DESC
-    `, { projectA, projectB })
-
-    return result.records.map(r => {
-      const memACount = r.get('memACount')
-      const memBCount = r.get('memBCount')
-      return {
-        nodeId: r.get('nodeId') as string,
-        nodeType: r.get('nodeType') as 'person' | 'entity',
-        label: r.get('label') as string,
-        projectACount: neo4j.isInt(memACount) ? (memACount as { toNumber(): number }).toNumber() : (memACount as number),
-        projectBCount: neo4j.isInt(memBCount) ? (memBCount as { toNumber(): number }).toNumber() : (memBCount as number),
-        projectALabels: r.get('memALabels') as string[],
-        projectBLabels: r.get('memBLabels') as string[],
-      }
-    })
-  }
-
   // --------------------------------------------------------------------------
   // Wave 5: Pattern completion — attribute-based node lookup
   // --------------------------------------------------------------------------

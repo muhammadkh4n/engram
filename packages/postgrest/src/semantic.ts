@@ -2,7 +2,7 @@ import type { PostgrestClient } from '@supabase/postgrest-js'
 import type { SemanticMemory, SearchOptions, SearchResult } from '@engram-mem/core'
 import { generateId } from '@engram-mem/core'
 import type { SemanticStorage } from '@engram-mem/core'
-import { orIlikeOperand, orOperand, projectScopeFilter } from './search.js'
+import { projectScopeFilter } from './search.js'
 import { parseVector } from './parse-vector.js'
 import { onlyUuids } from './uuid.js'
 
@@ -300,30 +300,6 @@ export class PostgRestSemanticStorage implements SemanticStorage {
       if (validUntil && validUntil <= asOfIso) return false
       return true
     }).slice(0, opts?.limit ?? 10)
-  }
-
-  async getTopicTimeline(
-    topic: string,
-    opts?: { fromDate?: Date; toDate?: Date },
-  ): Promise<SemanticMemory[]> {
-    // Superseded rows stay: the timeline shows them as the topic's history.
-    let query = this.client
-      .from('memory_semantic')
-      .select('*')
-      .or(`topic.eq.${orOperand(topic)},topic.ilike.${orIlikeOperand(topic)}`)
-      .is('forgotten_at', null)
-      .order('created_at', { ascending: true })
-
-    if (opts?.fromDate) {
-      query = query.gte('created_at', opts.fromDate.toISOString())
-    }
-    if (opts?.toDate) {
-      query = query.lte('created_at', opts.toDate.toISOString())
-    }
-
-    const { data, error } = await query
-    if (error) throw new Error(`Semantic getTopicTimeline failed: ${error.message}`)
-    return (data ?? []).map(rowToSemantic)
   }
 }
 

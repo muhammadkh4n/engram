@@ -231,3 +231,130 @@ export interface RecallStore {
   /** Stores an output unless the key is stored, and returns the stored one: the first writer's value wins. */
   cachePut(step: RecallStep, key: string, version: string, output: StepOutput): Promise<CachedStepOutput>
 }
+
+/** One stored item as memory_get shows it: every column but the embedding and the search index. */
+export interface ItemRecord {
+  id: string
+  class: ItemClass
+  kind: ItemKind
+  speaker: Speaker
+  trust: number
+  projectId: string | null
+  workspaceId: string | null
+  planSlug: string | null
+  sessionId: string | null
+  subjectLabel: string | null
+  /** The content's first 8,001 characters. */
+  contentHead: string
+  /** The whole content's length in characters. */
+  contentLength: number
+  /** The context's last 2,000 characters. */
+  question: string | null
+  occurredAt: Date
+  validTo: Date | null
+  supersededBy: string | null
+  restated: number
+  retiredAt: Date | null
+  retiredReason: string | null
+  standing: boolean | null
+  registerStatus: string | null
+  registerRef: string | null
+  source: ItemSource
+  lineage: string[]
+  embeddingModel: string | null
+  contentHash: string
+  extractionRunId: string | null
+  createdAt: Date
+}
+
+/** The reads the MCP tools make besides recall itself. Every method only reads. */
+export interface ItemReadStore {
+  /** The records of the ids that are not forgotten, in the order given, each once; at most 20 ids. */
+  getItems(ids: readonly string[]): Promise<ItemRecord[]>
+  /** The current record of each past session, newest first. */
+  sessionTimeline(req: SessionTimelineRequest): Promise<SessionTimelineEntry[]>
+  /** Counts of what the store holds: current items by class/kind, states, top subjects. */
+  itemOverview(req: ItemOverviewRequest): Promise<ItemOverviewRow[]>
+  /** The capture path's health as named counts and times. */
+  captureStatus(): Promise<CaptureStatusRow[]>
+  /** What waits for MK's review: without ids the pending items in scope, newest first; with ids those items in order. */
+  reviewCandidates(req: ReviewCandidatesRequest): Promise<ReviewCandidateRow[]>
+}
+
+export interface SessionTimelineRequest {
+  projectId?: string
+  /** Inclusive bounds on occurred_at, as ISO 8601 times PostgreSQL reads at microsecond precision. */
+  from?: string
+  to?: string
+  /** 1 to 50. */
+  limit: number
+}
+
+export interface SessionTimelineEntry {
+  id: string
+  sessionId: string | null
+  projectId: string | null
+  occurredAt: Date
+  /** The first 1,501 characters. */
+  contentHead: string
+  contentLength: number
+}
+
+export interface ItemOverviewRequest {
+  projectId?: string
+  /** 1 to 50. */
+  subjectLimit: number
+}
+
+export interface ItemOverviewRow {
+  section: 'class' | 'state' | 'subject'
+  /** `class/kind`, a state (`superseded`, `retired`, `candidate`) or a subject label. */
+  key: string
+  n: number
+  latest: Date | null
+}
+
+export interface CaptureStatusRow {
+  metric: string
+  /** A count or a UTC time; null when there is none. */
+  value: string | null
+}
+
+export interface ReviewCandidatesRequest {
+  scope: { projectId?: string; workspaceId?: string }
+  /** 1 to 8 lower-case uuids; when set, scope and limit do not apply. */
+  ids?: string[]
+  /** 1 to 8. */
+  limit: number
+}
+
+export type ReviewCandidateKind = 'ruling' | 'fact' | 'correction' | 'retraction'
+
+export interface ReviewTarget {
+  id: string
+  class: ItemClass
+  /** The first 2,000 characters of the target's content. */
+  text: string
+  status: RecallItemStatus
+}
+
+export interface ReviewCandidateRow {
+  id: string
+  kind: ReviewCandidateKind
+  /** The content whole. */
+  quote: string
+  /** The context's last 2,000 characters; null for a retraction. */
+  question: string | null
+  occurredAt: Date
+  sessionId: string | null
+  projectId: string | null
+  workspaceId: string | null
+  subject: string | null
+  proposedScope: string | null
+  status: RecallItemStatus
+  registerStatus: string | null
+  restatedCount: number
+  targets: ReviewTarget[]
+  /** Rows before the limit; with ids, the rows returned. */
+  total: number
+}

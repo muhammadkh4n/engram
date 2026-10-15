@@ -19,9 +19,6 @@ import {
 import {
   createMemory,
   startConsolidationWorker,
-  recallOutputPolicyFromEnv,
-  DEFAULT_RELATED_SHARE,
-  degradedRecallNotice,
   supersessionSettingsFromEnv,
   EXTRACTION_WINDOWS_PER_TICK,
   EXTRACTION_WINDOWS_PER_TICK_MAX,
@@ -31,7 +28,6 @@ import type {
   StorageAdapter,
   IntelligenceAdapter,
   GraphPort,
-  RecallOutputPolicy,
   SupersessionSettings,
 } from '@engram-mem/core'
 import { PostgRestCaptureStore, PostgRestItemStore, PostgRestRecallStore, PostgRestStorageAdapter } from '@engram-mem/postgrest'
@@ -44,10 +40,23 @@ import {
   RECALL_STEP_PROMPT_VERSION,
   type OpenAIIntelligenceOptions,
 } from '@engram-mem/openai'
-import { chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
-import type { ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
+import { FLOOR_CALIBRATIONS, chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
+import type { FloorCalibration, ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
+import {
+  MEMORY_CAPTURE_STATUS_TOOL,
+  MEMORY_GET_TOOL,
+  MEMORY_OVERVIEW_TOOL,
+  MEMORY_RECALL_TOOL,
+  MEMORY_TIMELINE_TOOL,
+  runMemoryCaptureStatus,
+  runMemoryGet,
+  runMemoryOverview,
+  runMemoryRecall,
+  runMemoryTimeline,
+} from './recall-tools.js'
+import type { RecallRouteDeps } from './recall-route.js'
 import {
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
@@ -55,7 +64,6 @@ import {
   runMemoryForget,
   runMemoryRetire,
 } from './item-action-tools.js'
-import { normalizeProjectId } from './ingest/project-detect.js'
 import type { CaptureDeps } from './ingest/capture.js'
 import { recallLogFromEnv } from './recall-log.js'
 import type { RecallLog } from './recall-log.js'
@@ -149,7 +157,7 @@ export async function maybeWithLocalRerank(
     console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
       intelligence: { ...intelligence, rerank: (query, documents) => onnx.rerank(query, documents) },
-      rerankerId: `onnx:${model ?? mod.DEFAULT_RERANK_MODEL}:q8`,
+      rerankerId: rerankerIdFromEnv(process.env, chatModel, mod.DEFAULT_RERANK_MODEL),
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -441,8 +449,8 @@ const getMemoryStack = sharedInit(buildMemoryStack)
 
 /**
  * Capture pipeline deps on the server's own stores and chat model. Builds the
- * memory stack on first use; the pipeline gets getMemory itself, so it is the
- * same instance the recall and forget tools use.
+ * memory stack on first use; the pipeline gets getMemory itself, so every
+ * capture shares one memory instance and one model configuration.
  */
 export async function getCaptureDeps(opts: { threshold: number; captureModel: string }): Promise<CaptureDeps> {
   const stack = await getMemoryStack()
@@ -461,27 +469,70 @@ export async function getMemory(): Promise<Memory> {
   return (await getMemoryStack()).memory
 }
 
+/** The ENGRAM_RECALL_* keys something reads; any other one set fails startup. */
+export const RECALL_ENV_KEYS: readonly string[] = ['ENGRAM_RECALL_LOG', 'ENGRAM_RECALL_LOG_MAX_MB', 'ENGRAM_RECALL_ENGINE']
+
 /**
- * Resolve the recall output policy from the environment and log it. The
- * server entry points call it before they serve anything, because the memory
- * stack is built lazily: validating only there would let the HTTP server pass
- * /health while every recall fails on a malformed ENGRAM_RECALL_* value. The
- * stack build re-validates without logging, for callers that skip the entry
- * points. The log line
- * carries numbers only: the effective Related share and item cap, where the
- * cap defaults to a quarter of the budget and is unbounded without one.
+ * The id of the reranker recall will use: `onnx:<model>:q8` when
+ * ENGRAM_RERANK_LOCAL=true and the local package loads (`defaultLocalModel`
+ * is its default model, null when it cannot load), else `openai:<chat
+ * model>`. The recall floor is recorded per id.
  */
-export function recallOutputPolicyAtStartup(env: NodeJS.ProcessEnv = process.env): RecallOutputPolicy {
-  const policy = recallOutputPolicyFromEnv(env)
-  const itemMaxTokens =
-    policy.itemMaxTokens ??
-    (policy.tokenBudget !== undefined ? Math.max(1, Math.floor(policy.tokenBudget / 4)) : 'unbounded')
+export function rerankerIdFromEnv(env: NodeJS.ProcessEnv, chatModel: string, defaultLocalModel: string | null): string {
+  if (env['ENGRAM_RERANK_LOCAL'] !== 'true' || defaultLocalModel === null) return `openai:${chatModel}`
+  const model = env['ENGRAM_RERANK_LOCAL_MODEL']?.trim() || defaultLocalModel
+  return `onnx:${model}:q8`
+}
+
+async function defaultLocalRerankModel(): Promise<string | null> {
+  try {
+    return (await import('@engram-mem/rerank-onnx')).DEFAULT_RERANK_MODEL
+  } catch {
+    return null
+  }
+}
+
+export interface RecallConfig {
+  rerankerId: string
+  /** The floor measured for that reranker; null means /recall and memory_recall refuse. */
+  calibration: FloorCalibration | null
+}
+
+/**
+ * The recall configuration, checked once before the server serves, so a
+ * bad value stops startup instead of failing the first recall: the recall
+ * log path and size, ENGRAM_TIMEZONE, the ENGRAM_CHAT_* options and the
+ * reranker id. An ENGRAM_RECALL_* key that nothing reads also stops it, all
+ * such keys named in one message: a key left over from the old recall
+ * engine would otherwise look like it still tunes recall. Logs one line
+ * with the reranker and its floor, and no secret or credential value.
+ */
+export async function recallConfigAtStartup(
+  env: NodeJS.ProcessEnv = process.env,
+  loadDefaultLocalModel: () => Promise<string | null> = defaultLocalRerankModel,
+  floors: readonly FloorCalibration[] = FLOOR_CALIBRATIONS,
+): Promise<RecallConfig> {
+  const unread = Object.keys(env)
+    .filter((key) => key.startsWith('ENGRAM_RECALL_') && !RECALL_ENV_KEYS.includes(key) && env[key] !== undefined)
+    .sort()
+  if (unread.length > 0) {
+    throw new Error(
+      `${unread.join(', ')} ${unread.length === 1 ? 'is' : 'are'} set, and nothing reads ${unread.length === 1 ? 'it' : 'them'}: ` +
+        `remove ${unread.length === 1 ? 'it' : 'them'} from the server environment (recall reads only ${RECALL_ENV_KEYS.join(', ')})`,
+    )
+  }
+  recallLogFromEnv(env)
+  parseTimeZoneEnv(env)
+  const chatModel = chatIntelligenceOptionsFromEnv(env).summarizationModel ?? DEFAULT_CHAT_MODEL
+  const localModel = env['ENGRAM_RERANK_LOCAL'] === 'true' ? await loadDefaultLocalModel() : null
+  const rerankerId = rerankerIdFromEnv(env, chatModel, localModel)
+  const calibration = floorFor(rerankerId, floors)
   console.error(
-    `[engram-mcp] recall output policy: emitK=${policy.emitK ?? 'unbounded'} ` +
-      `tokenBudget=${policy.tokenBudget ?? 'unbounded'} faint=${policy.faint ? 'on' : 'off'} ` +
-      `relatedShare=${policy.relatedShare ?? DEFAULT_RELATED_SHARE} itemMaxTokens=${itemMaxTokens}`,
+    calibration === null
+      ? `[engram-mcp] recall: reranker=${rerankerId} not calibrated; /recall and memory_recall refuse`
+      : `[engram-mcp] recall: reranker=${rerankerId} floor=${calibration.floor} strong=${calibration.strong}`,
   )
-  return policy
+  return { rerankerId, calibration }
 }
 
 /**
@@ -496,7 +547,6 @@ export function supersessionSettingsAtStartup(env: NodeJS.ProcessEnv = process.e
 }
 
 async function buildMemoryStack(): Promise<MemoryStack> {
-  recallOutputPolicyFromEnv(process.env)
   const { timeZone } = parseTimeZoneEnv()
   const supersession = supersessionSettingsAtStartup()
   const consolidation = consolidationEnabledFromEnv()
@@ -584,12 +634,17 @@ export async function getRecallLog(): Promise<RecallLog | null> {
  * paths. The floor is the one recorded for the reranker in use; with none,
  * every recall answers 503 until one is measured.
  */
+/** The read side of the item store on SUPABASE_URL: recall, memory_get and the other read tools share it. */
+export const getRecallStore = sharedInit(async (): Promise<PostgRestRecallStore> => {
+  return new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
+})
+
 export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   const stack = await getMemoryStack()
   const { intelligence } = stack
   const { embed, rerank, expandQuery, generateHypotheticalDoc, dimensions } = intelligence
   if (!embed || !rerank || !dimensions) throw new Error('recall needs an intelligence adapter that embeds and reranks')
-  const store = new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
+  const store = await getRecallStore()
   return {
     store,
     embed: (text) => embed.call(intelligence, text),
@@ -608,297 +663,37 @@ export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   }
 })
 
-const INSTRUCTIONS = `You have access to Engram, a persistent memory system that remembers across conversations.
+export const INSTRUCTIONS = `Engram is MK's memory store. It holds typed items, each with who said it, when, and where it came from:
+- MK's own words: utterances (speaker mk) and mk_statement items (an exact quote with the question it answered);
+- durable records: commits, plan decisions, register entries, vault document sections;
+- assistant observations, labelled with trust and date;
+- one record per session.
 
-IMPORTANT — When to use memory_recall:
-- Before answering questions about past work, decisions, preferences, or architecture
-- When the user references something from a previous session ("remember when...", "what did we decide about...", "last time we...")
-- When you're about to say "I don't have information about that" or "I can't recall" — CHECK MEMORY FIRST
-- When context from previous conversations would help answer the current question
-- When the user asks about their own preferences, tools, or workflow
+Memory reaches a Claude Code session through hooks: standing rulings by scope, and a briefing on each prompt. Call memory_recall when a task needs memory the briefing did not cover. Its result lands in the caller's context, so call it from a subagent where you can. memory_get returns full records by id.
 
-IMPORTANT — When NOT to search memory:
-- Routine file reads, test outputs, build commands
-- Questions about general programming knowledge (use your training data)
-- When the user explicitly says not to use memory
+Reading results:
+- trust 0 is MK's own words: quote them exactly; never restate them as a rule of your own.
+- An item with status superseded or retired is not current. A superseded item is shown only next to its successor.
+- An observation states what an assistant found on its date. Check live state before relying on it, above all when it is flagged verify_live.
+- Plan state lives in the plan's LEDGER.md, not in memory.
 
-If memory_recall returns relevant results, USE THEM directly in your response. Do not say "I don't have this information" if it appears in recalled memories.`
+Writing: memory_ingest stores one typed item. memory_retire and memory_forget take explicit ids and a reason; nothing is removed in bulk.`
 
 const TOOLS = [
-  {
-    name: 'memory_recall',
-    description:
-      'Search Engram memory for content relevant to a query. Returns formatted memories with attribution tags (role, date, session). ALWAYS use this tool BEFORE saying you don\'t know or can\'t recall something. Use when: answering questions about past work/decisions/preferences, when user says "remember", "recall", "what did we", "last time", or references prior conversations. Do NOT skip this tool and guess — check memory first. Pass synthesize=true when the question touches the user\'s stated preferences, habits, or requirements, or when making a recommendation: the result then appends a deterministic constraint block quoting stated preferences verbatim with citations. Constraints in that block must be APPLIED to your answer, not merely mentioned.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        query: {
-          type: 'string',
-          description: 'The search query to find relevant memories.',
-        },
-        session_id: {
-          type: 'string',
-          description:
-            'Optional session ID to scope the search to a specific conversation.',
-        },
-        conversation_id: {
-          type: 'string',
-          maxLength: 200,
-          description:
-            'Optional id of the caller\'s current conversation (at most 200 characters). Scopes priming to this conversation: topics this conversation\'s earlier recalls surfaced rank slightly higher in its later recalls. It does NOT filter results, unlike session_id. Omit it and the recall gets no priming.',
-        },
-        project_id: {
-          type: 'string',
-          description:
-            'Optional current project (typically the git repository name, e.g. "engram"). Memories of this project, then of its product group, rank higher; shared memories and other projects\' memories are still returned. Omit for no project preference.',
-        },
-        synthesize: {
-          type: 'boolean',
-          description:
-            'Opt-in: append a deterministic stated-preference constraint block (verbatim quotes with session/date citations) computed from the recalled memories. Code-only, no LLM call at recall time; no effect when the recalled memories contain no stated preferences.',
-        },
-        token_budget: {
-          type: 'integer',
-          minimum: 256,
-          maximum: 32000,
-          description:
-            'Optional cap on the returned text in estimated tokens (256-32000). Raises or lowers the server default for this call only. Items are emitted in rank order and the result stops at the first item that does not fit; the top memory is always returned whole.',
-        },
-      },
-      required: ['query'],
-    },
-  },
+  MEMORY_RECALL_TOOL,
+  MEMORY_GET_TOOL,
   MEMORY_INGEST_TOOL,
   MEMORY_FORGET_TOOL,
   MEMORY_RETIRE_TOOL,
   MEMORY_UNRETIRE_TOOL,
-  {
-    name: 'memory_timeline',
-    description:
-      'Show how a topic evolved over time. Returns a chronological list of semantic memories for a topic, including superseded (expired) beliefs. Useful for understanding how knowledge changed.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        topic: {
-          type: 'string',
-          description: 'Topic to trace (e.g. "preference", "TypeScript", "auth architecture").',
-        },
-        from_date: {
-          type: 'string',
-          description: 'Optional ISO date string to filter from (inclusive).',
-        },
-        to_date: {
-          type: 'string',
-          description: 'Optional ISO date string to filter to (inclusive).',
-        },
-      },
-      required: ['topic'],
-    },
-  },
-  {
-    name: 'memory_overview',
-    description:
-      'Returns a high-level summary of what Engram knows, organized by knowledge clusters. Use this to understand what topics, projects, or domains are heavily represented in memory. Optionally filter by topic to find related clusters.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        topic: {
-          type: 'string',
-          description: 'Optional topic filter. If provided, returns clusters whose summary or top entities match this topic.',
-        },
-        max_communities: {
-          type: 'number',
-          description: 'Maximum number of communities to return. Default 5.',
-        },
-        project_id: {
-          type: 'string',
-          description: 'Optional project namespace to scope the query.',
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: 'memory_bridges',
-    description:
-      'Find shared people or entities that bridge two different projects. Returns cross-project connections — useful for understanding what or who connects two workstreams. Returns labels and counts only, not full memory content from other projects.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        project_a: { type: 'string', description: 'First project ID.' },
-        project_b: { type: 'string', description: 'Second project ID.' },
-      },
-      required: ['project_a', 'project_b'],
-    },
-  },
-  {
-    name: 'memory_consolidation_status',
-    description:
-      'Return when each Engram consolidation cycle last ran and its result. Use this to verify auto-consolidation is healthy, see whether dream cycle has produced community summaries recently, or diagnose why memory_overview returns no clusters. Reads from the consolidation_runs table — no compute, just lookups.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {},
-    },
-  },
+  MEMORY_TIMELINE_TOOL,
+  MEMORY_OVERVIEW_TOOL,
+  MEMORY_CAPTURE_STATUS_TOOL,
 ]
 
-const RECALL_TIMING_STAGES = ['total', 'expand', 'search', 'hyde', 'pattern', 'mmr', 'rerank', 'graph'] as const
-
-/** Per-call token_budget bounds on memory_recall. Below the floor the header
- *  lines alone use most of the budget; the ceiling stays well inside a tool
- *  result a client will accept. */
-export const RECALL_TOKEN_BUDGET_MIN = 256
-export const RECALL_TOKEN_BUDGET_MAX = 32000
-
-/** Longest conversation_id memory_recall accepts. */
-export const RECALL_CONVERSATION_ID_MAX = 200
-
-export interface RecallArgOptions {
-  projectId?: string
-  synthesize?: true
-  tokenBudget?: number
-  conversationKey?: string
-}
-
-/**
- * Recall options from memory_recall arguments. The project id is normalised
- * with normalizeProjectId, the rule the stored project tags were written
- * under, so a padded id or a shared alias (blank/global/none/shared) ranks
- * against the same tag. An
- * out-of-range or non-integer token_budget is an error, not ignored, so a
- * caller never silently gets an unbounded payload. conversation_id becomes the
- * priming key; session_id is not, because it filters the search to one
- * session and a priming key must never narrow results. A blank, non-string or
- * over-long conversation_id is an error rather than a silent loss of priming.
- */
-export function recallOptionsFromArgs(args: Record<string, unknown>): RecallArgOptions | { error: string } {
-  const projectId = normalizeProjectId(args['project_id'])
-  const rawBudget = args['token_budget']
-  if (
-    rawBudget !== undefined &&
-    (typeof rawBudget !== 'number' ||
-      !Number.isInteger(rawBudget) ||
-      rawBudget < RECALL_TOKEN_BUDGET_MIN ||
-      rawBudget > RECALL_TOKEN_BUDGET_MAX)
-  ) {
-    return {
-      error: `token_budget must be an integer from ${RECALL_TOKEN_BUDGET_MIN} to ${RECALL_TOKEN_BUDGET_MAX}, got ${JSON.stringify(rawBudget)}`,
-    }
-  }
-  const rawConversation = args['conversation_id']
-  const conversationKey = typeof rawConversation === 'string' ? rawConversation.trim() : undefined
-  if (
-    rawConversation !== undefined &&
-    (conversationKey === undefined || conversationKey.length === 0 || conversationKey.length > RECALL_CONVERSATION_ID_MAX)
-  ) {
-    return {
-      error: `conversation_id must be a non-blank string of at most ${RECALL_CONVERSATION_ID_MAX} characters, got ${JSON.stringify(rawConversation)?.slice(0, 60)}`,
-    }
-  }
-  return {
-    ...(projectId ? { projectId } : {}),
-    ...(args['synthesize'] === true ? { synthesize: true as const } : {}),
-    ...(rawBudget !== undefined ? { tokenBudget: rawBudget } : {}),
-    ...(conversationKey ? { conversationKey } : {}),
-  }
-}
-
-/** Size of the payload a recall returned. */
-export interface RecallPayloadSize {
-  /** Recalled memories written into the text. */
-  emitted: number
-  /** Estimated tokens of the text. */
-  tokens: number
-  /** The token budget cut the payload short. */
-  truncated: boolean
-}
-
-/** One-line recall latency summary. Stages print in a fixed order, then any
- *  graph.* sub-stages sorted by name. Absent stages are omitted, not zeroed,
- *  so a missing key means the stage never ran for that query. A failed
- *  lexical leg (vector-only recall) is printed as lexical=error, a failed
- *  query embedding (keyword-only recall) as degraded=vector. `items` is
- *  the ranked pool; `emitted` is how much of it the payload carried. */
-export function formatRecallTimingLine(
-  timings: Record<string, number>,
-  items: number,
-  chars: number,
-  size?: RecallPayloadSize,
-): string {
-  const subStages = Object.keys(timings).filter(key => key.startsWith('graph.')).sort()
-  const parts = [...RECALL_TIMING_STAGES, ...subStages]
-    .filter(stage => timings[stage] !== undefined)
-    .map(stage => `${stage}=${Math.round(timings[stage]!)}`)
-  const lexical = timings['lexicalError'] !== undefined ? ['lexical=error'] : []
-  const degraded = timings['vectorError'] !== undefined ? ['degraded=vector'] : []
-  const sizeParts = size
-    ? [`emitted=${size.emitted}`, `tokens=${size.tokens}`, ...(size.truncated ? ['truncated=1'] : [])]
-    : []
-  return ['[recall]', ...parts, ...lexical, ...degraded, `items=${items}`, `chars=${chars}`, ...sizeParts].join(' ')
-}
-
-type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
-
-function toolText(text: string): ToolTextResult {
-  return { content: [{ type: 'text' as const, text }] }
-}
-
-function toolError(message: string): ToolTextResult {
-  return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true }
-}
-
-export const RECALL_BUDGET_TOO_SMALL =
-  'Memories matched, but the token budget is too small to show one. Raise token_budget or ENGRAM_RECALL_TOKEN_BUDGET.'
-
-/** A degraded recall is still an answer: the reader gets the reason and the
- *  keyword results, never a tool error that hides both. */
-export async function runMemoryRecall(
-  mem: Pick<Memory, 'recall'>,
-  args: Record<string, unknown>,
-  recallLog: RecallLog | null = null,
-): Promise<ToolTextResult> {
-  const query = args['query']
-  if (typeof query !== 'string' || query.trim().length === 0) {
-    return toolError('query must be a non-empty string')
-  }
-
-  const recallOpts = recallOptionsFromArgs(args)
-  if ('error' in recallOpts) return toolError(recallOpts.error)
-
-  // The request time is the reference date for relative time phrases
-  // ("last week") in query expansion and in the opt-in synthesis block.
-  const result = await mem.recall(query.trim(), { ...recallOpts, now: new Date() })
-  recallLog?.record(query.trim(), args, recallOpts.projectId, result)
-
-  if (result.timings) {
-    // stderr: stdout carries the stdio JSON-RPC stream.
-    console.error(
-      formatRecallTimingLine(result.timings, result.memories.length, result.formatted.length, {
-        emitted: result.payload?.emittedMemories ?? result.memories.length,
-        tokens: result.estimatedTokens,
-        truncated: result.payload?.truncated === true,
-      }),
-    )
-  }
-
-  if (!result.formatted && result.memories.length > 0) {
-    // Memories matched but none could be shown: the budget left no section
-    // the minimum room after the header and notice, or no first item fit its
-    // room with its tag and minimum content. Saying none matched would be
-    // false.
-    const notice = result.degraded ? `${degradedRecallNotice(result.degraded)}\n` : ''
-    return toolText(`${notice}${RECALL_BUDGET_TOO_SMALL}`)
-  }
-
-  if (!result.formatted || result.memories.length === 0) {
-    if (!result.degraded) return toolText('No relevant memories found.')
-    // After a failed keyword search only the plain text match ran, so "no
-    // keyword matches" would be a claim nothing checked.
-    const emptyLine = result.degraded.lexical === undefined ? 'No keyword matches.' : 'No text matches.'
-    return toolText(`${degradedRecallNotice(result.degraded)}\n${emptyLine}`)
-  }
-
-  return toolText(result.formatted)
+/** What the recall tools run on: the server's recall deps, its recall log, and stderr for failures. */
+function recallToolDeps(recallLog: RecallLog | null): RecallRouteDeps {
+  return { getDeps: getRecallDeps, log: recallLog, server: PACKAGE_VERSION, logError: (line) => console.error(line) }
 }
 
 export function createEngramServer(): Server {
@@ -923,11 +718,13 @@ export function createEngramServer(): Server {
     }
 
     try {
-      const mem = await getMemory()
-
       if (name === 'memory_recall') {
         const { recallLog } = await getMemoryStack()
-        return await runMemoryRecall(mem, args, recallLog)
+        return await runMemoryRecall(recallToolDeps(recallLog), args)
+      }
+
+      if (name === 'memory_get') {
+        return await runMemoryGet({ store: await getRecallStore() }, args)
       }
 
       if (name === 'memory_ingest') {
@@ -937,7 +734,7 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_forget') {
         const { itemStore, graph } = await getMemoryStack()
-        return await runMemoryForget({ preview: (query) => mem.forget(query), store: itemStore, graph }, args)
+        return await runMemoryForget({ store: itemStore, graph }, args)
       }
 
       if (name === 'memory_retire' || name === 'memory_unretire') {
@@ -946,146 +743,16 @@ export function createEngramServer(): Server {
       }
 
       if (name === 'memory_timeline') {
-        const topic = args['topic']
-        if (typeof topic !== 'string' || topic.trim().length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: topic must be a non-empty string' }],
-            isError: true,
-          }
-        }
-
-        const fromDate = typeof args['from_date'] === 'string' ? new Date(args['from_date']) : undefined
-        const toDate = typeof args['to_date'] === 'string' ? new Date(args['to_date']) : undefined
-
-        const timeline = await mem.getTimeline(topic.trim(), { fromDate, toDate })
-
-        if (timeline.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: `No semantic memories found for topic "${topic}".` }],
-          }
-        }
-
-        const lines = [`## Timeline: "${topic}" (${timeline.length} entries)\n`]
-        for (const m of timeline) {
-          const status = m.supersededBy ? '~~superseded~~' : '**current**'
-          const from = m.createdAt.toISOString().slice(0, 10)
-          lines.push(`- [${from}] ${status} — ${m.content}`)
-          if (m.supersededBy) lines.push(`  _superseded by: ${m.supersededBy}_`)
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
+        const { recallLog } = await getMemoryStack()
+        return await runMemoryTimeline({ store: await getRecallStore(), recall: recallToolDeps(recallLog) }, args)
       }
 
       if (name === 'memory_overview') {
-        const topic = typeof args['topic'] === 'string' ? args['topic'].trim() : undefined
-        const maxCommunities = typeof args['max_communities'] === 'number'
-          ? Math.min(args['max_communities'], 20)
-          : 5
-        const projectId = normalizeProjectId(args['project_id'])
-
-        const communities = await mem.getCommunitySummaries({ topic, limit: maxCommunities, projectId })
-
-        if (communities.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: 'No knowledge clusters found. Run a dream cycle consolidation to generate community summaries.' }],
-          }
-        }
-
-        const lines = ['## Engram — Knowledge Domain Overview', '']
-        for (const c of communities) {
-          lines.push(`### ${c.label}`)
-          lines.push(`- Members: ${c.memberCount} memories`)
-          if (c.topTopics.length > 0) lines.push(`- Topics: ${c.topTopics.join(', ')}`)
-          if (c.topEntities.length > 0) lines.push(`- Entities: ${c.topEntities.join(', ')}`)
-          if (c.topPersons.length > 0) lines.push(`- People: ${c.topPersons.join(', ')}`)
-          if (c.dominantEmotion) lines.push(`- Dominant tone: ${c.dominantEmotion}`)
-          lines.push('')
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
+        return await runMemoryOverview({ store: await getRecallStore() }, args)
       }
 
-      if (name === 'memory_bridges') {
-        const projectA = args['project_a']
-        const projectB = args['project_b']
-
-        if (typeof projectA !== 'string' || typeof projectB !== 'string') {
-          return {
-            content: [{ type: 'text' as const, text: 'Error: project_a and project_b are required.' }],
-            isError: true,
-          }
-        }
-
-        const bridges = await mem.findBridges(projectA, projectB)
-
-        if (bridges.length === 0) {
-          return {
-            content: [{ type: 'text' as const, text: `No shared entities or people found between ${projectA} and ${projectB}.` }],
-          }
-        }
-
-        const lines = [`## Cross-Project Bridges: ${projectA} ↔ ${projectB}`, '']
-        for (const b of bridges) {
-          lines.push(`### ${b.nodeType === 'person' ? 'Person' : 'Entity'}: ${b.label}`)
-          lines.push(`  - ${projectA}: ${b.projectACount} memories`)
-          lines.push(`  - ${projectB}: ${b.projectBCount} memories`)
-          lines.push('')
-        }
-
-        return {
-          content: [{ type: 'text' as const, text: lines.join('\n') }],
-        }
-      }
-
-      if (name === 'memory_consolidation_status') {
-        // Pull recent runs from the SQL tracker. Storage adapters that
-        // haven't implemented consolidationRuns yet (e.g. Supabase as of
-        // v0.3.12) just return "tracker unavailable" — the tool still
-        // serves the diagnostic intent of "tell me whether consolidation
-        // is happening" by saying clearly that no records are kept.
-        const storage = (mem as unknown as { storage: StorageAdapter }).storage
-        const tracker = storage?.consolidationRuns
-        if (!tracker) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: '## Engram — Consolidation Status\n\nThe storage adapter does not implement consolidation_runs tracking, so no per-cycle history is available. The in-process Phase 2 worker (lightSleep / deepSleep / decay) may still be running — check journalctl for the engram-mcp process. Dream cycle status is visible via the engram-dream-cycle systemd timer logs on the host.',
-            }],
-          }
-        }
-        const cycles: Array<'light' | 'deep' | 'dream' | 'decay'> = ['light', 'deep', 'dream', 'decay']
-        const lines = ['## Engram — Consolidation Status', '']
-        for (const cycle of cycles) {
-          const last = await tracker.getLastRun(cycle).catch(() => null)
-          if (!last) {
-            lines.push(`- **${cycle}**: never run`)
-            continue
-          }
-          const status = last.status
-          const when = last.completedAt ? last.completedAt.toISOString() : last.startedAt.toISOString()
-          const dur = last.durationMs !== null ? ` in ${last.durationMs}ms` : ''
-          lines.push(`- **${cycle}**: ${status} at ${when}${dur}`)
-          if (last.result) {
-            const r = last.result
-            const detail: string[] = []
-            if (r.digestsCreated !== undefined) detail.push(`digests=${r.digestsCreated}`)
-            if (r.promoted !== undefined) detail.push(`promoted=${r.promoted}`)
-            if (r.associationsCreated !== undefined) detail.push(`associations=${r.associationsCreated}`)
-            if (r.communitiesDetected !== undefined) detail.push(`communities=${r.communitiesDetected}`)
-            if (r.communitySummariesGenerated !== undefined) detail.push(`summaries=${r.communitySummariesGenerated}`)
-            if (r.llmCallsCount !== undefined) detail.push(`llmCalls=${r.llmCallsCount}`)
-            if (r.llmCallsUsdEstimate !== undefined) detail.push(`~$${r.llmCallsUsdEstimate.toFixed(4)}`)
-            if (r.episodeCount !== undefined) detail.push(`episodeCount=${r.episodeCount}`)
-            if (r.cappedAt !== undefined) detail.push(`cappedAt=${r.cappedAt}`)
-            if (detail.length > 0) lines.push(`  - ${detail.join(', ')}`)
-          }
-          if (last.error) lines.push(`  - error: ${last.error}`)
-        }
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
+      if (name === 'memory_capture_status') {
+        return await runMemoryCaptureStatus({ store: await getRecallStore() }, args)
       }
 
       return {

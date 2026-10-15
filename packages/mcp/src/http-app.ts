@@ -8,6 +8,7 @@
  *   *    /mcp              — MCP Streamable HTTP, BEARER_TOKEN auth
  *   POST /capture          — the capture pipeline (hooks and CLIs), BEARER_TOKEN auth
  *   POST /recall           — recall over the typed item store, BEARER_TOKEN auth
+ *   POST /candidates       — what waits for MK's review, BEARER_TOKEN auth
  *   POST /capture/events   — raw capture events, ENGRAM_CAPTURE_TOKEN auth; 503
  *                            while that token is unset
  *   POST /documents/sync   — vault notes, ENGRAM_DOCUMENTS_TOKEN auth; 503 while
@@ -47,7 +48,8 @@ import {
   type DocumentsResponse,
   type DocumentsRouteDeps,
 } from './documents-route.js'
-import { RECALL_BODY_MAX_BYTES, RECALL_FAILED_MESSAGE, runRecallRequest, type RecallRouteDeps, type RecallRouteResponse } from './recall-route.js'
+import { RECALL_BODY_MAX_BYTES, RECALL_FAILED_MESSAGE, runRecallRequest, type RecallRouteDeps } from './recall-route.js'
+import { CANDIDATES_BODY_MAX_BYTES, CANDIDATES_FAILED_MESSAGE, runCandidatesRequest, type CandidatesRouteDeps } from './candidates-route.js'
 
 /**
  * A capture carries at most 100,000 content chars plus small metadata. JSON
@@ -85,6 +87,8 @@ export interface HttpHandlers {
   documentsBodyMaxBytes?: number
   recall: RecallRouteDeps
   recallBodyMaxBytes?: number
+  candidates: CandidatesRouteDeps
+  candidatesBodyMaxBytes?: number
   logError?: (line: string) => void
 }
 
@@ -336,19 +340,36 @@ async function handleDocuments(
   sendDocuments(res, await runDocumentsRequest(handlers.documents, parsed))
 }
 
-function sendRecall(res: http.ServerResponse, response: RecallRouteResponse): void {
+interface JsonRouteResponse {
+  status: number
+  body: unknown
+}
+
+function sendJson(res: http.ServerResponse, response: JsonRouteResponse): void {
   res.writeHead(response.status, { 'content-type': 'application/json' })
   res.end(JSON.stringify(response.body))
 }
 
-async function handleRecall(
+interface JsonRoute {
+  /** Names the route in stderr lines. */
+  name: string
+  maxBytes: number
+  failedMessage: string
+  run(body: unknown): Promise<JsonRouteResponse>
+}
+
+/**
+ * A JSON POST route that reads memory, on the MCP bearer, which the capture
+ * and documents tokens never may: 401 before anything is read, 405 for any
+ * other method, 413 past the body cap, 400 for a body that is not JSON.
+ */
+async function handleJsonRoute(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   config: HttpConfig,
-  handlers: HttpHandlers,
+  route: JsonRoute,
   logError: (line: string) => void,
 ): Promise<void> {
-  // The MCP bearer: recall reads memory, which the capture and documents tokens never may.
   if (!checkAuth(req, config.bearerToken)) {
     req.resume()
     res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Bearer realm="engram-mcp"' })
@@ -361,27 +382,26 @@ async function handleRecall(
     res.end(JSON.stringify({ error: 'method not allowed' }))
     return
   }
-  const maxBytes = handlers.recallBodyMaxBytes ?? RECALL_BODY_MAX_BYTES
   let read: BodyRead
   try {
-    read = await readBody(req, maxBytes)
+    read = await readBody(req, route.maxBytes)
   } catch (err) {
-    logError(`[engram-mcp-http] recall body read failed: ${err instanceof Error ? err.message : String(err)}`)
-    if (!res.headersSent && !res.destroyed) sendRecall(res, { status: 500, body: { error: RECALL_FAILED_MESSAGE } })
+    logError(`[engram-mcp-http] ${route.name} body read failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (!res.headersSent && !res.destroyed) sendJson(res, { status: 500, body: { error: route.failedMessage } })
     return
   }
   if ('tooLarge' in read) {
-    sendRecall(res, { status: 413, body: { error: `body exceeds ${maxBytes} bytes` } })
+    sendJson(res, { status: 413, body: { error: `body exceeds ${route.maxBytes} bytes` } })
     return
   }
   let parsed: unknown
   try {
     parsed = JSON.parse(read.body.toString('utf8'))
   } catch {
-    sendRecall(res, { status: 400, body: { error: 'the body is not valid JSON' } })
+    sendJson(res, { status: 400, body: { error: 'the body is not valid JSON' } })
     return
   }
-  sendRecall(res, await runRecallRequest(handlers.recall, parsed))
+  sendJson(res, await route.run(parsed))
 }
 
 async function route(
@@ -416,7 +436,24 @@ async function route(
   }
 
   if (path === '/recall') {
-    await handleRecall(req, res, config, handlers, logError)
+    const route: JsonRoute = {
+      name: 'recall',
+      maxBytes: handlers.recallBodyMaxBytes ?? RECALL_BODY_MAX_BYTES,
+      failedMessage: RECALL_FAILED_MESSAGE,
+      run: (body) => runRecallRequest(handlers.recall, body),
+    }
+    await handleJsonRoute(req, res, config, route, logError)
+    return
+  }
+
+  if (path === '/candidates') {
+    const route: JsonRoute = {
+      name: 'candidates',
+      maxBytes: handlers.candidatesBodyMaxBytes ?? CANDIDATES_BODY_MAX_BYTES,
+      failedMessage: CANDIDATES_FAILED_MESSAGE,
+      run: (body) => runCandidatesRequest(handlers.candidates, body),
+    }
+    await handleJsonRoute(req, res, config, route, logError)
     return
   }
 

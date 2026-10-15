@@ -10,11 +10,11 @@
 
 import { exitWhenFlushed } from './cli-exit.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { consolidationAtStartup, createEngramServer, recallOutputPolicyAtStartup } from './server-core.js'
+import { consolidationAtStartup, createEngramServer, recallConfigAtStartup } from './server-core.js'
 
 async function main(): Promise<void> {
   // Logs to stderr, so the JSON-RPC stream on stdout stays clean.
-  recallOutputPolicyAtStartup()
+  await recallConfigAtStartup()
   consolidationAtStartup()
   const server = createEngramServer()
   const transport = new StdioServerTransport()

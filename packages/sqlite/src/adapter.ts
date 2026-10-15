@@ -440,48 +440,6 @@ export class SqliteStorageAdapter implements StorageAdapter {
     )
   }
 
-  async getCommunitySummaries(opts?: {
-    projectId?: string
-    limit?: number
-  }): Promise<Array<{
-    communityId: string
-    projectId: string | null
-    label: string
-    memberCount: number
-    topEntities: string[]
-    topTopics: string[]
-    topPersons: string[]
-    dominantEmotion: string | null
-    generatedAt: string
-  }>> {
-    const db = this.assertDb()
-    const limit = opts?.limit ?? 20
-
-    let sql: string
-    let params: unknown[]
-
-    if (opts?.projectId !== undefined) {
-      sql = `SELECT * FROM community_summaries WHERE (project_id = ? OR project_id IS NULL) ORDER BY member_count DESC LIMIT ?`
-      params = [opts.projectId, limit]
-    } else {
-      sql = `SELECT * FROM community_summaries ORDER BY member_count DESC LIMIT ?`
-      params = [limit]
-    }
-
-    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>
-    return rows.map(r => ({
-      communityId: r['community_id'] as string,
-      projectId: r['project_id'] as string | null,
-      label: r['label'] as string,
-      memberCount: r['member_count'] as number,
-      topEntities: JSON.parse(r['top_entities'] as string) as string[],
-      topTopics: JSON.parse(r['top_topics'] as string) as string[],
-      topPersons: JSON.parse(r['top_persons'] as string) as string[],
-      dominantEmotion: r['dominant_emotion'] as string | null,
-      generatedAt: String(r['generated_at']),
-    }))
-  }
-
   // ---------------------------------------------------------------------------
   // Recall-engine feed: scanEmbeddings / listTombstonesSince
   // ---------------------------------------------------------------------------

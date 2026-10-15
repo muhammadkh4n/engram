@@ -46,42 +46,26 @@ Add Engram to your `~/.claude/settings.json`:
 - `ENGRAM_SALIENCE_THRESHOLD` — server env for the capture route and the local ingest CLIs: the salience classifier's confidence cut, `0`..`1`, default `0.7`. A capture the classifier marks not worth storing, or scores below it, is rejected.
 - `ENGRAM_PROJECT_ID` — explicit default project for the **ingest CLIs** (the git post-commit hook, pre-compact, and session-summary). These run inside a project directory, so they auto-detect the project from the git repo basename; set this to override that detection. It does **not** scope the MCP server (see project scoping below). `global`/`none` map to the shared bucket.
 
-Recall output policy (server-wide; every variable unset means an unbounded payload, the same text as before these settings existed):
+**Recall configuration** (checked once at startup, before the server serves; a bad value stops it, naming the variable):
 
-- `ENGRAM_RECALL_EMIT_K` — positive integer: emit only the first K Recalled memories.
-- `ENGRAM_RECALL_TOKEN_BUDGET` — positive integer: cap the recall text at this many estimated tokens (`ceil(chars / 4)`), headers included. The per-call `token_budget` argument of `memory_recall` overrides it. A value below 128 (the header plus the 120 chars one section needs for a memory) fails startup, since it could never show one.
-- `ENGRAM_RECALL_FAINT` — `on` (default) or `off`: emit the Faint Associations section.
-- `ENGRAM_RECALL_RELATED_SHARE` — decimal from `0` to `0.9`, default `0.3`: the part of the budget room (the budget minus the header and any notice) held for Related Memories. Recalled memories fill the rest first; room either section leaves unused goes to the other (Recalled first), then Domain, Context and Faint fill what is left, in that order. Each section emits a prefix of its own ranking.
-- `ENGRAM_RECALL_ITEM_MAX_TOKENS` — positive integer, default a quarter of the budget: the longest single item in estimated tokens. A longer item is cut and ends with ` …` (see "Cut items" below), so one long memory cannot take the whole budget and the text never exceeds it. The cap in force is never larger than the budget in force: a per-call `token_budget` below the configured cap lowers the cap to that budget. A value below 32 fails startup: that is the longest memory tag (84 chars, `- [procedural · assistant · <device>/WhatsApp · YYYY-MM-DD] ` with the device name clipped to 32 chars), 40 content chars and the cut marker, so a smaller cap would leave out every long memory it cannot show with content. When both `ENGRAM_RECALL_ITEM_MAX_TOKENS` and `ENGRAM_RECALL_TOKEN_BUDGET` are set, a cap larger than the budget fails startup.
+- `ENGRAM_RECALL_LOG` — a file path: append one JSON line per recall (see "The log" under the recall route). Unset = off.
+- `ENGRAM_RECALL_LOG_MAX_MB` — positive number, default 200: past it the log is renamed to `<file>.1` and a new one started.
+- `ENGRAM_RECALL_ENGINE` — `true` wraps the old storage adapter in the RAM recall engine (used by the old engine only).
+- `ENGRAM_TIMEZONE` — an IANA zone name such as `Asia/Karachi`, default `UTC`: the calendar day query expansion states as today.
+- `ENGRAM_CHAT_MODEL`, `ENGRAM_CHAT_BASE_URL`, `ENGRAM_CHAT_API_KEY`, `ENGRAM_CHAT_PROVIDER_PREFS` (a JSON object) — the chat model every LLM step uses.
+- `ENGRAM_RERANK_LOCAL`, `ENGRAM_RERANK_LOCAL_MODEL` — name the reranker (above).
 
-**First item of each section.** Under a budget, the first Related memory is cut to fit Related's room (its share of the budget room, minus the heading), and the first Recalled memory is cut to the room Recalled can actually reach: its own room plus whatever Related left unused. Both cuts follow "Cut items" and never pass the item cap; later items keep the item cap. Related's share never takes the room the first Recalled memory needs for its heading, tag and 40 content chars, so whenever the whole room and the cap can show that memory, Recalled shows it before Related shows any association. Each of the two sections shows its best-ranked memory whatever the share, as long as its room is at least 120 chars (for Recalled, or the room its first memory needs) and the room and cap can hold the item's tag and 40 content chars; a section with less room (or with no candidates) reserves nothing, and the other section takes its room. A recall whose memories matched but whose budget shows none of them answers that the budget is too small, not that nothing matched.
+Any other `ENGRAM_RECALL_*` key that is set, even to an empty value, stops startup with one message naming every such key: nothing reads it. That covers the old engine's output policy, ranking and cache keys (`ENGRAM_RECALL_TOKEN_BUDGET`, `_EMIT_K`, `_FAINT`, `_RELATED_SHARE`, `_ITEM_MAX_TOKENS`, `_FAN`, `_GRAPH_REINFORCE`, `_CORECALL`, `_WALK_EXCLUDE`, `_HUB_DAMPING`, `_SEMANTIC_CONFIDENCE`, `_FUSION`, `_PRIMING`, `_TIMING`, `_LLM_CACHE_MAX`, `_LLM_CACHE_TTL_MIN`): remove them from the server's environment before upgrading. Startup logs one line, with no secret in it:
 
-**Cut items.** A cut item always shows content. The cut lands at the last word boundary within the final 20% of the item's room; without one there it is a hard cut at the room, never inside a surrogate pair (so an emoji is never split). It never lands inside the `- [type · role · date]` tag: the item keeps at least 40 content chars after the tag, or all of its content when that is shorter. An item whose room cannot hold its tag and that much content is not emitted, and its section's prefix ends before it.
-
-The share and the item cap apply only when a token budget is in force (from `ENGRAM_RECALL_TOKEN_BUDGET` or the per-call `token_budget`); with no budget they change nothing, and with no budget and no emit-K the payload is the unbounded text. A per-call `token_budget` replaces only the budget: the share still comes from the server, and the item cap does too when `ENGRAM_RECALL_ITEM_MAX_TOKENS` is set, otherwise it is a quarter of the per-call budget.
-
-An empty value counts as unset. Any other malformed value fails server startup with an error naming the variable, before the server listens; the resolved policy is logged once at startup as `[engram-mcp] recall output policy: emitK=… tokenBudget=… faint=… relatedShare=… itemMaxTokens=…`.
-
-Recall LLM step cache (read once when the server builds its memory instance; an empty value counts as unset, any other malformed value fails startup with an error naming the variable):
-
-- `ENGRAM_RECALL_LLM_CACHE_MAX` — non-negative integer, default `1000`: query expansions and HyDE documents the server keeps, so a repeated question on the same day reuses its first expansion instead of sampling a new one. `0` disables the cache.
-- `ENGRAM_RECALL_LLM_CACHE_TTL_MIN` — positive integer, default `1440`: minutes a cached expansion is reused.
+```
+[engram-mcp] recall: reranker=<id> floor=<F> strong=<S>
+[engram-mcp] recall: reranker=<id> not calibrated; /recall and memory_recall refuse
+```
 
 Fact supersession in deep sleep (parsed once at server startup; a malformed value fails startup with an error naming the variable, and the resolved settings are logged once):
 
 - `ENGRAM_SUPERSESSION` — `regex` (default), `llm` or `off`: how deep sleep retires a stored fact that a newer one replaces. `llm` asks the chat model whether nearby facts repeat or conflict with the new fact and whether each fact is a state, an event or a plan, orders a conflict by when each fact was stated, and retires only a current-state fact. See "Fact supersession in deep sleep" in the core README.
 - `ENGRAM_SUPERSESSION_MIN_COSINE` — a number in [-1, 1], default `0.6`: the cosine floor for a stored fact to be compared with a new one.
-
-Ranking priors (read on every recall call; each is `on` or `off`, default `off`; any other value throws, naming the variable). With both off, ranking is unchanged.
-
-- `ENGRAM_RECALL_HUB_DAMPING` — damps memories recalled far more often than their tier. For episode, semantic and procedural candidates, T = max(p99 of the tier's access_count, 10); the factor is 1 when access ≤ T, else `1 / (1 + ln(access / T))`. Digests get 1. The p99 comes from the storage's `accessCountQuantile` and is cached per storage instance for 10 minutes. On PostgREST it needs the `engram_access_count_quantile` function, so re-apply `packages/postgrest/schema.sql` before turning this on; with the function missing, hub damping is a no-op that logs one warning per process.
-- `ENGRAM_RECALL_SEMANTIC_CONFIDENCE` — semantic candidates are scaled by `0.5 + 0.5 · clamp(confidence, 0, 1)`.
-
-The prior is the product of the enabled factors. It multiplies each primary candidate's score, and after reranking it multiplies the rerank component again: `blended = w · rerank · prior + (1 − w) · relevance`. Graph associations are unaffected. A memory whose prior is not 1 carries it as `rankPrior`.
-
-- `ENGRAM_RECALL_FUSION` — JSON object overriding recall fusion weights, thresholds and candidate counts (e.g. `{"lexicalWeight":0.2,"rerankWeight":0.8}`), read on every recall. Unset or empty means the built-in defaults and unchanged ranking; an unknown key, a non-number or an out-of-range value fails the recall with an error naming the key. Keys, defaults and ranges are listed in the `@engram-mem/core` README (Fusion config). Meant only for adopting a config a measured bench grid has shown to beat the defaults, not for hand tuning.
-
-The payload is assembled in a fixed section order: Recalled Memories, Related Memories, Knowledge Domain Context, Context, Faint Associations. Each section emits a prefix of its own ranking (the prefix rule): within a section, items are added in rank order and the first item that does not fit ends that section, so a smaller item never jumps a better-ranked one. Recalled and Related split the room as described above, and the room either leaves unused goes to the other; Domain, Context and Faint then fill what is left in that order, and the first of their items that does not fit ends assembly. No item exceeds the item cap, the first Recalled and Related items are cut to the room their section can reach, as described above, and a section heading is written only with its first item. Access counts, co-recall edges and graph weights are recorded only for the memories and associations the payload emitted; an item counts as emitted only when it shows content, which every emitted item does.
 
 **Optional (enables Neo4j neural graph):**
 - `NEO4J_URI` — e.g., `bolt://localhost:7687`
@@ -92,60 +76,88 @@ When `NEO4J_URI` is set and reachable, Engram runs in full "graph mode" with spr
 
 ### 3. Start Using
 
-Claude Code now has access to Engram's memory tools. The server auto-includes instructions telling Claude when and how to use them.
+Claude Code now has access to Engram's memory tools. The server's instructions describe the typed items, how to read their trust and status, and to call memory_recall only for memory the session briefing did not cover.
 
 ### Project scoping
 
 A project tag **ranks** memories; it never hides one. Tags come from the working directory at write time, so a memory written from a worktree, a sibling repo of the same product, or outside any repo would otherwise vanish exactly where it is needed. The scope is **declarative and per-call** — the server holds no project state of its own (important for a shared HTTP server, which has no project context):
 
 - `memory_recall` and a `memory_ingest` observation accept an optional **`project_id`** parameter. The agent passes the current working project (typically the git repo name); omitting it means no project preference.
-- A recall for project X returns every matching memory. X's memories get `+ENGRAM_PROJECT_BOOST` (default `0.10`), memories of another project in X's product group get `+ENGRAM_PROJECT_GROUP_BOOST` (default `0.05`), shared and unrelated memories get nothing. The boost is applied before the candidate cut the reranker sees and again after reranking.
-- Product groups come from the JSON file named by `ENGRAM_PROJECT_GROUPS_FILE`: `{ "groups": { "aithentic": ["aithentic-*", "*-mfe"], "engram": ["engram*"] } }`. Patterns are project names or `*`/`?` globs, matched case-insensitively against the whole name; a project belongs to the first group that matches. Unset, missing or malformed means no groups; each distinct failure is reported once on stderr. The file is re-checked at most every 60 s and re-read when its modification time or existence changes, so an edit takes effect without a restart.
+- A recall for project X returns every matching item. Within each relevance band, X's items come first, then items of X's workspace (from the project registry), then the rest; a project the registry does not know orders nothing. Scope never removes an item.
+- Product groups (used by the old library recall) come from the JSON file named by `ENGRAM_PROJECT_GROUPS_FILE`: `{ "groups": { "aithentic": ["aithentic-*", "*-mfe"], "engram": ["engram*"] } }`. Patterns are project names or `*`/`?` globs, matched case-insensitively against the whole name; a project belongs to the first group that matches. Unset, missing or malformed means no groups; each distinct failure is reported once on stderr. The file is re-checked at most every 60 s and re-read when its modification time or existence changes, so an edit takes effect without a restart.
 - Ingest with `project_id` tags the stored memory; without it the memory is shared.
 - The git/hook ingest CLIs auto-detect the project from their working directory (see `ENGRAM_PROJECT_ID` above to override).
 - Hard scoping (only X plus shared memories) exists as the `projectStrict` recall option of `@engram-mem/core`; neither the MCP server nor the CLIs enable it.
 
 ## MCP Tools
 
-All tools are available as MCP resources. Claude uses them automatically based on context.
+| Tool | What it does |
+|---|---|
+| `memory_recall` | Search the typed items; each result quoted verbatim with its provenance |
+| `memory_get` | Stored items by id, as recorded |
+| `memory_timeline` | The per-session records of past sessions, newest first |
+| `memory_overview` | Counts of what the store holds |
+| `memory_capture_status` | The capture path's health in numbers |
+| `memory_ingest` | Store one typed item |
+| `memory_forget` | Forget items or old rows by id, with a reason |
+| `memory_retire`, `memory_unretire` | Retire or restore typed items by id, with a reason |
+
+Every argument outside a tool's schema is an error; a value out of range is refused, never clamped.
 
 ### memory_recall
 
-Search memory for content relevant to a query.
+Runs the recall of `POST /recall` (below) in process on channel `mcp`, and writes the same log line.
 
-**Input:**
-```json
-{
-  "query": "What deployment preferences did we discuss?",
-  "session_id": "optional-session-id",
-  "conversation_id": "optional-conversation-id",
-  "token_budget": 4000
-}
+**Input:** `query` (required, 1 to 2,000 characters), `project_id` (orders that project's items first; hides none), `exclude_session_id` (at most 256 characters; leaves that session's own items out), `include_history` (boolean), `classes` and `kinds` (non-empty lists), `limit` (1 to 30, default 12), `max_chars` (200 to 4,000, default 1,500), `budget_chars` (1,000 to 12,000, default 9,000), `as_of` (ISO 8601 with an offset). Superseded and retired items, session records, commits and assistant turns come only with `include_history`; `legacy` items only when `classes` names it.
+
+**Returns:**
+
+```
+## Engram recall: <n> items for "<query, first 120 chars>"
+Quoted verbatim. Tag: class · kind · speaker · trust · date · status. Trust 0 = MK's own words; 1 = a durable record; 2 = an assistant observation with evidence; 3 = an unverified assistant claim. Plan state is in the plan's LEDGER.md.
+[> <degraded notice, one line per failed stage>]
+
+### Matches
+- [<class> · <kind> · <speaker> · trust <t> · <YYYY-MM-DD> · <status>] id <id>
+  source: <type> <ref>[ · subject: <label>][ · superseded by <id>][ · flags: <f>, <f>]
+  [Answering: <question>]
+  <text, each line indented two spaces>
+[### Associated
+<same item form>]
+[<k> more items passed the floor and were not shown: limit <a>, budget <b>, uncuttable <c>.]
 ```
 
-`conversation_id` is optional: a non-blank string of at most 200 characters (trimmed) naming the caller's current conversation. It scopes priming to that conversation: keywords shared by several memories an earlier recall of the same `conversation_id` returned give a small score boost (whole-token match, capped) and seed the graph walk in its next recalls, and the last recall's intent informs the next one. It does **not** filter results, unlike `session_id`. A recall without `conversation_id` gets no priming and writes no priming state, so until a client sends it, priming is off. `ENGRAM_RECALL_PRIMING=off` disables priming even when it is sent. A blank, non-string or longer value returns an error result.
+With no item shown: `No memory item passed the relevance floor for this query.` (after any notice), or the "more items passed" line when items passed and none fit. The notices: `vector` → `> Semantic search failed (<reason>); results come from keyword and subject search only.`, `rerank` → `> Reranking failed (<reason>); items are in candidate order and no relevance floor was applied.`, `expansion` → `> Query expansion failed (<reason>).`, `hyde` → `> Hypothetical-document search failed (<reason>).`
 
-`token_budget` is optional: an integer from 256 to 32000 that raises or lowers the server's `ENGRAM_RECALL_TOKEN_BUDGET` for this call only. Any other value returns an error result. Omitted, the server default applies (unbounded when unset). The budget covers the whole payload, Related Memories included, split by `ENGRAM_RECALL_RELATED_SHARE` and with every item capped by `ENGRAM_RECALL_ITEM_MAX_TOKENS` (default a quarter of this budget).
+Errors: `recall is not calibrated for reranker <id>` until a floor is measured for the reranker in use; `recall failed` for any other failure, the cause scrubbed on stderr only. The arguments of the first `memory_recall` answer with what replaces them: `session_id` → `exclude_session_id`, `token_budget` → `budget_chars`; `conversation_id` and `synthesize` were removed.
 
-The request time is the recall's reference date. Query expansion states it to the model as today's date, so a relative phrase ("last week", "yesterday") expands to the dates it means. The model gets the weekday and the calendar day (`Today's date is Friday, 2026-10-02.`) in `ENGRAM_TIMEZONE`, an IANA zone name such as `Asia/Karachi` (default `UTC`), read once at startup. A name the runtime does not know fails startup.
+### memory_get
 
-**Returns:** Formatted memories with attribution (role, date, session). Includes direct matches and associated memories found via graph walk, in the section order and under the per-section prefix rule described in the recall output policy above.
+**Input:** `ids` (1 to 20 item ids), `max_chars` (200 to 8,000, default 4,000). Returns each stored item, in the order asked: the tag line, source and subject, scope (project, workspace, plan, session), occurred and stored times, retirement and its reason, standing and register status, restatements, lineage, content hash, embedding model and extraction run, the source record as JSON, the question, the length and how much is shown, then the text. Text is cut at a sentence boundary outside a quote; an MK statement, register entry or plan decision is never cut. Forgotten and unknown ids are listed under `Not found`; a value that is not a uuid is an error naming it.
 
-With `ENGRAM_RECALL_TIMING=1` the server writes one `[recall]` line per call to stderr: stage timings in milliseconds (`total expand search hyde pattern mmr rerank graph`, then any `graph.*` sub-stages sorted; a stage that did not run is absent), `items=` (the ranked pool), `chars=`, `emitted=` (Recalled memories in the payload), `tokens=` (estimated tokens of the payload) and `truncated=1` when the token budget cut it short.
+### memory_timeline
 
-With `ENGRAM_RECALL_LOG=<file path>` (unset = off) the server also appends one JSON line per recall to that file, for replaying real recall traffic in order and for counting how often each memory is shown:
+**Input:** `project_id`, `from_date`, `to_date` (an ISO 8601 date, a whole UTC day, or a time with an offset; both inclusive), `query`, `limit` (1 to 50, default 20; 1 to 30 with `query`). Lists the current record of each past session, newest first:
 
-```json
-{"ts":"2026-09-30T12:00:00.000Z","query":"deploy window","project_id":"engram","session_id":null,"conversation_id":null,"mode":"QUESTION","emitted":[{"id":"…","type":"episode","rank":1}],"associated":[{"id":"…","type":"semantic"}],"timings":{"total":120}}
+```
+- <YYYY-MM-DD HH:MM UTC> · <project or "no project"> · session <id> · item <id>
+  <the session record, cut at a line boundary to 1,500 characters>
+  [cut: memory_get <id> returns the whole record]
 ```
 
-- `query` is the query as received, trimmed, with credentials replaced by the same secret scrubber ingest uses. The recall itself still runs on the unscrubbed query.
-- `project_id` is the normalised `project_id` argument; `session_id` and `conversation_id` are the call's arguments of those names, `null` when absent. `mode` is the intent type the recall classified the query as.
-- `emitted` lists the Recalled section's memories in display order (`rank` from 1); `associated` lists every other memory the payload carried (related, domain, context and faint sections), in display order. `timings` is the same stage map the `[recall]` line prints when `ENGRAM_RECALL_TIMING=1`, else `null`.
-- The file is created with mode 0600 (an existing file is tightened to it). Lines are written in the background, one at a time: a slow or failing write never delays or fails a recall, and a write error is logged to stderr at most once per minute.
-- `ENGRAM_RECALL_LOG_MAX_MB` (default 200) caps the file: when the next line would push it past the cap, it is renamed to `<file>.1` (replacing any previous one) and a new file is started. A non-positive or non-numeric value fails startup.
+With `query`, recall over session records picks them; the project and dates still filter. The old argument `topic` answers that `query` replaced it.
 
-**When Claude uses it:** Automatically before answering questions about past work, decisions, or preferences. Also when you reference a previous session ("remember when...", "what did we decide about...").
+### memory_overview
+
+**Input:** `project_id`, `subjects` (1 to 50, default 20). Lists current items by class and kind; superseded, retired and pending-candidate counts; and the subjects with the most current items, each with the date of its newest item. The old arguments `topic` and `max_communities` answer with what replaces them.
+
+### memory_capture_status
+
+No input. Lists, as counts and UTC times only: events received in 24 h, unprocessed, dead (3 attempts) and the oldest unprocessed one's time, events with an error, the last processed time, items created in 24 h per class, extraction runs in 24 h per status and the last finished time, items the embedding pass covers still without an embedding per class, and the newest vault section's time. Never a payload, text or error message.
+
+### Removed
+
+`memory_bridges` and `memory_consolidation_status` answer `Error: unknown tool "<name>"`. `memory_forget` no longer takes `query`.
 
 ### memory_ingest
 
@@ -278,6 +290,30 @@ engram-recall-calibrate --replay cases.jsonl --channels profile.json \
 
 It scores each request as recall would, with no floor: reviewed cases on a query-lane channel, each on its own channel with the profile's fields, its scope and its decision time; gold rows on the `calibration` channel with `legacy` added to the classes. A slate item is needed when the case names its id or legacy id, or holds every phrase of one of its phrase groups; a gold row's stale ids count as neither needed nor noise. Then: n = the needed items that reached a slate; F = the largest value on the 0.005 grid at which at most max(1, ⌊0.01·n⌋) needed items score below it; S = the median needed score rounded down to the grid, or F when lower. It prints n, F, S and a ready floor entry, and the report holds ids and scores only, never text.
 
+## Candidates route (HTTP server)
+
+`POST /candidates` lists what waits for MK's review at session start. It sits behind the MCP bearer; the capture and documents tokens get 401. Body at most 4 KiB.
+
+```
+{ "scope": { "project_id": "engram", "workspace_id": "…" },   required, may be {}; both keys optional
+  "ids": [ "<uuid>", … ],                                       optional; 1 to 8 distinct uuids
+  "limit": 4 }                                                  optional; 1 to 8, default 4
+```
+
+Without `ids`: current standing MK statements waiting for the register, current corrections not yet recorded or dismissed with a target neither retired nor forgotten, and current assistant turns that retract a target neither retired nor forgotten; newest first, in scope (the item's project or workspace equals the request's, or it has neither). With `ids`: exactly those items, in the order given, whatever their review state; scope and limit do not apply, and every requested id with no such item is listed in `missing`.
+
+```
+200 { "candidates": [ { "id", "kind": "ruling" | "fact" | "correction" | "retraction", "quote", "question",
+                        "occurred_at", "session_id", "project_id", "workspace_id", "subject", "proposed_scope",
+                        "status", "register_status", "restated_count",
+                        "targets": [ { "id", "class", "text", "status" } ] } ],
+      "total", "missing": [ "<uuid>", … ] }
+```
+
+A statement's `quote` is whole; a retraction's text and each target's text are cut at a sentence boundary to 1,500 characters; `question` keeps its tail. `proposed_scope` is `global`, `project:<id>`, `workspace:<id>` or `plan:<slug>` from the level extraction stored, or null. `status` is `current`, `superseded` or `retired`. `total` counts every pending item in scope before `limit`; with `ids`, the items returned.
+
+Other statuses: 400 `{"error"}` (an unknown key, a wrong type, a value out of range, an empty, over-long, malformed or repeated `ids`); 401; 405 (not POST); 413; 500 `{"error":"candidates failed"}`, the cause scrubbed on stderr only.
+
 ## Capture clients (hooks and ingest CLIs)
 
 `engram-ingest` (git post-commit, the Stop and UserPromptSubmit hooks), `engram-session-summary` (SessionEnd) and the pre-compact hook run in one of two modes.
@@ -330,31 +366,20 @@ It scores each request as recall would, with no floor: reviewed cases on a query
 
 ### memory_forget
 
-Forget in two steps. Pass exactly one of `query` or `ids`.
+Takes `ids` and a `reason`, both required. A call that passes `query` is the tool error `query was removed: forget takes explicit ids and a reason. Find ids with memory_recall (include_history: true; add "legacy" to classes for old rows).` and forgets nothing.
 
-1. **Preview** with a query. Nothing is forgotten; each candidate, digests included, is listed on one line with its id. A query takes no `reason`:
+Forget the ids you approved, with a reason (1 to 2,000 characters, at most 50 ids per call). An id may name a typed item or a row of the old memory tables:
 
-   ```json
-   { "query": "deprecated API endpoint" }
-   ```
+```json
+{ "ids": ["3f2c…"], "reason": "the v1 endpoint notes were imported from the wrong project" }
+```
 
-   ```
-   - [semantic · 2026-03-14] 3f2c… · relevance 0.71 · The v1 /export endpoint is deprecated …
-   To forget, call memory_forget again with ids set to the ones to remove and a reason.
-   ```
+A forget cascades, in one transaction:
+- an item takes every item whose lineage holds it (an utterance its statements and session index);
+- an episode takes the digests built from it and the facts and procedures citing it; a digest takes the facts, procedures and digests built from it. A digest is one text, so it goes when any of its episodes goes;
+- an old row and its `legacy` item take each other.
 
-2. **Forget** the ids you approved, with a reason (1 to 2,000 characters, at most 50 ids per call). An id may name a typed item or a row of the old memory tables:
-
-   ```json
-   { "ids": ["3f2c…"], "reason": "the v1 endpoint notes were imported from the wrong project" }
-   ```
-
-   A forget cascades, in one transaction:
-   - an item takes every item whose lineage holds it (an utterance its statements and session index);
-   - an episode takes the digests built from it and the facts and procedures citing it; a digest takes the facts, procedures and digests built from it. A digest is one text, so it goes when any of its episodes goes;
-   - an old row and its `legacy` item take each other.
-
-   The reply lists the requested ids, each cascaded id with the id that pulled it in (`via`), the items restored or re-pointed because their successor was forgotten, and the ids not found. A requested id that was already forgotten is listed again. Forgotten old rows are also stamped in Neo4j when it is configured; a graph failure never fails the forget. Every call that finds something writes one `memory_item_actions` row: the ids, what happened to each, the reason and the channel.
+The reply lists the requested ids, each cascaded id with the id that pulled it in (`via`), the items restored or re-pointed because their successor was forgotten, and the ids not found. A requested id that was already forgotten is listed again. Forgotten old rows are also stamped in Neo4j when it is configured; a graph failure never fails the forget. Every call that finds something writes one `memory_item_actions` row: the ids, what happened to each, the reason and the channel.
 
 A forgotten memory is hidden from every recall path. The row stays in storage as a tombstone.
 
@@ -366,69 +391,6 @@ Retire typed items that are no longer current but were true when stored; unretir
 - retiring a statement MK recorded in a register adds `recorded as <register_ref>: change it there too`.
 
 Unretire clears the retire reason; its own reason is kept in the audit row.
-
-### memory_timeline
-
-Show how a topic evolved over time. Returns chronological semantic memories including superseded beliefs.
-
-**Input:**
-```json
-{
-  "topic": "authentication strategy",
-  "from_date": "2024-01-01",
-  "to_date": "2024-12-31"
-}
-```
-
-Useful for understanding how knowledge changed and what beliefs were replaced.
-
-### memory_overview
-
-High-level summary of what Engram knows, organized by knowledge clusters (communities).
-
-**Input:**
-```json
-{
-  "topic": "optional-filter",
-  "max_communities": 5,
-  "project_id": "optional-namespace"
-}
-```
-
-Returns community labels, member counts, top topics, entities, people, and dominant tone.
-
-### memory_consolidation_status
-
-Reports when each consolidation cycle (light / deep / dream / decay) last ran and its result. Reads from the `memory_consolidation_runs` table — no compute, just lookups. Useful for verifying that auto-consolidation is healthy or diagnosing why `memory_overview` returns no clusters.
-
-No parameters.
-
-**Example response:**
-```
-## Engram — Consolidation Status
-
-- **light**: completed at 2026-05-25T03:34:33Z in 80943ms
-  - digests=3
-- **deep**: completed at 2026-05-25T03:19:01Z in 52225ms
-  - promoted=0
-- **dream**: completed at 2026-05-24T14:13:01Z in 184438ms
-  - associations=0, communities=11525, summaries=52, llmCalls=52, ~$0.0053, episodeCount=4733
-- **decay**: completed at 2026-05-24T14:19:18Z in 5456ms
-```
-
-### memory_bridges
-
-Find shared people or entities that bridge two projects.
-
-**Input:**
-```json
-{
-  "project_a": "project-1-id",
-  "project_b": "project-2-id"
-}
-```
-
-Returns cross-project connections (people/entities shared between projects). Useful for understanding what or who connects two workstreams.
 
 ## How It Works
 
@@ -571,15 +533,15 @@ The package includes CLI utilities for advanced use cases:
 
 **Q: Claude isn't using memory_recall automatically**
 
-A: The server includes built-in instructions that guide Claude to use recall proactively. If it's not working, check that the MCP server is running and that Claude can see the tools (they should appear in the tools list).
+A: By design. Memory reaches a Claude Code session through hooks (standing rulings and a briefing on each prompt); the server's instructions say to call memory_recall only for memory the briefing did not cover, from a subagent where possible.
 
 **Q: No memories found on recall**
 
-A: Memories are only retrieved after they're ingested and consolidated. Wait a moment for consolidation to run, then try again. Check that you're using the same session ID if you scoped to a specific session.
+A: Recall shows only items whose rerank score passes the floor measured for the reranker in use; without a measured floor it refuses with `recall is not calibrated for reranker <id>`. Captured turns become items once the capture worker has processed them (see memory_capture_status), and superseded, retired and history-only items need `include_history`.
 
 **Q: High token estimates**
 
-A: Set `ENGRAM_RECALL_TOKEN_BUDGET` (or `ENGRAM_RECALL_EMIT_K`) on the server, or pass `token_budget` to `memory_recall` for one call. Memories are ranked by relevance and the payload keeps a prefix of that ranking, so the top results always survive. Or configure `AUTO_CONSOLIDATE=true` to create digests (summaries) that reduce token count.
+A: Pass a smaller `budget_chars`, `max_chars` or `limit` to `memory_recall`. Items are shown in rank order; the text never exceeds `budget_chars`, and the result says how many items passed and were not shown.
 
 **Q: "Missing required environment variable"**
 

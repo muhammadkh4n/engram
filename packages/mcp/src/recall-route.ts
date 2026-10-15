@@ -57,7 +57,7 @@ const SCOPE_KEYS: ReadonlySet<string> = new Set(['project_id', 'workspace_id', '
 const CHANNELS: ReadonlySet<string> = new Set(RECALL_CHANNELS)
 const CLASSES: ReadonlySet<string> = new Set(ITEM_CLASSES)
 /** The id shape memory_items and memory_subjects accept for a project. */
-const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+export const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
 const PLAN_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 /** ISO 8601 with a date, a time and an explicit offset. */
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
@@ -389,21 +389,47 @@ export interface RecallRouteResponse {
   body: unknown
 }
 
+export type RecallOutcome =
+  | { kind: 'ok'; response: RecallResponse }
+  | { kind: 'not_calibrated' | 'bad_request'; message: string }
+  | { kind: 'failed' }
+
+/**
+ * Runs one checked request and writes its log line. A reranker with no floor
+ * and a request recall itself refuses come back with their message; any
+ * other failure is logged to stderr, scrubbed, as `<label> failed: <cause>`,
+ * and comes back without it, so no cause reaches a caller.
+ */
+export async function executeRecall(deps: RecallRouteDeps, request: RecallRequest, label: string): Promise<RecallOutcome> {
+  const now = deps.now ?? (() => new Date())
+  try {
+    const recallDeps = await deps.getDeps()
+    const { response, trace } = await runRecall(recallDeps, request)
+    if (deps.log !== null) deps.log.recordLine(buildRecallLogLineV2(request, response, trace, deps.server, now()))
+    return { kind: 'ok', response }
+  } catch (err) {
+    if (err instanceof RecallNotCalibratedError) return { kind: 'not_calibrated', message: err.message }
+    if (err instanceof RecallRequestError) return { kind: 'bad_request', message: err.message }
+    const message = err instanceof Error ? err.message : String(err)
+    const { text } = await scrubSecrets(message)
+    deps.logError(`${label} failed: ${text}`)
+    return { kind: 'failed' }
+  }
+}
+
 export async function runRecallRequest(deps: RecallRouteDeps, body: unknown): Promise<RecallRouteResponse> {
   const now = deps.now ?? (() => new Date())
   const parsed = parseRecallRequest(body, now())
   if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
-  try {
-    const recallDeps = await deps.getDeps()
-    const { response, trace } = await runRecall(recallDeps, parsed.value)
-    if (deps.log !== null) deps.log.recordLine(buildRecallLogLineV2(parsed.value, response, trace, deps.server, now()))
-    return { status: 200, body: wireResponse(response) }
-  } catch (err) {
-    if (err instanceof RecallNotCalibratedError) return { status: 503, body: { error: err.message } }
-    if (err instanceof RecallRequestError) return { status: 400, body: { error: err.message } }
-    const message = err instanceof Error ? err.message : String(err)
-    const { text } = await scrubSecrets(message)
-    deps.logError(`[engram-mcp-http] recall failed: ${text}`)
-    return { status: 500, body: { error: RECALL_FAILED_MESSAGE } }
+  const outcome = await executeRecall(deps, parsed.value, '[engram-mcp-http] recall')
+  switch (outcome.kind) {
+    case 'ok':
+      return { status: 200, body: wireResponse(outcome.response) }
+    case 'not_calibrated':
+      return { status: 503, body: { error: outcome.message } }
+    case 'bad_request':
+      return { status: 400, body: { error: outcome.message } }
+    case 'failed':
+      return { status: 500, body: { error: RECALL_FAILED_MESSAGE } }
   }
 }

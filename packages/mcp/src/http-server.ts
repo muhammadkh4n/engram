@@ -11,9 +11,10 @@ import {
   createEngramServer,
   getCaptureDeps,
   getRecallDeps,
+  getRecallStore,
   getRecallLog,
   PACKAGE_VERSION,
-  recallOutputPolicyAtStartup,
+  recallConfigAtStartup,
   consolidationAtStartup,
   extractionHeldFromEnv,
   captureModelFromEnv,
@@ -193,7 +194,7 @@ export async function main(): Promise<void> {
   const threshold = parseSalienceThresholdEnv()
   const captureModel = captureModelFromEnv()
   const extractWindowsPerTick = parseExtractWindowsPerTickEnv()
-  recallOutputPolicyAtStartup()
+  await recallConfigAtStartup()
   consolidationAtStartup()
   const extractionHeld = extractionHeldFromEnv()
   const log = (line: string): void => {
@@ -275,6 +276,8 @@ export async function main(): Promise<void> {
         server: PACKAGE_VERSION,
         logError: (line) => process.stderr.write(`${line}\n`),
       },
+      // The same item-store reader recall and the read tools use.
+      candidates: { getStore: getRecallStore, logError: (line) => process.stderr.write(`${line}\n`) },
     }),
   )
 

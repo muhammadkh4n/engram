@@ -7,26 +7,40 @@ import type {
   CachedStepOutput,
   Candidate,
   CandidateRequest,
+  CaptureStatusRow,
   ItemClass,
+  ItemOverviewRequest,
+  ItemOverviewRow,
   ItemKind,
+  ItemReadStore,
+  ItemRecord,
   ItemSource,
   RecallChain,
   RecallItemRow,
   RecallItemState,
+  RecallItemStatus,
   RecallItemsOptions,
   RecallProject,
   RecallStep,
   RecallStore,
   RegisterToken,
+  ReviewCandidateRow,
+  ReviewCandidatesRequest,
+  SessionTimelineEntry,
+  SessionTimelineRequest,
   Speaker,
   StepOutput,
 } from '@engram-mem/core'
 import { PostgRestItemStore } from './items.js'
 import { parseVector } from './parse-vector.js'
-import { onlyUuids } from './uuid.js'
+import { isUuid, onlyUuids } from './uuid.js'
 
 /** engram_recall_items refuses more ids than this in one call. */
 const MAX_RECALL_IDS = 500
+/** engram_get_items refuses more ids than this in one call. */
+const MAX_GET_IDS = 20
+/** engram_review_candidates takes at most this many ids. */
+const MAX_REVIEW_IDS = 8
 /** Reads are repeated once after a short pause: a dropped connection or a restart rarely lasts longer. */
 const READ_RETRY = { maxRetries: 1, baseDelayMs: 200 } as const
 const CHAINS: ReadonlySet<string> = new Set<RecallChain>(['current', 'superseded', 'successor_retired'])
@@ -64,7 +78,7 @@ type Row = Record<string, unknown>
  * to weigh); the other reads are repeated once on any failure, since a read
  * repeated changes nothing.
  */
-export class PostgRestRecallStore implements RecallStore {
+export class PostgRestRecallStore implements RecallStore, ItemReadStore {
   private readonly client: PostgrestClient
   private readonly itemStore: PostgRestItemStore
 
@@ -224,6 +238,76 @@ export class PostgRestRecallStore implements RecallStore {
     return toCachedOutput(step, data[0] as Row, 'cachePut', 1)
   }
 
+  async getItems(ids: readonly string[]): Promise<ItemRecord[]> {
+    const wanted = [...new Set(ids.map((id) => id.toLowerCase()))]
+    if (wanted.length === 0) return []
+    const malformed = wanted.find((id) => !isUuid(id))
+    if (malformed !== undefined) throw new Error(`getItems failed: ${JSON.stringify(malformed)} is not a uuid`)
+    if (wanted.length > MAX_GET_IDS) throw new Error(`getItems failed: ${wanted.length} ids, at most ${MAX_GET_IDS} per call`)
+    const rows = await this.read('getItems', 'engram_get_items', { p_ids: wanted })
+    return rows.map((row, i) => toItemRecord(row, i + 1))
+  }
+
+  async sessionTimeline(req: SessionTimelineRequest): Promise<SessionTimelineEntry[]> {
+    const args: Record<string, unknown> = { p_limit: req.limit }
+    if (req.projectId !== undefined) args.p_project_id = req.projectId
+    if (req.from !== undefined) args.p_from = req.from
+    if (req.to !== undefined) args.p_to = req.to
+    const rows = await this.read('sessionTimeline', 'engram_session_timeline', args)
+    return rows.map((row, i) => {
+      const id = requiredText(row, 'id', 'sessionTimeline', i + 1)
+      if (typeof row.content_head !== 'string') throw new Error(`sessionTimeline failed: item ${id} has no text`)
+      return {
+        id,
+        sessionId: optionalText(row, 'session_id'),
+        projectId: optionalText(row, 'project_id'),
+        occurredAt: time(row.occurred_at, 'occurred_at', 'sessionTimeline', id),
+        contentHead: row.content_head,
+        contentLength: integer(row, 'content_length', id),
+      }
+    })
+  }
+
+  async itemOverview(req: ItemOverviewRequest): Promise<ItemOverviewRow[]> {
+    const args: Record<string, unknown> = { p_subject_limit: req.subjectLimit }
+    if (req.projectId !== undefined) args.p_project_id = req.projectId
+    const rows = await this.read('itemOverview', 'engram_item_overview', args)
+    return rows.map((row, i) => {
+      const section = row.section
+      if (section !== 'class' && section !== 'state' && section !== 'subject') {
+        throw new Error(`itemOverview failed: row ${i + 1} has an unknown section`)
+      }
+      const key = requiredText(row, 'key', 'itemOverview', i + 1)
+      const n = typeof row.n === 'string' ? Number(row.n) : row.n
+      if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) throw new Error(`itemOverview failed: row ${i + 1} has no count`)
+      return { section, key, n, latest: optionalTime(row, 'latest', 'itemOverview', key) }
+    })
+  }
+
+  async captureStatus(): Promise<CaptureStatusRow[]> {
+    const rows = await this.read('captureStatus', 'engram_capture_status', {})
+    return rows.map((row, i) => ({
+      metric: requiredText(row, 'metric', 'captureStatus', i + 1),
+      value: optionalText(row, 'value'),
+    }))
+  }
+
+  async reviewCandidates(req: ReviewCandidatesRequest): Promise<ReviewCandidateRow[]> {
+    const args: Record<string, unknown> = { p_limit: req.limit }
+    if (req.scope.projectId !== undefined) args.p_project_id = req.scope.projectId
+    if (req.scope.workspaceId !== undefined) args.p_workspace_id = req.scope.workspaceId
+    if (req.ids !== undefined) {
+      if (req.ids.length === 0 || req.ids.length > MAX_REVIEW_IDS) {
+        throw new Error(`reviewCandidates failed: ${req.ids.length} ids, 1 to ${MAX_REVIEW_IDS} per call`)
+      }
+      const malformed = req.ids.find((id) => !isUuid(id))
+      if (malformed !== undefined) throw new Error(`reviewCandidates failed: ${JSON.stringify(malformed)} is not a uuid`)
+      args.p_ids = req.ids
+    }
+    const rows = await this.read('reviewCandidates', 'engram_review_candidates', args)
+    return rows.map((row, i) => toReviewCandidate(row, i + 1))
+  }
+
   private async readValue(operation: string, fn: string, args: Record<string, unknown>): Promise<unknown> {
     return withRetry(async () => {
       const { data, error } = (await this.client.rpc(fn, args)) as RpcResult
@@ -343,5 +427,108 @@ function toItemRow(row: Row, position: number): RecallItemRow {
     currentId: optionalText(row, 'current_id'),
     chain: chain as RecallChain,
     endExcluded: bool(row, 'end_excluded', id),
+  }
+}
+
+function optionalBool(row: Row, column: string, operation: string, id: string): boolean | null {
+  const value = row[column]
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'boolean') throw new Error(`${operation} failed: item ${id}: ${column} is not a boolean`)
+  return value
+}
+
+function uuidList(row: Row, column: string, operation: string, id: string): string[] {
+  const value = row[column]
+  if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && isUuid(v))) {
+    throw new Error(`${operation} failed: item ${id}: ${column} is not a list of uuids`)
+  }
+  return value as string[]
+}
+
+/** A row outside engram_get_items' contract is an error, never a guess. */
+function toItemRecord(row: Row, position: number): ItemRecord {
+  const id = requiredText(row, 'id', 'getItems', position)
+  const fail = (what: string) => new Error(`getItems failed: item ${id}: ${what}`)
+  const cls = row.class
+  const kind = row.kind
+  const speaker = row.speaker
+  if (typeof cls !== 'string' || !CLASSES.has(cls)) throw fail('unknown class')
+  if (typeof kind !== 'string' || !KINDS.has(kind)) throw fail('unknown kind')
+  if (typeof speaker !== 'string' || !SPEAKER_SET.has(speaker)) throw fail('unknown speaker')
+  if (typeof row.content_head !== 'string') throw fail('has no text')
+  const source = row.source
+  if (source === null || typeof source !== 'object' || Array.isArray(source)) throw fail('source is not an object')
+  return {
+    id,
+    class: cls as ItemClass,
+    kind: kind as ItemKind,
+    speaker: speaker as Speaker,
+    trust: integer(row, 'trust', id),
+    projectId: optionalText(row, 'project_id'),
+    workspaceId: optionalText(row, 'workspace_id'),
+    planSlug: optionalText(row, 'plan_slug'),
+    sessionId: optionalText(row, 'session_id'),
+    subjectLabel: optionalText(row, 'subject_label'),
+    contentHead: row.content_head,
+    contentLength: integer(row, 'content_length', id),
+    question: optionalText(row, 'question'),
+    occurredAt: time(row.occurred_at, 'occurred_at', 'getItems', id),
+    validTo: optionalTime(row, 'valid_to', 'getItems', id),
+    supersededBy: optionalText(row, 'superseded_by'),
+    restated: integer(row, 'restated', id),
+    retiredAt: optionalTime(row, 'retired_at', 'getItems', id),
+    retiredReason: optionalText(row, 'retired_reason'),
+    standing: optionalBool(row, 'standing', 'getItems', id),
+    registerStatus: optionalText(row, 'register_status'),
+    registerRef: optionalText(row, 'register_ref'),
+    source: source as ItemSource,
+    lineage: uuidList(row, 'lineage', 'getItems', id),
+    embeddingModel: optionalText(row, 'embedding_model'),
+    contentHash: requiredText(row, 'content_hash', 'getItems', position),
+    extractionRunId: optionalText(row, 'extraction_run_id'),
+    createdAt: time(row.created_at, 'created_at', 'getItems', id),
+  }
+}
+
+function status(value: unknown, fail: (what: string) => Error): RecallItemStatus {
+  if (value !== 'current' && value !== 'superseded' && value !== 'retired') throw fail('unknown status')
+  return value
+}
+
+/** A row outside engram_review_candidates' contract is an error, never a guess. */
+function toReviewCandidate(row: Row, position: number): ReviewCandidateRow {
+  const id = requiredText(row, 'id', 'reviewCandidates', position)
+  const fail = (what: string) => new Error(`reviewCandidates failed: item ${id}: ${what}`)
+  const kind = row.kind
+  if (kind !== 'ruling' && kind !== 'fact' && kind !== 'correction' && kind !== 'retraction') throw fail('unknown kind')
+  if (typeof row.quote !== 'string') throw fail('has no quote')
+  if (!Array.isArray(row.targets)) throw fail('targets is not a list')
+  const targets = (row.targets as unknown[]).map((t) => {
+    if (t === null || typeof t !== 'object') throw fail('a target is not an object')
+    const target = t as Row
+    const cls = target.class
+    if (typeof target.id !== 'string' || !isUuid(target.id)) throw fail('a target has no id')
+    if (typeof cls !== 'string' || !CLASSES.has(cls)) throw fail('a target has an unknown class')
+    if (typeof target.text !== 'string') throw fail('a target has no text')
+    return { id: target.id, class: cls as ItemClass, text: target.text, status: status(target.status, fail) }
+  })
+  const total = typeof row.total === 'string' ? Number(row.total) : row.total
+  if (typeof total !== 'number' || !Number.isSafeInteger(total) || total < 0) throw fail('has no total')
+  return {
+    id,
+    kind,
+    quote: row.quote,
+    question: optionalText(row, 'question'),
+    occurredAt: time(row.occurred_at, 'occurred_at', 'reviewCandidates', id),
+    sessionId: optionalText(row, 'session_id'),
+    projectId: optionalText(row, 'project_id'),
+    workspaceId: optionalText(row, 'workspace_id'),
+    subject: optionalText(row, 'subject'),
+    proposedScope: optionalText(row, 'proposed_scope'),
+    status: status(row.status, fail),
+    registerStatus: optionalText(row, 'register_status'),
+    restatedCount: integer(row, 'restated_count', id),
+    targets,
+    total,
   }
 }

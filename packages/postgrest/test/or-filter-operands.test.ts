@@ -6,7 +6,6 @@
 import { describe, it, expect } from 'vitest'
 import type { PostgrestClient } from '@supabase/postgrest-js'
 import { orIlikeOperand, orOperand } from '../src/search.js'
-import { PostgRestSemanticStorage } from '../src/semantic.js'
 import { PostgRestProceduralStorage } from '../src/procedural.js'
 
 type Call = [method: string, ...args: unknown[]]
@@ -100,13 +99,5 @@ describe('.or() call sites quote caller text', () => {
     await new PostgRestProceduralStorage(client).search(',', { limit: 3 })
 
     expect(orArgs(calls)).toEqual(['trigger_text.ilike."%,%",procedure.ilike."%,%"'])
-  })
-
-  it('semantic.getTopicTimeline emits quoted eq and ilike operands', async () => {
-    const { client, calls } = recordingClient()
-
-    await new PostgRestSemanticStorage(client).getTopicTimeline('deploy, rollback')
-
-    expect(orArgs(calls)).toEqual(['topic.eq."deploy, rollback",topic.ilike."%deploy, rollback%"'])
   })
 })

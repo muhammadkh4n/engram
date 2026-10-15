@@ -12,21 +12,16 @@
  * `packages/recall-engine/test/decorator.test.ts` instead).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
-import type { RecallResult } from '@engram-mem/core'
-import { vectorUnavailableNotice } from '@engram-mem/core'
 import {
   maybeWithRecallEngine,
-  formatRecallTimingLine,
-  recallOptionsFromArgs,
-  RECALL_CONVERSATION_ID_MAX,
   parseChatReasoningEnv,
   parseTimeZoneEnv,
   chatIntelligenceOptionsFromEnv,
   supersessionSettingsAtStartup,
-  runMemoryRecall,
-  RECALL_BUDGET_TOO_SMALL,
   parseSalienceThresholdEnv,
   parseExtractWindowsPerTickEnv,
   captureModelFromEnv,
@@ -35,10 +30,11 @@ import {
   consolidationAtStartup,
   consolidationEnabledFromEnv,
   extractionHeldFromEnv,
-  recallOutputPolicyAtStartup,
+  recallConfigAtStartup,
+  rerankerIdFromEnv,
   getMemory,
-  RECALL_TOKEN_BUDGET_MIN,
-  RECALL_TOKEN_BUDGET_MAX,
+  createEngramServer,
+  INSTRUCTIONS,
 } from '../src/server-core.js'
 
 const ENV_KEYS = ['ENGRAM_RECALL_ENGINE', 'ENGRAM_ENGINE_EXACT'] as const
@@ -130,196 +126,64 @@ describe('maybeWithRecallEngine', () => {
   })
 })
 
-describe('formatRecallTimingLine', () => {
-  it('prints stages in fixed order with integer ms and omits absent stages', () => {
-    const line = formatRecallTimingLine(
-      { format: 0.4, rerank: 812.6, search: 95.2, total: 1203.49, expand: 240.5, graph: 40.1 },
-      12,
-      4810,
-    )
-
-    expect(line).toBe('[recall] total=1203 expand=241 search=95 rerank=813 graph=40 items=12 chars=4810')
-  })
-
-  it('prints only total and counts when no optional stage ran', () => {
-    expect(formatRecallTimingLine({ total: 3.2 }, 0, 0)).toBe('[recall] total=3 items=0 chars=0')
-  })
-
-  it('marks a failed lexical leg as lexical=error', () => {
-    expect(formatRecallTimingLine({ total: 3.2, search: 1.1, lexicalError: 1 }, 2, 40)).toBe(
-      '[recall] total=3 search=1 lexical=error items=2 chars=40',
-    )
-  })
-
-  it('marks a recall without a query embedding as degraded=vector', () => {
-    expect(formatRecallTimingLine({ total: 3.2, search: 1.1, vectorError: 1 }, 2, 40)).toBe(
-      '[recall] total=3 search=1 degraded=vector items=2 chars=40',
-    )
-  })
-
-  it('prints pattern and mmr in order, then graph sub-stages sorted', () => {
-    const line = formatRecallTimingLine(
-      { 'graph.walk': 7.2, mmr: 3.4, graph: 20, total: 100, 'graph.community': 9.6, pattern: 1.2, rerank: 50 },
-      30,
-      900,
-    )
-
-    expect(line).toBe(
-      '[recall] total=100 pattern=1 mmr=3 rerank=50 graph=20 graph.community=10 graph.walk=7 items=30 chars=900',
-    )
-  })
-
-  it('appends the emitted count and estimated tokens after the pool count', () => {
-    const line = formatRecallTimingLine({ total: 10, mmr: 2 }, 30, 4000, { emitted: 12, tokens: 1000, truncated: false })
-
-    expect(line).toBe('[recall] total=10 mmr=2 items=30 chars=4000 emitted=12 tokens=1000')
-  })
-
-  it('marks a payload cut by the token budget with truncated=1', () => {
-    const line = formatRecallTimingLine({ total: 10 }, 30, 2000, { emitted: 5, tokens: 500, truncated: true })
-
-    expect(line).toBe('[recall] total=10 items=30 chars=2000 emitted=5 tokens=500 truncated=1')
-  })
-})
-
-describe('recallOptionsFromArgs', () => {
-  it('passes conversation_id through as the priming key, trimmed', () => {
-    expect(recallOptionsFromArgs({ query: 'q', conversation_id: '  conv-1  ' })).toEqual({ conversationKey: 'conv-1' })
-  })
-
-  it('accepts a conversation_id of exactly the maximum length', () => {
-    const id = 'c'.repeat(RECALL_CONVERSATION_ID_MAX)
-    expect(recallOptionsFromArgs({ query: 'q', conversation_id: id })).toEqual({ conversationKey: id })
-  })
-
-  it('never turns session_id into a priming key', () => {
-    expect(recallOptionsFromArgs({ query: 'q', session_id: 'sess-1' })).toEqual({})
-  })
-
-  it.each(['', '   ', 42, null, 'c'.repeat(RECALL_CONVERSATION_ID_MAX + 1)])(
-    'rejects conversation_id %j',
-    (value) => {
-      const opts = recallOptionsFromArgs({ query: 'q', conversation_id: value })
-
-      expect(opts).toHaveProperty('error')
-      expect((opts as { error: string }).error).toMatch(/conversation_id must be a non-blank string of at most 200 characters/)
-    },
-  )
-
-  it('trims the project id the way stored project tags were written', () => {
-    expect(recallOptionsFromArgs({ query: 'q', project_id: '  engram  ' })).toEqual({ projectId: 'engram' })
-  })
-
-  it('treats blank and shared aliases as no project', () => {
-    for (const alias of ['', '   ', 'global', 'none', 'shared', 'GLOBAL']) {
-      expect(recallOptionsFromArgs({ query: 'q', project_id: alias })).toEqual({})
-    }
-  })
-
-  it('ignores a non-string project id and passes synthesize through', () => {
-    expect(recallOptionsFromArgs({ query: 'q', project_id: 42, synthesize: true })).toEqual({ synthesize: true })
-  })
-
-  it('passes token_budget through as tokenBudget at both bounds', () => {
-    expect(recallOptionsFromArgs({ query: 'q', token_budget: RECALL_TOKEN_BUDGET_MIN })).toEqual({ tokenBudget: 256 })
-    expect(recallOptionsFromArgs({ query: 'q', token_budget: RECALL_TOKEN_BUDGET_MAX, project_id: 'engram' })).toEqual({
-      projectId: 'engram',
-      tokenBudget: 32000,
-    })
-  })
-
-  it.each([255, 32001, 0, -1, 1000.5, '2000', null, Number.NaN, Number.POSITIVE_INFINITY])(
-    'rejects token_budget %s',
-    (value) => {
-      const opts = recallOptionsFromArgs({ query: 'q', token_budget: value })
-
-      expect(opts).toHaveProperty('error')
-      expect((opts as { error: string }).error).toMatch(/token_budget must be an integer from 256 to 32000/)
-    },
-  )
-})
-
-describe('recallOutputPolicyAtStartup', () => {
+describe('recallConfigAtStartup', () => {
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('resolves the unbounded policy when nothing is set and logs numbers only', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const noLocalModel = async () => null
+  const TST_FLOORS = [
+    { reranker: 'onnx:tst-org/tst-reranker:q8', floor: 0.3, strong: 0.7, calibratedAt: '2026-02-03T04:00:00Z', dataset: 'tst', neededInSlate: 0, neededBelowFloor: 0 },
+  ]
 
-    expect(recallOutputPolicyAtStartup({})).toEqual({ faint: true })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=unbounded faint=on ' +
-        'relatedShare=0.3 itemMaxTokens=unbounded',
-    )
+  it('passes the three keys recall reads and logs that recall refuses without a floor', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const env = { ENGRAM_RECALL_LOG: '/tmp/tst-recall.jsonl', ENGRAM_RECALL_LOG_MAX_MB: '5', ENGRAM_RECALL_ENGINE: 'false', ENGRAM_CHAT_MODEL: 'tst-chat-model' }
+    expect(await recallConfigAtStartup(env, noLocalModel)).toEqual({ rerankerId: 'openai:tst-chat-model', calibration: null })
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall: reranker=openai:tst-chat-model not calibrated; /recall and memory_recall refuse')
   })
 
-  it('resolves and logs a configured policy', () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const env = { ENGRAM_RECALL_EMIT_K: '12', ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_FAINT: 'off' }
-
-    expect(recallOutputPolicyAtStartup(env)).toEqual({ emitK: 12, tokenBudget: 4000, faint: false })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=12 tokenBudget=4000 faint=off relatedShare=0.3 itemMaxTokens=1000',
-    )
-  })
-
-  it('logs a configured Related share and item cap', () => {
+  it('logs the floor and strong line of a calibrated reranker, and no secret', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const env = {
-      ENGRAM_RECALL_TOKEN_BUDGET: '4000',
-      ENGRAM_RECALL_RELATED_SHARE: '0.45',
-      ENGRAM_RECALL_ITEM_MAX_TOKENS: '700',
+      ENGRAM_RERANK_LOCAL: 'true',
+      ENGRAM_RERANK_LOCAL_MODEL: 'tst-org/tst-reranker',
+      ENGRAM_CHAT_API_KEY: 'tst-secret-chat-key-value',
     }
+    const config = await recallConfigAtStartup(env, async () => 'tst-org/tst-default', TST_FLOORS)
+    expect(config.rerankerId).toBe('onnx:tst-org/tst-reranker:q8')
+    expect(errorSpy).toHaveBeenCalledWith('[engram-mcp] recall: reranker=onnx:tst-org/tst-reranker:q8 floor=0.3 strong=0.7')
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('tst-secret-chat-key-value')
+  })
 
-    expect(recallOutputPolicyAtStartup(env)).toEqual({
-      tokenBudget: 4000,
-      relatedShare: 0.45,
-      itemMaxTokens: 700,
-      faint: true,
-    })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[engram-mcp] recall output policy: emitK=unbounded tokenBudget=4000 faint=on relatedShare=0.45 itemMaxTokens=700',
+  it('names the reranker the server will use: the local default model, or the chat model when the local package cannot load', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect((await recallConfigAtStartup({ ENGRAM_RERANK_LOCAL: 'true' }, async () => 'tst-org/tst-default')).rerankerId).toBe('onnx:tst-org/tst-default:q8')
+    expect((await recallConfigAtStartup({ ENGRAM_RERANK_LOCAL: 'true', ENGRAM_CHAT_MODEL: 'tst-chat-model' }, noLocalModel)).rerankerId).toBe('openai:tst-chat-model')
+    expect(rerankerIdFromEnv({ ENGRAM_RERANK_LOCAL: 'false' }, 'tst-chat-model', 'tst-org/tst-default')).toBe('openai:tst-chat-model')
+  })
+
+  it('fails on an ENGRAM_RECALL_* key nothing reads, naming it', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(recallConfigAtStartup({ ENGRAM_RECALL_FAN: 'on' }, noLocalModel)).rejects.toThrow(
+      'ENGRAM_RECALL_FAN is set, and nothing reads it: remove it from the server environment',
     )
+  })
+
+  it('names every unread key in one message, an empty value included', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(
+      recallConfigAtStartup({ ENGRAM_RECALL_TOKEN_BUDGET: '4000', ENGRAM_RECALL_TIMING: '', ENGRAM_RECALL_LOG: '/tmp/x' }, noLocalModel),
+    ).rejects.toThrow(/^ENGRAM_RECALL_TIMING, ENGRAM_RECALL_TOKEN_BUDGET are set, and nothing reads them/)
   })
 
   it.each([
-    ['ENGRAM_RECALL_RELATED_SHARE', '0.95'],
-    ['ENGRAM_RECALL_ITEM_MAX_TOKENS', 'lots'],
-  ])('throws at startup naming %s for %j', (name, value) => {
+    [{ ENGRAM_TIMEZONE: 'Asia/Nowhere_City' }, /ENGRAM_TIMEZONE/],
+    [{ ENGRAM_CHAT_PROVIDER_PREFS: '[1,2]' }, /ENGRAM_CHAT_PROVIDER_PREFS is not a valid JSON object/],
+    [{ ENGRAM_RECALL_LOG: '/tmp/x.jsonl', ENGRAM_RECALL_LOG_MAX_MB: '0' }, /ENGRAM_RECALL_LOG_MAX_MB/],
+  ])('fails on a bad value %j', async (env, message) => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    expect(() => recallOutputPolicyAtStartup({ [name]: value })).toThrow(name)
-  })
-
-  it('fails startup when the item cap is larger than the token budget', () => {
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    const env = { ENGRAM_RECALL_TOKEN_BUDGET: '1000', ENGRAM_RECALL_ITEM_MAX_TOKENS: '1200' }
-
-    expect(() => recallOutputPolicyAtStartup(env)).toThrow(
-      'ENGRAM_RECALL_ITEM_MAX_TOKENS (1200) must not exceed ENGRAM_RECALL_TOKEN_BUDGET (1000)',
-    )
-    expect(() => recallOutputPolicyAtStartup({ ...env, ENGRAM_RECALL_ITEM_MAX_TOKENS: '1000' })).not.toThrow()
-  })
-
-  it('fails startup on a malformed budget before any backend is contacted', async () => {
-    const saved = process.env['ENGRAM_RECALL_TOKEN_BUDGET']
-    process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = 'abc'
-    try {
-      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_TOKEN_BUDGET must be a positive integer, got "abc"/)
-    } finally {
-      if (saved === undefined) delete process.env['ENGRAM_RECALL_TOKEN_BUDGET']
-      else process.env['ENGRAM_RECALL_TOKEN_BUDGET'] = saved
-    }
-  })
-  it('fails startup on a malformed item cap before any backend is contacted', async () => {
-    const saved = process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
-    process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = '-5'
-    try {
-      await expect(getMemory()).rejects.toThrow(/ENGRAM_RECALL_ITEM_MAX_TOKENS must be a positive integer, got "-5"/)
-    } finally {
-      if (saved === undefined) delete process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS']
-      else process.env['ENGRAM_RECALL_ITEM_MAX_TOKENS'] = saved
-    }
+    await expect(recallConfigAtStartup(env, noLocalModel)).rejects.toThrow(message)
   })
 })
 
@@ -447,159 +311,6 @@ describe('parseTimeZoneEnv', () => {
       if (saved === undefined) delete process.env['ENGRAM_TIMEZONE']
       else process.env['ENGRAM_TIMEZONE'] = saved
     }
-  })
-})
-
-describe('runMemoryRecall', () => {
-  const REASON = '429 You exceeded your current quota, please check your plan and billing details.'
-  const NOTICE = vectorUnavailableNotice(REASON)
-  const MEMORY = {
-    id: 'ep-1', type: 'episode' as const, content: 'The deploy window is Thursday.', relevance: 0.4,
-    source: 'recall' as const, metadata: {},
-  }
-
-  function result(partial: Partial<RecallResult>): RecallResult {
-    return {
-      memories: [], associations: [], primed: [], estimatedTokens: 0, formatted: '',
-      intent: { type: 'QUESTION', confidence: 1, strategy: {} } as unknown as RecallResult['intent'],
-      ...partial,
-    }
-  }
-
-  function stubMemory(r: RecallResult) {
-    return { recall: async () => r }
-  }
-
-  it('passes the request time as now and keeps the argument-derived options', async () => {
-    const seen: unknown[] = []
-    const mem = { recall: async (_q: string, opts?: unknown) => { seen.push(opts); return result({}) } }
-    const before = Date.now()
-
-    await runMemoryRecall(mem, { query: 'what did we ship last week', project_id: 'engram', synthesize: true })
-
-    const after = Date.now()
-    expect(seen).toHaveLength(1)
-    const { now, ...rest } = seen[0] as { now: Date }
-    expect(now).toBeInstanceOf(Date)
-    expect(now.getTime()).toBeGreaterThanOrEqual(before)
-    expect(now.getTime()).toBeLessThanOrEqual(after)
-    expect(rest).toEqual({ projectId: 'engram', synthesize: true })
-  })
-
-  it('returns a degraded recall as normal content that leads with the notice', async () => {
-    const formatted = `${NOTICE}\n## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
-    const res = await runMemoryRecall(
-      stubMemory(result({ memories: [MEMORY], formatted, degraded: { vector: REASON } })),
-      { query: 'deploy window' },
-    )
-
-    expect(res.isError).toBeUndefined()
-    expect(res.content[0]?.text).toBe(formatted)
-    expect(res.content[0]?.text.split('\n')[0]).toBe(NOTICE)
-  })
-
-  it('says the keyword search found nothing when a degraded recall is empty', async () => {
-    const res = await runMemoryRecall(stubMemory(result({ degraded: { vector: REASON } })), { query: 'deploy window' })
-
-    expect(res.isError).toBeUndefined()
-    expect(res.content[0]?.text).toBe(`${NOTICE}\nNo keyword matches.`)
-  })
-
-  it('says the text match found nothing, not the keyword search, when keyword search failed', async () => {
-    const res = await runMemoryRecall(
-      stubMemory(result({ degraded: { vector: REASON, lexical: 'canceling statement due to statement timeout' } })),
-      { query: 'deploy window' },
-    )
-    const text = res.content[0]?.text ?? ''
-
-    expect(res.isError).toBeUndefined()
-    expect(text).not.toContain('No keyword matches.')
-    expect(text).toBe(
-      `> Semantic and keyword search unavailable (semantic: ${REASON}; keyword: canceling statement due to statement timeout); these results come from a plain text match only.\nNo text matches.`,
-    )
-  })
-
-  it('keeps the plain empty answer for a healthy recall', async () => {
-    const res = await runMemoryRecall(stubMemory(result({})), { query: 'deploy window' })
-
-    expect(res).toEqual({ content: [{ type: 'text', text: 'No relevant memories found.' }] })
-  })
-
-  it('says the budget is too small, not that nothing matched, when memories matched but none fit', async () => {
-    const res = await runMemoryRecall(stubMemory(result({ memories: [MEMORY], formatted: '' })), { query: 'deploy window' })
-
-    expect(res).toEqual({ content: [{ type: 'text', text: RECALL_BUDGET_TOO_SMALL }] })
-    expect(RECALL_BUDGET_TOO_SMALL).toContain('token budget is too small')
-  })
-
-  it('keeps the degraded notice ahead of the budget-too-small answer', async () => {
-    const res = await runMemoryRecall(
-      stubMemory(result({ memories: [MEMORY], formatted: '', degraded: { vector: REASON } })),
-      { query: 'deploy window' },
-    )
-
-    expect(res.content[0]?.text).toBe(`${NOTICE}\n${RECALL_BUDGET_TOO_SMALL}`)
-  })
-
-  it('returns a healthy payload unchanged', async () => {
-    const formatted = `## Engram — Recalled Conversation Memory\n\n- [episode] ${MEMORY.content}`
-    const res = await runMemoryRecall(stubMemory(result({ memories: [MEMORY], formatted })), { query: 'deploy window' })
-
-    expect(res).toEqual({ content: [{ type: 'text', text: formatted }] })
-  })
-
-  it('rejects an empty query as a tool error', async () => {
-    const res = await runMemoryRecall(stubMemory(result({})), { query: '  ' })
-
-    expect(res).toEqual({ content: [{ type: 'text', text: 'Error: query must be a non-empty string' }], isError: true })
-  })
-
-  function capturingMemory() {
-    const calls: Array<{ query: string; opts: unknown }> = []
-    return {
-      calls,
-      mem: {
-        recall: async (query: string, opts?: unknown) => {
-          calls.push({ query, opts })
-          return result({})
-        },
-      },
-    }
-  }
-
-  it('forwards conversation_id to the recall as conversationKey', async () => {
-    const { calls, mem } = capturingMemory()
-
-    await runMemoryRecall(mem, { query: 'deploy window', conversation_id: 'conv-1', project_id: 'engram' })
-
-    expect(calls).toEqual([{ query: 'deploy window', opts: { projectId: 'engram', conversationKey: 'conv-1', now: expect.any(Date) } }])
-  })
-
-  it('sends no conversationKey without conversation_id, so the recall gets no priming', async () => {
-    const { calls, mem } = capturingMemory()
-
-    await runMemoryRecall(mem, { query: 'deploy window' })
-
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.opts).not.toHaveProperty('conversationKey')
-  })
-
-  it('leaves session_id out of the recall options, as before', async () => {
-    const { calls, mem } = capturingMemory()
-
-    await runMemoryRecall(mem, { query: 'deploy window', session_id: 'sess-1' })
-
-    expect(calls).toEqual([{ query: 'deploy window', opts: { now: expect.any(Date) } }])
-  })
-
-  it('rejects a blank conversation_id as a tool error without recalling', async () => {
-    const { calls, mem } = capturingMemory()
-
-    const res = await runMemoryRecall(mem, { query: 'deploy window', conversation_id: '  ' })
-
-    expect(res.isError).toBe(true)
-    expect(res.content[0]?.text).toMatch(/^Error: conversation_id must be a non-blank string/)
-    expect(calls).toHaveLength(0)
   })
 })
 
@@ -782,5 +493,89 @@ describe('consolidationAtStartup', () => {
       if (saved === undefined) delete process.env.ENGRAM_CONSOLIDATION
       else process.env.ENGRAM_CONSOLIDATION = saved
     }
+  })
+})
+
+describe('the MCP server', () => {
+  async function connect(): Promise<Client> {
+    const server = createEngramServer()
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverSide)
+    const client = new Client({ name: 'tst-client', version: '0.0.0' })
+    await client.connect(clientSide)
+    return client
+  }
+
+  it('lists exactly the read tools over typed items and the four item-action tools', async () => {
+    const client = await connect()
+    const names = (await client.listTools()).tools.map((t) => t.name).sort()
+    expect(names).toEqual([
+      'memory_capture_status',
+      'memory_forget',
+      'memory_get',
+      'memory_ingest',
+      'memory_overview',
+      'memory_recall',
+      'memory_retire',
+      'memory_timeline',
+      'memory_unretire',
+    ])
+    await client.close()
+  })
+
+  it('lists neither memory_bridges nor memory_consolidation_status, and answers them as unknown tools', async () => {
+    const client = await connect()
+    const names = (await client.listTools()).tools.map((t) => t.name)
+    expect(names).not.toContain('memory_bridges')
+    expect(names).not.toContain('memory_consolidation_status')
+    for (const name of ['memory_bridges', 'memory_consolidation_status']) {
+      expect(await client.callTool({ name, arguments: {} })).toEqual({
+        content: [{ type: 'text', text: `Error: unknown tool "${name}"` }],
+        isError: true,
+      })
+    }
+    await client.close()
+  })
+
+  it('serves instructions that describe typed memory items, word for word', async () => {
+    const expected = [
+      "Engram is MK's memory store. It holds typed items, each with who said it, when, and where it came from:",
+      "- MK's own words: utterances (speaker mk) and mk_statement items (an exact quote with the question it answered);",
+      "- durable records: commits, plan decisions, register entries, vault document sections;",
+      "- assistant observations, labelled with trust and date;",
+      "- one record per session.",
+      "",
+      "Memory reaches a Claude Code session through hooks: standing rulings by scope, and a briefing on each prompt. Call memory_recall when a task needs memory the briefing did not cover. Its result lands in the caller's context, so call it from a subagent where you can. memory_get returns full records by id.",
+      "",
+      "Reading results:",
+      "- trust 0 is MK's own words: quote them exactly; never restate them as a rule of your own.",
+      "- An item with status superseded or retired is not current. A superseded item is shown only next to its successor.",
+      "- An observation states what an assistant found on its date. Check live state before relying on it, above all when it is flagged verify_live.",
+      "- Plan state lives in the plan's LEDGER.md, not in memory.",
+      "",
+      "Writing: memory_ingest stores one typed item. memory_retire and memory_forget take explicit ids and a reason; nothing is removed in bulk.",
+    ].join('\n')
+    expect(INSTRUCTIONS).toBe(expected)
+    const client = await connect()
+    expect(client.getInstructions()).toBe(expected)
+    await client.close()
+  })
+
+  it('tells no client to always recall or check memory first, and names only registered tools', async () => {
+    expect(INSTRUCTIONS).not.toMatch(/ALWAYS|CHECK MEMORY FIRST/)
+    const client = await connect()
+    const names = new Set((await client.listTools()).tools.map((t) => t.name))
+    const mentioned = [...new Set(INSTRUCTIONS.match(/\bmemory_[a-z_]+\b/g) ?? [])]
+    expect(mentioned.sort()).toEqual(['memory_forget', 'memory_get', 'memory_ingest', 'memory_recall', 'memory_retire'])
+    for (const name of mentioned) expect(names.has(name), name).toBe(true)
+    await client.close()
+  })
+
+  it('lists memory_forget with ids and reason required and no query', async () => {
+    const client = await connect()
+    const forget = (await client.listTools()).tools.find((t) => t.name === 'memory_forget')!
+    expect(forget.inputSchema.required).toEqual(['ids', 'reason'])
+    expect(Object.keys(forget.inputSchema.properties ?? {}).sort()).toEqual(['ids', 'reason'])
+    await client.close()
   })
 })

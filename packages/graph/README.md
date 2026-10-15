@@ -119,18 +119,9 @@ Result: **Context-aware retrieval** that finds related memories you didn't expli
 
 ### Community Detection
 
-The graph uses **Louvain community detection** to cluster related memories:
-
-```typescript
-const communities = await memory.getCommunitySummaries()
-// Returns: [
-//   { label: 'Authentication Systems', memberCount: 42, topTopics: ['OAuth', 'JWT', 'OIDC'] },
-//   { label: 'Deployment Infrastructure', memberCount: 67, topTopics: ['AWS', 'Kubernetes', 'CI/CD'] },
-//   ...
-// ]
-```
-
-Useful for understanding what knowledge domains you've built up.
+The dream cycle clusters related memories with **Louvain community detection** and stores each community's
+label, size and top topics, entities and people on the graph (and in the storage adapter's community cache).
+Recall reads them through `NeuralGraph.queryCommunities`.
 
 ### Pattern Completion
 
@@ -214,15 +205,6 @@ await sess.ingest({ role: 'user', content: 'I prefer tabs over spaces' })
 
 // Graph isolation: this user's memories form a subgraph
 const result = await sess.recall('code style')
-```
-
-### Cross-Project Bridges
-
-Find shared entities between projects:
-
-```typescript
-const bridges = await memory.findBridges('project-a', 'project-b')
-// Returns people/entities that appear in both projects
 ```
 
 ## Types Reference

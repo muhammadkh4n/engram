@@ -195,11 +195,6 @@ export interface SemanticStorage {
    * NULL valid_from = always valid. NULL valid_until = still valid.
    */
   searchAtTime(query: string, asOf: Date, opts?: Omit<SearchOptions, 'beforeDate'>): Promise<SearchResult<SemanticMemory>[]>
-  /**
-   * Return all semantic memories for a topic, ordered by valid_from ASC.
-   * Includes superseded memories for full timeline reconstruction.
-   */
-  getTopicTimeline(topic: string, opts?: { fromDate?: Date; toDate?: Date }): Promise<SemanticMemory[]>
 }
 
 export interface ProceduralStorage {
@@ -327,7 +322,7 @@ export interface StorageAdapter {
   /** Optional consolidation run tracking. When present, auto-consolidation logs results. */
   consolidationRuns?: ConsolidationRunStorage
 
-  // Wave 5: community summary SQL cache (optional — used by MCP for fast queries)
+  // Wave 5: community summary SQL cache (optional), written by the dream cycle
   saveCommunityCache?(data: {
     communityId: string
     projectId: string | null
@@ -338,21 +333,6 @@ export interface StorageAdapter {
     topPersons: string[]
     dominantEmotion: string | null
   }): Promise<void>
-
-  getCommunitySummaries?(opts?: {
-    projectId?: string
-    limit?: number
-  }): Promise<Array<{
-    communityId: string
-    projectId: string | null
-    label: string
-    memberCount: number
-    topEntities: string[]
-    topTopics: string[]
-    topPersons: string[]
-    dominantEmotion: string | null
-    generatedAt: string
-  }>>
 
   /**
    * Stream every embedded, live row of `opts.tier` in ascending
