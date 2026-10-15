@@ -33,6 +33,11 @@ interface Allowed {
 
 const ALLOWED: readonly Allowed[] = [
   {
+    file: 'packages/postgrest/src/recall-store.ts',
+    line: 'wanted.slice(i, i + LEGACY_ID_BATCH)',
+    reason: 'cuts an array of ids into batches, not a string',
+  },
+  {
     file: 'packages/core/src/extraction/decide.ts',
     line: 'read.candidates.slice(0, DECISION_CANDIDATES_MAX)',
     reason: 'cuts an array of candidates, not a string',
