@@ -262,6 +262,18 @@ export interface CompleteJsonResult {
   model: string
 }
 
+/**
+ * Per-call options a reranker may honour. A queueing reranker runs calls by
+ * `priority` (lower first; a clock reading, so older requests first), drops a
+ * call's remaining work when `signal` aborts, and reports the call's queue
+ * wait, run time and pass count through `onSettled` exactly once.
+ */
+export interface RerankOptions {
+  priority?: number
+  signal?: AbortSignal
+  onSettled?: (stats: { waitMs: number; runMs: number; passes: number }) => void
+}
+
 export interface IntelligenceAdapter {
   embed?(text: string): Promise<number[]>
   embedBatch?(texts: string[]): Promise<number[][]>
@@ -364,6 +376,7 @@ export interface IntelligenceAdapter {
   rerank?(
     query: string,
     documents: ReadonlyArray<{ id: string; content: string }>,
+    options?: RerankOptions,
   ): Promise<Array<{ id: string; score: number }>>
   /**
    * Synthesis evidence selection: given a question and numbered evidence

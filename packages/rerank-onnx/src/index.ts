@@ -18,6 +18,16 @@ import {
   type PreTrainedTokenizer,
   type PreTrainedModel,
 } from '@huggingface/transformers'
+import { createRerankScheduler, type RerankSubmitOptions } from './scheduler.js'
+
+export {
+  createRerankScheduler,
+  type RerankScheduler,
+  type RerankSchedulerOptions,
+  type RerankSubmitOptions,
+  type RerankJobStats,
+  type RerankPass,
+} from './scheduler.js'
 
 export type OnnxDType = 'fp32' | 'fp16' | 'q8' | 'q4'
 
@@ -62,9 +72,16 @@ export interface RerankResult {
 }
 
 export interface OnnxReranker {
+  /**
+   * Scores each document against the query, in document order. Calls share one
+   * queue: `priority` orders them (lower first, default the clock at submit),
+   * `signal` drops a call's remaining passes, and `onSettled` reports its wait,
+   * run time and pass count once.
+   */
   rerank(
     query: string,
     documents: ReadonlyArray<{ id: string; content: string }>,
+    options?: RerankSubmitOptions,
   ): Promise<RerankResult[]>
   /** Whether the model has been loaded. */
   readonly isReady: boolean
@@ -151,18 +168,23 @@ export function createOnnxReranker(options: OnnxRerankerOptions = {}): OnnxReran
     return sigmoid(Number(logits.data[0]))
   }
 
+  // ONNX Runtime already spreads one pass across its intra-op threads, so
+  // concurrent passes only contend for them and every call ends as late as all
+  // of them together. Each call is submitted as one job: passes run one at a
+  // time, oldest call first, so an older request's queued passes end first.
+  const scheduler = createRerankScheduler()
+
   async function rerank(
     query: string,
     documents: ReadonlyArray<{ id: string; content: string }>,
+    callOptions: RerankSubmitOptions = {},
   ): Promise<RerankResult[]> {
     const candidates = documents.slice(0, maxCandidates)
-    const results: RerankResult[] = []
-    // Sequential on purpose: ONNX Runtime already spreads one pass across
-    // its intra-op threads, so concurrent passes only contend for them.
-    for (const candidate of candidates) {
-      results.push({ id: candidate.id, score: await scorePair(query, candidate.content) })
-    }
-    return results
+    const scores = await scheduler.submit(
+      candidates.map((candidate) => () => scorePair(query, candidate.content)),
+      callOptions,
+    )
+    return candidates.map((candidate, i) => ({ id: candidate.id, score: scores[i]! }))
   }
 
   return {

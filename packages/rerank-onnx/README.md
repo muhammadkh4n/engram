@@ -51,10 +51,22 @@ const memory = createMemory({
   storage,
   intelligence: {
     ...openai,
-    rerank: (query, docs) => onnx.rerank(query, docs),
+    rerank: (query, docs, options) => onnx.rerank(query, docs, options),
   },
 })
 ```
+
+### One queue per reranker
+
+Every pair is scored in its own forward pass, and ONNX Runtime already spreads one pass across all its intra-op threads, so passes from concurrent calls would only contend for the same cores and every call would finish as late as all of them together. Each `createOnnxReranker()` instance therefore runs one pass at a time across all its calls. A call is submitted as one job, and after each pass the next one comes from the pending call with the lowest priority (ties in submit order). Scores are unchanged: only when a pass runs changes.
+
+`rerank(query, docs, options?)` takes:
+
+- `priority`: lower runs first. It is a `performance.now()` reading, and a call without one gets the clock at submit (first come, first served). Give every call of one request the request's start time, and an older request's queued passes run before a newer request's.
+- `signal`: an `AbortSignal`. Aborted before the call, it rejects at once and scores nothing. Aborted while the call waits, the call leaves the queue. Aborted while one of its passes runs, that pass finishes, its score is dropped and the call rejects. The rejection is `signal.reason` when it is an `Error`, otherwise an `AbortError`.
+- `onSettled({ waitMs, runMs, passes })`: called once per call, before its promise settles. `waitMs` counts only time spent behind other calls' passes.
+
+A failing pass rejects its call and no further pass of that call starts. A pass that never settles (a first model download that hangs) stalls every call queued behind it.
 
 ## Options
 
