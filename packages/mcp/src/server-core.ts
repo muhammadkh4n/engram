@@ -41,7 +41,7 @@ import {
   type OpenAIIntelligenceOptions,
 } from '@engram-mem/openai'
 import { FLOOR_CALIBRATIONS, chatStepVersion, defaultSecretRegistry, embeddingStepVersion, floorFor } from '@engram-mem/core'
-import type { FloorCalibration, ItemIngestStore, ItemStore, Memory, RecallDeps } from '@engram-mem/core'
+import type { FloorCalibration, ItemIngestStore, ItemStore, Memory, RecallDeps, RecallReranker } from '@engram-mem/core'
 import { tryCreateGraph } from './graph-helper.js'
 import { MEMORY_INGEST_TOOL, runMemoryIngestTyped } from './item-tools.js'
 import {
@@ -156,7 +156,7 @@ export async function maybeWithLocalRerank(
     const modelLabel = model ?? `${mod.DEFAULT_RERANK_MODEL} (default)`
     console.log(`[engram-mcp] ENGRAM_RERANK_LOCAL=true — using ${modelLabel}`)
     return {
-      intelligence: { ...intelligence, rerank: (query, documents) => onnx.rerank(query, documents) },
+      intelligence: { ...intelligence, rerank: (query, documents, options) => onnx.rerank(query, documents, options) },
       rerankerId: rerankerIdFromEnv(process.env, chatModel, mod.DEFAULT_RERANK_MODEL),
     }
   } catch (err) {
@@ -551,7 +551,7 @@ async function buildMemoryStack(): Promise<MemoryStack> {
   const supersession = supersessionSettingsAtStartup()
   const consolidation = consolidationEnabledFromEnv()
   const recallLog = recallLogFromEnv()
-  if (recallLog) console.error(`[engram-mcp] recall log: appending one line per recall to ${recallLog.path}`)
+  if (recallLog) console.error(`[engram-mcp] recall log: appending one line per answered recall to ${recallLog.path}`)
 
   const supabaseUrl = requireEnv('SUPABASE_URL')
   const supabaseKey = requireEnv('SUPABASE_KEY')
@@ -639,6 +639,17 @@ export const getRecallStore = sharedInit(async (): Promise<PostgRestRecallStore>
   return new PostgRestRecallStore({ url: requireEnv('SUPABASE_URL'), key: requireEnv('SUPABASE_KEY') })
 })
 
+/**
+ * The recall pipeline's view of an intelligence adapter's reranker, bound to
+ * that adapter, forwarding the per-call options (priority, signal, onSettled)
+ * so a queueing reranker sees them.
+ */
+export function recallRerankerFrom(intelligence: IntelligenceAdapter, id: string): RecallReranker {
+  const { rerank } = intelligence
+  if (!rerank) throw new Error('recall needs an intelligence adapter that reranks')
+  return { id, rerank: (query, documents, options) => rerank.call(intelligence, query, documents, options) }
+}
+
 export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   const stack = await getMemoryStack()
   const { intelligence } = stack
@@ -648,7 +659,7 @@ export const getRecallDeps = sharedInit(async (): Promise<RecallDeps> => {
   return {
     store,
     embed: (text) => embed.call(intelligence, text),
-    rerank: { id: stack.rerankerId, rerank: (query, documents) => rerank.call(intelligence, query, documents) },
+    rerank: recallRerankerFrom(intelligence, stack.rerankerId),
     ...(expandQuery ? { expand: (query: string, opts: { now: Date; temperature: number }) => expandQuery.call(intelligence, query, opts) } : {}),
     ...(generateHypotheticalDoc
       ? { hyde: (query: string, opts: { temperature: number }) => generateHypotheticalDoc.call(intelligence, query, opts) }

@@ -4,7 +4,8 @@
  * The request is checked whole before any store call: an unknown key, a wrong
  * type, a value out of range or a channel rule is a 400, never clamped. A
  * reranker with no measured floor is a 503; any other failure a 500 whose
- * cause goes to stderr, scrubbed, and never to the client.
+ * cause goes to stderr, scrubbed, and never to the client. A client that
+ * leaves before the answer stops the recall: 499, and no log line.
  */
 import { createHash } from 'node:crypto'
 import {
@@ -13,6 +14,7 @@ import {
   DEFAULT_MAX_CHARS,
   ITEM_CLASSES,
   RECALL_CHANNELS,
+  RecallAbortedError,
   RecallNotCalibratedError,
   RecallRequestError,
   effectiveFilters,
@@ -393,35 +395,64 @@ export type RecallOutcome =
   | { kind: 'ok'; response: RecallResponse }
   | { kind: 'not_calibrated' | 'bad_request'; message: string }
   | { kind: 'failed' }
+  | { kind: 'aborted' }
+
+async function scrubbedCause(err: unknown): Promise<string> {
+  const message = err instanceof Error ? err.message : String(err)
+  const { text } = await scrubSecrets(message)
+  return text
+}
 
 /**
- * Runs one checked request and writes its log line. A reranker with no floor
- * and a request recall itself refuses come back with their message; any
- * other failure is logged to stderr, scrubbed, as `<label> failed: <cause>`,
- * and comes back without it, so no cause reaches a caller.
+ * Runs one checked request and writes its log line, for an answered recall
+ * only. A reranker with no floor and a request recall itself refuses come
+ * back with their message; any other failure is logged to stderr, scrubbed,
+ * as `<label> failed: <cause>`, and comes back without it, so no cause
+ * reaches a caller.
+ *
+ * Once `signal` has aborted the caller is gone, so whatever the run did, the
+ * outcome is `aborted` and no log line is written: the recall log holds only
+ * answered recalls. stderr gets `<label> aborted at <stage> after <ms> ms
+ * (queue <ms> ms)`, plus `: <cause>`, scrubbed, when the run failed with
+ * something other than the stop itself (stage `unknown`). A run that finished
+ * just as the caller left stops at `logged`.
  */
-export async function executeRecall(deps: RecallRouteDeps, request: RecallRequest, label: string): Promise<RecallOutcome> {
+export async function executeRecall(
+  deps: RecallRouteDeps,
+  request: RecallRequest,
+  label: string,
+  signal?: AbortSignal,
+): Promise<RecallOutcome> {
   const now = deps.now ?? (() => new Date())
+  const started = performance.now()
+  const aborted = (stage: string, queueMs: number, cause?: string): RecallOutcome => {
+    const ms = Math.round(performance.now() - started)
+    deps.logError(`${label} aborted at ${stage} after ${ms} ms (queue ${Math.round(queueMs)} ms)${cause === undefined ? '' : `: ${cause}`}`)
+    return { kind: 'aborted' }
+  }
   try {
     const recallDeps = await deps.getDeps()
-    const { response, trace } = await runRecall(recallDeps, request)
+    const { response, trace } = await runRecall(recallDeps, request, { signal })
+    if (signal?.aborted) return aborted('logged', trace.timings.queue)
     if (deps.log !== null) deps.log.recordLine(buildRecallLogLineV2(request, response, trace, deps.server, now()))
     return { kind: 'ok', response }
   } catch (err) {
+    if (signal?.aborted) {
+      if (err instanceof RecallAbortedError) return aborted(err.stage, err.queueMs)
+      return aborted('unknown', 0, await scrubbedCause(err))
+    }
     if (err instanceof RecallNotCalibratedError) return { kind: 'not_calibrated', message: err.message }
     if (err instanceof RecallRequestError) return { kind: 'bad_request', message: err.message }
-    const message = err instanceof Error ? err.message : String(err)
-    const { text } = await scrubSecrets(message)
-    deps.logError(`${label} failed: ${text}`)
+    deps.logError(`${label} failed: ${await scrubbedCause(err)}`)
     return { kind: 'failed' }
   }
 }
 
-export async function runRecallRequest(deps: RecallRouteDeps, body: unknown): Promise<RecallRouteResponse> {
+export async function runRecallRequest(deps: RecallRouteDeps, body: unknown, signal?: AbortSignal): Promise<RecallRouteResponse> {
   const now = deps.now ?? (() => new Date())
   const parsed = parseRecallRequest(body, now())
   if ('error' in parsed) return { status: 400, body: { error: parsed.error } }
-  const outcome = await executeRecall(deps, parsed.value, '[engram-mcp-http] recall')
+  const outcome = await executeRecall(deps, parsed.value, '[engram-mcp-http] recall', signal)
   switch (outcome.kind) {
     case 'ok':
       return { status: 200, body: wireResponse(outcome.response) }
@@ -431,5 +462,8 @@ export async function runRecallRequest(deps: RecallRouteDeps, body: unknown): Pr
       return { status: 400, body: { error: outcome.message } }
     case 'failed':
       return { status: 500, body: { error: RECALL_FAILED_MESSAGE } }
+    case 'aborted':
+      // Never delivered: the client has gone. 499 is the nginx convention for it.
+      return { status: 499, body: { error: 'client closed request' } }
   }
 }

@@ -10,7 +10,7 @@ import { parseProjectRegistry, type ProjectRegistry } from '../src/capture-event
 import type { CaptureEventsRouteDeps } from '../src/capture-events/route.js'
 import type { DocumentsRouteDeps } from '../src/documents-route.js'
 import { RECEIVED_AT, envelope, validEvent } from './capture-events/fixtures.js'
-import type { RecallDeps, ReviewCandidateRow } from '@engram-mem/core'
+import type { RecallDeps, RerankOptions, ReviewCandidateRow } from '@engram-mem/core'
 import type { RecallRouteDeps } from '../src/recall-route.js'
 import { TST_ITEM_ID, stubRecallDeps } from './recall-fixtures.js'
 
@@ -39,6 +39,8 @@ interface Harness {
   recordLine: ReturnType<typeof vi.fn>
   reviewCandidates: ReturnType<typeof vi.fn>
   candidatesLogError: ReturnType<typeof vi.fn>
+  /** Server responses that emitted 'close' so far. */
+  responsesClosed: () => number
   port: number
   close: () => Promise<void>
 }
@@ -119,6 +121,12 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
       logError,
     }),
   )
+  let responsesClosed = 0
+  server.on('request', (_req: http.IncomingMessage, res: http.ServerResponse) => {
+    res.once('close', () => {
+      responsesClosed++
+    })
+  })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
@@ -132,16 +140,18 @@ async function startServer(opts: ServerOptions = {}): Promise<Harness> {
     recordLine,
     reviewCandidates,
     candidatesLogError,
+    responsesClosed: () => responsesClosed,
     port,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }
 }
 
-function post(url: string, body: string, headers: Record<string, string> = {}): Promise<Response> {
+function post(url: string, body: string, headers: Record<string, string> = {}, signal?: AbortSignal): Promise<Response> {
   return fetch(url, {
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', ...headers },
     body,
+    ...(signal ? { signal } : {}),
   })
 }
 
@@ -529,6 +539,80 @@ describe('POST /recall', () => {
     const logged = String(h.recallLogError.mock.calls[0]?.[0])
     expect(logged).toContain('recall failed: store unreachable')
     expect(logged).not.toContain('Zq7madeupNotReal91xAbc')
+  })
+
+  /** Recall deps whose reranker hands its call options to the test and waits for the signal to abort. */
+  function waitingReranker() {
+    const seen: { options?: RerankOptions } = {}
+    let reached: () => void = () => {}
+    const reachedRerank = new Promise<void>((resolve) => {
+      reached = resolve
+    })
+    const stub = stubRecallDeps()
+    const recallDeps: RecallDeps = {
+      ...stub,
+      rerank: {
+        id: stub.rerank.id,
+        rerank: (_q, docs, options) => {
+          seen.options = options
+          reached()
+          return new Promise((resolve, reject) => {
+            const signal = options?.signal
+            if (!signal) return resolve(docs.map((d) => ({ id: d.id, score: 0.8 })))
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+          })
+        },
+      },
+    }
+    return { seen, reachedRerank, recallDeps }
+  }
+
+  it('aborts the run when the client leaves, and writes no log line', async () => {
+    const { seen, reachedRerank, recallDeps } = waitingReranker()
+    await h.close()
+    h = await startServer({ recallDeps: async () => recallDeps })
+    const client = new AbortController()
+
+    const request = post(`${h.url}/recall`, body, {}, client.signal).catch((e: unknown) => e)
+    await reachedRerank
+    client.abort()
+    await request
+
+    await vi.waitFor(() => {
+      expect(h.recallLogError).toHaveBeenCalledWith(expect.stringMatching(/^\[engram-mcp-http\] recall aborted at slate-rerank after \d+ ms/))
+    })
+    expect(seen.options?.signal?.aborted).toBe(true)
+    expect(h.recordLine).not.toHaveBeenCalled()
+  })
+
+  it('leaves the signal of an answered request unaborted after the response closes', async () => {
+    const stub = stubRecallDeps()
+    const seen: { options?: RerankOptions } = {}
+    await h.close()
+    h = await startServer({
+      recallDeps: async () => ({
+        ...stub,
+        rerank: {
+          id: stub.rerank.id,
+          rerank: async (q, docs, options) => {
+            seen.options = options
+            return stub.rerank.rerank(q, docs)
+          },
+        },
+      }),
+    })
+
+    const res = await post(`${h.url}/recall`, body)
+    expect(res.status).toBe(200)
+    await res.json()
+    await vi.waitFor(() => {
+      expect(h.responsesClosed()).toBeGreaterThanOrEqual(1)
+    })
+
+    expect(seen.options?.signal).toBeDefined()
+    expect(seen.options?.signal?.aborted).toBe(false)
+    expect(h.recordLine).toHaveBeenCalledTimes(1)
+    expect(h.recallLogError).not.toHaveBeenCalled()
   })
 })
 

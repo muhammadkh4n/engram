@@ -355,7 +355,8 @@ interface JsonRoute {
   name: string
   maxBytes: number
   failedMessage: string
-  run(body: unknown): Promise<JsonRouteResponse>
+  /** `signal` aborts when the client goes away before the response is written. */
+  run(body: unknown, signal: AbortSignal): Promise<JsonRouteResponse>
 }
 
 /**
@@ -401,7 +402,15 @@ async function handleJsonRoute(
     sendJson(res, { status: 400, body: { error: 'the body is not valid JSON' } })
     return
   }
-  sendJson(res, await route.run(parsed))
+  // 'close' also fires after a response is written, so only a close before the
+  // response finished means the client left. One that left during the body
+  // read has already closed, so the check after registering catches it.
+  const controller = new AbortController()
+  res.once('close', () => {
+    if (!res.writableFinished) controller.abort()
+  })
+  if (res.destroyed) controller.abort()
+  sendJson(res, await route.run(parsed, controller.signal))
 }
 
 async function route(
@@ -440,7 +449,7 @@ async function route(
       name: 'recall',
       maxBytes: handlers.recallBodyMaxBytes ?? RECALL_BODY_MAX_BYTES,
       failedMessage: RECALL_FAILED_MESSAGE,
-      run: (body) => runRecallRequest(handlers.recall, body),
+      run: (body, signal) => runRecallRequest(handlers.recall, body, signal),
     }
     await handleJsonRoute(req, res, config, route, logError)
     return

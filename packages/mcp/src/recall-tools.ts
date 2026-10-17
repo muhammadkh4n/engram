@@ -23,6 +23,7 @@ import { PROJECT_ID, executeRecall, parseRecallRequest, type ParsedRecall, type 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: true }
 
 export const RECALL_TOOL_FAILED_MESSAGE = 'recall failed'
+export const RECALL_TOOL_CANCELLED_MESSAGE = 'recall cancelled'
 export const NO_RECALL_ITEMS = 'No memory item passed the relevance floor for this query.'
 const HEADER_QUERY_CHARS = 120
 
@@ -268,6 +269,8 @@ export async function runMemoryRecall(deps: RecallRouteDeps, args: Record<string
       return toolError(outcome.message)
     case 'failed':
       return toolError(RECALL_TOOL_FAILED_MESSAGE)
+    case 'aborted':
+      return toolError(RECALL_TOOL_CANCELLED_MESSAGE)
   }
 }
 
@@ -606,6 +609,7 @@ export async function runMemoryTimeline(deps: TimelineToolDeps, args: Record<str
   }
   const outcome = await executeRecall(deps.recall, request, '[engram-mcp] memory_timeline')
   if (outcome.kind === 'failed') return toolError(RECALL_TOOL_FAILED_MESSAGE)
+  if (outcome.kind === 'aborted') return toolError(RECALL_TOOL_CANCELLED_MESSAGE)
   if (outcome.kind !== 'ok') return toolError(outcome.message)
   const { response } = outcome
   const entries = response.items
