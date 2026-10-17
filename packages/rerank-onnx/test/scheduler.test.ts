@@ -42,6 +42,7 @@ class Lab {
   pass(label: string, score: number): RerankPass {
     return () => {
       this.called.push(label)
+      this.events.push(`call:${label}`)
       this.startedAt.set(label, this.t)
       return new Promise<number>((resolve, reject) => {
         this.live.push({ label, score, resolve, reject })
@@ -51,7 +52,7 @@ class Lab {
   }
 
   passes(name: string, n: number): RerankPass[] {
-    return Array.from({ length: n }, (_, i) => this.pass(`${name}${i + 1}`, (i + 1) / 10))
+    return Array.from({ length: n }, (_, i) => this.pass(`${name}:${i + 1}`, (i + 1) / 10))
   }
 
   submit(name: string, n: number, opts: RerankSubmitOptions = {}): Job {
@@ -140,7 +141,7 @@ describe('rerank scheduler: order', () => {
 
     await lab.drain()
 
-    expect(lab.called).toEqual(['A1', 'B1', 'C1', 'A2'])
+    expect(lab.called).toEqual(['A:1', 'B:1', 'C:1', 'A:2'])
     expect(await resolution(a)).toEqual([0.1, 0.2])
     expect(await resolution(b)).toEqual([0.1])
     expect(await resolution(c)).toEqual([0.1])
@@ -158,7 +159,7 @@ describe('rerank scheduler: order', () => {
 
     await lab.drain()
 
-    expect(lab.called).toEqual(['X1', 'X2', 'Y1', 'Y2', 'Z1'])
+    expect(lab.called).toEqual(['X:1', 'X:2', 'Y:1', 'Y:2', 'Z:1'])
     expectSettledOnce(lab, x, { waitMs: 0, runMs: 20, passes: 2 })
     expectSettledOnce(lab, y, { waitMs: 20, runMs: 20, passes: 2 })
     expectSettledOnce(lab, z, { waitMs: 40, runMs: 10, passes: 1 })
@@ -171,9 +172,15 @@ describe('rerank scheduler: order', () => {
     await lab.drain()
 
     expect(lab.maxActive).toBe(1)
-    expect(lab.called).toEqual(['P1', 'Q1', 'Q2', 'R1', 'S1', 'S2', 'T1'])
+    expect(lab.called).toEqual(['P:1', 'Q:1', 'Q:2', 'R:1', 'S:1', 'S:2', 'T:1'])
     expectBackToBack(lab)
     for (const job of jobs) expect((await job.outcome).ok).toBe(true)
+    const [p, q, r, s, t] = jobs
+    expectSettledOnce(lab, p!, { waitMs: 0, runMs: 10, passes: 1 })
+    expectSettledOnce(lab, q!, { waitMs: 10, runMs: 20, passes: 2 })
+    expectSettledOnce(lab, r!, { waitMs: 30, runMs: 10, passes: 1 })
+    expectSettledOnce(lab, s!, { waitMs: 40, runMs: 20, passes: 2 })
+    expectSettledOnce(lab, t!, { waitMs: 60, runMs: 10, passes: 1 })
   })
 
   it('gives a call without a priority the clock reading at submit', async () => {
@@ -187,7 +194,7 @@ describe('rerank scheduler: order', () => {
 
     await lab.drain()
 
-    expect(lab.called).toEqual(['F1', 'F2', 'G1', 'H1'])
+    expect(lab.called).toEqual(['F:1', 'F:2', 'G:1', 'H:1'])
     expectSettledOnce(lab, f, { waitMs: 0, runMs: 20, passes: 2 })
     expectSettledOnce(lab, g, { waitMs: 15, runMs: 10, passes: 1 })
     expectSettledOnce(lab, h, { waitMs: 25, runMs: 10, passes: 1 })
@@ -205,7 +212,7 @@ describe('rerank scheduler: wait', () => {
 
     await lab.drain()
 
-    expect(lab.called).toEqual(['B1', 'A1', 'A2', 'B2', 'B3'])
+    expect(lab.called).toEqual(['B:1', 'A:1', 'A:2', 'B:2', 'B:3'])
     expectSettledOnce(lab, a, { waitMs: 6, runMs: 20, passes: 2 })
     expectSettledOnce(lab, b, { waitMs: 20, runMs: 30, passes: 3 })
     expectBackToBack(lab)
@@ -239,7 +246,7 @@ describe('rerank scheduler: wait', () => {
 
     await lab.finish({ dt: 5 })
     await lab.drain()
-    expect(lab.called).toEqual(['B1', 'A1', 'A2'])
+    expect(lab.called).toEqual(['B:1', 'A:1', 'A:2'])
     expectSettledOnce(lab, a, { waitMs: 5, runMs: 20, passes: 2 })
   })
 })
@@ -264,7 +271,7 @@ describe('rerank scheduler: abort', () => {
     expect(lab.sched.pending()).toBe(1)
 
     await lab.drain()
-    expect(lab.called).toEqual(['O1'])
+    expect(lab.called).toEqual(['O:1'])
     expect((await other.outcome).ok).toBe(true)
   })
 
@@ -279,6 +286,7 @@ describe('rerank scheduler: abort', () => {
     expect(error).toBeInstanceOf(Error)
     expect(error.name).toBe('AbortError')
     expect(error.message).toBe('aborted')
+    expectSettledOnce(lab, job, { waitMs: 0, runMs: 0, passes: 0 })
   })
 
   it('resolves an empty call at once with zeros reported', async () => {
@@ -302,12 +310,12 @@ describe('rerank scheduler: abort', () => {
     await flush()
 
     expect(w.done).toBe(true)
-    expect(lab.live.map((p) => p.label)).toEqual(['X1'])
+    expect(lab.live.map((p) => p.label)).toEqual(['X:1'])
     expectSettledOnce(lab, w, { waitMs: 3, runMs: 0, passes: 0 })
 
     await lab.finish({ dt: 7 })
     await lab.drain()
-    expect(lab.called).toEqual(['X1', 'Y1'])
+    expect(lab.called).toEqual(['X:1', 'Y:1'])
     expectSettledOnce(lab, x, { waitMs: 0, runMs: 10, passes: 1 })
     expectSettledOnce(lab, y, { waitMs: 10, runMs: 10, passes: 1 })
   })
@@ -323,15 +331,15 @@ describe('rerank scheduler: abort', () => {
     await flush()
 
     expect(j.done).toBe(false)
-    expect(lab.called).toEqual(['J1', 'J2'])
+    expect(lab.called).toEqual(['J:1', 'J:2'])
 
     await lab.finish({ dt: 7 })
     expect((await rejection(j)) as Error).toMatchObject({ name: 'AbortError' })
     expectSettledOnce(lab, j, { waitMs: 0, runMs: 20, passes: 2 })
 
     await lab.drain()
-    expect(lab.called).toEqual(['J1', 'J2', 'K1'])
-    expect(lab.startedAt.get('K1')).toBeGreaterThanOrEqual(lab.settledAt.get('J2')!)
+    expect(lab.called).toEqual(['J:1', 'J:2', 'K:1'])
+    expect(lab.startedAt.get('K:1')).toBeGreaterThanOrEqual(lab.settledAt.get('J:2')!)
     expectSettledOnce(lab, k, { waitMs: 20, runMs: 10, passes: 1 })
   })
 
@@ -352,22 +360,23 @@ describe('rerank scheduler: abort', () => {
     const ctrl = new AbortController()
     const first: RerankPass = () => {
       ctrl.abort()
-      return lab.pass('J1', 0.1)()
+      return lab.pass('J:1', 0.1)()
     }
-    const j = lab.submitWith('J', [first, lab.pass('J2', 0.2), lab.pass('J3', 0.3)], { signal: ctrl.signal })
+    const j = lab.submitWith('J', [first, lab.pass('J:2', 0.2), lab.pass('J:3', 0.3)], { signal: ctrl.signal })
     const k = lab.submit('K', 1)
     await flush()
 
     expect(j.done).toBe(false)
-    expect(lab.live.map((p) => p.label)).toEqual(['J1'])
+    expect(lab.live.map((p) => p.label)).toEqual(['J:1'])
 
     await lab.finish()
     expect((await rejection(j)) as Error).toMatchObject({ name: 'AbortError' })
     expectSettledOnce(lab, j, { waitMs: 0, runMs: 10, passes: 1 })
 
     await lab.drain()
-    expect(lab.called).toEqual(['J1', 'K1'])
+    expect(lab.called).toEqual(['J:1', 'K:1'])
     expect((await k.outcome).ok).toBe(true)
+    expectSettledOnce(lab, k, { waitMs: 10, runMs: 10, passes: 1 })
   })
 })
 
@@ -384,8 +393,23 @@ describe('rerank scheduler: errors', () => {
     expectSettledOnce(lab, j, { waitMs: 0, runMs: 20, passes: 2 })
 
     await lab.drain()
-    expect(lab.called).toEqual(['J1', 'J2', 'K1'])
+    expect(lab.called).toEqual(['J:1', 'J:2', 'K:1'])
     expect(await resolution(k)).toEqual([0.1])
+    expectSettledOnce(lab, k, { waitMs: 20, runMs: 10, passes: 1 })
+  })
+
+  it('rejects with the abort reason, not the pass error, when the caller left during a pass that then fails', async () => {
+    const lab = new Lab()
+    const ctrl = new AbortController()
+    const reason = new Error('caller left')
+    const j = lab.submit('J', 3, { signal: ctrl.signal })
+    await lab.finish()
+    ctrl.abort(reason)
+    await lab.finish({ error: new Error('onnx failed') })
+
+    expect(await rejection(j)).toBe(reason)
+    expectSettledOnce(lab, j, { waitMs: 0, runMs: 20, passes: 2 })
+    expect(lab.called).toEqual(['J:1', 'J:2'])
   })
 
   it('turns a synchronous throw in a pass into the job rejection, with no unhandled rejection', async () => {
@@ -400,14 +424,15 @@ describe('rerank scheduler: errors', () => {
       const thrower: RerankPass = () => {
         throw failure
       }
-      const j = lab.submitWith('J', [thrower, lab.pass('J2', 0.2)])
+      const j = lab.submitWith('J', [thrower, lab.pass('J:2', 0.2)])
       const k = lab.submit('K', 1)
 
       expect(await rejection(j)).toBe(failure)
       expectSettledOnce(lab, j, { waitMs: 0, runMs: 0, passes: 1 })
       await lab.drain()
-      expect(lab.called).toEqual(['K1'])
+      expect(lab.called).toEqual(['K:1'])
       expect((await k.outcome).ok).toBe(true)
+      expectSettledOnce(lab, k, { waitMs: 0, runMs: 10, passes: 1 })
       await flush()
       expect(unhandled).toEqual([])
     } finally {
@@ -431,7 +456,31 @@ describe('rerank scheduler: errors', () => {
       expect(await resolution(a)).toEqual([0.1])
       expect(await resolution(b)).toEqual([0.1])
       expectSettledOnce(lab, a, { waitMs: 0, runMs: 10, passes: 1 })
+      expectSettledOnce(lab, b, { waitMs: 10, runMs: 10, passes: 1 })
       expect(stderr.mock.calls.some(([line]) => String(line).includes('boom'))).toBe(true)
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+})
+
+describe('rerank scheduler: an onSettled that throws something unprintable', () => {
+  it('still settles the job and runs the next one', async () => {
+    const lab = new Lab()
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const a = lab.submit('A', 1, {
+        onSettled: () => {
+          throw Object.create(null) as unknown
+        },
+      })
+      const b = lab.submit('B', 1)
+
+      await lab.drain()
+
+      expect(await resolution(a)).toEqual([0.1])
+      expect(await resolution(b)).toEqual([0.1])
+      expect(stderr.mock.calls.some(([line]) => String(line).includes('onSettled threw'))).toBe(true)
     } finally {
       stderr.mockRestore()
     }
@@ -452,8 +501,12 @@ describe('rerank scheduler: re-entrancy', () => {
     await lab.drain()
 
     expect(lab.maxActive).toBe(1)
-    expect(lab.called).toEqual(['A1', 'C1', 'B1'])
+    expect(lab.called).toEqual(['A:1', 'C:1', 'B:1'])
+    // A pass started from inside onSettled would be invoked before A's own
+    // promise callbacks run; only queueing leaves A's settle to finish first.
+    expect(lab.events.indexOf('then:A')).toBeLessThan(lab.events.indexOf('call:C:1'))
     expect((await a.outcome).ok).toBe(true)
+    expectSettledOnce(lab, a, { waitMs: 0, runMs: 10, passes: 1 })
     expectSettledOnce(lab, later[0]!, { waitMs: 0, runMs: 10, passes: 1 })
     expectSettledOnce(lab, b, { waitMs: 20, runMs: 10, passes: 1 })
   })
@@ -462,17 +515,19 @@ describe('rerank scheduler: re-entrancy', () => {
     const lab = new Lab()
     const later: Job[] = []
     const outer: RerankPass = () => {
-      later.push(lab.submit('E', 1))
-      return lab.pass('D1', 0.1)()
+      later.push(lab.submit('Inner', 1))
+      return lab.pass('Outer:1', 0.1)()
     }
-    lab.submitWith('D', [outer])
+    const host = lab.submitWith('Outer', [outer])
     await flush()
 
-    expect(lab.live.map((p) => p.label)).toEqual(['D1'])
+    expect(lab.live.map((p) => p.label)).toEqual(['Outer:1'])
     await lab.drain()
     expect(lab.maxActive).toBe(1)
-    expect(lab.called).toEqual(['D1', 'E1'])
+    expect(lab.called).toEqual(['Outer:1', 'Inner:1'])
     expect((await later[0]!.outcome).ok).toBe(true)
+    expectSettledOnce(lab, host, { waitMs: 0, runMs: 10, passes: 1 })
+    expectSettledOnce(lab, later[0]!, { waitMs: 10, runMs: 10, passes: 1 })
   })
 })
 
@@ -499,6 +554,9 @@ describe('rerank scheduler: abort listeners', () => {
     expect(getEventListeners(resolved.signal, 'abort')).toHaveLength(0)
     expect(getEventListeners(failed.signal, 'abort')).toHaveLength(0)
     expect(getEventListeners(removed.signal, 'abort')).toHaveLength(0)
+    expectSettledOnce(lab, r, { waitMs: 0, runMs: 10, passes: 1 })
+    expectSettledOnce(lab, f, { waitMs: 10, runMs: 10, passes: 1 })
+    expectSettledOnce(lab, w, { waitMs: 0, runMs: 0, passes: 0 })
   })
 
   it('ignores an abort after the job settled', async () => {
@@ -517,7 +575,7 @@ describe('rerank scheduler: abort listeners', () => {
       ctrl.abort()
       await flush()
 
-      expect(job.stats).toHaveLength(1)
+      expectSettledOnce(lab, job, { waitMs: 0, runMs: 10, passes: 1 })
       expect(unhandled).toEqual([])
     } finally {
       process.off('unhandledRejection', onUnhandled)

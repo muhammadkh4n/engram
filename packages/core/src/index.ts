@@ -239,6 +239,7 @@ export type {
   CompleteJsonRequest,
   CompleteJsonResult,
   RerankOptions,
+  RerankCallStats,
 } from './adapters/intelligence.js'
 export {
   UnclassifiableReplyError,

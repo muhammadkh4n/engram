@@ -14,6 +14,9 @@ const stub = vi.hoisted(() => ({
   tokenizerCalls: [] as TokenizerCall[],
   pending: [] as Array<(logit: number) => void>,
   auto: false,
+  /** Forward passes answered with two logits, which the reranker refuses for one pair. */
+  multiLogitPasses: new Set<number>(),
+  passes: 0,
 }))
 
 vi.mock('@huggingface/transformers', () => ({
@@ -29,7 +32,8 @@ vi.mock('@huggingface/transformers', () => ({
     from_pretrained: async () => ({
       _call: () =>
         new Promise<{ logits: { data: Float32Array } }>((resolve) => {
-          const answer = (logit: number): void => resolve({ logits: { data: Float32Array.from([logit]) } })
+          const width = stub.multiLogitPasses.has(stub.passes++) ? 2 : 1
+          const answer = (logit: number): void => resolve({ logits: { data: new Float32Array(width).fill(logit) } })
           if (stub.auto) answer(0)
           else stub.pending.push(answer)
         }),
@@ -59,6 +63,8 @@ describe('the ONNX reranker submits each call to its scheduler', () => {
     stub.tokenizerCalls.length = 0
     stub.pending.length = 0
     stub.auto = false
+    stub.multiLogitPasses.clear()
+    stub.passes = 0
   })
 
   it('tokenizes (query, content) per candidate in order with unchanged arguments', async () => {
@@ -139,6 +145,22 @@ describe('the ONNX reranker submits each call to its scheduler', () => {
     await flush()
     expect(documentsSeen()).toEqual(['d document 1', 'd document 2'])
     expect(stub.pending).toHaveLength(0)
+  })
+
+  it('rejects a call with its failing pass error and scores none of its later documents, while the next call runs', async () => {
+    stub.auto = true
+    stub.multiLogitPasses.add(1)
+    const reranker = createOnnxReranker()
+
+    const failing = reranker.rerank('q1', docs('a', 4)).then(
+      () => null,
+      (error: Error) => error.message,
+    )
+    const next = reranker.rerank('q2', docs('b', 1))
+
+    expect(await failing).toMatch(/returned 2 logits for one pair/)
+    expect((await next).map((r) => r.id)).toEqual(['b1'])
+    expect(documentsSeen()).toEqual(['a document 1', 'a document 2', 'b document 1'])
   })
 
   it('reports onSettled once per call', async () => {

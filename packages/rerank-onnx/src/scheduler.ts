@@ -11,23 +11,13 @@
 // A pass that never settles (the first model download has no timeout) stalls
 // every call behind it, as the shared model-load promise already did.
 
-export interface RerankJobStats {
-  /** Time this job's passes spent waiting behind other jobs' passes, in ms. */
-  waitMs: number
-  /** Time this job's passes spent running, in ms. */
-  runMs: number
-  /** Passes that ran, a failed one included; passes never started are not counted. */
-  passes: number
-}
+import type { RerankCallStats, RerankOptions } from '@engram-mem/core'
 
-export interface RerankSubmitOptions {
-  /** Lower runs first; ties run in submit order. Defaults to the clock reading at submit. */
-  priority?: number
-  /** Aborting removes a waiting job at once, or rejects a running one when its current pass settles. */
-  signal?: AbortSignal
-  /** Called exactly once per job, before its promise settles. */
-  onSettled?: (stats: RerankJobStats) => void
-}
+/** One job's cost: the shape core's rerank options report. */
+export type RerankJobStats = RerankCallStats
+
+/** A job's options are exactly a rerank call's options, so one type serves both. */
+export type RerankSubmitOptions = RerankOptions
 
 export type RerankPass = () => Promise<number>
 
@@ -76,7 +66,15 @@ function report(onSettled: RerankSubmitOptions['onSettled'], stats: RerankJobSta
   try {
     onSettled(stats)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    // Formatting the thrown value can itself throw (a null-prototype object, a
+    // throwing message getter); nothing here may escape, or the job would never
+    // settle and the loop would stall.
+    let message = 'a value that cannot be printed'
+    try {
+      message = error instanceof Error ? error.message : String(error)
+    } catch {
+      // keep the placeholder
+    }
     process.stderr.write(`[rerank] onSettled threw: ${message}\n`)
   }
 }

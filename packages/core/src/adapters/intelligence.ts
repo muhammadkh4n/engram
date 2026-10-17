@@ -262,16 +262,29 @@ export interface CompleteJsonResult {
   model: string
 }
 
-/**
- * Per-call options a reranker may honour. A queueing reranker runs calls by
- * `priority` (lower first; a clock reading, so older requests first), drops a
- * call's remaining work when `signal` aborts, and reports the call's queue
- * wait, run time and pass count through `onSettled` exactly once.
- */
+/** What one rerank call cost, as a queueing reranker reports it. */
+export interface RerankCallStats {
+  /** Time the call's passes spent waiting behind other calls' passes, in ms. */
+  waitMs: number
+  /** Time the call's passes spent running, in ms. */
+  runMs: number
+  /** Passes that ran, a failed one included; passes never started are not counted. */
+  passes: number
+}
+
+/** Per-call options a reranker may honour; one that does not queue ignores them. */
 export interface RerankOptions {
+  /**
+   * Lower runs first; ties run in submit order. A `performance.now()` reading,
+   * the clock a call without one gets at submit: give every call of one request
+   * the request's start time and older requests go first. A reading on another
+   * clock (`Date.now()`) sorts after every call that has none.
+   */
   priority?: number
+  /** Aborting drops the call's remaining work: at once while it waits, after the running pass otherwise. */
   signal?: AbortSignal
-  onSettled?: (stats: { waitMs: number; runMs: number; passes: number }) => void
+  /** Called exactly once per call, before its promise settles. */
+  onSettled?: (stats: RerankCallStats) => void
 }
 
 export interface IntelligenceAdapter {
