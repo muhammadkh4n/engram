@@ -602,7 +602,7 @@ describe('runRecall when its caller leaves', () => {
   it('rejects at rescue-rerank when the rescue rerank fails because the caller left', async () => {
     const ctrl = new AbortController()
     const first = [row('weak-1')]
-    const { deps } = setup(
+    const { deps, store } = setup(
       { rows: [...first, row('found')], candidates: [[cand('weak-1', 'bm25', 1)], [cand('found', 'hyde', 1)]] },
       { rerank: scripted(ctrl, ['resolve', 'abort-reject'], { waits: [10, 30], scores: { 'weak-1': 0.1 } }) },
     )
@@ -611,6 +611,7 @@ describe('runRecall when its caller leaves', () => {
 
     expectStage(error, 'rescue-rerank')
     expect(error.queueMs).toBe(40)
+    expect(store.registerTokens).not.toHaveBeenCalled()
   })
 
   it('rejects at association-rerank when the association rerank fails because the caller left', async () => {
@@ -678,6 +679,19 @@ describe('runRecall when its caller leaves', () => {
 
     expect(response.degraded).toEqual({ rerank: 'tst rerank down' })
     expect(response.items.map((i) => i.id)).toEqual(['first', 'second'])
+  })
+
+  it('still drops the associations, degrading, when their rerank fails while the caller is still there', async () => {
+    const ctrl = new AbortController()
+    const { deps } = setup({ rows: [...queryRows, row('a1')], candidates: queryCandidates, links: [link('a1', 'subject', 'q1')] })
+    const rerank = vi.mocked(deps.rerank.rerank)
+    const first = rerank.getMockImplementation()!
+    rerank.mockImplementationOnce(first).mockRejectedValueOnce(new Error('tst reranker down'))
+
+    const { response } = await runRecall(deps, req(), { signal: ctrl.signal })
+
+    expect(response.items.map((i) => i.id)).toEqual(['q1', 'q2', 'q3', 'q4'])
+    expect(response.degraded).toEqual({ rerank: 'tst reranker down' })
   })
 
   it('has scoreSlate pass a priority and no signal', async () => {

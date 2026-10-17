@@ -378,7 +378,7 @@ await memory.dispose()
 
 ## Recall core
 
-`runRecall(deps, request)` answers one recall over the typed item store and returns `{ response, trace }`. It is a separate path from `Memory.recall`, which keeps the old engine.
+`runRecall(deps, request, { signal }?)` answers one recall over the typed item store and returns `{ response, trace }` (the optional signal is below, under the rerank queue). It is a separate path from `Memory.recall`, which keeps the old engine.
 
 **Request.** `{ query, channel, scope, classes?, kinds?, excludeSessionId?, asOf?, limit?, maxChars?, budgetChars?, includeHistory? }`. `channel` is one of `prompt`, `agent_dispatch`, `executor_start`, `hand_recall`, `session_start`, `mcp`, `replay`, `calibration`; `scope` holds `projectId`, `workspaceId`, `planSlugs` or `atRoot` and orders results without removing any.
 
