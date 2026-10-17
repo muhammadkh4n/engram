@@ -273,6 +273,7 @@ describe('rerank scheduler: abort', () => {
     await lab.drain()
     expect(lab.called).toEqual(['O:1'])
     expect((await other.outcome).ok).toBe(true)
+    expectSettledOnce(lab, other, { waitMs: 0, runMs: 10, passes: 1 })
   })
 
   it('rejects with an AbortError when the abort reason is not an Error', async () => {
@@ -480,7 +481,32 @@ describe('rerank scheduler: an onSettled that throws something unprintable', () 
 
       expect(await resolution(a)).toEqual([0.1])
       expect(await resolution(b)).toEqual([0.1])
+      expectSettledOnce(lab, a, { waitMs: 0, runMs: 10, passes: 1 })
+      expectSettledOnce(lab, b, { waitMs: 10, runMs: 10, passes: 1 })
       expect(stderr.mock.calls.some(([line]) => String(line).includes('onSettled threw'))).toBe(true)
+    } finally {
+      stderr.mockRestore()
+    }
+  })
+
+  it('still settles the job when the thrown Error has a message that cannot be printed', async () => {
+    const lab = new Lab()
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    try {
+      const a = lab.submit('A', 1, {
+        onSettled: () => {
+          const error = new Error('x')
+          Object.defineProperty(error, 'message', { value: Symbol('unprintable') })
+          throw error
+        },
+      })
+      const b = lab.submit('B', 1)
+
+      await lab.drain()
+
+      expect(await resolution(a)).toEqual([0.1])
+      expect(await resolution(b)).toEqual([0.1])
+      expectSettledOnce(lab, a, { waitMs: 0, runMs: 10, passes: 1 })
     } finally {
       stderr.mockRestore()
     }

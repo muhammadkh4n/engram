@@ -254,7 +254,8 @@ export function renderRecall(query: string, response: RecallResponse): string {
  * line written, the items rendered. A reranker with no measured floor and a
  * request recall refuses are tool errors with their message; any other
  * failure is the tool error "recall failed", its cause on stderr, scrubbed.
- * Once `signal` aborts (the caller's connection dropped) the run stops, the
+ * Once `signal` aborts (the client cancelled the call, or its transport
+ * closed; over /mcp only the latter reaches this server) the run stops, the
  * answer is "recall cancelled" and no line is written.
  */
 export async function runMemoryRecall(

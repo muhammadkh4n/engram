@@ -71,7 +71,7 @@ function report(onSettled: RerankSubmitOptions['onSettled'], stats: RerankJobSta
     // settle and the loop would stall.
     let message = 'a value that cannot be printed'
     try {
-      message = error instanceof Error ? error.message : String(error)
+      message = String(error instanceof Error ? error.message : error)
     } catch {
       // keep the placeholder
     }
