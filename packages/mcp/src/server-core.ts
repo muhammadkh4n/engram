@@ -718,9 +718,11 @@ export function createEngramServer(): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
-  // extra.signal aborts only when the /mcp connection drops: stateless /mcp builds
-  // a new Server per POST, so a client's cancel notification reaches a server
-  // that holds no request, and a client-side tool timeout cancels nothing here.
+  // extra.signal aborts when the transport closes or the client cancels the
+  // request. Over stdio a cancel (the SDK client sends one when its own timeout
+  // fires) reaches this server and stops the recall. Over /mcp only a dropped
+  // connection does: /mcp is stateless and builds a new Server per POST, so a
+  // cancel reaches a server that holds no request.
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params
 

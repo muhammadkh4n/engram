@@ -584,11 +584,14 @@ describe('the MCP server', () => {
 
 describe('rerank call options reach the reranker', () => {
   const docs = [{ id: 'tst-a', content: 'tst document' }]
+  const rerankEnv = { local: process.env['ENGRAM_RERANK_LOCAL'], model: process.env['ENGRAM_RERANK_LOCAL_MODEL'] }
 
   afterEach(() => {
     vi.doUnmock('@engram-mem/rerank-onnx')
-    delete process.env['ENGRAM_RERANK_LOCAL']
-    delete process.env['ENGRAM_RERANK_LOCAL_MODEL']
+    if (rerankEnv.local === undefined) delete process.env['ENGRAM_RERANK_LOCAL']
+    else process.env['ENGRAM_RERANK_LOCAL'] = rerankEnv.local
+    if (rerankEnv.model === undefined) delete process.env['ENGRAM_RERANK_LOCAL_MODEL']
+    else process.env['ENGRAM_RERANK_LOCAL_MODEL'] = rerankEnv.model
   })
 
   it('forwards the options through the local ONNX reranker wrapper', async () => {

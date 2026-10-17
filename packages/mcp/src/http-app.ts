@@ -403,8 +403,10 @@ async function handleJsonRoute(
     return
   }
   // 'close' also fires after a response is written, so only a close before the
-  // response finished means the client left. One that left during the body
-  // read has already closed, so the check after registering catches it.
+  // response finished means the client left. (A client that leaves mid-body
+  // fails readBody above and never gets here.) The destroyed check covers a
+  // close that landed between the body read and this listener; Node does not
+  // normally open that window, so it is a guard, not a path a test reaches.
   const controller = new AbortController()
   res.once('close', () => {
     if (!res.writableFinished) controller.abort()

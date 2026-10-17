@@ -459,6 +459,17 @@ describe('memory_timeline', () => {
     expect(textOf(await runMemoryTimeline(deps, { query: 'q' }))).toBe('Error: recall is not calibrated for reranker tst-reranker')
   })
 
+  it('without a query, lists the session records whatever the signal, since no recall runs', async () => {
+    const { deps, sessionTimeline } = timelineDeps([entry('01970000-0000-7000-8000-0000000000c1', 1)])
+    const ctrl = new AbortController()
+    ctrl.abort()
+
+    const text = textOf(await runMemoryTimeline(deps, {}, ctrl.signal))
+
+    expect(sessionTimeline).toHaveBeenCalledTimes(1)
+    expect(text).toContain('tst-session-1')
+  })
+
   it('with a query, answers "recall cancelled" and logs no line when the caller already left', async () => {
     const recordLine = vi.fn()
     const { deps, sessionTimeline } = timelineDeps([], { log: { recordLine } })
