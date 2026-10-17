@@ -1,3 +1,4 @@
+import type { RerankOptions } from '../adapters/intelligence.js'
 import { extractEntities } from '../extraction/entities.js'
 import { ASSOCIATION_SEEDS, findAssociations, type Associated } from './associations.js'
 import type { Candidate, CandidateRequest } from '../items/item-store.js'
@@ -26,8 +27,16 @@ const MAX_TERMS = 64
 /** The reranker in use, with the id its floor is recorded under. */
 export interface RecallReranker {
   id: string
-  /** Scores each document against the query on its own; a document past the reranker's cap gets no score. */
-  rerank(query: string, documents: ReadonlyArray<{ id: string; content: string }>): Promise<Array<{ id: string; score: number }>>
+  /**
+   * Scores each document against the query on its own; a document past the reranker's cap gets no score.
+   * A queueing reranker runs calls by `options.priority`, drops a call whose `options.signal` aborts, and
+   * reports the call's queue wait through `options.onSettled`.
+   */
+  rerank(
+    query: string,
+    documents: ReadonlyArray<{ id: string; content: string }>,
+    options?: RerankOptions,
+  ): Promise<Array<{ id: string; score: number }>>
 }
 
 export interface RecallDeps {
@@ -52,6 +61,11 @@ export interface RecallTimings {
   hydrate: number
   rerank: number
   associations: number
+  /**
+   * Time this recall's rerank calls waited behind other calls, in ms. It is part of
+   * `rerank` and `associations`, which are wall times, so the timings do not add up.
+   */
+  queue: number
   total: number
 }
 
@@ -79,6 +93,35 @@ export class RecallNotCalibratedError extends Error {
     super(`recall is not calibrated for reranker ${reranker}`)
     this.name = 'RecallNotCalibratedError'
     this.reranker = reranker
+  }
+}
+
+/** The last point a recall reached before it stopped because its caller left. */
+export type RecallAbortStage =
+  | 'entry'
+  | 'inputs'
+  | 'slate-rerank'
+  | 'slate'
+  | 'rescue-rerank'
+  | 'rescue'
+  | 'resolved'
+  | 'association-rerank'
+  | 'packed'
+
+/**
+ * The caller left (its signal aborted), so the recall stopped. Not a failure:
+ * nothing was answered, and it must not be logged as a degraded recall.
+ */
+export class RecallAbortedError extends Error {
+  readonly stage: RecallAbortStage
+  /** The recall's rerank queue wait so far, in ms. */
+  readonly queueMs: number
+
+  constructor(stage: RecallAbortStage, queueMs: number) {
+    super(`recall aborted at ${stage}`)
+    this.name = 'RecallAbortedError'
+    this.stage = stage
+    this.queueMs = queueMs
   }
 }
 
@@ -117,6 +160,9 @@ interface RecallRun {
   base: CandidateRequest
   degraded: RecallDegraded
   timings: RecallTimings
+  /** The run's start on the reranker's clock: every rerank call of the run queues at it, so older runs go first. */
+  priority: number
+  signal: AbortSignal | undefined
 }
 
 /** What the model steps and the registry gave before the candidate call. */
@@ -147,8 +193,16 @@ interface Inputs {
  *    links to the first 3 shown (subject, entity, lineage), reranked and kept
  *    at or above the floor like query items. None when the reranker failed.
  * Then read the store version again. A recall writes no item state.
+ *
+ * When `opts.signal` aborts, the recall stops at the next stage boundary, or at
+ * once when a rerank call fails because of it, with a RecallAbortedError. Model
+ * and store calls already in flight are not cut.
  */
-export async function runRecall(deps: RecallDeps, request: RecallRequest): Promise<{ response: RecallResponse; trace: RecallTrace }> {
+export async function runRecall(
+  deps: RecallDeps,
+  request: RecallRequest,
+  opts: { signal?: AbortSignal } = {},
+): Promise<{ response: RecallResponse; trace: RecallTrace }> {
   const started = performance.now()
   const floor = deps.floor
   // A floor measured on another reranker's scores is no floor at all: the
@@ -157,16 +211,20 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
   const filters = effectiveFilters(request)
   if ('error' in filters) throw new RecallRequestError(filters.error)
 
-  const run = startRun(deps, request, filters)
+  const run = startRun(deps, request, filters, opts.signal)
+  stopIfAborted(run, 'entry')
   const at = request.asOf ?? deps.now()
   const versionBefore = await deps.store.storeVersion()
   const inputs = await gatherInputs(run, at)
+  stopIfAborted(run, 'inputs')
   const slate = new Slate(run)
-  await slate.add(await firstCandidates(run, inputs))
+  await slate.add(await firstCandidates(run, inputs), 'slate-rerank')
+  stopIfAborted(run, 'slate')
   let passed = passing(slate, floor)
   const rescue = passed.length === 0 && !slate.rerankFailed && !inputs.hydeRan && inputs.queryVector !== null
   if (rescue) {
     await rescueWithHyde(run, slate)
+    stopIfAborted(run, 'rescue')
     passed = passing(slate, floor)
   }
 
@@ -179,6 +237,7 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
     budgetChars: request.budgetChars ?? DEFAULT_BUDGET_CHARS,
   })
   packer.addQuery(await resolve(ordered, slate.rows, 'query'))
+  stopIfAborted(run, 'resolved')
   let associationCount = 0
   if (!slate.rerankFailed && packer.hasRoomForAssociations()) {
     const associated = await associate(run, slate, floor, scope, filters, packer.seeds(ASSOCIATION_SEEDS))
@@ -187,6 +246,7 @@ export async function runRecall(deps: RecallDeps, request: RecallRequest): Promi
       packer.addAssociations(await resolve(associated.ordered, associated.rows, 'association'))
     }
   }
+  stopIfAborted(run, 'packed')
   const packed = packer.result()
   const versionAfter = await deps.store.storeVersion()
   run.timings.total = performance.now() - started
@@ -236,13 +296,13 @@ export async function scoreSlate(deps: SlateDeps, request: RecallRequest): Promi
   const run = startRun(deps, request, filters)
   const inputs = await gatherInputs(run, request.asOf ?? deps.now())
   const slate = new Slate(run)
-  await slate.add(await firstCandidates(run, inputs))
+  await slate.add(await firstCandidates(run, inputs), 'slate-rerank')
   if (slate.rerankFailed) throw new Error(`the reranker failed: ${run.degraded.rerank ?? 'no reason'}`)
   const items = [...slate.scored.values()].map((s) => ({ row: s.row, score: s.score ?? Number.NEGATIVE_INFINITY }))
   return { items, degraded: run.degraded }
 }
 
-function startRun(deps: SlateDeps, request: RecallRequest, filters: EffectiveFilters): RecallRun {
+function startRun(deps: SlateDeps, request: RecallRequest, filters: EffectiveFilters, signal?: AbortSignal): RecallRun {
   const steps = new ModelSteps({
     cache: deps.store,
     embed: deps.embed,
@@ -251,8 +311,23 @@ function startRun(deps: SlateDeps, request: RecallRequest, filters: EffectiveFil
     referenceDate: deps.referenceDate,
     versions: deps.versions,
   })
-  const timings: RecallTimings = { embed: 0, expand: 0, hyde: 0, candidates: 0, hydrate: 0, rerank: 0, associations: 0, total: 0 }
-  return { deps, request, steps, base: candidateFilters(filters, request), degraded: {}, timings }
+  const timings: RecallTimings = { embed: 0, expand: 0, hyde: 0, candidates: 0, hydrate: 0, rerank: 0, associations: 0, queue: 0, total: 0 }
+  return { deps, request, steps, base: candidateFilters(filters, request), degraded: {}, timings, priority: performance.now(), signal }
+}
+
+function stopIfAborted(run: RecallRun, stage: RecallAbortStage): void {
+  if (run.signal?.aborted) throw new RecallAbortedError(stage, run.timings.queue)
+}
+
+/** What every rerank call of a run passes: the run's priority and signal, and its wait added to the run's queue time. */
+function rerankOptions(run: RecallRun): RerankOptions {
+  return {
+    priority: run.priority,
+    ...(run.signal !== undefined ? { signal: run.signal } : {}),
+    onSettled: (stats) => {
+      run.timings.queue += stats.waitMs
+    },
+  }
 }
 
 function projectOf(request: RecallRequest): string | undefined {
@@ -331,7 +406,7 @@ async function rescueWithHyde(run: RecallRun, slate: Slate): Promise<void> {
   const second = await timed(() => run.deps.store.candidates({ ...run.base, hydeEmbedding }))
   run.timings.candidates += second.ms
   if (!second.ok) throw second.error
-  await slate.add(second.value.filter((c) => c.leg === 'hyde'))
+  await slate.add(second.value.filter((c) => c.leg === 'hyde'), 'rescue-rerank')
 }
 
 /**
@@ -350,14 +425,14 @@ class Slate {
 
   constructor(private readonly run: RecallRun) {}
 
-  async add(candidates: readonly Candidate[]): Promise<void> {
+  async add(candidates: readonly Candidate[], stage: 'slate-rerank' | 'rescue-rerank'): Promise<void> {
     this.candidates = [...this.candidates, ...candidates]
     this.fused = fuse(this.candidates)
     const batch = this.fused.filter((f) => !this.scored.has(f.itemId)).slice(0, SLATE_SIZE)
     if (batch.length === 0) return
     const rows = await this.hydrate(batch.map((f) => f.itemId))
     const position = new Map(this.fused.map((f, i) => [f.itemId, i]))
-    const scores = await this.rerank(rows)
+    const scores = await this.rerank(rows, stage)
     for (const row of rows) {
       // A document past the reranker's cap gets no score, so it does not pass.
       const score = scores === null ? null : (scores.get(row.id) ?? Number.NEGATIVE_INFINITY)
@@ -380,14 +455,20 @@ class Slate {
   }
 
   /** Scores by id, or null once the reranker has failed. */
-  private async rerank(rows: RecallItemRow[]): Promise<Map<string, number> | null> {
+  private async rerank(rows: RecallItemRow[], stage: 'slate-rerank' | 'rescue-rerank'): Promise<Map<string, number> | null> {
     if (this.rerankFailed || rows.length === 0) return this.rerankFailed ? null : new Map()
     const { deps, request, timings, degraded } = this.run
     const result = await timed(() =>
-      deps.rerank.rerank(request.query, rows.map((row) => ({ id: row.id, content: rerankDocument(row) }))),
+      deps.rerank.rerank(
+        request.query,
+        rows.map((row) => ({ id: row.id, content: rerankDocument(row) })),
+        rerankOptions(this.run),
+      ),
     )
     timings.rerank += result.ms
     if (result.ok) return new Map(result.value.map((r) => [r.id, r.score]))
+    // A rerank that failed because the caller left is a stop, not a degraded recall.
+    stopIfAborted(this.run, stage)
     this.rerankFailed = true
     degraded.rerank = await failureReason(result.error, 'rerank error')
     return null
@@ -481,8 +562,15 @@ async function associate(
         known: new Set(slate.rows.keys()),
         score: async (rows) => {
           if (rows.length === 0) return new Map()
-          const scored = await timed(() => deps.rerank.rerank(request.query, rows.map((row) => ({ id: row.id, content: rerankDocument(row) }))))
+          const scored = await timed(() =>
+            deps.rerank.rerank(
+              request.query,
+              rows.map((row) => ({ id: row.id, content: rerankDocument(row) })),
+              rerankOptions(run),
+            ),
+          )
           if (scored.ok) return new Map(scored.value.map((r) => [r.id, r.score]))
+          stopIfAborted(run, 'association-rerank')
           degraded.rerank = await failureReason(scored.error, 'rerank error')
           return null
         },
