@@ -138,6 +138,8 @@ describe('recall runs on the queueing reranker', () => {
       () => null,
       (error: unknown) => error,
     )
+    for (let i = 0; i < 50 && submits.length === 0; i++) await flush()
+    expect(submits).toHaveLength(1)
     await new Promise((resolve) => setTimeout(resolve, 20))
     const leftAt = performance.now()
     leaving.abort()
@@ -145,18 +147,21 @@ describe('recall runs on the queueing reranker', () => {
 
     // A recall the abort cannot reach would wait on the held pass forever; fail
     // fast on that instead of at the suite's timeout.
+    let deadline: ReturnType<typeof setTimeout> | undefined
     const error = await Promise.race([
       waitingOutcome,
-      new Promise((resolve) => setTimeout(() => resolve('the waiting recall did not stop'), 2000)),
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve('the waiting recall did not stop'), 2000)
+      }),
     ])
+    clearTimeout(deadline)
     expect(error).toBeInstanceOf(RecallAbortedError)
     expect((error as RecallAbortedError).stage).toBe('slate-rerank')
     // Its slate was submitted once and never ran, so its whole time in the queue,
     // from that submit to the abort, is its reported wait. The scheduler reads its
-    // clock just after the wrapper below and, on removal, inside abort(), which
+    // clock just after the wrapper in recallDeps and, on removal, inside abort(), which
     // runs its listeners synchronously: so the wait lies between these bounds,
     // the lower one allowing for the synchronous work before the submit.
-    expect(submits).toHaveLength(1)
     expect(leftAt - submits[0]!).toBeGreaterThan(5)
     expect((error as RecallAbortedError).queueMs).toBeGreaterThanOrEqual(leftAt - submits[0]! - 3)
     expect((error as RecallAbortedError).queueMs).toBeLessThanOrEqual(abortedAt - submits[0]!)
