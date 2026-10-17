@@ -55,8 +55,8 @@ export type { FusedCandidate, Band, ScopeTier, ScopeContext, OrderFields } from 
 export { FLOOR_CALIBRATIONS, floorFor } from './floor-calibration.js'
 export type { FloorCalibration } from './floor-calibration.js'
 export { failureReason } from './failure-reason.js'
-export { runRecall, scoreSlate, rerankDocument, RecallNotCalibratedError, RecallRequestError } from './pipeline.js'
-export type { RecallDeps, RecallReranker, RecallTrace, RecallTimings, ScoredItem, SlateDeps, SlateScore } from './pipeline.js'
+export { runRecall, scoreSlate, rerankDocument, RecallAbortedError, RecallNotCalibratedError, RecallRequestError } from './pipeline.js'
+export type { RecallAbortStage, RecallDeps, RecallReranker, RecallTrace, RecallTimings, ScoredItem, SlateDeps, SlateScore } from './pipeline.js'
 export { resolveItems, itemFlags, holdsToken, sourceRef } from './resolve.js'
 export type { ResolveOptions, ResolvedItem } from './resolve.js'
 export {

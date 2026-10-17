@@ -17,7 +17,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { StorageAdapter } from '@engram-mem/core'
 import { recallEngineOf } from '@engram-mem/recall-engine'
 import {
+  maybeWithLocalRerank,
   maybeWithRecallEngine,
+  recallRerankerFrom,
   parseChatReasoningEnv,
   parseTimeZoneEnv,
   chatIntelligenceOptionsFromEnv,
@@ -577,5 +579,56 @@ describe('the MCP server', () => {
     expect(forget.inputSchema.required).toEqual(['ids', 'reason'])
     expect(Object.keys(forget.inputSchema.properties ?? {}).sort()).toEqual(['ids', 'reason'])
     await client.close()
+  })
+})
+
+describe('rerank call options reach the reranker', () => {
+  const docs = [{ id: 'tst-a', content: 'tst document' }]
+  const rerankEnv = { local: process.env['ENGRAM_RERANK_LOCAL'], model: process.env['ENGRAM_RERANK_LOCAL_MODEL'] }
+
+  afterEach(() => {
+    vi.doUnmock('@engram-mem/rerank-onnx')
+    if (rerankEnv.local === undefined) delete process.env['ENGRAM_RERANK_LOCAL']
+    else process.env['ENGRAM_RERANK_LOCAL'] = rerankEnv.local
+    if (rerankEnv.model === undefined) delete process.env['ENGRAM_RERANK_LOCAL_MODEL']
+    else process.env['ENGRAM_RERANK_LOCAL_MODEL'] = rerankEnv.model
+  })
+
+  it('forwards the options through the local ONNX reranker wrapper', async () => {
+    const rerank = vi.fn(async (_q: string, d: ReadonlyArray<{ id: string }>) => d.map((x) => ({ id: x.id, score: 0.5 })))
+    vi.doMock('@engram-mem/rerank-onnx', () => ({
+      DEFAULT_RERANK_MODEL: 'tst/reranker-model',
+      createOnnxReranker: () => ({ rerank, load: async () => {} }),
+    }))
+    process.env['ENGRAM_RERANK_LOCAL'] = 'true'
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const { intelligence } = await maybeWithLocalRerank({}, 'tst-chat')
+      const options = { priority: 3, onSettled: () => {} }
+
+      await intelligence.rerank!('tst query', docs, options)
+
+      expect(rerank).toHaveBeenCalledWith('tst query', docs, options)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('forwards the options through the recall reranker adapter, bound to its adapter', async () => {
+    const calls: unknown[][] = []
+    const intelligence = {
+      marker: 'tst-adapter',
+      async rerank(this: { marker: string }, ...args: unknown[]) {
+        calls.push([this.marker, ...args])
+        return [{ id: 'tst-a', score: 0.5 }]
+      },
+    }
+    const options = { priority: 7 }
+
+    const reranker = recallRerankerFrom(intelligence, 'tst-reranker')
+    await reranker.rerank('tst query', docs, options)
+
+    expect(reranker.id).toBe('tst-reranker')
+    expect(calls).toEqual([['tst-adapter', 'tst query', docs, options]])
   })
 })

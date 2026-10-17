@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { runRecall } from '@engram-mem/core'
+import { runRecall, type RecallDeps, type RerankOptions } from '@engram-mem/core'
 import { buildRecallLogLineV2, parseRecallRequest, runRecallRequest, type RecallRouteDeps } from '../src/recall-route.js'
 import { TST_T0, stubRecallDeps } from './recall-fixtures.js'
 
@@ -134,5 +134,99 @@ describe('runRecallRequest', () => {
     const deps: RecallRouteDeps = { getDeps: async () => stubRecallDeps(), log: { recordLine }, server: 'tst', logError: vi.fn(), now: () => NOW }
     expect(await runRecallRequest(deps, { query: 'q', channel: 'mcp' })).toEqual({ status: 400, body: { error: 'scope is required; send {} for none' } })
     expect(recordLine).not.toHaveBeenCalled()
+  })
+})
+
+describe('runRecallRequest when the caller leaves', () => {
+  const body = { query: 'what is the tst floor?', channel: 'hand_recall', scope: {} }
+
+  function routeDeps(recallDeps: RecallDeps) {
+    const recordLine = vi.fn()
+    const logError = vi.fn()
+    const deps: RecallRouteDeps = { getDeps: async () => recallDeps, log: { recordLine }, server: 'tst', logError, now: () => NOW }
+    return { deps, recordLine, logError }
+  }
+
+  it('answers 499 and writes the aborted line, and no log line, when the run stops mid-way', async () => {
+    const ctrl = new AbortController()
+    const stub = stubRecallDeps()
+    const recallDeps: RecallDeps = {
+      ...stub,
+      rerank: {
+        id: stub.rerank.id,
+        rerank: async (_q, _docs, options?: RerankOptions) => {
+          options?.onSettled?.({ waitMs: 12.4, runMs: 1, passes: 1 })
+          ctrl.abort()
+          throw options?.signal?.reason ?? new Error('tst no signal')
+        },
+      },
+    }
+    const { deps, recordLine, logError } = routeDeps(recallDeps)
+
+    const response = await runRecallRequest(deps, body, ctrl.signal)
+
+    expect(response).toEqual({ status: 499, body: { error: 'client closed request' } })
+    expect(recordLine).not.toHaveBeenCalled()
+    expect(logError).toHaveBeenCalledTimes(1)
+    expect(logError.mock.calls[0]![0]).toMatch(/^\[engram-mcp-http\] recall aborted at slate-rerank after \d+ ms \(queue 12 ms\)$/)
+  })
+
+  it('reports an abort after a resolved run as stopped at logged, writing no log line', async () => {
+    const ctrl = new AbortController()
+    const stub = stubRecallDeps()
+    let versions = 0
+    const recallDeps: RecallDeps = {
+      ...stub,
+      store: {
+        ...stub.store,
+        storeVersion: async () => {
+          versions++
+          if (versions === 2) ctrl.abort()
+          return 1
+        },
+      },
+    }
+    const { deps, recordLine, logError } = routeDeps(recallDeps)
+
+    const response = await runRecallRequest(deps, body, ctrl.signal)
+
+    expect(response.status).toBe(499)
+    expect(recordLine).not.toHaveBeenCalled()
+    expect(logError.mock.calls[0]![0]).toMatch(/^\[engram-mcp-http\] recall aborted at logged after \d+ ms \(queue 0 ms\)$/)
+  })
+
+  it('reports any failure under an aborted signal as aborted at unknown, with its cause scrubbed', async () => {
+    const ctrl = new AbortController()
+    const stub = stubRecallDeps()
+    const recallDeps: RecallDeps = {
+      ...stub,
+      store: {
+        ...stub.store,
+        candidates: async () => {
+          ctrl.abort()
+          throw new Error('store unreachable: Authorization: Bearer Zq7madeupNotReal91xAbc')
+        },
+      },
+    }
+    const { deps, recordLine, logError } = routeDeps(recallDeps)
+
+    const response = await runRecallRequest(deps, body, ctrl.signal)
+
+    expect(response.status).toBe(499)
+    expect(recordLine).not.toHaveBeenCalled()
+    const line = String(logError.mock.calls[0]![0])
+    expect(line).toMatch(/^\[engram-mcp-http\] recall aborted at unknown after \d+ ms \(queue 0 ms\): store unreachable/)
+    expect(line).not.toContain('Zq7madeupNotReal91xAbc')
+  })
+
+  it('answers and logs as before when the signal never aborts', async () => {
+    const ctrl = new AbortController()
+    const { deps, recordLine, logError } = routeDeps(stubRecallDeps())
+
+    const response = await runRecallRequest(deps, body, ctrl.signal)
+
+    expect(response.status).toBe(200)
+    expect(recordLine).toHaveBeenCalledTimes(1)
+    expect(logError).not.toHaveBeenCalled()
   })
 })

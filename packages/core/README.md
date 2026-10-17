@@ -378,7 +378,7 @@ await memory.dispose()
 
 ## Recall core
 
-`runRecall(deps, request)` answers one recall over the typed item store and returns `{ response, trace }`. It is a separate path from `Memory.recall`, which keeps the old engine.
+`runRecall(deps, request, { signal }?)` answers one recall over the typed item store and returns `{ response, trace }` (the optional signal is below, under the rerank queue). It is a separate path from `Memory.recall`, which keeps the old engine.
 
 **Request.** `{ query, channel, scope, classes?, kinds?, excludeSessionId?, asOf?, limit?, maxChars?, budgetChars?, includeHistory? }`. `channel` is one of `prompt`, `agent_dispatch`, `executor_start`, `hand_recall`, `session_start`, `mcp`, `replay`, `calibration`; `scope` holds `projectId`, `workspaceId`, `planSlugs` or `atRoot` and orders results without removing any.
 
@@ -394,6 +394,22 @@ await memory.dispose()
 7. Supersession as of `asOf`: a replaced item gives its place to its current successor, which names what it replaced. Superseded, retired and legacy-superseded items appear only with `includeHistory`. A chain end is checked against the same filters, and one from the excluded session hides its predecessors.
 
 Order: band, scope tier (project or plan, workspace, the rest), trust ascending, score, newest, id. A failed embedding, expansion, HyDE or reranker degrades the recall and names it in `degraded`; a failed store read fails it. A recall writes no item state.
+
+**Rerank queue and stopping.** `runRecall(deps, request, { signal })` takes an optional `AbortSignal` for the caller's lifetime. A run reads `performance.now()` once when it starts, and every rerank call it makes (the slate, the HyDE rescue, the associations) passes that reading as its `priority`, with the signal and an `onSettled` that adds the call's queue wait to `timings.queue`. A queueing reranker (`@engram-mem/rerank-onnx`) therefore runs an older recall's queued passes before a newer one's. `timings.queue` is the time the run's rerank calls waited behind other calls, in ms; it is part of `timings.rerank` and `timings.associations`, so the timings do not add up.
+
+When the signal aborts, the run rejects with `RecallAbortedError` (`stage`, and `queueMs` so far) at the next point it checks:
+
+| `stage` | Where |
+|---|---|
+| `entry` | before the first store read |
+| `inputs` | after the model steps and registry reads |
+| `slate-rerank`, `rescue-rerank`, `association-rerank` | a rerank call failed and the signal had aborted |
+| `slate` | after the first slate is scored |
+| `rescue` | after the HyDE rescue |
+| `resolved` | after the query items are resolved, before associations |
+| `packed` | after associations, before the closing store version |
+
+A rerank failure while the signal aborted is a stop, never a degraded recall. Model and store calls already in flight finish first. `scoreSlate` passes a priority and no signal.
 
 **Flags** (sorted): `as_of:<date>` and, at trust 3, `verify_live` on observations and legacy rows; `contradicted_by:<register id>` on a document section naming an active register entry's token; `restated:<n>`; `source_truncated`; `supersedes:<id>`; `successor_retired`; `legacy_superseded`.
 

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runRecall } from '@engram-mem/core'
+import { runRecall, type RerankOptions } from '@engram-mem/core'
 import { RecallLog, recallLogFromEnv } from '../src/recall-log.js'
 import { buildRecallLogLineV2, type RecallLogLineV2 } from '../src/recall-route.js'
 import { TST_T0, stubRecallDeps } from './recall-fixtures.js'
@@ -59,6 +59,28 @@ describe('RecallLog.recordLine', () => {
     expect(lines).toHaveLength(2)
     expect(lines[0]).toEqual(JSON.parse(JSON.stringify(first)))
     expect(lines[1]).toMatchObject({ v: 2, query: 'second', channel: 'mcp' })
+  })
+
+  it('carries the recall queue time in its timings', async () => {
+    const path = join(freshDir(), 'recall.jsonl')
+    const log = new RecallLog(path)
+    const stub = stubRecallDeps()
+    const deps = {
+      ...stub,
+      rerank: {
+        id: stub.rerank.id,
+        rerank: async (q: string, docs: ReadonlyArray<{ id: string; content: string }>, options?: RerankOptions) => {
+          options?.onSettled?.({ waitMs: 9, runMs: 1, passes: docs.length })
+          return stub.rerank.rerank(q, docs)
+        },
+      },
+    }
+    const request = { query: 'tst queue', channel: 'mcp' as const, scope: {} }
+    const { response, trace } = await runRecall(deps, request)
+    log.recordLine(buildRecallLogLineV2(request, response, trace, 'tst-server', TST_T0))
+    await log.flush()
+
+    expect(readLines(path)[0]).toMatchObject({ timings: { queue: 9 } })
   })
 
   it('creates the file owner-only', async () => {
