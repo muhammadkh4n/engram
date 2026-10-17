@@ -238,6 +238,17 @@ describe('runMemoryRecall', () => {
     expect(res.isError).toBe(true)
     expect(recordLine).not.toHaveBeenCalled()
   })
+
+  it('answers "recall cancelled" and logs no line when the caller already left', async () => {
+    const recordLine = vi.fn()
+    const ctrl = new AbortController()
+    ctrl.abort()
+
+    const res = await runMemoryRecall(routeDeps({ log: { recordLine } }), { query: 'tst floor' }, ctrl.signal)
+
+    expect(res).toEqual({ content: [{ type: 'text', text: 'Error: recall cancelled' }], isError: true })
+    expect(recordLine).not.toHaveBeenCalled()
+  })
 })
 
 function record(overrides: Partial<ItemRecord> = {}): ItemRecord {
@@ -446,6 +457,19 @@ describe('memory_timeline', () => {
   it('with a query, refuses when no floor is measured for the reranker', async () => {
     const { deps } = timelineDeps([], { getDeps: async () => stubRecallDeps({ floor: null }) })
     expect(textOf(await runMemoryTimeline(deps, { query: 'q' }))).toBe('Error: recall is not calibrated for reranker tst-reranker')
+  })
+
+  it('with a query, answers "recall cancelled" and logs no line when the caller already left', async () => {
+    const recordLine = vi.fn()
+    const { deps, sessionTimeline } = timelineDeps([], { log: { recordLine } })
+    const ctrl = new AbortController()
+    ctrl.abort()
+
+    const res = await runMemoryTimeline(deps, { query: 'tst floor' }, ctrl.signal)
+
+    expect(res).toEqual({ content: [{ type: 'text', text: 'Error: recall cancelled' }], isError: true })
+    expect(recordLine).not.toHaveBeenCalled()
+    expect(sessionTimeline).not.toHaveBeenCalled()
   })
 })
 

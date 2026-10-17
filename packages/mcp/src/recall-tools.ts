@@ -254,13 +254,19 @@ export function renderRecall(query: string, response: RecallResponse): string {
  * line written, the items rendered. A reranker with no measured floor and a
  * request recall refuses are tool errors with their message; any other
  * failure is the tool error "recall failed", its cause on stderr, scrubbed.
+ * Once `signal` aborts (the caller's connection dropped) the run stops, the
+ * answer is "recall cancelled" and no line is written.
  */
-export async function runMemoryRecall(deps: RecallRouteDeps, args: Record<string, unknown>): Promise<ToolTextResult> {
+export async function runMemoryRecall(
+  deps: RecallRouteDeps,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolTextResult> {
   const now = deps.now ?? (() => new Date())
   const parsed = recallRequestFromArgs(args, now())
   if ('error' in parsed) return toolError(parsed.error)
   const request: RecallRequest = parsed.value
-  const outcome = await executeRecall(deps, request, '[engram-mcp] memory_recall')
+  const outcome = await executeRecall(deps, request, '[engram-mcp] memory_recall', signal)
   switch (outcome.kind) {
     case 'ok':
       return toolText(renderRecall(request.query, outcome.response))
@@ -580,9 +586,14 @@ export interface TimelineToolDeps {
  * The current session records, newest first. With query, recall over
  * session records picks them (history included, since session records are
  * history); project_id and the dates then filter what recall showed, and a
- * superseded or retired record gives way to its current one.
+ * superseded or retired record gives way to its current one. With query,
+ * `signal` stops that recall as it does memory_recall's.
  */
-export async function runMemoryTimeline(deps: TimelineToolDeps, args: Record<string, unknown>): Promise<ToolTextResult> {
+export async function runMemoryTimeline(
+  deps: TimelineToolDeps,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<ToolTextResult> {
   const req = timelineRequestFromArgs(args)
   if ('error' in req) return toolError(req.error)
   if (req.query === undefined) {
@@ -607,7 +618,7 @@ export async function runMemoryTimeline(deps: TimelineToolDeps, args: Record<str
     maxChars: TIMELINE_ENTRY_CHARS,
     budgetChars: 12000,
   }
-  const outcome = await executeRecall(deps.recall, request, '[engram-mcp] memory_timeline')
+  const outcome = await executeRecall(deps.recall, request, '[engram-mcp] memory_timeline', signal)
   if (outcome.kind === 'failed') return toolError(RECALL_TOOL_FAILED_MESSAGE)
   if (outcome.kind === 'aborted') return toolError(RECALL_TOOL_CANCELLED_MESSAGE)
   if (outcome.kind !== 'ok') return toolError(outcome.message)

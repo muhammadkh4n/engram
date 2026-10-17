@@ -718,7 +718,10 @@ export function createEngramServer(): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // extra.signal aborts only when the /mcp connection drops: stateless /mcp builds
+  // a new Server per POST, so a client's cancel notification reaches a server
+  // that holds no request, and a client-side tool timeout cancels nothing here.
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params
 
     if (!args || typeof args !== 'object') {
@@ -731,7 +734,7 @@ export function createEngramServer(): Server {
     try {
       if (name === 'memory_recall') {
         const { recallLog } = await getMemoryStack()
-        return await runMemoryRecall(recallToolDeps(recallLog), args)
+        return await runMemoryRecall(recallToolDeps(recallLog), args, extra.signal)
       }
 
       if (name === 'memory_get') {
@@ -755,7 +758,7 @@ export function createEngramServer(): Server {
 
       if (name === 'memory_timeline') {
         const { recallLog } = await getMemoryStack()
-        return await runMemoryTimeline({ store: await getRecallStore(), recall: recallToolDeps(recallLog) }, args)
+        return await runMemoryTimeline({ store: await getRecallStore(), recall: recallToolDeps(recallLog) }, args, extra.signal)
       }
 
       if (name === 'memory_overview') {

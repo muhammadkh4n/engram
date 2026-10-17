@@ -106,7 +106,7 @@ Every argument outside a tool's schema is an error; a value out of range is refu
 
 ### memory_recall
 
-Runs the recall of `POST /recall` (below) in process on channel `mcp`, and writes the same log line for an answered recall.
+Runs the recall of `POST /recall` (below) in process on channel `mcp`, and writes the same log line for an answered recall. When the `/mcp` connection drops mid-call, the recall stops as `/recall`'s does (no log line, the aborted stderr line) and the tool answers `recall cancelled`. A client-side tool timeout or a `notifications/cancelled` does **not** stop it: `/mcp` is stateless and builds a new server per POST, so a cancel reaches a server that holds no request. `memory_timeline` with `query` behaves the same.
 
 **Input:** `query` (required, 1 to 2,000 characters), `project_id` (orders that project's items first; hides none), `exclude_session_id` (at most 256 characters; leaves that session's own items out), `include_history` (boolean), `classes` and `kinds` (non-empty lists), `limit` (1 to 30, default 12), `max_chars` (200 to 4,000, default 1,500), `budget_chars` (1,000 to 12,000, default 9,000), `as_of` (ISO 8601 with an offset). Superseded and retired items, session records, commits and assistant turns come only with `include_history`; `legacy` items only when `classes` names it.
 
