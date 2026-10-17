@@ -71,7 +71,7 @@ function row(id: string): RecallItemRow {
   }
 }
 
-function recallDeps(rerank: ReturnType<typeof createOnnxReranker>, ids: string[]): RecallDeps {
+function recallDeps(rerank: ReturnType<typeof createOnnxReranker>, ids: string[], submits: number[] = []): RecallDeps {
   const rows = new Map(ids.map((id) => [id, row(id)]))
   const store: RecallStore = {
     candidates: async () => ids.map((itemId, i) => ({ itemId, leg: 'bm25' as const, rank: i + 1, rawScore: 1, path: null })),
@@ -94,7 +94,13 @@ function recallDeps(rerank: ReturnType<typeof createOnnxReranker>, ids: string[]
   return {
     store,
     embed: async () => [1, 0, 0],
-    rerank: { id: RERANKER_ID, rerank: (query, documents, options) => rerank.rerank(query, documents, options) },
+    rerank: {
+      id: RERANKER_ID,
+      rerank: (query, documents, options) => {
+        submits.push(performance.now())
+        return rerank.rerank(query, documents, options)
+      },
+    },
     referenceDate: (now) => now.toISOString().slice(0, 10),
     floor: FLOOR,
     versions: { embedding: 'openai:tst:3', chat: 'tst-chat:1' },
@@ -124,8 +130,10 @@ describe('recall runs on the queueing reranker', () => {
 
     const running = runRecall(recallDeps(reranker, ['b1', 'b2']), { query: 'tst running', channel: 'mcp', scope: {} })
     for (let i = 0; i < 50 && stub.pending.length === 0; i++) await flush()
-    const waitingFrom = performance.now()
-    const waiting = runRecall(recallDeps(reranker, ['a1', 'a2']), { query: 'tst waiting', channel: 'mcp', scope: {} }, { signal: leaving.signal })
+    // The running recall's first pass holds the reranker; nothing else may.
+    expect(stub.pending).toHaveLength(1)
+    const submits: number[] = []
+    const waiting = runRecall(recallDeps(reranker, ['a1', 'a2'], submits), { query: 'tst waiting', channel: 'mcp', scope: {} }, { signal: leaving.signal })
     const waitingOutcome = waiting.then(
       () => null,
       (error: unknown) => error,
@@ -133,12 +141,25 @@ describe('recall runs on the queueing reranker', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     const leftAt = performance.now()
     leaving.abort()
+    const abortedAt = performance.now()
 
-    const error = await waitingOutcome
+    // A recall the abort cannot reach would wait on the held pass forever; fail
+    // fast on that instead of at the suite's timeout.
+    const error = await Promise.race([
+      waitingOutcome,
+      new Promise((resolve) => setTimeout(() => resolve('the waiting recall did not stop'), 2000)),
+    ])
     expect(error).toBeInstanceOf(RecallAbortedError)
     expect((error as RecallAbortedError).stage).toBe('slate-rerank')
-    expect((error as RecallAbortedError).queueMs).toBeGreaterThan(0)
-    expect((error as RecallAbortedError).queueMs).toBeLessThanOrEqual(leftAt - waitingFrom + 1)
+    // Its slate was submitted once and never ran, so its whole time in the queue,
+    // from that submit to the abort, is its reported wait. The scheduler reads its
+    // clock just after the wrapper below and, on removal, inside abort(), which
+    // runs its listeners synchronously: so the wait lies between these bounds,
+    // the lower one allowing for the synchronous work before the submit.
+    expect(submits).toHaveLength(1)
+    expect(leftAt - submits[0]!).toBeGreaterThan(5)
+    expect((error as RecallAbortedError).queueMs).toBeGreaterThanOrEqual(leftAt - submits[0]! - 3)
+    expect((error as RecallAbortedError).queueMs).toBeLessThanOrEqual(abortedAt - submits[0]!)
 
     await settleNextPass()
     await settleNextPass()
