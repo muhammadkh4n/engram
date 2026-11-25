@@ -197,6 +197,10 @@ must come from the assistant turn just before MK's words or from the dialog he a
 
 Its schema has no capture options. Hook and CLI captures go through the HTTP server's `POST /capture` route instead (below).
 
+## MCP endpoint (HTTP server)
+
+`/mcp` on `engram-mcp-http` is a stateless Streamable HTTP endpoint behind `Authorization: Bearer $BEARER_TOKEN`: every POST builds a fresh server and answers a request with JSON (a POST of notifications only gets 202 with no body), and no session id is issued. It sends no server-initiated messages, so it offers no standalone SSE stream: any method other than POST gets 405 with `Allow: POST` and the JSON-RPC body `{"jsonrpc":"2.0","error":{"code":-32000,"message":"Method not allowed."},"id":null}`. The checks before it still apply: 403 for a host outside `ALLOWED_HOSTS` when that is set, then 401 for a missing or wrong token. Probes use `GET /health` or `GET /healthz`, which need no token and answer 200 `ok`; only GET on the exact path matches (`HEAD /health` or `/health?x=1` gets 404).
+
 ## Capture route (HTTP server)
 
 `POST /capture` on the HTTP server (`engram-mcp-http`) runs the capture pipeline: secret scrub, salience classification, dedup and storage, with the server's model configuration. It is for hooks and ingest CLIs, not agents, and sits behind the same `Authorization: Bearer $BEARER_TOKEN` check as `/mcp`. One request per capture; no MCP handshake.

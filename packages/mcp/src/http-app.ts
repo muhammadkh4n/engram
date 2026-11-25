@@ -5,7 +5,8 @@
  *
  * Routes:
  *   GET  /health, /healthz — liveness, no auth
- *   *    /mcp              — MCP Streamable HTTP, BEARER_TOKEN auth
+ *   POST /mcp              — MCP Streamable HTTP, BEARER_TOKEN auth; any other
+ *                            method 405
  *   POST /capture          — the capture pipeline (hooks and CLIs), BEARER_TOKEN auth
  *   POST /recall           — recall over the typed item store, BEARER_TOKEN auth
  *   POST /candidates       — what waits for MK's review, BEARER_TOKEN auth
@@ -489,19 +490,22 @@ async function route(
     return
   }
 
-  // Probe-friendly GET: external health-checkers (Claude Code's
-  // mcp-health-check hook, uptime probes, etc.) hit GET /mcp without an
-  // SSE Accept header. The MCP SDK strictly returns 406 in that case,
-  // which monitors don't recognize as healthy. Short-circuit those
-  // probes with 200 OK before the SDK sees them. Real SSE clients
-  // sending `Accept: text/event-stream` still pass through to the SDK.
-  if (req.method === 'GET') {
-    const accept = (req.headers['accept'] ?? '').toString()
-    if (!accept.includes('text/event-stream')) {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ status: 'ok', transport: 'streamable-http' }))
-      return
-    }
+  // Engram is a stateless Streamable HTTP server with no server-initiated
+  // messages, so it offers no standalone SSE stream. Handing a GET to the SDK's
+  // stateless transport opens a text/event-stream that never carries a byte;
+  // Claude Code's MCP logs show it aborting such a stream after ~360 s and
+  // reconnecting the whole transport after three aborts. The spec's answer for
+  // a server without that stream is 405, which clients read as "POST only".
+  // DELETE (session end) has nothing to end either. Health probes use /health.
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' })
+    res.end(JSON.stringify({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Method not allowed.' },
+      id: null,
+    }))
+    return
   }
 
   await handlers.mcp(req, res)
