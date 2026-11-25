@@ -313,6 +313,54 @@ describe('other routes', () => {
     expect(h.mcp).toHaveBeenCalledTimes(1)
   })
 
+  it('answers 405 with Allow: POST to the standalone SSE GET a client opens on /mcp', async () => {
+    const res = await fetch(`${h.url}/mcp`, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        accept: 'text/event-stream',
+        'mcp-protocol-version': '2025-06-18',
+      },
+    })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('POST')
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Method not allowed.' },
+      id: null,
+    })
+    expect(h.mcp).not.toHaveBeenCalled()
+  })
+
+  it('answers 405 to every other non-POST method on /mcp, a plain GET probe included', async () => {
+    for (const method of ['GET', 'DELETE', 'PUT', 'PATCH', 'OPTIONS']) {
+      const res = await fetch(`${h.url}/mcp`, { method, headers: { authorization: `Bearer ${TOKEN}` } })
+      expect(res.status, method).toBe(405)
+      expect(res.headers.get('allow'), method).toBe('POST')
+      expect(await res.json(), method).toEqual({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method not allowed.' },
+        id: null,
+      })
+    }
+    const head = await fetch(`${h.url}/mcp`, { method: 'HEAD', headers: { authorization: `Bearer ${TOKEN}` } })
+    expect(head.status).toBe(405)
+    expect(head.headers.get('allow')).toBe('POST')
+    expect(h.mcp).not.toHaveBeenCalled()
+  })
+
+  it('answers 401 before 405 to a GET on /mcp with no token or a wrong one', async () => {
+    const noToken = await fetch(`${h.url}/mcp`, { method: 'GET', headers: { accept: 'text/event-stream' } })
+    expect(noToken.status).toBe(401)
+    const wrongToken = await fetch(`${h.url}/mcp`, {
+      method: 'GET',
+      headers: { accept: 'text/event-stream', authorization: 'Bearer not-the-token' },
+    })
+    expect(wrongToken.status).toBe(401)
+    expect(h.mcp).not.toHaveBeenCalled()
+  })
+
   it('refuses the capture token on /mcp and /capture', async () => {
     const auth = { authorization: `Bearer ${CAPTURE_TOKEN}` }
     expect((await post(`${h.url}/mcp`, '{}', auth)).status).toBe(401)
